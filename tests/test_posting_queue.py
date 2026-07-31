@@ -1,0 +1,167 @@
+from datetime import datetime
+from unittest import TestCase
+
+from adb_bot.clients import airtable as at
+from adb_bot.automation.posting_planner import plan_posting_queue, PostingItem
+from adb_bot.automation.posting_runner import _map_post_status, apply_post_result
+
+
+NOW = datetime(2026, 7, 28, 12, 0, 0)
+
+
+def queue_row(rec_id="recQ1", account="recAcc1", variant="recVar1", caption="recCap1",
+              status="Pending", scheduled="2026-07-28T09:00:00.000Z", retry=0, name="Post 1"):
+    fields = {at.F_PQ_NAME: name, at.F_PQ_POST_STATUS: status}
+    if scheduled is not None:
+        fields[at.F_PQ_SCHEDULED] = scheduled
+    if account is not None:
+        fields[at.F_PQ_TARGET_ACCOUNT] = [account]
+    if variant is not None:
+        fields[at.F_PQ_SPOOF_VARIANT] = [variant]
+    if caption is not None:
+        fields[at.F_PQ_CAPTION] = [caption]
+    if retry:
+        fields[at.F_PQ_RETRY_COUNT] = retry
+    return {"id": rec_id, "fields": fields}
+
+
+def base_lookups(**overrides):
+    accounts = {"recAcc1": {at.F_ACC_NAME: "nikki_1", at.F_ACC_PROFILE: ["recProf1"],
+                            at.F_ACC_LIFECYCLE_STAGE: "Active"}}
+    profiles = {"recProf1": {"launch_id": "624354174112432228", "name": "Nikki 1"}}
+    variants = {"recVar1": {"file_path": "C:/spoofed/nikki_1/v1.mp4", "status": "Ready"}}
+    captions = {"recCap1": "hello world"}
+    data = {"accounts": accounts, "profiles": profiles, "variants": variants, "captions": captions}
+    data.update(overrides)
+    return data
+
+
+class PlanPostingTest(TestCase):
+    def _plan(self, rows, **lk):
+        d = base_lookups(**lk)
+        return plan_posting_queue(rows, d["accounts"], d["profiles"], d["variants"], d["captions"], now=NOW)
+
+    def test_due_post_is_planned(self):
+        plan = self._plan([queue_row()])
+        self.assertEqual(len(plan.to_post), 1)
+        item = plan.to_post[0]
+        self.assertEqual(item.launch_id, "624354174112432228")
+        self.assertEqual(item.video_path, "C:/spoofed/nikki_1/v1.mp4")
+        self.assertEqual(item.caption, "hello world")
+
+    def test_future_scheduled_is_not_due(self):
+        plan = self._plan([queue_row(scheduled="2026-07-28T18:00:00.000Z")])
+        self.assertEqual(plan.to_post, [])
+
+    def test_missing_schedule_is_due_now(self):
+        plan = self._plan([queue_row(scheduled=None)])
+        self.assertEqual(len(plan.to_post), 1)
+
+    def test_needs_verification_skipped(self):
+        accts = {"recAcc1": {at.F_ACC_NAME: "nikki_1", at.F_ACC_PROFILE: ["recProf1"],
+                             at.F_ACC_LIFECYCLE_STAGE: "Active", at.F_ACC_NEEDS_VERIFICATION: True}}
+        plan = self._plan([queue_row()], accounts=accts)
+        self.assertEqual(plan.to_post, [])
+        self.assertIn("verification", plan.skipped[0].reason)
+
+    def test_banned_stage_skipped(self):
+        accts = {"recAcc1": {at.F_ACC_NAME: "nikki_1", at.F_ACC_PROFILE: ["recProf1"],
+                             at.F_ACC_LIFECYCLE_STAGE: "Banned"}}
+        plan = self._plan([queue_row()], accounts=accts)
+        self.assertEqual(plan.to_post, [])
+        self.assertIn("Banned", plan.skipped[0].reason)
+
+    def test_no_launch_id_skipped(self):
+        plan = self._plan([queue_row()], profiles={"recProf1": {"launch_id": None, "name": "Nikki 1"}})
+        self.assertIn("MLX API ID", plan.skipped[0].reason)
+
+    def test_no_video_path_skipped(self):
+        plan = self._plan([queue_row()], variants={"recVar1": {"file_path": None, "status": "Ready"}})
+        self.assertIn("Spoof Variant", plan.skipped[0].reason)
+
+    def test_missing_target_account_skipped(self):
+        plan = self._plan([queue_row(account=None)])
+        self.assertIn("Target Account", plan.skipped[0].reason)
+
+    def test_caption_optional(self):
+        plan = self._plan([queue_row(caption=None)])
+        self.assertEqual(len(plan.to_post), 1)
+        self.assertIsNone(plan.to_post[0].caption)
+
+    def test_selected_launch_ids_filters(self):
+        d = base_lookups()
+        plan = plan_posting_queue([queue_row()], d["accounts"], d["profiles"], d["variants"],
+                                  d["captions"], now=NOW, selected_launch_ids={"other"})
+        self.assertEqual(plan.to_post, [])
+
+
+class FakePostClient:
+    def __init__(self):
+        self.run_logs, self.acc_results, self.post_marks, self.used, self.incidents_q = [], [], [], [], []
+
+    def create_run_log(self, account_id, account_name, flow, result, notes=None):
+        self.run_logs.append((account_id, flow, result, notes)); return "recLog"
+
+    def set_account_result(self, account_id, last_result, needs_verification=None):
+        self.acc_results.append((account_id, last_result)); return True
+
+    def mark_post_result(self, queue_id, post_status, issue_type=None, retry_count=None):
+        self.post_marks.append((queue_id, post_status, issue_type, retry_count)); return True
+
+    def mark_variant_used(self, variant_id):
+        self.used.append(variant_id); return True
+
+    # used by incidents.apply_account_incident
+    def flag_account(self, account_id, *, lifecycle_stage=None, needs_verification=None, ban_notes=None):
+        return True
+
+    def create_ban_flag_history(self, account_id, event_type, notes=None):
+        return "recHist"
+
+    def set_posting_queue_issue(self, queue_record_id, issue_type, post_status=at.POST_STATUS_FAILED):
+        self.incidents_q.append((queue_record_id, issue_type, post_status)); return True
+
+
+ITEM = PostingItem(queue_id="recQ1", account_id="recAcc1", account_name="nikki_1",
+                   launch_id="LID", video_path="v.mp4", caption="c", variant_id="recVar1",
+                   scheduled=None, retry_count=1)
+
+
+class ApplyPostResultTest(TestCase):
+    def test_posted_marks_and_uses_variant(self):
+        c = FakePostClient()
+        self.assertTrue(apply_post_result(c, ITEM, "done"))
+        self.assertEqual(c.post_marks[0][:2], ("recQ1", at.POST_STATUS_POSTED))
+        self.assertEqual(c.used, ["recVar1"])
+        self.assertEqual(c.run_logs[0][2], at.RESULT_DONE)
+
+    def test_retryable_failure_bumps_retry(self):
+        c = FakePostClient()
+        apply_post_result(c, ITEM, "failed")
+        qid, status, issue, retry = c.post_marks[0]
+        self.assertEqual(status, at.POST_STATUS_FAILED)
+        self.assertEqual(issue, at.ISSUE_NEEDS_RETRY)
+        self.assertEqual(retry, 2)  # was 1
+        self.assertEqual(c.used, [])
+
+    def test_banned_routes_through_incident_no_retry_bump(self):
+        c = FakePostClient()
+        apply_post_result(c, ITEM, "banned")
+        # incident path stamps the queue Issue Type; no plain mark_post_result retry bump
+        self.assertEqual(c.incidents_q[0], ("recQ1", at.ISSUE_BANNED_BLOCKED, at.POST_STATUS_FAILED))
+        self.assertEqual(c.post_marks, [])
+
+    def test_verification_routes_through_incident(self):
+        c = FakePostClient()
+        apply_post_result(c, ITEM, "human_verification")
+        self.assertEqual(c.incidents_q[0][1], at.ISSUE_HUMAN_VERIFICATION)
+
+    def test_intermediate_status_no_writeback(self):
+        c = FakePostClient()
+        self.assertFalse(apply_post_result(c, ITEM, "running"))
+        self.assertEqual(c.run_logs, [])
+
+    def test_status_mapping_table(self):
+        self.assertEqual(_map_post_status("done")[0], at.POST_STATUS_POSTED)
+        self.assertEqual(_map_post_status("action_block")[2], "action_block")
+        self.assertIsNone(_map_post_status("starting"))

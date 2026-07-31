@@ -1,0 +1,29 @@
+# Secrets -- dev_settings.json holds the MultiLogin/Airtable tokens in plain
+# text. On the server the tokens belong in /etc/adbbot/env instead.
+dev_settings.json
+
+# Virtualenvs. Never transfer these between machines: they contain
+# platform-specific binaries and absolute paths, so a Windows .venv is worse
+# than useless on Linux. Recreate with ./install_requirements.sh.
+.venv/
+venv/
+build_venv/
+
+# PyInstaller output
+build/
+dist/
+dist_new/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Runtime output
+logs/
+*.log
+
+# OS noise
+.DS_Store
+Thumbs.db

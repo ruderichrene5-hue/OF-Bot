@@ -1,0 +1,17 @@
+# Windows build dependencies.
+#
+# Same as the top-level requirements.txt, except opencv-python and numpy are
+# left unpinned so pip installs prebuilt wheels for whatever Python version is
+# in use. The top-level pins (numpy==1.26.4, opencv-python==4.10.0.84) have no
+# prebuilt wheels for Python 3.13, which forces a from-source build that fails
+# without a C/C++ compiler. These loose constraints avoid that entirely.
+requests==2.34.2
+charset_normalizer==3.4.7
+idna==3.18
+urllib3==2.7.0
+certifi==2026.6.17
+opencv-python>=4.10
+numpy>=1.26
+pytesseract==0.3.13
+Pillow>=10.0.0
+uiautomator2>=3.0.0
