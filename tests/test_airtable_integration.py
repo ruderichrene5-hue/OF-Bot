@@ -63,6 +63,41 @@ class AirtableClientTest(TestCase):
             self.assertFalse(client.update_record("rec1", {"Status": "Done"}))
 
 
+class ProfileTargetsByModelTest(TestCase):
+    """Grouping the MLX profile inventory by model, for targets='profiles'."""
+
+    ROWS = [
+        {"id": "p1", "fields": {"Profile Name": "Jil 2", "MLX API ID": "222"}},
+        {"id": "p2", "fields": {"Profile Name": "Jil 1", "MLX API ID": "111"}},
+        {"id": "p3", "fields": {"Profile Name": "Katja 3", "MLX API ID": "333"}},
+        # Excluded: the per-model link-in-bio account, not a posting target.
+        {"id": "p4", "fields": {"Profile Name": "Jil I Link Account", "MLX API ID": "444"}},
+        # Excluded: nothing can be launched without the 18-digit key.
+        {"id": "p5", "fields": {"Profile Name": "Jil 9", "MLX API ID": ""}},
+    ]
+
+    def _targets(self, **kwargs):
+        client = AirtableClient("tok", "app123", "Profiles")
+        with patch.object(AirtableClient, "_list_table", return_value=self.ROWS):
+            return client.profile_targets_by_model(**kwargs)
+
+    def test_groups_by_first_word_of_the_profile_name(self):
+        targets = self._targets()
+        self.assertEqual(sorted(targets), ["jil", "katja"])
+        # Sorted by name, so a run's fan-out order is stable.
+        self.assertEqual([t["handle"] for t in targets["jil"]], ["Jil 1", "Jil 2"])
+        self.assertEqual(targets["jil"][0], {"profile_id": "p2", "handle": "Jil 1", "launch_id": "111"})
+
+    def test_link_profiles_and_keyless_profiles_are_dropped(self):
+        handles = [t["handle"] for t in self._targets()["jil"]]
+        self.assertNotIn("Jil I Link Account", handles)
+        self.assertNotIn("Jil 9", handles)
+
+    def test_link_profiles_can_be_opted_back_in(self):
+        targets = self._targets(include_link_profiles=True)
+        self.assertIn("Jil I Link Account", [t["handle"] for t in targets["jil"]])
+
+
 class AirtableRunnerHelpersTest(TestCase):
     def test_status_mapping(self):
         self.assertEqual(_status_to_airtable_fields("done")["Status"], "Done")

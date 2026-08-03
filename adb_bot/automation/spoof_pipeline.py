@@ -34,6 +34,10 @@ SPOOF_METHOD = "video_spoofer/vtf run"
 # off hundreds of encodes back-to-back and fill the disk.
 MAX_VARIANTS_PER_RUN = 20
 
+# What a raw video gets spoofed *for*. See run_pipeline().
+TARGETS_ACCOUNTS = "accounts"
+TARGETS_PROFILES = "profiles"
+
 
 @dataclass
 class RawVideo:
@@ -255,8 +259,19 @@ def build_source(raw_root: str | None = None, drive_folder_id: str | None = None
 def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
                  spoof_fn=None, source=None, dry_run: bool = True,
                  drive_folder_id: str | None = None, service_account_json: str | None = None,
-                 max_variants: int | None = MAX_VARIANTS_PER_RUN) -> PipelineReport:
-    """Scan for new raw videos and spoof one variant per active account.
+                 max_variants: int | None = MAX_VARIANTS_PER_RUN,
+                 targets: str = TARGETS_ACCOUNTS) -> PipelineReport:
+    """Scan for new raw videos and spoof one variant per target under the model.
+
+    `targets` picks what a "target" is:
+
+    - ``'accounts'`` (default): Airtable Accounts at Lifecycle Stage Active.
+    - ``'profiles'``: the MLX profile inventory, via Profiles (Cloning). Use this
+      for models that have phones but no Accounts rows yet -- the variant links
+      to the profile instead of an account.
+
+    Either way a target is ``{'handle': str}`` plus an id, so everything below
+    this point is the same for both.
 
     `spoof_fn(raw_path, out_dir, seed, logger) -> Path|None` does the actual
     encoding; if omitted, real runs need one (dry-runs don't call it).
@@ -292,7 +307,9 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
         return report
 
     existing = airtable.content_pipeline_names()
-    active_by_model = airtable.active_accounts_by_model()
+    by_profile = targets == TARGETS_PROFILES
+    active_by_model = (airtable.profile_targets_by_model() if by_profile
+                       else airtable.active_accounts_by_model())
     model_ids = airtable.models_by_name()
 
     capped = False
@@ -302,7 +319,8 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
             if video.name in existing:
                 continue  # already processed on a prior run
             if not accounts:
-                report.skipped.append((video.name, f"no active accounts under model '{model}'"))
+                what = "MLX profiles" if by_profile else "active accounts"
+                report.skipped.append((video.name, f"no {what} under model '{model}'"))
                 continue
 
             # Budget check happens between videos so a video is always done in
@@ -316,8 +334,9 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
             if dry_run:
                 report.processed_videos.append(video.name)
                 report.variants_created += len(accounts)
-                logger.info("[DRY-RUN] would spoof %s for %s account(s) under %s",
-                            video.name, len(accounts), model)
+                logger.info("[DRY-RUN] would spoof %s for %s %s under %s",
+                            video.name, len(accounts),
+                            "profile(s)" if by_profile else "account(s)", model)
                 continue
 
             if spoof_fn is None:
@@ -370,7 +389,13 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
                         any_failed = True
                         report.errors.append((f"{video.name} -> {handle}", f"could not name the variant: {exc}"))
                         continue
-                    airtable.create_spoof_variant(cp_id, acct["account_id"], str(variant_path), method=SPOOF_METHOD)
+                    airtable.create_spoof_variant(
+                        cp_id,
+                        None if by_profile else acct["account_id"],
+                        str(variant_path),
+                        method=SPOOF_METHOD,
+                        target_profile_id=acct["profile_id"] if by_profile else None,
+                    )
                     report.variants_created += 1
             finally:
                 source.release(video, local_raw)

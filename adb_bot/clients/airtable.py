@@ -86,6 +86,7 @@ F_PQ_RETRY_COUNT = "Retry Count"
 F_PQ_CAPTION = "Caption"                 # link -> Caption Pool
 F_PQ_SPOOF_VARIANT = "Spoof Variant"     # link -> Spoof Variants
 F_PQ_TARGET_ACCOUNT = "Target Account"   # link -> Accounts
+F_PQ_TARGET_PROFILE = "Target Profile"   # link -> Profiles (Cloning); see below
 
 # Posting Queue Issue Type / Post Status values
 ISSUE_NONE = "None"
@@ -123,6 +124,7 @@ F_SV_STATUS = "Status"
 F_SV_CREATED_DATE = "Created Date"
 F_SV_SOURCE_CONTENT = "Source Content"   # link -> Content Pipeline
 F_SV_TARGET_ACCOUNT = "Target Account"   # link -> Accounts
+F_SV_TARGET_PROFILE = "Target Profile"   # link -> Profiles (Cloning); see below
 SV_STATUS_PENDING = "Pending"
 SV_STATUS_READY = "Ready"
 SV_STATUS_USED = "Used"
@@ -431,14 +433,19 @@ class AirtableClient:
             }
         return out
 
-    def create_run_log(self, account_id: str, account_name: str, flow: str, result: str, notes: str | None = None) -> str | None:
+    def create_run_log(self, account_id: str | None, account_name: str, flow: str, result: str, notes: str | None = None) -> str | None:
+        """One row per flow run. `account_id` is None for a profile-driven run
+        (no Accounts row exists): the row is still written -- losing the record
+        of a real run is worse than an unlinked one -- just without the link,
+        with the profile name carried by F_RUN_NAME."""
         fields: dict = {
             F_RUN_NAME: f"{account_name} / {flow} / {_now_local_label()}",
-            F_RUN_ACCOUNT: [account_id],
             F_RUN_FLOW: flow,
             F_RUN_RESULT: result,
             F_RUN_AT: _now_iso(),
         }
+        if account_id:
+            fields[F_RUN_ACCOUNT] = [account_id]
         if notes:
             fields[F_RUN_NOTES] = notes
         return self._create_in(TABLE_RUN_LOG, fields)
@@ -449,7 +456,10 @@ class AirtableClient:
             fields[F_RUN_NOTES] = notes
         return self._patch_in(TABLE_RUN_LOG, run_log_id, fields)
 
-    def set_account_result(self, account_id: str, last_result: str, needs_verification: bool | None = None) -> bool:
+    def set_account_result(self, account_id: str | None, last_result: str, needs_verification: bool | None = None) -> bool:
+        """No-op for a profile-driven run: there is no Accounts row to stamp."""
+        if not account_id:
+            return False
         fields: dict = {F_ACC_LAST_RUN: _now_iso(), F_ACC_LAST_RESULT: last_result}
         if needs_verification is not None:
             fields[F_ACC_NEEDS_VERIFICATION] = bool(needs_verification)
@@ -510,6 +520,7 @@ class AirtableClient:
             fields=[
                 F_PQ_NAME, F_PQ_SCHEDULED, F_PQ_POST_STATUS, F_PQ_RETRY_COUNT,
                 F_PQ_CAPTION, F_PQ_SPOOF_VARIANT, F_PQ_TARGET_ACCOUNT,
+                F_PQ_TARGET_PROFILE,
             ],
             filter_formula=formula,
         )
@@ -635,6 +646,45 @@ class AirtableClient:
             out.setdefault(model_name.lower(), []).append({"account_id": record.get("id"), "handle": handle})
         return out
 
+    def profile_targets_by_model(self, include_link_profiles: bool = False) -> dict:
+        """Lower-cased model name -> [{'profile_id', 'handle', 'launch_id'}] built
+        from the MLX profile inventory instead of the Accounts table.
+
+        Used when the pipeline is told to take its targets from the profiles
+        (`targets='profiles'`), which is how models with real phones but no
+        Accounts rows yet get content made for them.
+
+        The model comes from the profile *name*, not the MLX folder: folders and
+        groups on this workspace are named with raw UUIDs, while the names follow
+        ``<Model> <N>`` ("Jil 1", "Katja 3"), so the first word is the only
+        reliable key.
+
+        Skipped by default: the per-model "Link" profile (`Jasmin Link`,
+        `Jil I Link Account`), which is the fixed link-in-bio account rather than
+        a posting target, and any profile with no MLX API ID -- without the
+        18-digit launch key nothing can be launched for it anyway.
+        """
+        out: dict = {}
+        for record in self._list_table(TABLE_PROFILES, fields=[F_PROF_NAME, F_PROF_MLX_API_ID]):
+            fields = record.get("fields", {}) or {}
+            name = str(fields.get(F_PROF_NAME) or "").strip()
+            if not name:
+                continue
+            if not include_link_profiles and "link" in name.lower():
+                continue
+            launch_id = str(fields.get(F_PROF_MLX_API_ID) or "").strip()
+            if not launch_id:
+                continue
+            model_key = name.split()[0].lower()
+            out.setdefault(model_key, []).append({
+                "profile_id": record.get("id"),
+                "handle": name,
+                "launch_id": launch_id,
+            })
+        for targets in out.values():
+            targets.sort(key=lambda t: t["handle"])
+        return out
+
     def content_pipeline_names(self) -> set:
         """Names of raw videos already recorded, so the pipeline skips them."""
         names: set = set()
@@ -660,16 +710,27 @@ class AirtableClient:
             fields[F_CP_STATUS] = CP_STATUS_DONE
         return self._patch_in(TABLE_CONTENT_PIPELINE, record_id, fields)
 
-    def create_spoof_variant(self, source_content_id: str, target_account_id: str,
+    def create_spoof_variant(self, source_content_id: str, target_account_id: str | None,
                              file_path: str, method: str | None = None,
-                             variant_id: str | None = None) -> str | None:
+                             variant_id: str | None = None,
+                             target_profile_id: str | None = None) -> str | None:
+        """One spoofed video, linked to what it was made for.
+
+        The target is an Account normally, or a Profiles (Cloning) row when the
+        pipeline is driven by the MLX profile inventory (`targets='profiles'`).
+        Exactly one of the two links is written -- writing both would make the
+        row ambiguous for the posting planner, which reads whichever is set.
+        """
         fields: dict = {
             F_SV_FILE_PATH: file_path,
             F_SV_STATUS: SV_STATUS_READY,
             F_SV_CREATED_DATE: _now_date(),
             F_SV_SOURCE_CONTENT: [source_content_id],
-            F_SV_TARGET_ACCOUNT: [target_account_id],
         }
+        if target_profile_id:
+            fields[F_SV_TARGET_PROFILE] = [target_profile_id]
+        elif target_account_id:
+            fields[F_SV_TARGET_ACCOUNT] = [target_account_id]
         if variant_id:
             fields[F_SV_VARIANT_ID] = variant_id
         if method:

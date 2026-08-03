@@ -110,26 +110,38 @@ def plan_posting_queue(
             continue
 
         account_id = _first_link(fields, at.F_PQ_TARGET_ACCOUNT)
-        if not account_id or account_id not in accounts_by_id:
-            plan.skipped.append(SkippedPost(name, "no linked Target Account"))
-            continue
-        account = accounts_by_id[account_id]
-        account_name = str(account.get(at.F_ACC_NAME) or account_id).strip()
+        direct_profile_id = _first_link(fields, at.F_PQ_TARGET_PROFILE)
 
-        # --- account health guards (checklist: skip flagged accounts) ---
-        if bool(account.get(at.F_ACC_NEEDS_VERIFICATION)):
-            plan.skipped.append(SkippedPost(account_name, "needs human verification"))
-            continue
-        if at._select_name(account.get(at.F_ACC_AUTOMATION_MODE)) == at.MODE_PAUSED:
-            plan.skipped.append(SkippedPost(account_name, "automation mode paused"))
-            continue
-        stage = at._select_name(account.get(at.F_ACC_LIFECYCLE_STAGE))
-        if stage in (at.STAGE_PAUSED, at.STAGE_BANNED):
-            plan.skipped.append(SkippedPost(account_name, f"lifecycle stage {stage}"))
+        if account_id and account_id in accounts_by_id:
+            account = accounts_by_id[account_id]
+            account_name = str(account.get(at.F_ACC_NAME) or account_id).strip()
+
+            # --- account health guards (checklist: skip flagged accounts) ---
+            if bool(account.get(at.F_ACC_NEEDS_VERIFICATION)):
+                plan.skipped.append(SkippedPost(account_name, "needs human verification"))
+                continue
+            if at._select_name(account.get(at.F_ACC_AUTOMATION_MODE)) == at.MODE_PAUSED:
+                plan.skipped.append(SkippedPost(account_name, "automation mode paused"))
+                continue
+            stage = at._select_name(account.get(at.F_ACC_LIFECYCLE_STAGE))
+            if stage in (at.STAGE_PAUSED, at.STAGE_BANNED):
+                plan.skipped.append(SkippedPost(account_name, f"lifecycle stage {stage}"))
+                continue
+
+            # --- resolve the launch key (Account -> Profile -> MLX API ID) ---
+            profile_id = _first_link(account, at.F_ACC_PROFILE)
+        elif direct_profile_id:
+            # Profile-driven row: no Accounts row exists, so there are no account
+            # health guards to apply. The profile itself is the target, and its
+            # name stands in for the handle in logs and Airtable write-back.
+            account_id = None
+            profile_id = direct_profile_id
+            account_name = str((profiles_by_recid.get(direct_profile_id) or {}).get("name")
+                               or direct_profile_id).strip()
+        else:
+            plan.skipped.append(SkippedPost(name, "no linked Target Account or Target Profile"))
             continue
 
-        # --- resolve the launch key (Account -> Profile -> MLX API ID) ---
-        profile_id = _first_link(account, at.F_ACC_PROFILE)
         launch_id = None
         if profile_id:
             info = profiles_by_recid.get(profile_id) or {}

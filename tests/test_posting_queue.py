@@ -100,7 +100,7 @@ class FakePostClient:
         self.run_logs, self.acc_results, self.post_marks, self.used, self.incidents_q = [], [], [], [], []
 
     def create_run_log(self, account_id, account_name, flow, result, notes=None):
-        self.run_logs.append((account_id, flow, result, notes)); return "recLog"
+        self.run_logs.append((account_id, flow, result, notes, account_name)); return "recLog"
 
     def set_account_result(self, account_id, last_result, needs_verification=None):
         self.acc_results.append((account_id, last_result)); return True
@@ -125,6 +125,56 @@ class FakePostClient:
 ITEM = PostingItem(queue_id="recQ1", account_id="recAcc1", account_name="nikki_1",
                    launch_id="LID", video_path="v.mp4", caption="c", variant_id="recVar1",
                    scheduled=None, retry_count=1)
+
+
+PROFILE_ITEM = PostingItem(queue_id="recQ2", account_id=None, account_name="Jil 3",
+                           launch_id="LID2", video_path="v2.mp4", caption=None,
+                           variant_id="recVar2", scheduled=None, retry_count=0)
+
+
+class PlanPostingByProfileTest(TestCase):
+    """Rows targeting an MLX profile instead of an Account (targets='profiles')."""
+
+    def _row(self, profile="recProf1", account=None):
+        fields = {at.F_PQ_NAME: "Profile post", at.F_PQ_POST_STATUS: "Pending",
+                  at.F_PQ_SPOOF_VARIANT: ["recVar1"]}
+        if profile is not None:
+            fields[at.F_PQ_TARGET_PROFILE] = [profile]
+        if account is not None:
+            fields[at.F_PQ_TARGET_ACCOUNT] = [account]
+        return {"id": "recQ2", "fields": fields}
+
+    def _plan(self, rows, **lk):
+        d = base_lookups(**lk)
+        return plan_posting_queue(rows, d["accounts"], d["profiles"], d["variants"], d["captions"], now=NOW)
+
+    def test_profile_row_resolves_launch_id_without_an_account(self):
+        plan = self._plan([self._row()])
+        self.assertEqual(len(plan.to_post), 1)
+        item = plan.to_post[0]
+        self.assertEqual(item.launch_id, "624354174112432228")
+        self.assertIsNone(item.account_id)
+        self.assertEqual(item.account_name, "Nikki 1")   # profile name stands in
+
+    def test_account_link_still_wins_when_both_are_set(self):
+        """A row with both links follows the account path, guards included --
+        otherwise a paused account could be posted to via its profile."""
+        accounts = {"recAcc1": {at.F_ACC_NAME: "nikki_1", at.F_ACC_PROFILE: ["recProf1"],
+                                at.F_ACC_LIFECYCLE_STAGE: "Active",
+                                at.F_ACC_AUTOMATION_MODE: at.MODE_PAUSED}}
+        plan = self._plan([self._row(account="recAcc1")], accounts=accounts)
+        self.assertEqual(plan.to_post, [])
+        self.assertIn("paused", plan.skipped[0].reason)
+
+    def test_neither_link_is_skipped(self):
+        plan = self._plan([self._row(profile=None)])
+        self.assertEqual(plan.to_post, [])
+        self.assertIn("Target Profile", plan.skipped[0].reason)
+
+    def test_profile_without_mlx_id_is_skipped(self):
+        plan = self._plan([self._row()], profiles={"recProf1": {"launch_id": None, "name": "Nikki 1"}})
+        self.assertEqual(plan.to_post, [])
+        self.assertIn("no MLX API ID", plan.skipped[0].reason)
 
 
 class ApplyPostResultTest(TestCase):
@@ -160,6 +210,26 @@ class ApplyPostResultTest(TestCase):
         c = FakePostClient()
         self.assertFalse(apply_post_result(c, ITEM, "running"))
         self.assertEqual(c.run_logs, [])
+
+    def test_profile_item_writes_back_without_an_account(self):
+        """A profile-driven post still records its outcome: the queue row and the
+        variant are updated, and a Run Log row is written unlinked rather than
+        dropped -- losing the record of a real run is worse than an unlinked one."""
+        c = FakePostClient()
+        self.assertTrue(apply_post_result(c, PROFILE_ITEM, "done"))
+        self.assertEqual(c.post_marks[0][:2], ("recQ2", at.POST_STATUS_POSTED))
+        self.assertEqual(c.used, ["recVar2"])
+        self.assertIsNone(c.run_logs[0][0])           # no Account link
+        self.assertEqual(c.run_logs[0][4], "Jil 3")   # profile name carries it
+
+    def test_profile_item_incident_stamps_queue_without_flagging_an_account(self):
+        c = FakePostClient()
+        apply_post_result(c, PROFILE_ITEM, "banned")
+        self.assertEqual(c.incidents_q, [])          # no account to flag
+        qid, status, issue, retry = c.post_marks[0]
+        self.assertEqual((qid, status, issue), ("recQ2", at.POST_STATUS_FAILED,
+                                                at.ISSUE_BANNED_BLOCKED))
+        self.assertIsNone(retry)                     # not retryable -- no bump
 
     def test_status_mapping_table(self):
         self.assertEqual(_map_post_status("done")[0], at.POST_STATUS_POSTED)

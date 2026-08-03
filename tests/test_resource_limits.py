@@ -205,8 +205,9 @@ class FakePipelineClient:
     def create_content_pipeline(self, name, model_id=None, raw_link=None):
         return f"recCP-{name}"
 
-    def create_spoof_variant(self, cp, acct, path, method=None, variant_id=None):
-        self.variant_rows.append((cp, acct, path))
+    def create_spoof_variant(self, cp, acct, path, method=None, variant_id=None,
+                             target_profile_id=None):
+        self.variant_rows.append((cp, acct or target_profile_id, path))
         return "recSV"
 
     def set_content_pipeline_spoofed(self, rec, failed=False):

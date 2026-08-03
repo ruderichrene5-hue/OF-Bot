@@ -150,7 +150,13 @@ def _run_pipeline(args, logger) -> int:
         drive_folder_id=args.drive_folder or settings.get_saved_drive_folder_id(),
         service_account_json=settings.get_saved_google_service_account_json(),
         dry_run=not args.apply,
-        max_variants=args.max_variants,
+        # `--max-variants` unset means "the default cap", not "no cap". Passing
+        # args.max_variants straight through sent None, which *disables* the cap
+        # -- so every CLI and systemd run was uncapped, which is exactly what the
+        # constant exists to prevent. Use 0 to genuinely disable it.
+        max_variants=(spoof_pipeline.MAX_VARIANTS_PER_RUN if args.max_variants is None
+                      else (args.max_variants or None)),
+        targets=args.targets,
     )
     logger.info("pipeline result: %s", report.summary())
     return 1 if report.errors else 0
@@ -286,7 +292,11 @@ def main(argv=None) -> int:
     parser.add_argument("--max-concurrent", type=int, default=None,
                         help="posting/warmup: max profiles running at once (default 10).")
     parser.add_argument("--max-variants", type=int, default=None,
-                        help="pipeline: max variants produced per run (default 20).")
+                        help="pipeline: max variants produced per run (default 20; 0 = no cap).")
+    parser.add_argument("--targets", choices=("accounts", "profiles"), default="accounts",
+                        help="pipeline: what to spoof for -- Airtable Accounts at Lifecycle "
+                             "Stage Active (default), or the MLX profile inventory, for models "
+                             "that have phones but no Accounts rows yet.")
     parser.add_argument("--skip-staging", action="store_true",
                         help="mlx-sync: skip staging profiles that belong to no model.")
     parser.add_argument("--raw-root", default=None, help="pipeline: raw-videos root (overrides config).")

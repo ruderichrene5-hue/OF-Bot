@@ -97,13 +97,18 @@ def apply_post_result(airtable, item, status, flow=POST_FLOW, logger=None, detai
         # answer. The variant stays unused until the recheck decides -- marking
         # it Used now would lose it if the post turns out never to have landed.
         airtable.mark_post_pending_verification(item.queue_id, note=note)
-    elif incident:
+    elif incident and item.account_id:
         # incidents also sets the queue row's Issue Type + Post Status=Failed and
         # flags the account so the loops skip it. Don't bump retry -- not retryable.
         incidents.apply_account_incident(
             airtable, item.account_id, flow, incident, note, logger,
             queue_record_id=item.queue_id,
         )
+    elif incident:
+        # Profile-driven run: the flag belongs on an Accounts row that doesn't
+        # exist. Still stamp the queue row so the incident is visible and the row
+        # is not retried blindly -- but no retry bump, same as the account path.
+        airtable.mark_post_result(item.queue_id, at.POST_STATUS_FAILED, issue_type)
     else:
         airtable.mark_post_result(
             item.queue_id, at.POST_STATUS_FAILED, issue_type, retry_count=item.retry_count + 1,
