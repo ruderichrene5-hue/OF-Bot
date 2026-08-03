@@ -2122,6 +2122,18 @@ class ReelPostCountProbeFlow(InstagramReelUploadU2Flow):
             return {"profile_id": profile.id, "target": target, "aborted": False,
                     "success": False, "post_count": None}
 
+        # Start Instagram before looking for it. The in-run probe inherits an app
+        # that is already open -- the post just happened on it -- but a recheck
+        # arrives fifteen minutes later on a FRESHLY launched phone, which boots
+        # to the Android launcher. Without this the wait below could never
+        # succeed: it spent its 10s looking for Instagram UI on a home screen,
+        # then reported the count "unreadable", and decide_recheck correctly
+        # turned that into UNKNOWN. Every recheck on 2026-08-03 failed this way,
+        # including one whose phone had connected perfectly.
+        for command in self.build_launch_commands(target):
+            adb_client.run_command(command)
+        _sleep_after_instagram_launch()
+
         waits.settle(
             10,
             ready=waits.u2_ready(

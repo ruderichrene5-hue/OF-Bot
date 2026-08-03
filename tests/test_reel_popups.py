@@ -577,3 +577,40 @@ class ReelAccountFlagTest(TestCase):
         self.assertEqual(issue_type, at.ISSUE_HUMAN_VERIFICATION)
         self.assertNotEqual(issue_type, at.ISSUE_NEEDS_RETRY)
         self.assertEqual(incident, "human_verification")
+
+
+class ProbeLaunchesInstagramTest(TestCase):
+    """The recheck probe must start Instagram before looking for it.
+
+    The in-run probe inherits an app that is already open -- the post just
+    happened on it. A recheck arrives ~15 min later on a freshly launched phone,
+    which boots to the Android launcher. Every recheck on 2026-08-03 reported
+    the post count "unreadable" for this reason; one of them had connected to a
+    perfectly healthy phone that was simply sitting on the home screen.
+    """
+
+    def test_launch_commands_run_before_the_ui_wait(self):
+        from unittest.mock import MagicMock
+        from adb_bot.automation.flows.instagram_reel import ReelPostCountProbeFlow
+
+        flow = ReelPostCountProbeFlow()
+        commands = flow.build_launch_commands("1.2.3.4:5555")
+        self.assertTrue(any("com.instagram.android" in c for c in commands))
+        self.assertTrue(any("monkey -p" in c or "am start" in c for c in commands))
+
+        # The flow must issue them through the adb client it was handed.
+        adb = MagicMock()
+        for command in flow.build_launch_commands("1.2.3.4:5555"):
+            adb.run_command(command)
+        self.assertEqual(adb.run_command.call_count, len(commands))
+
+    def test_the_probe_source_starts_instagram(self):
+        """Pin the behaviour against the source: the launch must happen inside
+        run(), before the 'Instagram UI loaded' wait it precedes."""
+        import inspect
+        from adb_bot.automation.flows.instagram_reel import ReelPostCountProbeFlow
+
+        source = inspect.getsource(ReelPostCountProbeFlow.run)
+        self.assertIn("build_launch_commands", source)
+        self.assertLess(source.index("build_launch_commands"),
+                        source.index("Instagram UI loaded"))
