@@ -16,6 +16,7 @@ video_spoofer CLI).
 from __future__ import annotations
 
 import hashlib
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -147,6 +148,58 @@ def _seed_for(raw_name: str, handle: str) -> int:
     the same distinct variant, and two accounts never get the same one."""
     digest = hashlib.sha256(f"{raw_name}|{handle}".encode("utf-8")).hexdigest()
     return int(digest[:8], 16)
+
+
+def safe_name(text: str) -> str:
+    """Filesystem- and shell-safe filename fragment.
+
+    Output paths end up inside Android shell commands (the media-scanner
+    broadcast takes the pushed file's path), and the device shell splits on
+    spaces, so a name like ``clip 1 aug.mp4`` would break on the phone even
+    though `adb push` itself handles it. Collapse anything outside
+    ``[A-Za-z0-9._-]`` to a single underscore.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(text).strip())
+    return cleaned.strip("._-") or "unnamed"
+
+
+def next_run_dir(out_root: str, model: str) -> Path:
+    """``<out_root>/<Model>/run<N>``, N one past the highest run folder present.
+
+    One run folder per raw video. Numbering continues across pipeline
+    invocations -- a video picked up tomorrow becomes the next run rather than
+    reopening an existing one. A run folder removed by cleanup can have its
+    number reused; that is harmless because the Airtable rows pointing at it
+    were only cleaned up once already marked Used.
+    """
+    model_dir = Path(out_root) / model
+    highest = 0
+    if model_dir.is_dir():
+        for child in model_dir.iterdir():
+            if not child.is_dir():
+                continue
+            match = re.fullmatch(r"run(\d+)", child.name)
+            if match:
+                highest = max(highest, int(match.group(1)))
+    return model_dir / f"run{highest + 1}"
+
+
+def finalize_variant(produced: Path, raw_name: str, handle: str) -> Path:
+    """Rename a freshly-spoofed file to ``<source>__<handle><ext>``.
+
+    Must happen before the next account is spoofed into the same run folder.
+    `vtf` names every output after the SOURCE video, so without this the second
+    account's encode overwrites the first (the CLI is run with ``--overwrite``),
+    `build_cli_spoofer` then finds no new file, falls back to "newest video in
+    the directory", and every account ends up sharing one file -- the exact
+    duplicate-content problem the per-account variants exist to avoid.
+    """
+    target = produced.with_name(
+        f"{safe_name(Path(raw_name).stem)}__{safe_name(handle)}{produced.suffix}"
+    )
+    if target != produced:
+        produced.replace(target)   # replace() overwrites an existing target
+    return target
 
 
 def build_cli_spoofer(spoofer_python: str, spoofer_cwd: str, preset: str = "normal"):
@@ -288,19 +341,34 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
                 continue
             report.processed_videos.append(video.name)
 
+            # One run folder per raw video, shared by every account under the
+            # model: <out_root>/<Model>/run<N>/<source>__<handle>.mp4
+            run_dir = next_run_dir(out_root, model)
+            logger.info("pipeline: %s -> %s", video.name, run_dir)
+
             any_failed = False
             try:
                 for acct in accounts:
                     handle = acct["handle"]
-                    out_dir = str(Path(out_root) / model / handle)
                     try:
-                        variant_path = spoof_fn(local_raw, out_dir, _seed_for(video.name, handle), logger)
+                        produced = spoof_fn(local_raw, str(run_dir), _seed_for(video.name, handle), logger)
                     except Exception as exc:  # a bad encode shouldn't kill the batch
                         logger.warning("spoof error for %s/%s: %s", model, handle, exc)
-                        variant_path = None
-                    if not variant_path:
+                        produced = None
+                    if not produced:
                         any_failed = True
                         report.errors.append((f"{video.name} -> {handle}", "spoof produced no file"))
+                        continue
+                    # Rename before the next account runs -- see finalize_variant().
+                    # A failure here must not be recorded: the un-renamed file
+                    # would be overwritten by the next account and the row would
+                    # point at somebody else's video.
+                    try:
+                        variant_path = finalize_variant(Path(produced), video.name, handle)
+                    except OSError as exc:
+                        logger.warning("could not name the variant for %s/%s: %s", model, handle, exc)
+                        any_failed = True
+                        report.errors.append((f"{video.name} -> {handle}", f"could not name the variant: {exc}"))
                         continue
                     airtable.create_spoof_variant(cp_id, acct["account_id"], str(variant_path), method=SPOOF_METHOD)
                     report.variants_created += 1

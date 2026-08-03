@@ -81,6 +81,73 @@ def plan_actions_for_day(
     return actions
 
 
+# Flow used when a plan row asks for scrolling but not following. The warm-up
+# flow always does both, so it would over-deliver on a scroll-only day.
+FLOW_SCROLL_ONLY = "instagram_scroll"
+
+# Plan-row capabilities with no flow behind them. Surfaced as warnings rather
+# than dropped, so a row asking for something the bot cannot do is visible
+# instead of silently doing nothing.
+UNSUPPORTED_PLAN_KEYS = {"feed_posts": "feed posts"}
+
+
+def plan_actions_from_row(day: int, row: dict) -> tuple[list[PlannedAction], list[str]]:
+    """Translate one Warmup Plan row into actions, plus warnings for anything
+    the row asks for that no flow implements.
+
+    Kept pure (no Airtable, no device) so the mapping is testable on its own.
+    The checkbox -> flow mapping:
+
+      Scroll + Follow People -> warm_up_process   (that flow does both)
+      Scroll only            -> instagram_scroll
+      Follow only            -> warm_up_process   (no follow-only flow exists)
+      Profile Picture Update -> update_profile_picture
+      Bio Update             -> update_bio_u2
+      Reel Post              -> instagram_reel_upload_u2
+      Feed Posts             -> nothing; warned
+    """
+    actions: list[PlannedAction] = []
+    warnings: list[str] = []
+
+    scroll, follow = bool(row.get("scroll")), bool(row.get("follow"))
+    if scroll and follow:
+        actions.append(PlannedAction(FLOW_WARMUP, f"Warm-up (day {day}: scroll + follow)"))
+    elif follow:
+        actions.append(PlannedAction(FLOW_WARMUP, f"Warm-up (day {day}: follow)"))
+    elif scroll:
+        actions.append(PlannedAction(FLOW_SCROLL_ONLY, f"Scroll feed (day {day})"))
+
+    if row.get("picture"):
+        actions.append(PlannedAction(FLOW_UPDATE_PICTURE, f"Update profile picture (day {day})"))
+    if row.get("bio"):
+        actions.append(PlannedAction(FLOW_UPDATE_BIO, f"Update bio (day {day})"))
+    if row.get("reel"):
+        actions.append(PlannedAction(FLOW_REEL, f"Post reel (day {day})"))
+
+    for key, label in UNSUPPORTED_PLAN_KEYS.items():
+        if row.get(key):
+            warnings.append(
+                f"day {day} asks for {row[key]} {label}, which no flow implements -- ignored"
+            )
+    return actions, warnings
+
+
+def plan_actions_from_table(day: int, plan_by_day: dict) -> tuple[list[PlannedAction], list[str]]:
+    """Actions for `day` from the client's Warmup Plan table.
+
+    A day past the end of the table means warm-up is over: no actions. Posting
+    from then on is driven by the Posting Queue (the client's Airtable
+    automations create those rows), NOT by this planner -- scheduling reels here
+    as well would post twice.
+    """
+    if day < 1:
+        return [], []
+    row = plan_by_day.get(day)
+    if row is None:
+        return [], []
+    return plan_actions_from_row(day, row)
+
+
 def describe_campaign(
     start_date: date,
     num_days: int = 7,

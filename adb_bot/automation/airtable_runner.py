@@ -67,6 +67,7 @@ def _status_to_airtable_fields(status: str) -> dict:
         "already_had_bio": (STATUS_SKIPPED, "already_had_bio"),
         "adb_connect_failed": (STATUS_FAILED, "failed_to_connect_adb"),
         "failed": (STATUS_FAILED, "failed"),
+        "heartbeat_lost": (STATUS_FAILED, "profile_lost_mid_run"),
     }
     if status not in mapping:
         return {}
@@ -110,6 +111,10 @@ def _map_terminal_status(status: str):
         return (RESULT_FAILED, "account banned/suspended", "banned")
     if status == "action_block":
         return (RESULT_FAILED, "action blocked (temporary)", "action_block")
+    if status == "heartbeat_lost":
+        # The phone stopped being ours mid-flow (shut down, or opened
+        # elsewhere). Not an IG incident -- nothing is wrong with the account.
+        return (RESULT_FAILED, "profile lost mid-run (heartbeat failed)", None)
     return None
 
 
@@ -141,7 +146,7 @@ def run_airtable_queue(
     progress_callback=None,
     shutdown_on_success: bool = False,
     today=None,
-    run_reels: bool = False,
+    run_reels: bool = True,
     selected_launch_ids=None,
     confirm_callback=None,
     override_flow=None,

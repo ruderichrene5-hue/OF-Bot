@@ -1,6 +1,7 @@
 """CPU/disk guard rails: profile concurrency, spoof throughput, and retention."""
 
 import logging
+import tempfile
 import time
 from pathlib import Path
 from unittest import TestCase
@@ -97,11 +98,17 @@ class VariantCapTest(TestCase):
         def spoof(raw, out_dir, seed, logger=None):
             if order is not None:
                 order.append(raw)
-            return Path(out_dir) / f"v{seed}.mp4"
+            # spoof_fn must return a file that exists: the pipeline renames it
+            # into <source>__<handle> before recording the variant.
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            produced = Path(out_dir) / f"v{seed}.mp4"
+            produced.write_text("video")
+            return produced
 
         kwargs = {} if max_variants is None else {"max_variants": max_variants}
-        report = run_pipeline(client, LOG, raw_root="/raw", out_root="/out",
-                              source=FakeSource(videos), spoof_fn=spoof, dry_run=False, **kwargs)
+        with tempfile.TemporaryDirectory() as out_root:
+            report = run_pipeline(client, LOG, raw_root="/raw", out_root=out_root,
+                                  source=FakeSource(videos), spoof_fn=spoof, dry_run=False, **kwargs)
         return report, client
 
     def test_default_cap_is_twenty(self):

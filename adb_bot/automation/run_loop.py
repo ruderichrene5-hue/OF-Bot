@@ -92,6 +92,9 @@ def _run_posting(args, logger) -> int:
         airtable, clients.launcher, clients.shutdown, clients.adb_enable, clients.api,
         build_automation(), logger,
         max_concurrent_profiles=args.max_concurrent,
+        readiness_wait_seconds=settings.get_saved_readiness_wait(),
+        readiness_max_attempts=settings.get_saved_readiness_attempts(),
+        batch_launch_delay_seconds=settings.get_saved_batch_launch_delay(),
     )
     logger.info("posting result: %s", result)
     return 0
@@ -118,6 +121,9 @@ def _run_warmup(args, logger) -> int:
         airtable, clients.launcher, clients.shutdown, clients.adb_enable, clients.api,
         build_automation(), logger, run_reels=args.reels,
         max_concurrent_profiles=args.max_concurrent,
+        readiness_wait_seconds=settings.get_saved_readiness_wait(),
+        readiness_max_attempts=settings.get_saved_readiness_attempts(),
+        batch_launch_delay_seconds=settings.get_saved_batch_launch_delay(),
     )
     logger.info("warmup result: %s", result)
     return 0
@@ -202,7 +208,11 @@ def main(argv=None) -> int:
     parser.add_argument("loop", choices=COMMANDS,
                         help="Which loop to run, or 'doctor' to preflight-check the setup.")
     parser.add_argument("--apply", action="store_true", help="Do real work (default: dry-run/plan-only).")
-    parser.add_argument("--reels", action="store_true", help="warmup: enable reel actions (media must be wired).")
+    # On by default now that reel media is wired (Drive -> spoof pipeline ->
+    # Spoof Variants). `--no-reels` disables them, e.g. to run a warm-up day
+    # without posting while the content side is being reworked.
+    parser.add_argument("--reels", action=argparse.BooleanOptionalAction, default=True,
+                        help="warmup: run reel actions from the plan (default: on; use --no-reels to skip).")
     parser.add_argument("--max-age-days", type=float, default=None,
                         help="cleanup: delete finished media older than this (default 2).")
     parser.add_argument("--max-concurrent", type=int, default=None,

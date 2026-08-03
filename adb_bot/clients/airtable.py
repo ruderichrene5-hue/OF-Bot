@@ -38,6 +38,18 @@ TABLE_MODELS = "Models"
 TABLE_RUN_LOG = "Run Log"
 TABLE_BAN_HISTORY = "Ban & Flag History"
 TABLE_POSTING_QUEUE = "Posting Queue"
+TABLE_WARMUP_PLAN = "Warmup Plan"
+
+# Warmup Plan -- the client-editable day-by-day warm-up schedule. One row per
+# campaign day; the planner reads the row matching an account's day number.
+F_WP_DAY = "Day"
+F_WP_SCROLL = "Scroll"
+F_WP_FOLLOW = "Follow People"
+F_WP_FEED_POSTS = "Feed Posts"
+F_WP_PICTURE = "Profile Picture Update"
+F_WP_BIO = "Bio Update"
+F_WP_REEL = "Reel Post"
+F_WP_NOTES = "Notes"
 
 # Accounts
 F_ACC_NAME = "Name"
@@ -365,6 +377,42 @@ class AirtableClient:
             for account_id in (fields.get(F_RUN_ACCOUNT) or []):
                 done.add((account_id, flow))
         return done
+
+    def warmup_plan_by_day(self) -> dict:
+        """Day number -> the client's warm-up row for that day.
+
+        The client edits this table to change what the warm-up does, so it is
+        read fresh each run. Returns {} when the table is missing or empty, and
+        the planner then falls back to the built-in schedule -- a base without
+        the table keeps working exactly as before.
+        """
+        out: dict = {}
+        try:
+            rows = self._list_table(
+                TABLE_WARMUP_PLAN,
+                fields=[F_WP_DAY, F_WP_SCROLL, F_WP_FOLLOW, F_WP_FEED_POSTS,
+                        F_WP_PICTURE, F_WP_BIO, F_WP_REEL, F_WP_NOTES],
+            )
+        except Exception:
+            return {}
+        for record in rows:
+            fields = record.get("fields", {}) or {}
+            try:
+                day = int(fields.get(F_WP_DAY))
+            except (TypeError, ValueError):
+                continue          # a row with no day number can't be scheduled
+            if day < 1:
+                continue
+            out[day] = {
+                "scroll": bool(fields.get(F_WP_SCROLL)),
+                "follow": bool(fields.get(F_WP_FOLLOW)),
+                "feed_posts": int(fields.get(F_WP_FEED_POSTS) or 0),
+                "picture": bool(fields.get(F_WP_PICTURE)),
+                "bio": bool(fields.get(F_WP_BIO)),
+                "reel": bool(fields.get(F_WP_REEL)),
+                "notes": (str(fields.get(F_WP_NOTES) or "").strip() or None),
+            }
+        return out
 
     def create_run_log(self, account_id: str, account_name: str, flow: str, result: str, notes: str | None = None) -> str | None:
         fields: dict = {

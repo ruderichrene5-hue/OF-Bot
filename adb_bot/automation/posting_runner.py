@@ -44,6 +44,11 @@ def _map_post_status(status: str):
         return (at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY, None, at.RESULT_FAILED, "ADB connect failed")
     if status == "failed":
         return (at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY, None, at.RESULT_FAILED, "flow reported a failure (see app logs)")
+    if status == "heartbeat_lost":
+        # The phone stopped being ours mid-post. Retryable: nothing is wrong
+        # with the account, the post simply never completed.
+        return (at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY, None, at.RESULT_FAILED,
+                "profile lost mid-run (heartbeat failed)")
     return None
 
 

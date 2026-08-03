@@ -69,16 +69,17 @@ def plan_airtable_runs(
     today=None,
     now_time=None,
     logger=None,
-    run_reels: bool = False,
+    run_reels: bool = True,
     selected_launch_ids=None,
     override_flow: str | None = None,
     override_bio: str | None = None,
     override_caption: str | None = None,
     override_picture: str | None = None,
 ) -> AirtablePlan:
-    """Build the run plan. `run_reels` is False by default because reel media is
-    not wired yet; when enabled, reels are also time-gated to their scheduled
-    slot so pressing the button in the morning doesn't fire the whole day.
+    """Build the run plan. `run_reels` defaults to True now that reel media is
+    wired (Drive -> spoof pipeline -> Spoof Variants); pass False to skip reel
+    actions. Reels carrying a scheduled time are also time-gated to that slot,
+    so running in the morning doesn't fire the whole day at once.
 
     `selected_launch_ids` (a set of 18-digit MLX API IDs) restricts the run to
     accounts whose profile is in that set; None/empty means run every account.
@@ -97,6 +98,24 @@ def plan_airtable_runs(
         completed = airtable.todays_completed_runs()
     except Exception:
         completed = set()
+
+    # The client edits the Warmup Plan table to control the warm-up. Read it
+    # fresh each run; an empty/missing table falls back to the built-in
+    # schedule so a base without the table behaves exactly as before.
+    warmup_plan = {}
+    if not override_flow:
+        try:
+            warmup_plan = airtable.warmup_plan_by_day() or {}
+        except Exception as exc:
+            if logger:
+                logger.warning("Could not read the Warmup Plan table (%s); using the built-in schedule", exc)
+    if logger:
+        logger.info(
+            "Warm-up schedule: %s",
+            f"Warmup Plan table, day(s) {sorted(warmup_plan)}" if warmup_plan
+            else "built-in (lifecycle.py) -- Warmup Plan table empty or unavailable",
+        )
+    reported_plan_warnings: set = set()
 
     # Reverse map so we can report selected profiles that match no Account.
     launch_id_to_name = {}
@@ -169,12 +188,21 @@ def plan_airtable_runs(
             plan.skipped.append(SkippedAccount(display_name, "no creation date"))
             continue
 
-        actions = lifecycle.plan_actions_for_day(start_date, today)
+        day = lifecycle.day_number(start_date, today)
+        if warmup_plan:
+            actions, warnings = lifecycle.plan_actions_from_table(day, warmup_plan)
+            for warning in warnings:
+                if warning not in reported_plan_warnings:
+                    reported_plan_warnings.add(warning)   # once per run, not per account
+                    if logger:
+                        logger.warning("Warmup Plan: %s", warning)
+        else:
+            actions = lifecycle.plan_actions_for_day(start_date, today)
         runs = []
         for action in actions:
             if action.flow == lifecycle.FLOW_REEL:
                 if not run_reels:
-                    continue  # reels deferred until media is wired
+                    continue  # caller explicitly disabled reels (--no-reels)
                 sched = _parse_hhmm(action.scheduled_time)
                 if sched is not None and now_time < sched:
                     continue  # not time for this reel slot yet

@@ -8,6 +8,7 @@ from adb_bot.automation import AutomationRunner
 from adb_bot.config.config import get_bearer_token, get_profile_ids
 from adb_bot.automation.flows.instagram import InstagramLikeFeedFlow, InstagramNotificationsFlow, InstagramScrollFlow, InstagramStoryUploadFlow, InstagramReelUploadFlow, InstagramUpdateBioFlow, InstagramUpdateBioU2Flow, InstagramUpdateProfilePictureU2Flow, InstagramWarmUpDay1Flow
 from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
+from adb_bot.automation.heartbeat import DEFAULT_INTERVAL_SECONDS, ProfileHeartbeat
 from adb_bot.core.logger import get_logger
 from adb_bot.core.models import Profile
 from adb_bot.clients.multilogin import (
@@ -262,6 +263,8 @@ def run_profile_workflow(
     bio: str | None = None,
     picture: str | None = None,
     media_path: str | None = None,
+    heartbeat_interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
+    heartbeat_shutdown_on_failure: bool = True,
 ) -> None:
     adb_client = ADBClient()
     if callable(status_callback):
@@ -310,6 +313,23 @@ def run_profile_workflow(
     if callable(status_callback):
         status_callback(profile_id_value, "running")
     logger.info("Starting Instagram-style automation for profile %s using flow '%s'", profile_id_value, flow_name)
+
+    # From here on the flow drives a real phone, so every abort check also
+    # confirms the phone is still the one we launched. Replaces `should_stop`
+    # (it wraps it) so the flows need no changes -- they already poll it
+    # before and after every action.
+    heartbeat = ProfileHeartbeat(
+        profile_id_value,
+        target,
+        api_client,
+        adb_client,
+        shutdown_client,
+        logger,
+        interval_seconds=heartbeat_interval_seconds,
+        inner_should_stop=should_stop,
+        shutdown_on_failure=heartbeat_shutdown_on_failure,
+    )
+    should_stop = heartbeat
 
     done_event = threading.Event()
     completed_actions = 0
@@ -402,13 +422,20 @@ def run_profile_workflow(
                 pass
 
     if callable(should_stop) and should_stop():
-        if shutdown_on_abort:
+        if heartbeat.stopped:
+            # The heartbeat already shut the profile down (or deliberately did
+            # not); saying so beats a second, misleading "aborted" line.
+            logger.warning(
+                "Workflow aborted for profile %s by the heartbeat: %s",
+                profile_id_value, heartbeat.reason,
+            )
+        elif shutdown_on_abort:
             logger.info("Shutting down profile %s because the workflow was aborted", profile_id_value)
             shutdown_client.shutdown_profiles([profile_id_value])
         else:
             logger.info("Workflow aborted for profile %s without shutting it down", profile_id_value)
         if callable(status_callback):
-            status_callback(profile_id_value, "failed")
+            status_callback(profile_id_value, "heartbeat_lost" if heartbeat.stopped else "failed")
         return
 
     if isinstance(flow_result, dict):

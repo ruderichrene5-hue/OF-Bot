@@ -72,9 +72,14 @@ def save_settings(settings: dict) -> bool:
 
 
 def get_saved_bearer_token() -> str:
-    """Get saved bearer token or empty string if not set."""
-    settings = load_settings()
-    return settings.get("bearer_token", "").strip() or ""
+    """Get the MultiLogin token from saved settings, else MULTILOGIN_TOKEN.
+
+    The env fallback matters on a server: systemd units inherit nothing from a
+    shell, so the token arrives via /etc/adbbot/env. Without it `doctor` reported
+    "no token configured" while the loops -- which read the env var directly --
+    worked fine.
+    """
+    return _get_saved_or_env("bearer_token", "MULTILOGIN_TOKEN")
 
 
 def _get_saved_or_env(settings_key: str, env_key: str) -> str:

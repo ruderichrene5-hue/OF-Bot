@@ -1,4 +1,5 @@
 import logging
+import tempfile
 from pathlib import Path
 from unittest import TestCase
 
@@ -103,21 +104,32 @@ class RunPipelineTest(TestCase):
         )
         made = []
 
-        def fake_spoof(raw_path, out_dir, seed, logger=None):
-            p = Path(out_dir) / f"variant_{seed}.mp4"
-            made.append((raw_path, out_dir, seed))
-            return p
+        with tempfile.TemporaryDirectory() as out_root:
+            def fake_spoof(raw_path, out_dir, seed, logger=None):
+                # Mimic vtf: the output is named after the SOURCE, so every
+                # account produces the same filename in the shared run folder.
+                Path(out_dir).mkdir(parents=True, exist_ok=True)
+                p = Path(out_dir) / "clip_variant_001.mp4"
+                p.write_text(str(seed))
+                made.append((raw_path, out_dir, seed))
+                return p
 
-        report = run_pipeline(client, LOG, raw_root="/raw", out_root="/out",
-                              source=FakeSource(_one_video()), spoof_fn=fake_spoof, dry_run=False)
-        self.assertEqual(report.variants_created, 2)
-        self.assertEqual(len(client.content_rows), 1)
-        self.assertEqual(client.content_rows[0][2], "recModelN")   # model linked
-        self.assertEqual(len(client.variant_rows), 2)
-        # distinct output dirs per handle, distinct seeds
-        self.assertNotEqual(made[0][1], made[1][1])
-        self.assertNotEqual(made[0][2], made[1][2])
-        self.assertEqual(client.spoofed_marks, [("recCP1", False)])
+            report = run_pipeline(client, LOG, raw_root="/raw", out_root=out_root,
+                                  source=FakeSource(_one_video()), spoof_fn=fake_spoof, dry_run=False)
+            self.assertEqual(report.variants_created, 2)
+            self.assertEqual(len(client.content_rows), 1)
+            self.assertEqual(client.content_rows[0][2], "recModelN")   # model linked
+            self.assertEqual(len(client.variant_rows), 2)
+            # Both accounts share ONE run folder now, but get distinct seeds...
+            self.assertEqual(made[0][1], made[1][1])
+            self.assertNotEqual(made[0][2], made[1][2])
+            # ...and, crucially, distinct FILES. Without the rename both rows
+            # would point at the same overwritten path.
+            paths = [row[2] for row in client.variant_rows]
+            self.assertEqual(len(set(paths)), 2)
+            for path in paths:
+                self.assertTrue(Path(path).is_file())
+            self.assertEqual(client.spoofed_marks, [("recCP1", False)])
 
     def test_already_processed_video_skipped(self):
         client = FakePipelineClient(existing={"clip1.mp4"},
@@ -224,7 +236,12 @@ class DriveRawSourceTest(TestCase):
             seen["raw_path"] = raw_path
             # the raw file must exist at spoof time (downloaded, not yet released)
             seen["existed"] = Path(raw_path).is_file()
-            return Path(out_dir) / "out.mp4"
+            # spoof_fn's contract is a file that really exists -- the pipeline
+            # renames it into <source>__<handle> before recording it.
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            out = Path(out_dir) / "out.mp4"
+            out.write_text("video")
+            return out
 
         report = run_pipeline(airtable, LOG, raw_root=None, out_root=tmp,
                               source=src, spoof_fn=fake_spoof, dry_run=False)
@@ -258,3 +275,96 @@ class AttachmentsTest(TestCase):
         self.assertTrue(attachments.is_url("https://x/a.jpg"))
         self.assertFalse(attachments.is_url("C:/local/a.jpg"))
         self.assertFalse(attachments.is_url(None))
+
+
+class RunFolderLayoutTest(TestCase):
+    """Output layout: <out_root>/<Model>/run<N>/<source>__<handle>.mp4 --
+    one run folder per raw video, shared by every account under the model."""
+
+    def test_safe_name_strips_spaces_and_punctuation(self):
+        # Output paths reach the Android shell, which splits on spaces.
+        self.assertEqual(spoof_pipeline.safe_name("viktoria 1 I 1 aug"), "viktoria_1_I_1_aug")
+        self.assertEqual(spoof_pipeline.safe_name("Rodrigo (test)"), "Rodrigo_test")
+        self.assertEqual(spoof_pipeline.safe_name("a/b\\c"), "a_b_c")
+        self.assertEqual(spoof_pipeline.safe_name("  ...  "), "unnamed")
+
+    def test_first_run_is_run1(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertEqual(spoof_pipeline.next_run_dir(root, "Rodrigo").name, "run1")
+
+    def test_numbering_continues_past_existing_runs(self):
+        with tempfile.TemporaryDirectory() as root:
+            model = Path(root) / "Rodrigo"
+            for name in ("run1", "run2", "run7", "notarun", "run_x"):
+                (model / name).mkdir(parents=True)
+            # Highest wins, non-run folders are ignored -- not a simple count.
+            self.assertEqual(spoof_pipeline.next_run_dir(root, "Rodrigo").name, "run8")
+
+    def test_numbering_is_per_model(self):
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / "Rodrigo" / "run5").mkdir(parents=True)
+            self.assertEqual(spoof_pipeline.next_run_dir(root, "Jasmin").name, "run1")
+
+    def test_finalize_variant_renames_to_source_and_handle(self):
+        with tempfile.TemporaryDirectory() as root:
+            produced = Path(root) / "clip_variant_001.mp4"
+            produced.write_text("x")
+            out = spoof_pipeline.finalize_variant(produced, "my clip 1.mp4", "Rodrigo (test)")
+            self.assertEqual(out.name, "my_clip_1__Rodrigo_test.mp4")
+            self.assertTrue(out.is_file())
+            self.assertFalse(produced.exists())
+
+    def test_each_video_gets_its_own_run_folder(self):
+        client = FakePipelineClient(
+            active={"rodrigo": [{"account_id": "a1", "handle": "acct_one"},
+                                {"account_id": "a2", "handle": "acct_two"}]},
+            model_ids={"rodrigo": "recModelR"},
+        )
+        videos = {"Rodrigo": [RawVideo(model="Rodrigo", name="v1.mp4", path="/raw/Rodrigo/v1.mp4"),
+                              RawVideo(model="Rodrigo", name="v2.mp4", path="/raw/Rodrigo/v2.mp4")]}
+
+        with tempfile.TemporaryDirectory() as out_root:
+            def fake_spoof(raw_path, out_dir, seed, logger=None):
+                Path(out_dir).mkdir(parents=True, exist_ok=True)
+                p = Path(out_dir) / f"{Path(raw_path).stem}_variant_001.mp4"
+                p.write_text(str(seed))
+                return p
+
+            report = run_pipeline(client, LOG, raw_root="/raw", out_root=out_root,
+                                  source=FakeSource(videos), spoof_fn=fake_spoof, dry_run=False)
+
+            self.assertEqual(report.variants_created, 4)   # 2 videos x 2 accounts
+            self.assertEqual(report.errors, [])
+
+            model_dir = Path(out_root) / "Rodrigo"
+            runs = sorted(p.name for p in model_dir.iterdir() if p.is_dir())
+            self.assertEqual(runs, ["run1", "run2"])
+
+            # Two distinct files per run, one per account, all four unique.
+            for run in runs:
+                files = sorted(p.name for p in (model_dir / run).iterdir())
+                self.assertEqual(len(files), 2, f"{run} should hold one file per account")
+            paths = [row[2] for row in client.variant_rows]
+            self.assertEqual(len(set(paths)), 4)
+
+    def test_rename_failure_is_reported_not_recorded(self):
+        # A variant that cannot be named must NOT reach Airtable: the un-renamed
+        # file gets overwritten by the next account, so the row would point at
+        # the wrong account's video.
+        client = FakePipelineClient(
+            active={"rodrigo": [{"account_id": "a1", "handle": "acct_one"}]},
+            model_ids={"rodrigo": "recModelR"},
+        )
+        videos = {"Rodrigo": [RawVideo(model="Rodrigo", name="v1.mp4", path="/raw/Rodrigo/v1.mp4")]}
+
+        with tempfile.TemporaryDirectory() as out_root:
+            def fake_spoof(raw_path, out_dir, seed, logger=None):
+                return Path(out_dir) / "never_created.mp4"   # nothing on disk
+
+            report = run_pipeline(client, LOG, raw_root="/raw", out_root=out_root,
+                                  source=FakeSource(videos), spoof_fn=fake_spoof, dry_run=False)
+
+            self.assertEqual(report.variants_created, 0)
+            self.assertEqual(client.variant_rows, [])
+            self.assertEqual(len(report.errors), 1)
+            self.assertEqual(client.spoofed_marks, [("recCP1", True)])   # marked failed
