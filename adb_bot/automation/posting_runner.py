@@ -14,12 +14,10 @@ with a fake client, so the whole mapping is verifiable without a device.
 
 from __future__ import annotations
 
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from adb_bot.clients import airtable as at
 from adb_bot.core.locks import ProfileLocks
-from adb_bot.core.batching import chunked, resolve_concurrency
+from adb_bot.core.batching import LaunchGate, resolve_concurrency, run_rolling
 from adb_bot.automation import incidents
 from adb_bot.automation.posting_planner import plan_posting_queue
 from adb_bot.automation.workflow import run_profile_workflow
@@ -34,6 +32,19 @@ def _map_post_status(status: str):
     intermediate status that produces no write-back."""
     if status == "done":
         return (at.POST_STATUS_POSTED, at.ISSUE_NONE, None, at.RESULT_DONE, "posted")
+    if status == "uncertain":
+        # Share was tapped but the post could not be proven inside the run's
+        # (deliberately short) budget. This is not a failure and not a job for a
+        # human -- it is a question the machine can answer better in fifteen
+        # minutes, once Instagram has finished processing and the profile has
+        # refreshed. The row parks in Verifying with a Recheck After stamp and
+        # the deferred pass resolves it.
+        #
+        # It used to land on Failed + Issue=Other, which was wrong twice over:
+        # it reported live posts as failures, and it put them in front of a
+        # person who then had no better way to check than we did.
+        return (at.POST_STATUS_VERIFYING, at.ISSUE_NONE, None, at.RESULT_UNVERIFIED,
+                "sent but not yet confirmed -- queued for automatic recheck")
     if status == "human_verification":
         return (at.POST_STATUS_FAILED, at.ISSUE_HUMAN_VERIFICATION, "human_verification", at.RESULT_FAILED, "human verification requested")
     if status == "banned":
@@ -47,7 +58,7 @@ def _map_post_status(status: str):
     return None
 
 
-def apply_post_result(airtable, item, status, flow=POST_FLOW, logger=None) -> bool:
+def apply_post_result(airtable, item, status, flow=POST_FLOW, logger=None, detail="") -> bool:
     """Write one post's outcome back to Airtable. Returns True if it was a
     terminal status that produced a write-back, False for intermediate statuses.
 
@@ -62,6 +73,12 @@ def apply_post_result(airtable, item, status, flow=POST_FLOW, logger=None) -> bo
         return False
     post_status, issue_type, incident, run_result, note = mapped
 
+    # Record which signal decided this. Without it the Run Log says "failed"
+    # with no way to tell a post that never happened from one we simply could
+    # not see -- which is the difference between "retry" and "go look".
+    if detail:
+        note = f"{note} ({detail})" if note else detail
+
     airtable.create_run_log(item.account_id, item.account_name, flow, run_result, note)
     airtable.set_account_result(item.account_id, f"{run_result}: {flow} ({note})")
 
@@ -69,6 +86,12 @@ def apply_post_result(airtable, item, status, flow=POST_FLOW, logger=None) -> bo
         airtable.mark_post_result(item.queue_id, at.POST_STATUS_POSTED, issue_type)
         if item.variant_id:
             airtable.mark_variant_used(item.variant_id)
+    elif post_status == at.POST_STATUS_VERIFYING:
+        # No retry bump and no Issue: this is neither a "try again" nor a
+        # "something is wrong" outcome, it is an open question with a scheduled
+        # answer. The variant stays unused until the recheck decides -- marking
+        # it Used now would lose it if the post turns out never to have landed.
+        airtable.mark_post_pending_verification(item.queue_id, note=note)
     elif incident:
         # incidents also sets the queue row's Issue Type + Post Status=Failed and
         # flags the account so the loops skip it. Don't bump retry -- not retryable.
@@ -177,14 +200,16 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
         if aborted():
             return
 
-        def _cb(pid: str, status: str) -> None:
+        def _cb(pid: str, status: str, detail: str = "") -> None:
             if callable(status_callback):
                 try:
+                    status_callback(pid, status, detail)
+                except TypeError:
                     status_callback(pid, status)
                 except Exception:
                     pass
             try:
-                apply_post_result(airtable, item, status, flow=flow, logger=logger)
+                apply_post_result(airtable, item, status, flow=flow, logger=logger, detail=detail)
             except Exception as exc:
                 logger.warning("Failed to write post result for %s: %s", item.account_name, exc)
 
@@ -206,44 +231,49 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
             shutdown_on_success=True,
             caption=item.caption,
             media_path=item.video_path,
+            # Lets readiness relaunch a profile whose launch didn't take,
+            # instead of re-enabling ADB on something that isn't running.
+            launcher_client=launcher_client,
         )
 
-    # Launch and post in batches so no more than `concurrency` phones are ever
-    # live at once -- launching every due profile up front pinned the CPU.
+    # A rolling window of at most `concurrency` phones. The previous fixed
+    # batches ran only as fast as their slowest profile: with a 3-minute post
+    # verification floor, one laggard held every finished phone in its batch
+    # idle. Here a finished profile is replaced immediately.
     concurrency = resolve_concurrency(max_concurrent_profiles)
-    batches = chunked(launch_ids, concurrency)
     items_by_launch: dict = {}
     for item in plan.to_post:
         items_by_launch.setdefault(item.launch_id, []).append(item)
 
-    logger.info("Posting %s profile(s) in %s batch(es) of up to %s",
-                len(launch_ids), len(batches), concurrency)
+    gate = LaunchGate(batch_launch_delay_seconds)
 
-    for batch_index, batch in enumerate(batches, start=1):
-        if aborted():
-            return {"processed": 0, "aborted": True}
-        logger.info("Batch %s/%s: launching %s profile(s)", batch_index, len(batches), len(batch))
-        for launch_id in batch:
+    def run_profile(launch_id) -> None:
+        """Launch one profile, then work through everything due on it.
+
+        Its items run **sequentially**. They share one phone, and
+        `run_profile_workflow` shuts the profile down when it succeeds -- so
+        running two of them at once would have the first one's shutdown pull the
+        device out from under the second.
+        """
+        response = gate.launch(lambda: launcher_client.start_profiles([launch_id]))
+        if isinstance(response, dict) and response.get("status") == "error":
+            logger.error("Failed to launch profile %s: %s", launch_id, response)
+        else:
+            logger.info("Launched profile %s", launch_id)
+        # No batch-wide readiness sleep any more: run_profile_workflow waits for
+        # *this* profile to be ready, which is the same wait applied where it
+        # belongs instead of once for a whole group.
+        for item in items_by_launch.get(launch_id, []):
             if aborted():
-                return {"processed": 0, "aborted": True}
-            response = launcher_client.start_profiles([launch_id])
-            if isinstance(response, dict) and response.get("status") == "error":
-                logger.error("Failed to launch profile %s: %s", launch_id, response)
-            else:
-                logger.info("Launched profile %s", launch_id)
-            if batch_launch_delay_seconds > 0:
-                time.sleep(batch_launch_delay_seconds)
+                return
+            run_post(item)
 
-        if aborted():
-            return {"processed": 0, "aborted": True}
-        logger.info("Waiting %s seconds for profiles to become ready", readiness_wait_seconds)
-        time.sleep(readiness_wait_seconds)
-
-        batch_items = [i for lid in batch for i in items_by_launch.get(lid, [])]
-        with ThreadPoolExecutor(max_workers=max(1, len(batch_items))) as executor:
-            futures = [executor.submit(run_post, item) for item in batch_items]
-            for future in as_completed(futures):
-                future.result()
+    logger.info("Posting %s profile(s), up to %s at a time (rolling)",
+                len(launch_ids), concurrency)
+    outcome = run_rolling(launch_ids, run_profile, concurrency=concurrency,
+                          should_stop=should_stop, logger=logger)
+    if outcome["aborted"]:
+        return {"processed": 0, "aborted": True}
 
     logger.info("Posting run complete (%s post(s))", len(plan.to_post))
     return {"processed": len(plan.to_post), "skipped": len(plan.skipped), "busy": busy_count}

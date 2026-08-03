@@ -203,9 +203,11 @@ class AirtableRunnerWiringTests(unittest.TestCase):
 
         airtable = MagicMock()
         airtable.create_run_log.return_value = "log1"
+        # No `time.sleep` patch needed any more: the batch-wide readiness sleep
+        # is gone, and each profile now waits for its own readiness inside
+        # run_profile_workflow (mocked here).
         with patch.object(airtable_runner, "run_profile_workflow") as run_workflow, \
-                patch.object(airtable_runner, "_missing_input_reason", return_value=None), \
-                patch.object(airtable_runner.time, "sleep"):
+                patch.object(airtable_runner, "_missing_input_reason", return_value=None):
             airtable_runner._launch_and_run_flows(
                 plan, ["p-a1"], airtable, MagicMock(), MagicMock(), MagicMock(), MagicMock(),
                 MagicMock(), MagicMock(), 0, 1, 0, None, None, None, False,

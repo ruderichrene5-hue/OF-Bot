@@ -25,12 +25,13 @@ import os
 import sys
 from datetime import datetime
 
+from adb_bot.automation.flows import reel_verify
 from adb_bot.clients import airtable as at
 from adb_bot.clients.airtable import AirtableClient
 from adb_bot.config import settings
 from adb_bot.core.logger import get_logger
 
-LOOPS = ("posting", "warmup", "pipeline", "mlx-sync", "cleanup")
+LOOPS = ("posting", "recheck", "warmup", "pipeline", "mlx-sync", "cleanup")
 # `doctor` isn't a loop -- it's the preflight check, runnable the same way.
 COMMANDS = LOOPS + ("doctor",)
 
@@ -177,6 +178,72 @@ def _run_cleanup(args, logger) -> int:
     return 1 if (inputs.errors or variants.errors) else 0
 
 
+def _run_recheck(args, logger) -> int:
+    """Resolve posts that were sent but could not be confirmed in-run.
+
+    The posting loop now stops verifying after ~45s and parks anything unproven
+    in `Verifying` with a Recheck After stamp, so a profile never holds a phone
+    for five minutes over one post. This loop is the other half of that
+    bargain -- run it on a timer (every ~15 min) or those rows never resolve.
+    """
+    from adb_bot.automation import post_ledger, recheck_runner
+    airtable = _airtable(args.base_id, args.airtable_token)
+
+    rows = airtable.list_posts_awaiting_recheck()
+    if not args.apply:
+        # Plan-only: pure, no device. Shows what is parked and what evidence
+        # each row has, which is also the fastest way to spot posts that are
+        # unresolvable because no baseline count was captured.
+        ledger = post_ledger.PostLedger()
+        entries = {r.queue_id: r for r in ledger.pending() if r.queue_id}
+        logger.info("[DRY-RUN] %s row(s) awaiting recheck", len(rows or []))
+        for row in rows or []:
+            fields = row.get("fields", {}) or {}
+            entry = entries.get(row.get("id"))
+            if entry is None:
+                logger.info("  %s: no local ledger entry -- cannot be resolved here",
+                            fields.get(at.F_PQ_NAME))
+                continue
+            logger.info("  %s: shared %.0f min ago, baseline=%s%s",
+                        fields.get(at.F_PQ_NAME), entry.age_seconds / 60.0,
+                        entry.baseline_count if entry.baseline_count >= 0 else "unavailable",
+                        "" if entry.baseline_exact else " (not exact -- unresolvable)")
+        return 0
+
+    from adb_bot.automation.bootstrap import build_automation, build_mlx_clients
+    from adb_bot.automation.workflow import run_profile_workflow
+    token = _mlx_token(args.mlx_token)
+    clients = build_mlx_clients(token)
+    automation = build_automation()
+    launch_map = airtable.profile_launch_map()
+
+    def read_post_count(profile_id, fields):
+        """Launch the profile, read its post count, shut it down again."""
+        accounts = fields.get(at.F_PQ_TARGET_ACCOUNT) or []
+        launch_id = launch_map.get(accounts[0]) if accounts else None
+        if not launch_id:
+            logger.warning("No launch id for queue row %s; cannot probe", fields.get(at.F_PQ_NAME))
+            return None
+        captured = {}
+
+        def capture(result):
+            if result.get("post_count") is not None:
+                captured["count"] = reel_verify.Count(int(result["post_count"]),
+                                                      bool(result.get("post_count_exact")))
+
+        run_profile_workflow(
+            launch_id, clients.api.bearer_token, clients.api, clients.adb_enable,
+            clients.shutdown, automation, logger,
+            flow_name="reel_post_count_probe", result_callback=capture,
+            shutdown_on_success=True, launcher_client=clients.launcher,
+        )
+        return captured.get("count")
+
+    tally = recheck_runner.recheck_pending_posts(airtable, read_post_count, logger=logger)
+    logger.info("recheck result: %s", tally)
+    return 0
+
+
 def _run_doctor(args, logger) -> int:
     from adb_bot.automation import doctor
     results = doctor.run_checks()
@@ -189,6 +256,7 @@ def _run_doctor(args, logger) -> int:
 
 _DISPATCH = {
     "posting": _run_posting,
+    "recheck": _run_recheck,
     "warmup": _run_warmup,
     "pipeline": _run_pipeline,
     "mlx-sync": _run_mlx_sync,

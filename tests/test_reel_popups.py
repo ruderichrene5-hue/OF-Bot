@@ -1,6 +1,6 @@
 """Regression tests for the time sinks found in the first live Rodrigo run."""
 
-from unittest import TestCase
+from unittest import TestCase, mock
 
 from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
 
@@ -278,13 +278,17 @@ class BrowseRefreshTest(TestCase):
         self.assertLess(next(i for i, c in enumerate(clicked) if "feed_tab" in c),
                         next(i for i, c in enumerate(clicked) if "profile_tab" in c))
 
-    def test_scrolls_the_feed_and_pulls_to_refresh(self):
+    def test_pulls_to_refresh_without_a_wasted_scroll_back(self):
+        """Was: scroll the feed down, scroll back up, then pull-to-refresh the
+        profile. The scroll-back only undid the scroll-down -- the refresh comes
+        from the feed->profile round trip plus the pull. One gesture per screen
+        is enough, and this probe repeats every ~25s for up to three minutes."""
         d, events = self._device()
         self.flow._browse_and_refresh_profile_u2(d, "t")
         swipes = [direction for kind, direction in events if kind == "swipe"]
-        self.assertIn("up", swipes)      # scrolling the feed
-        self.assertIn("down", swipes)    # pull-to-refresh on the profile
-        self.assertGreaterEqual(len(swipes), 3)
+        self.assertEqual(len(swipes), 2, swipes)
+        self.assertNotIn("up", swipes)   # the scroll-away-and-back is gone
+        self.assertEqual(swipes, ["down", "down"])   # feed reload, then grid pull
 
     def test_survives_a_device_without_window_size(self):
         class Dev:
@@ -319,7 +323,10 @@ class BrowseRefreshTest(TestCase):
                 from adb_bot.automation.flows.reel_verify import Count
                 return Count(3, True)
 
-        probe = CountingFlow()._profile_post_count_probe_u2(None, "t", None, None, every_seconds=999)
+        # initial_delay=0 skips the banner-window hold-off so the throttle
+        # itself is what's under test here.
+        probe = CountingFlow()._profile_post_count_probe_u2(None, "t", None, None,
+                                                            every_seconds=999, initial_delay=0)
         self.assertIsNotNone(probe())
         self.assertIsNone(probe())
         self.assertEqual(len(calls), 1)
@@ -455,3 +462,53 @@ class ForegroundCheckTest(TestCase):
                 raise RuntimeError("offline")
 
         self.assertFalse(self.flow._ig_is_foreground("t", Adb()))
+
+
+class BrowseRefreshGestureTest(TestCase):
+    """The verification probe used to swipe down the feed and then swipe back up.
+    The second gesture only undid the first: what actually refreshes the post
+    count is leaving to the feed and returning to the profile, plus the
+    pull-to-refresh on the grid. One feed gesture is enough, and the probe runs
+    every ~25s for up to three minutes, so the saving repeats."""
+
+    def setUp(self):
+        self.flow = InstagramReelUploadU2Flow()
+
+    def _swipes(self):
+        recorded = []
+
+        class Dev:
+            def window_size(self):
+                return (1080, 2340)
+
+            def swipe(self, x1, y1, x2, y2, duration):
+                recorded.append((y1, y2))
+
+            def __call__(self, *a, **k):
+                return mock.MagicMock(exists=True, wait=lambda *a, **k: True,
+                                      click=lambda *a, **k: None, info={})
+
+            def __getattr__(self, name):
+                return mock.MagicMock()
+
+        with mock.patch.object(self.flow, "_dismiss_popups_u2"), \
+             mock.patch.object(self.flow, "_tap_ig_home_icon_u2"), \
+             mock.patch.object(self.flow, "_open_profile_tab_u2", return_value=True), \
+             mock.patch("adb_bot.automation.flows.waits.settle"):
+            self.flow._browse_and_refresh_profile_u2(Dev(), "t")
+        return recorded
+
+    def test_only_two_swipes_total(self):
+        """One on the feed, one pull-to-refresh on the profile grid -- the
+        redundant scroll-back is gone."""
+        self.assertEqual(len(self._swipes()), 2)
+
+    def test_no_swipe_merely_undoes_the_previous_one(self):
+        swipes = self._swipes()
+        for (first, second) in zip(swipes, swipes[1:]):
+            self.assertNotEqual((first[1], first[0]), second,
+                                "a gesture that reverses the one before it does no work")
+
+    def test_feed_gesture_pulls_downward_to_reload(self):
+        first = self._swipes()[0]
+        self.assertLess(first[0], first[1], "should pull down (reload), not scroll away")
