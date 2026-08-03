@@ -55,6 +55,21 @@ def _map_post_status(status: str):
         return (at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY, None, at.RESULT_FAILED, "ADB connect failed")
     if status == "failed":
         return (at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY, None, at.RESULT_FAILED, "flow reported a failure (see app logs)")
+    if status == "already_shared":
+        # The ledger stopped a second send of a clip this profile already got.
+        # Terminal and NOT retryable: the queue row asks for something that has
+        # already happened, so Issue stays Other (the retry pass only re-queues
+        # "Failed - Needs Retry") and the counter is not bumped -- a refusal is
+        # not an attempt. The Run Log says Skipped rather than Failed, because
+        # a guard doing its job should not read as a breakage when someone is
+        # scanning for problems.
+        #
+        # The variant is deliberately left alone rather than marked Used: if a
+        # later recheck disproves the original post, the clip becomes sendable
+        # again, and consuming it here would throw that away.
+        return (at.POST_STATUS_FAILED, at.ISSUE_OTHER, None, at.RESULT_SKIPPED,
+                "skipped: this clip was already sent to this profile")
+
     if status == "heartbeat_lost":
         # The phone stopped being ours mid-post. Retryable: nothing is wrong
         # with the account, the post simply never completed.
@@ -108,6 +123,12 @@ def apply_post_result(airtable, item, status, flow=POST_FLOW, logger=None, detai
         # Profile-driven run: the flag belongs on an Accounts row that doesn't
         # exist. Still stamp the queue row so the incident is visible and the row
         # is not retried blindly -- but no retry bump, same as the account path.
+        airtable.mark_post_result(item.queue_id, at.POST_STATUS_FAILED, issue_type)
+    elif status == "already_shared":
+        # Terminal, but not an attempt: the send never happened because the clip
+        # was already out. Bumping the counter here would spend a retry the row
+        # never used -- and the row is not retryable anyway, so the only effect
+        # would be a misleading number in front of whoever reads it.
         airtable.mark_post_result(item.queue_id, at.POST_STATUS_FAILED, issue_type)
     else:
         airtable.mark_post_result(

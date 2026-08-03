@@ -647,6 +647,17 @@ def run_profile_workflow(
                            profile_id_value)
             emit_status(profile_id_value, "uncertain", flow_result)
             return
+        if flow_result.get("already_shared", False):
+            # The ledger refused this send: Share was already tapped for this
+            # clip on this profile. Falling through to "failed" below labelled a
+            # working guard as a breakage -- the row landed on Failed - Needs
+            # Retry and burned a retry on something no retry can change. It is
+            # a skip, and the run stops here either way.
+            logger.info("Skipping profile %s: this clip was already sent to it (%s)",
+                        profile_id_value, flow_result.get("verify_detail") or "ledger")
+            emit_status(profile_id_value, "already_shared", flow_result)
+            return
+
         if flow_result.get("aborted", False) or flow_result.get("failed", False) or flow_result.get("success") is False:
             logger.info("Workflow failed for profile %s", profile_id_value)
             emit_status(profile_id_value, "failed", flow_result)

@@ -235,3 +235,43 @@ class ApplyPostResultTest(TestCase):
         self.assertEqual(_map_post_status("done")[0], at.POST_STATUS_POSTED)
         self.assertEqual(_map_post_status("action_block")[2], "action_block")
         self.assertIsNone(_map_post_status("starting"))
+
+
+class AlreadySharedTest(TestCase):
+    """The ledger refusing a second send is a guard working, not a failure.
+
+    Before this mapping the result fell through to the generic failed branch:
+    the row landed on `Failed - Needs Retry` with the retry counter bumped, so a
+    refusal to double-post was recorded as a breakage and queued for a retry
+    that could never change the answer.
+    """
+
+    def test_it_is_terminal_and_not_retryable(self):
+        post_status, issue_type, incident, run_result, note = _map_post_status("already_shared")
+        self.assertEqual(post_status, at.POST_STATUS_FAILED)
+        self.assertEqual(issue_type, at.ISSUE_OTHER)
+        self.assertNotEqual(issue_type, at.ISSUE_NEEDS_RETRY)   # the retry pass must not pick it up
+        self.assertIsNone(incident)                             # nothing is wrong with the account
+        self.assertEqual(run_result, at.RESULT_SKIPPED)
+        self.assertIn("already sent", note)
+
+    def test_it_does_not_bump_the_retry_counter(self):
+        c = FakePostClient()
+        apply_post_result(c, ITEM, "already_shared")
+        qid, status, issue, retry = c.post_marks[0]
+        self.assertEqual((qid, status, issue), ("recQ1", at.POST_STATUS_FAILED, at.ISSUE_OTHER))
+        self.assertIsNone(retry)   # a refusal is not an attempt
+
+    def test_it_does_not_consume_the_variant(self):
+        """A later recheck can disprove the original post, which makes the clip
+        sendable again -- marking it Used here would throw that away."""
+        c = FakePostClient()
+        apply_post_result(c, ITEM, "already_shared")
+        self.assertEqual(c.used, [])
+
+    def test_the_retry_pass_will_not_requeue_it(self):
+        from adb_bot.automation import retry_runner
+        fields = {at.F_PQ_POST_STATUS: at.POST_STATUS_FAILED, at.F_PQ_ISSUE_TYPE: at.ISSUE_OTHER,
+                  at.F_PQ_RETRY_COUNT: 0}
+        outcome, _detail = retry_runner.decide_retry(fields, "LID", "hash", None)
+        self.assertNotEqual(outcome, retry_runner.OUTCOME_RETRY)
