@@ -45,13 +45,22 @@ DEFAULT_TIMEZONE = "Europe/Berlin"
 TARGET_ACCOUNT = "account"
 TARGET_PROFILE = "profile"
 
-# A queue row in one of these statuses still owns its variant, so that variant
-# must not be handed to a second row. Pending = waiting to post, Verifying = sent
-# but unproven (the recheck may still turn it into Posted). Posted is included as
-# a belt-and-braces guard: the variant should already be Used, but if that write
-# failed the only thing standing between us and posting the same clip twice is
-# this set.
-VARIANT_HELD_BY = (at.POST_STATUS_PENDING, at.POST_STATUS_VERIFYING, at.POST_STATUS_POSTED)
+# A variant that already has a queue row belongs to that row, in EVERY status,
+# so it must never be handed to a second one. Pending = waiting to post,
+# Verifying = sent but unproven (the recheck may still turn it into Posted).
+# Posted is belt-and-braces: the variant should already be Used, but if that
+# write failed this set is the only thing standing between us and posting the
+# same clip twice.
+#
+# Failed is in here for a subtler reason. Recovering a failed row is the retry
+# pass's job -- it re-queues the SAME row after consulting the ledger. If this
+# loop could also draw that row's variant into a fresh slot, both would act on
+# one clip and produce two Pending rows for it. The ledger still prevents the
+# second post, so nothing goes out twice, but it costs a phone launch and files
+# a confusing Skipped row. One clip, one owner: retry owns recovery, this loop
+# only ever draws genuinely fresh variants.
+VARIANT_HELD_BY = (at.POST_STATUS_PENDING, at.POST_STATUS_VERIFYING,
+                   at.POST_STATUS_POSTED, at.POST_STATUS_FAILED)
 
 
 @dataclass
@@ -202,14 +211,14 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
         return report
 
     # --- guard state from the existing queue -------------------------------
-    held_variants: set = set()
+    held_variants: dict = {}
     filled: set = set()
     for row in queue_rows or []:
         fields = row.get("fields", {}) or {}
         status = at._select_name(fields.get(at.F_PQ_POST_STATUS))
         variant_id = _first_link(fields, at.F_PQ_SPOOF_VARIANT)
         if variant_id and status in VARIANT_HELD_BY:
-            held_variants.add(variant_id)
+            held_variants[variant_id] = status
         account_id = _first_link(fields, at.F_PQ_TARGET_ACCOUNT)
         profile_id = _first_link(fields, at.F_PQ_TARGET_PROFILE)
         key = ((TARGET_PROFILE, profile_id) if profile_id
@@ -224,10 +233,20 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
     pools: dict = {}
     targets_by_key = {t.key: t for t in targets}
     stranded: set = set()
+    # What a target's variants are tied up in, so "nothing to post" can say
+    # WHICH kind of nothing: no media spoofed yet (the pipeline owes us one) vs
+    # media that exists but belongs to a row already in flight. Those need
+    # opposite responses, and one shared skip line would hide the difference.
+    tied_up: dict = {}
     for variant in sorted(variants or [],
                           key=lambda v: (str(v.get("created") or ""), str(v.get("id") or ""))):
         variant_id = variant.get("id")
-        if not variant_id or variant_id in held_variants:
+        if not variant_id:
+            continue
+        if variant_id in held_variants:
+            key = _variant_target_key(variant)
+            if key is not None:
+                tied_up.setdefault(key, set()).add(held_variants[variant_id])
             continue
         status = variant.get("status")
         if status is not None and status != at.SV_STATUS_READY:
@@ -256,7 +275,16 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
                 # One skip per target, not per slot: a target waiting on the
                 # spoof pipeline would otherwise add five identical lines to
                 # every run's log and bury the skips that mean something.
-                report.skipped.append((target.name, f"no unused Ready Spoof Variant (from the {label} slot on)"))
+                holders = tied_up.get(target.key)
+                if holders:
+                    # Not "no media" -- media that an existing row still owns.
+                    # A Failed holder is the retry pass's to recover or to give
+                    # up on; queueing a fresh row for the same clip would race it.
+                    reason = ("its Ready variant(s) belong to an existing "
+                              f"{'/'.join(sorted(holders))} row (from the {label} slot on)")
+                else:
+                    reason = f"no unused Ready Spoof Variant (from the {label} slot on)"
+                report.skipped.append((target.name, reason))
                 break
             report.planned.append(PlannedRow(
                 target=target,

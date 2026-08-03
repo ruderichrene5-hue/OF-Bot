@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest import TestCase
 from zoneinfo import ZoneInfo
 
@@ -148,7 +148,10 @@ class RunQueueSlotsTest(TestCase):
         )
         report = run_queue_slots(client, LOG, now=_now(10), dry_run=False)
         self.assertEqual(client.created, [])
-        self.assertIn("no unused Ready Spoof Variant", report.skipped[0][1])
+        # The reason names the holder: "no media" and "media owned by a live
+        # row" call for opposite responses, so they must not read alike.
+        self.assertIn("belong to an existing", report.skipped[0][1])
+        self.assertIn(at.POST_STATUS_VERIFYING, report.skipped[0][1])
 
     def test_used_variant_is_not_queued(self):
         # A Used variant has already been posted. list_ready_variants filters
@@ -283,3 +286,68 @@ class PlanSlotRowsTest(TestCase):
     def test_missing_timezone_falls_back_to_local(self):
         # A box without a tz database must still create slots, not fail the loop.
         self.assertIsNotNone(queue_runner._zone("Not/AZone", LOG))
+
+
+class FailedRowOwnsItsVariantTest(TestCase):
+    """Recovering a failed row belongs to the retry pass, not to this loop.
+
+    Both act on the same clip: retry re-queues the original row after asking the
+    ledger, while this loop would draw the same variant into a fresh slot. That
+    produced two Pending rows for one clip -- the ledger still stopped the second
+    post, so nothing went out twice, but it cost a phone launch and filed a
+    Skipped row that reads like a fault. Observed in the 2026-08-03 dry-run,
+    which offered new rows for Jil 1 and Katja 2, the two whose posts had failed.
+    """
+
+    def _variant(self, vid="recV1", profile="recProf1"):
+        return _variant(vid, profile_id=profile)
+
+    def _target(self):
+        return queue_runner.SlotTarget(kind=queue_runner.TARGET_PROFILE,
+                                       record_id="recProf1", name="Katja 2")
+
+    def _row(self, status, vid="recV1"):
+        return {"id": "recQ1", "fields": {at.F_PQ_POST_STATUS: status,
+                                          at.F_PQ_SPOOF_VARIANT: [vid],
+                                          at.F_PQ_TARGET_PROFILE: ["recProf1"],
+                                          at.F_PQ_SCHEDULED: "2026-08-03T05:30:00.000Z"}}
+
+    def _plan(self, rows):
+        return queue_runner.plan_slot_rows(
+            [self._target()], [self._variant()], rows,
+            now=_now(22),
+        )
+
+    def test_a_failed_row_still_owns_its_variant(self):
+        report = self._plan([self._row(at.POST_STATUS_FAILED)])
+        self.assertEqual(report.planned, [])
+
+    def test_the_skip_says_the_variant_is_owned_not_missing(self):
+        """'no media' and 'media tied to a live row' need opposite responses."""
+        report = self._plan([self._row(at.POST_STATUS_FAILED)])
+        _name, reason = report.skipped[0]
+        self.assertIn("belong to an existing", reason)
+        self.assertIn(at.POST_STATUS_FAILED, reason)
+        self.assertNotIn("no unused", reason)
+
+    def test_a_target_with_genuinely_no_media_still_says_so(self):
+        report = queue_runner.plan_slot_rows([self._target()], [], [], now=_now(22))
+        _name, reason = report.skipped[0]
+        self.assertIn("no unused Ready Spoof Variant", reason)
+
+    def test_every_terminal_and_in_flight_status_holds(self):
+        for status in (at.POST_STATUS_PENDING, at.POST_STATUS_VERIFYING,
+                       at.POST_STATUS_POSTED, at.POST_STATUS_FAILED):
+            with self.subTest(status=status):
+                self.assertEqual(self._plan([self._row(status)]).planned, [])
+
+    def test_a_fresh_variant_is_still_queued_alongside_a_failed_one(self):
+        """Holding the failed row's clip must not freeze the target entirely --
+        new media spoofed later is still eligible."""
+        fresh = self._variant(vid="recV2")
+        report = queue_runner.plan_slot_rows(
+            [self._target()], [self._variant(), fresh], [self._row(at.POST_STATUS_FAILED)],
+            now=_now(22),
+        )
+        self.assertTrue(report.planned)
+        self.assertEqual({r.variant_id for r in report.planned}, {"recV2"})
