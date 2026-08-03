@@ -13,10 +13,68 @@ from pathlib import Path
 TASK_PREFIX = "ADBBot-"
 UNIT_PREFIX = "adbbot-"
 
-LOOPS = ("posting", "warmup", "pipeline", "mlx-sync", "cleanup")
+# The loops `run_loop` can run today, in the same order as `run_loop.LOOPS`. A
+# test keeps this from naming a loop the CLI cannot run; the other direction is
+# handled at runtime (`scheduling.cli_loops`), so a loop that lands in the CLI
+# first is still scheduled -- that gap is how `recheck` stayed unscheduled and
+# left Posting Queue rows parked in `Verifying` forever.
+LOOPS = ("posting", "recheck", "warmup", "pipeline", "mlx-sync", "cleanup")
 
-# Sensible starting cadence (minutes). The UI can override per loop.
-DEFAULT_INTERVALS = {"posting": 10, "pipeline": 20, "warmup": 360, "mlx-sync": 1440, "cleanup": 1440}
+# Loops that are being written now and are not CLI commands yet. They are listed
+# so their cadence is already agreed and `install_units.sh` picks them up the
+# moment they land -- but nothing installs a timer for a loop the CLI cannot run
+# (that would just fail every tick), so these are skipped until then.
+PLANNED_LOOPS = ("queue", "retry")
+
+# Everything an unattended server should have scheduled.
+RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "warmup",
+                     "mlx-sync", "cleanup")
+
+# Recommended cadence in minutes. The UI can override per loop; these are what
+# `install_units.sh` installs. Ordered by the flow a reel goes through, because
+# the intervals only make sense relative to each other:
+RECOMMENDED_INTERVALS = {
+    # Spoofing is the expensive step (ffmpeg encodes, capped at 20 variants a
+    # run). Half-hourly keeps a same-day buffer of variants ahead of posting
+    # without stacking encodes -- and an overrun is dropped, not queued.
+    "pipeline": 30,
+    # Fills the Posting Queue. Must run several times per posting slot so a slot
+    # never opens on an empty queue; cheap (Airtable only), so 15 min.
+    "queue": 15,
+    # Slots are fixed wall-clock times, so this only has to be fine-grained
+    # enough to catch one soon after it opens. 5 min bounds the lateness of a
+    # post at ~5 min, which is inside the jitter the slots already tolerate.
+    "posting": 5,
+    # Rows become eligible RECHECK_DELAY_SECONDS (15 min, airtable.py) after an
+    # unproven post. Matching that delay means a row waits at most one extra
+    # tick: eligible at +15, rechecked by +30. Faster would burn profile
+    # launches on rows that are not eligible yet; slower leaves `Verifying` rows
+    # sitting there, which is the failure this schedule exists to fix.
+    "recheck": 15,
+    # Resets retryable Failed rows to Pending. Failures are mostly transient
+    # (device offline, MLX hiccup); half-hourly recovers them well within the
+    # posting day while still spacing out retries against a genuinely broken
+    # account instead of hammering it.
+    "retry": 30,
+    # Lifecycle day plan (Day 1-4) spreads actions across the day; hourly gives
+    # the plan enough ticks to place them and to pick up a profile that only
+    # became due mid-day.
+    "warmup": 60,
+    # Full MultiLogin -> Airtable inventory sweep: expensive, and nothing during
+    # the day depends on it being fresher than daily. Runs at 23:30 (see
+    # DEFAULT_DAILY_START), after the posting day.
+    "mlx-sync": 1440,
+    # Disk housekeeping (old used media). Once a night, off-peak (04:00).
+    "cleanup": 1440,
+}
+
+# Historical name -- the UI, both backends and install_units.sh read this.
+DEFAULT_INTERVALS = RECOMMENDED_INTERVALS
+
+# Cadence for a loop nobody has given a recommendation for. Deliberately slow:
+# an unknown loop should still get scheduled rather than error out, but it
+# should not be the thing that hammers Airtable.
+FALLBACK_INTERVAL_MIN = 30
 
 # For a daily task (interval a whole number of days) we need a start time.
 DEFAULT_DAILY_START = {"mlx-sync": "23:30", "warmup": "08:00", "cleanup": "04:00"}
@@ -27,6 +85,9 @@ MAX_RUNTIME_SECONDS = 2 * 60 * 60
 
 DESCRIPTIONS = {
     "posting": "ADB bot posting loop (Posting Queue -> IG)",
+    "recheck": "ADB bot recheck loop (Verifying -> Posted/Failed)",
+    "queue": "ADB bot queue loop (variants -> Posting Queue rows)",
+    "retry": "ADB bot retry loop (retryable Failed -> Pending)",
     "warmup": "ADB bot warmup loop (lifecycle Day 1-4)",
     "pipeline": "ADB bot spoofing pipeline (Drive/raw -> Spoof Variants)",
     "mlx-sync": "ADB bot MultiLogin->Airtable profile sync",

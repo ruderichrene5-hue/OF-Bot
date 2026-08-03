@@ -6,12 +6,20 @@
 # Run once on the server as root. Re-running is safe: units are rewritten in
 # place and the timers re-enabled.
 #
-# Frequencies follow BOT_RESPONSIBILITIES_CHECKLIST.md:
-#   posting   every 10 min   (slots are fixed; just catch each one)
-#   pipeline  every 20 min   (same-day spoofing)
-#   warmup    every 360 min
+# Frequencies come from adb_bot/automation/schedule_spec.py (RECOMMENDED_INTERVALS),
+# which is where they are justified. At the time of writing:
+#   pipeline  every 30 min   (same-day spoofing)
+#   queue     every 15 min   (fills the Posting Queue)
+#   posting   every  5 min   (slots are fixed; just catch each one)
+#   recheck   every 15 min   (matches RECHECK_DELAY_SECONDS)
+#   retry     every 30 min   (retryable Failed -> Pending)
+#   warmup    hourly
 #   mlx-sync  daily (23:30 local)
 #   cleanup   daily (04:00 local)
+#
+# Loops that are in the recommended set but not yet CLI commands (queue/retry,
+# until they land) are skipped with a note rather than installed -- a timer for
+# a command that does not exist just fails every tick.
 #
 # Usage:
 #   sudo ./install_units.sh                # register in DRY-RUN (safe; plans only)
@@ -25,7 +33,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 ENV_FILE="${ENV_FILE:-/etc/adbbot/env}"
 SERVICE_USER="${SERVICE_USER:-}"
-LOOPS=(posting warmup pipeline mlx-sync cleanup)
+# Every loop that may have a unit on disk, including ones not wired yet -- used
+# by --remove, which must clean up whatever a previous run installed. The set we
+# *install* is asked of Python below, so there is one definition of it.
+LOOPS=(pipeline queue posting recheck retry warmup mlx-sync cleanup)
 
 APPLY=0
 ACTION=install
@@ -85,20 +96,34 @@ if [[ ! -f "$ENV_FILE" ]]; then
     echo
 fi
 
+# Which of the recommended loops this checkout can actually run. Asked of the
+# code rather than hard-coded here, so a loop added to run_loop.py is installed
+# by the next run of this script with no edit.
+mapfile -t INSTALL_LOOPS < <(
+    PYTHONPATH="$REPO_ROOT" "$PYTHON" -c \
+        'from adb_bot.automation import scheduling; print("\n".join(scheduling.installable_loops()))'
+)
+if [[ ${#INSTALL_LOOPS[@]} -eq 0 ]]; then
+    echo "Error: could not determine the loop set (is the venv installed?)." >&2
+    exit 1
+fi
+
 # Delegate the unit text to the same builders the UI and tests use, so there is
 # exactly one definition of what a loop's unit looks like.
-"$PYTHON" - "$REPO_ROOT" "$APPLY" "$ENV_FILE" "$SERVICE_USER" <<'PYEOF'
+"$PYTHON" - "$REPO_ROOT" "$APPLY" "$ENV_FILE" "$SERVICE_USER" "${INSTALL_LOOPS[@]}" <<'PYEOF'
 import sys
 from pathlib import Path
 
 repo_root, apply_flag, env_file, service_user = sys.argv[1:5]
+loops = sys.argv[5:]
 sys.path.insert(0, repo_root)
 
+from adb_bot.automation import scheduling
 from adb_bot.automation import systemd_admin as sd
-from adb_bot.automation.schedule_spec import DEFAULT_INTERVALS
 
 unit_dir = Path("/etc/systemd/system")
-for loop, interval in DEFAULT_INTERVALS.items():
+for loop in loops:
+    interval = scheduling.recommended_interval(loop)
     (unit_dir / sd.unit_name(loop, "service")).write_text(
         sd.build_service_unit(loop, apply=apply_flag == "1", python=f"{repo_root}/.venv/bin/python",
                               working_dir=repo_root, user=service_user or None,
@@ -107,10 +132,12 @@ for loop, interval in DEFAULT_INTERVALS.items():
     (unit_dir / sd.unit_name(loop, "timer")).write_text(
         sd.build_timer_unit(loop, interval), encoding="utf-8")
     print(f"  wrote adbbot-{loop}.service + .timer (every {interval} min)")
+for loop in scheduling.pending_loops():
+    print(f"  skipped {loop}: not a run_loop command yet -- re-run this script once it lands")
 PYEOF
 
 systemctl daemon-reload
-for loop in "${LOOPS[@]}"; do
+for loop in "${INSTALL_LOOPS[@]}"; do
     systemctl enable --now "adbbot-$loop.timer"
     echo "  enabled adbbot-$loop.timer"
 done

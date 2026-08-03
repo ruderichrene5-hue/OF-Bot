@@ -183,6 +183,177 @@ class RecheckPassTest(TestCase):
         self.assertEqual(tally["checked"], 0)
 
 
+class ProfileDrivenRecheckTest(TestCase):
+    """Rows that target a Profiles (Cloning) row instead of an Accounts row.
+
+    These exist for models that have MLX phones but no Accounts rows. They used
+    to be read, decided, and resolved in the local ledger while Airtable was
+    never touched -- the row sat in `Verifying` forever and the two records
+    disagreed permanently, which is worse than not having rechecked at all.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.ledger = PostLedger(root / "ledger.jsonl")
+        self.clip = root / "clip.mp4"
+        self.clip.write_bytes(b"reel bytes")
+        self.airtable = MagicMock()
+        self.airtable.profile_launch_map.return_value = {
+            "prof1": {"name": "aria_clone", "launch_id": "1" * 18, "serial": "s1"},
+        }
+
+    def _queue_row(self, fields):
+        self.airtable.list_posts_awaiting_recheck.return_value = [{"id": "q1", "fields": fields}]
+        self.ledger.record_share("p1", self.clip, queue_id="q1", baseline_count=Count(41, True))
+
+    def _run(self):
+        return recheck_runner.recheck_pending_posts(
+            self.airtable, lambda pid, fields: Count(42, True), ledger=self.ledger)
+
+    def test_a_profile_driven_row_reaching_posted_is_written_back(self):
+        self._queue_row({
+            at.F_PQ_NAME: "aria / reel",
+            at.F_PQ_TARGET_PROFILE: ["prof1"],
+            at.F_PQ_SPOOF_VARIANT: ["v1"],
+        })
+        tally = self._run()
+        self.assertEqual(tally["posted"], 1)
+        # The row must leave Verifying, or Airtable and the ledger disagree.
+        self.airtable.mark_post_result.assert_called_once_with(
+            "q1", at.POST_STATUS_POSTED, at.ISSUE_NONE)
+        self.airtable.mark_variant_used.assert_called_once_with("v1")
+        self.airtable.create_run_log.assert_called_once()
+        self.assertFalse(self.airtable.create_run_log.call_args[0][0],
+                         "there is no Accounts row to link")
+
+    def test_a_profile_driven_row_is_logged_under_the_profile_name(self):
+        self._queue_row({
+            at.F_PQ_NAME: "aria / reel",
+            at.F_PQ_TARGET_PROFILE: ["prof1"],
+        })
+        self._run()
+        self.assertEqual(self.airtable.create_run_log.call_args[0][1], "aria_clone")
+        # One lookup for the whole pass, never one per row.
+        self.airtable.profile_launch_map.assert_called_once()
+
+    def test_an_unresolvable_profile_name_falls_back_to_the_row_name(self):
+        self.airtable.profile_launch_map.return_value = {}
+        self._queue_row({
+            at.F_PQ_NAME: "aria / reel",
+            at.F_PQ_TARGET_PROFILE: ["prof1"],
+        })
+        self._run()
+        self.assertEqual(self.airtable.create_run_log.call_args[0][1], "aria / reel")
+
+    def test_a_row_with_both_links_follows_the_account_path(self):
+        """The Accounts row carries the health guards; taking the profile branch
+        when both are set would quietly route around them."""
+        self._queue_row({
+            at.F_PQ_NAME: "acct / reel",
+            at.F_PQ_TARGET_ACCOUNT: ["a1"],
+            at.F_PQ_TARGET_PROFILE: ["prof1"],
+        })
+        self._run()
+        self.assertEqual(self.airtable.create_run_log.call_args[0][0], "a1")
+        self.assertEqual(self.airtable.create_run_log.call_args[0][1], "acct / reel")
+        self.airtable.set_account_result.assert_called_once()
+        self.assertEqual(self.airtable.set_account_result.call_args[0][0], "a1")
+        self.airtable.profile_launch_map.assert_not_called()
+
+    def test_an_account_driven_row_is_unchanged(self):
+        self._queue_row({
+            at.F_PQ_NAME: "acct / reel",
+            at.F_PQ_TARGET_ACCOUNT: ["a1"],
+            at.F_PQ_SPOOF_VARIANT: ["v1"],
+        })
+        tally = self._run()
+        self.assertEqual(tally["posted"], 1)
+        self.airtable.mark_post_result.assert_called_once_with(
+            "q1", at.POST_STATUS_POSTED, at.ISSUE_NONE)
+        self.assertEqual(self.airtable.create_run_log.call_args[0][0], "a1")
+        self.assertEqual(self.airtable.set_account_result.call_args[0][0], "a1")
+        self.airtable.profile_launch_map.assert_not_called()
+
+    def test_a_failed_profile_driven_row_is_written_back_too(self):
+        self._queue_row({
+            at.F_PQ_NAME: "aria / reel",
+            at.F_PQ_TARGET_PROFILE: ["prof1"],
+        })
+        tally = recheck_runner.recheck_pending_posts(
+            self.airtable, lambda pid, fields: Count(41, True), ledger=self.ledger)
+        self.assertEqual(tally["failed"], 1)
+        self.airtable.mark_post_result.assert_called_once_with(
+            "q1", at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY)
+
+    def test_an_inconclusive_profile_driven_row_is_re_parked(self):
+        self._queue_row({
+            at.F_PQ_NAME: "aria / reel",
+            at.F_PQ_TARGET_PROFILE: ["prof1"],
+        })
+        recheck_runner.recheck_pending_posts(
+            self.airtable, lambda pid, fields: None, ledger=self.ledger)
+        self.airtable.mark_post_pending_verification.assert_called_once()
+
+    def test_a_row_with_neither_link_still_leaves_verifying(self):
+        # Nothing to link the log to, but the queue row is still answerable.
+        self._queue_row({at.F_PQ_NAME: "orphan / reel"})
+        self._run()
+        self.airtable.mark_post_result.assert_called_once_with(
+            "q1", at.POST_STATUS_POSTED, at.ISSUE_NONE)
+
+
+class RunLogWithoutAnAccountTest(TestCase):
+    """The write-back leans on the client tolerating a missing account link."""
+
+    def _client(self):
+        client = at.AirtableClient("tok", "appX", "Posting Queue")
+        self.created = []
+
+        def fake_create_in(table, fields):
+            self.created.append((table, fields))
+            return "rec1"
+
+        client._create_in = fake_create_in
+        return client
+
+    def test_a_run_log_without_an_account_id_is_still_written(self):
+        client = self._client()
+        self.assertEqual(client.create_run_log(None, "aria_clone", "flow", at.RESULT_DONE), "rec1")
+        _table, fields = self.created[0]
+        self.assertNotIn(at.F_RUN_ACCOUNT, fields)
+        self.assertIn("aria_clone", fields[at.F_RUN_NAME])
+
+    def test_setting_an_account_result_without_an_account_id_no_ops(self):
+        client = self._client()
+        client._patch_in = lambda *a, **kw: self.fail("patched an account that does not exist")
+        self.assertFalse(client.set_account_result(None, "done"))
+
+    def test_apply_recheck_outcome_survives_a_missing_account(self):
+        client = self._client()
+        patched = []
+        client._patch_in = lambda table, rid, fields: patched.append((table, rid, fields)) or True
+        terminal = recheck_runner.apply_recheck_outcome(
+            client, "q1", None, "aria_clone", OUTCOME_POSTED, "41 -> 42", variant_id="v1")
+        self.assertTrue(terminal)
+        self.assertIn(at.TABLE_POSTING_QUEUE, [t for t, _r, _f in patched])
+
+    def test_the_recheck_query_asks_for_the_profile_link(self):
+        """Without this field the profile branch can never fire in production --
+        Airtable only returns the columns the query names."""
+        client = at.AirtableClient("tok", "appX", "Posting Queue")
+        seen = {}
+
+        def fake_list_table(table, fields=None, filter_formula=None):
+            seen["fields"] = fields or []
+            return []
+
+        client._list_table = fake_list_table
+        client.list_posts_awaiting_recheck()
+        self.assertIn(at.F_PQ_TARGET_PROFILE, seen["fields"])
+
+
 class WiringTest(TestCase):
     """A recheck pass nobody runs is the same as no recheck pass -- rows would
     sit in Verifying forever, which is worse than the Failed they replaced."""

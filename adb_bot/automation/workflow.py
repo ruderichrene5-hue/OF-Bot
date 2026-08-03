@@ -1,3 +1,4 @@
+import math
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -178,11 +179,41 @@ def normalize_profile_ids(profile_ids: list[str] | None = None, fallback_ids: li
 MLX_PROFILE_NOT_RUNNING_CODE = 42002
 
 # How many *consecutive* not-running answers mean the launch genuinely did not
-# take, rather than the profile still coming up. Measured from a real 56-profile
-# run: healthy profiles needed at most 11 attempts, while every profile that
-# reached the 15-attempt cap had failed to start at all and never recovered.
-# 12 therefore separates the two populations without disturbing a slow boot.
-DEFAULT_RELAUNCH_AFTER_ATTEMPTS = 12
+# take, rather than the profile still coming up -- expressed as a fraction of
+# the attempt budget, because the budget is a per-server setting.
+#
+# Where the number comes from: a real 56-profile run on a 15-attempt budget.
+# Healthy profiles cleared 42002 within 11 attempts, while every profile that
+# reached the cap had failed to start at all and never recovered, so 12 of 15
+# separated the two populations without disturbing a slow boot. That is the
+# 0.8 below (ceil(0.8 * 15) == 12) -- the original threshold is preserved
+# exactly for the budget it was measured on.
+#
+# Why the 12 must NOT be reinstated as a fixed constant: it silently encoded
+# "15 attempts". This server runs readiness_max_attempts=8 (dev_settings.json),
+# so 12 consecutive answers were unreachable -- the relaunch and the early
+# break were dead code, and on 2026-08-03 profile "Katja 2" burned the whole
+# ~2-minute budget re-enabling ADB on a profile that was never going to run.
+# Any fixed value is wrong for every budget except the one it was derived from.
+#
+# Why a fraction rather than e.g. max_attempts - 1: the threshold has to stay
+# above the slowest *healthy* boot, and slow boots scale with the budget too.
+# On this 8-attempt server a healthy cold phone has needed 6 consecutive 42002s
+# and become ready on attempt 7 (see logs/loop_posting.log, 2026-08-03
+# 18:51:11). ceil(0.8 * 8) == 7 leaves that boot untouched, exactly the same
+# one-attempt margin the 56-profile run had (11 healthy -> 12 threshold).
+RELAUNCH_ATTEMPT_FRACTION = 0.8
+
+
+def relaunch_after_attempts_for(max_attempts: int) -> int:
+    """Consecutive not-running answers that should trigger a relaunch.
+
+    Clamped into [1, max_attempts] so the trigger is always reachable: a
+    threshold above the budget is the bug this replaces, and a threshold of 0
+    would relaunch before Multilogin had said anything.
+    """
+    attempts = max(1, int(max_attempts))
+    return max(1, min(attempts, math.ceil(RELAUNCH_ATTEMPT_FRACTION * attempts)))
 
 
 def _enable_reported_not_running(response, profile_id: str) -> bool:
@@ -222,7 +253,7 @@ def prepare_profile_for_adb(
     media_path: str | None = None,
     queue_id: str | None = None,
     launcher_client=None,
-    relaunch_after_attempts: int = DEFAULT_RELAUNCH_AFTER_ATTEMPTS,
+    relaunch_after_attempts: int | None = None,
 ):
     """Wait for a launched profile to become ADB-ready.
 
@@ -236,7 +267,13 @@ def prepare_profile_for_adb(
     Now a persistent not-running answer triggers the thing that can actually
     fix it -- a relaunch -- and if that still doesn't take, we stop early
     instead of running out the budget.
+
+    ``relaunch_after_attempts`` is derived from ``max_attempts`` when left as
+    None (see RELAUNCH_ATTEMPT_FRACTION); it stays an explicit parameter so
+    callers and tests that pin a threshold keep working.
     """
+    if relaunch_after_attempts is None:
+        relaunch_after_attempts = relaunch_after_attempts_for(max_attempts)
     profile = None
     consecutive_not_running = 0
     relaunched = False

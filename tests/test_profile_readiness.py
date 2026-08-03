@@ -16,6 +16,7 @@ from adb_bot.automation.workflow import (
     MLX_PROFILE_NOT_RUNNING_CODE,
     _enable_reported_not_running,
     prepare_profile_for_adb,
+    relaunch_after_attempts_for,
 )
 
 PROFILE = "62642224128176960"
@@ -64,7 +65,9 @@ class ReadinessLoopTest(TestCase):
     def _prepare(self, **kwargs):
         kwargs.setdefault("max_attempts", 15)
         kwargs.setdefault("wait_seconds", 0)
-        kwargs.setdefault("relaunch_after_attempts", 12)
+        # No relaunch_after_attempts default here on purpose: the threshold is
+        # derived from max_attempts, and a 15-attempt budget must keep deriving
+        # the 12 these cases were written against.
         return prepare_profile_for_adb(
             PROFILE, self.api, self.adb_enable, self.logger, **kwargs)
 
@@ -131,6 +134,87 @@ class ReadinessLoopTest(TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(self.adb_enable.enable_adb.call_count, 1, "did not stop once ready")
         launcher.start_profiles.assert_not_called()
+
+
+class DerivedRelaunchThresholdTest(TestCase):
+    """The relaunch trigger has to scale with whatever budget the server runs.
+
+    Regression from 2026-08-03: the threshold was the fixed 12 measured on a
+    15-attempt run, but this server runs readiness_max_attempts=8, so 12
+    consecutive not-running answers were unreachable. Profile "Katja 2" was
+    never relaunched and burned the whole budget instead.
+    """
+
+    def setUp(self):
+        self.logger = MagicMock()
+        self.adb_enable = MagicMock()
+        self.api = MagicMock()
+        self.api.fetch_adb_credentials.return_value = {}
+
+    def _prepare(self, **kwargs):
+        kwargs.setdefault("wait_seconds", 0)
+        return prepare_profile_for_adb(
+            PROFILE, self.api, self.adb_enable, self.logger, **kwargs)
+
+    def test_the_threshold_tracks_the_budget(self):
+        # 15 keeps the value measured on the 56-profile run; 8 is this server.
+        self.assertEqual(relaunch_after_attempts_for(15), 12)
+        self.assertEqual(relaunch_after_attempts_for(8), 7)
+        self.assertEqual(relaunch_after_attempts_for(2), 2)
+
+    def test_the_threshold_is_always_reachable(self):
+        # A threshold above the budget is exactly the bug being fixed.
+        for budget in range(1, 31):
+            threshold = relaunch_after_attempts_for(budget)
+            self.assertGreaterEqual(threshold, 1)
+            self.assertLessEqual(threshold, budget, f"unreachable for budget {budget}")
+
+    def test_a_small_budget_still_relaunches(self):
+        """The regression: with max_attempts=8 the relaunch must fire."""
+        self.adb_enable.enable_adb.return_value = not_running()
+        launcher = MagicMock()
+        self._prepare(max_attempts=8, launcher_client=launcher)
+        launcher.start_profiles.assert_called_once_with([PROFILE])
+        # 7 to trigger it, then 7 more on the fresh budget before giving up --
+        # the same shape as 12 + 12 on a 15-attempt budget.
+        self.assertEqual(self.adb_enable.enable_adb.call_count, 14)
+
+    def test_the_slow_boot_this_server_really_sees_is_not_relaunched(self):
+        """Live 2026-08-03: a healthy cold phone answered 42002 six times and
+        became ready on attempt 7 of 8. Relaunching that would be a regression.
+        """
+        from unittest.mock import patch
+        from adb_bot.core.models import Profile
+        self.adb_enable.enable_adb.side_effect = [not_running()] * 6 + [enable_ok()]
+        ready = Profile(id=PROFILE, status="active", ip="1.2.3.4", port="5555", pwd="secret")
+        launcher = MagicMock()
+        with patch("adb_bot.automation.workflow.parse_profiles_from_response",
+                   side_effect=lambda *_: [ready] if self.adb_enable.enable_adb.call_count >= 7 else []):
+            result = self._prepare(max_attempts=8, launcher_client=launcher)
+        self.assertIsNotNone(result, "a healthy late boot was dropped")
+        launcher.start_profiles.assert_not_called()
+        self.assertEqual(self.adb_enable.enable_adb.call_count, 7)
+
+    def test_a_large_budget_keeps_the_measured_behaviour(self):
+        # 15 attempts must still behave exactly as the hard-coded 12 did.
+        self.adb_enable.enable_adb.return_value = not_running()
+        launcher = MagicMock()
+        self._prepare(max_attempts=15, launcher_client=launcher)
+        self.assertEqual(self.adb_enable.enable_adb.call_count, 24)
+        launcher.start_profiles.assert_called_once_with([PROFILE])
+
+    def test_a_small_budget_without_a_launcher_breaks_early(self):
+        # Nothing here can restart it, so don't spend the last attempt proving
+        # a call that cannot succeed.
+        self.adb_enable.enable_adb.return_value = not_running()
+        self._prepare(max_attempts=8)
+        self.assertEqual(self.adb_enable.enable_adb.call_count, 7)
+
+    def test_an_explicit_threshold_still_wins(self):
+        # Callers and tests pin the parameter; deriving must not override them.
+        self.adb_enable.enable_adb.return_value = not_running()
+        self._prepare(max_attempts=8, relaunch_after_attempts=3)
+        self.assertEqual(self.adb_enable.enable_adb.call_count, 3)
 
 
 class WiringTest(TestCase):

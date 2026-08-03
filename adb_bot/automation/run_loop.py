@@ -31,7 +31,7 @@ from adb_bot.clients.airtable import AirtableClient
 from adb_bot.config import settings
 from adb_bot.core.logger import get_logger
 
-LOOPS = ("posting", "recheck", "warmup", "pipeline", "mlx-sync", "cleanup")
+LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "warmup", "mlx-sync", "cleanup")
 # `doctor` isn't a loop -- it's the preflight check, runnable the same way.
 COMMANDS = LOOPS + ("doctor",)
 
@@ -191,6 +191,49 @@ def _run_cleanup(args, logger) -> int:
     return 1 if (inputs.errors or variants.errors) else 0
 
 
+def _run_queue(args, logger) -> int:
+    """Create the Posting Queue rows for today's slots.
+
+    The step between spoofing and posting: `pipeline` makes variants, `posting`
+    consumes queue rows, and until this loop existed nothing made the rows. Five
+    Airtable automations were meant to, but they are undeployed and write no
+    Spoof Variant link, so every row they create is rejected by the planner.
+    Here it is code instead -- Airtable cannot see the profile-driven targeting
+    path, and cannot be tested.
+    """
+    from adb_bot.automation import queue_runner
+    airtable = _airtable(args.base_id, args.airtable_token)
+    report = queue_runner.run_queue_slots(
+        airtable, logger=logger,
+        slot_times=queue_runner.parse_slot_times(args.slots) if args.slots else queue_runner.DEFAULT_SLOT_TIMES,
+        dry_run=not args.apply,
+        include_profiles=args.targets != "accounts",
+    )
+    for name, reason in report.skipped:
+        logger.info("queue: skipped %s: %s", name, reason)
+    logger.info("queue result: %s", report.summary())
+    return 1 if report.errors else 0
+
+
+def _run_retry(args, logger) -> int:
+    """Put retryable Failed rows back in the queue.
+
+    Without this a failure is terminal: `list_pending_posts` only reads Pending,
+    so nothing ever picks a Failed row up again. The ledger is what makes it safe
+    -- a row whose clip may already be live is left alone, so a transient device
+    failure retries and a post that actually landed never goes out twice.
+    """
+    from adb_bot.automation import retry_runner
+    airtable = _airtable(args.base_id, args.airtable_token)
+    tally = retry_runner.retry_failed_posts(
+        airtable, logger=logger,
+        max_retries=args.max_retries,
+        dry_run=not args.apply,
+    )
+    logger.info("retry result: %s", tally)
+    return 1 if tally.get("errors") else 0
+
+
 def _run_recheck(args, logger) -> int:
     """Resolve posts that were sent but could not be confirmed in-run.
 
@@ -272,6 +315,8 @@ _DISPATCH = {
     "recheck": _run_recheck,
     "warmup": _run_warmup,
     "pipeline": _run_pipeline,
+    "queue": _run_queue,
+    "retry": _run_retry,
     "mlx-sync": _run_mlx_sync,
     "cleanup": _run_cleanup,
     "doctor": _run_doctor,
@@ -297,6 +342,10 @@ def main(argv=None) -> int:
     parser.add_argument("--profile", default=None,
                         help="pipeline: restrict to these target handles (comma-separated, "
                              "e.g. 'Jil 1'). Use to try one profile end to end.")
+    parser.add_argument("--slots", default=None,
+                        help="queue: comma-separated slot times (default 09:00,12:00,15:00,18:00,21:00).")
+    parser.add_argument("--max-retries", type=int, default=3,
+                        help="retry: give up on a row once Retry Count reaches this (default 3).")
     parser.add_argument("--targets", choices=("accounts", "profiles"), default="accounts",
                         help="pipeline: what to spoof for -- Airtable Accounts at Lifecycle "
                              "Stage Active (default), or the MLX profile inventory, for models "

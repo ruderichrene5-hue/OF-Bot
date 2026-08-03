@@ -272,19 +272,17 @@ def check_spoofer(spoofer_python: str, spoofer_root: str) -> CheckResult:
 
 
 def check_scheduler() -> CheckResult:
+    """Name the loops that are not scheduled, not just "none are".
+
+    A loop with no timer runs only when a human types the command, so a partly
+    installed set looks healthy until something quietly never happens (a
+    `Verifying` row waiting on a recheck that is never triggered).
+    """
     from adb_bot.automation import scheduling
-    if not scheduling.is_supported():
-        return CheckResult("Scheduler", WARN, "no scheduler backend available",
-                           scheduling.unavailable_reason())
-    status = scheduling.list_status()
-    installed = {loop: state for loop, state in status.items() if state}
-    if not installed:
-        installer = ("deploy/scheduler/install_tasks.ps1" if scheduling.backend_name() == scheduling.WINDOWS
-                     else "sudo deploy/systemd/install_units.sh")
-        return CheckResult("Scheduler", WARN, f"{scheduling.backend_name()}: no loops installed",
-                           f"Enable the loops in the app's Scheduler window (or run {installer}).")
-    return CheckResult("Scheduler", PASS,
-                       f"{scheduling.backend_name()}: " + ", ".join(f"{k}={v}" for k, v in installed.items()))
+    report = scheduling.timer_report()
+    if not report.supported:
+        return CheckResult("Scheduler", WARN, "no scheduler backend available", report.hint())
+    return CheckResult("Scheduler", PASS if report.ok else WARN, report.summary(), report.hint())
 
 
 def check_locks() -> CheckResult:

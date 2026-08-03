@@ -525,6 +525,48 @@ class AirtableClient:
             filter_formula=formula,
         )
 
+    def list_failed_posts(self) -> list:
+        """Posting Queue rows sitting in Failed -- the automatic-retry pass's
+        work queue.
+
+        Only Post Status is filtered here. Whether a failed row may actually be
+        retried (Issue Type, Retry Count, and above all the local post ledger)
+        is decided in retry_runner, so those rules stay testable without a base
+        -- the same split list_pending_posts uses for the due-time check.
+        """
+        formula = f"{{{F_PQ_POST_STATUS}}}='{POST_STATUS_FAILED}'"
+        return self._list_table(
+            TABLE_POSTING_QUEUE,
+            fields=[
+                F_PQ_NAME, F_PQ_SCHEDULED, F_PQ_POST_STATUS, F_PQ_ISSUE_TYPE,
+                F_PQ_RETRY_COUNT, F_PQ_SPOOF_VARIANT, F_PQ_TARGET_ACCOUNT,
+                F_PQ_TARGET_PROFILE,
+            ],
+            filter_formula=formula,
+        )
+
+    def requeue_post(self, queue_record_id: str, scheduled_iso: str,
+                     note: str | None = None) -> bool:
+        """Put a failed row back in the queue: Pending, due at `scheduled_iso`.
+
+        Retry Count is deliberately NOT touched. The posting runner bumps it when
+        an attempt fails, so it counts *attempts*; bumping it here as well would
+        burn two of the three allowed retries per real attempt and the row would
+        die at half its budget.
+
+        Issue Type is cleared because the row is no longer failed -- leaving
+        "Failed - Needs Retry" on a Pending row makes the queue unreadable to the
+        client. The reason it was requeued goes in Notes instead.
+        """
+        fields: dict = {
+            F_PQ_POST_STATUS: POST_STATUS_PENDING,
+            F_PQ_SCHEDULED: scheduled_iso,
+            F_PQ_ISSUE_TYPE: ISSUE_NONE,
+        }
+        if note:
+            fields[F_PQ_NOTES] = note[:1000]
+        return self._patch_in(TABLE_POSTING_QUEUE, queue_record_id, fields)
+
     def accounts_by_id(self) -> dict:
         """record_id -> fields dict, for resolving a Posting Queue row's Target
         Account (guards + linked Profile)."""
@@ -594,10 +636,96 @@ class AirtableClient:
             TABLE_POSTING_QUEUE,
             fields=[
                 F_PQ_NAME, F_PQ_SCHEDULED, F_PQ_POST_STATUS, F_PQ_RETRY_COUNT,
-                F_PQ_CAPTION, F_PQ_SPOOF_VARIANT, F_PQ_TARGET_ACCOUNT, F_PQ_RECHECK_AFTER,
+                F_PQ_CAPTION, F_PQ_SPOOF_VARIANT, F_PQ_TARGET_ACCOUNT,
+                F_PQ_TARGET_PROFILE, F_PQ_RECHECK_AFTER,
             ],
             filter_formula=formula,
         )
+
+    # ------------------------------------------------------------------
+    # Slot creation (queue_runner): Ready variant -> Posting Queue row. The
+    # Airtable automations that were meant to fill the queue never wrote the
+    # Spoof Variant link, so every row they made was unpostable; these three
+    # give the code path everything it needs to write a complete row.
+    # ------------------------------------------------------------------
+    def list_ready_variants(self) -> list:
+        """Spoof Variants at Status Ready, with the target link each one carries:
+        ``[{'id', 'file_path', 'status', 'account_id', 'profile_id', 'created'}]``.
+
+        Exactly one of `account_id` / `profile_id` is set (a profile-driven
+        variant has no Accounts row). `created` orders the pool so the queue
+        works through the backlog oldest-first."""
+        formula = f"{{{F_SV_STATUS}}}='{SV_STATUS_READY}'"
+        rows = self._list_table(
+            TABLE_SPOOF_VARIANTS,
+            fields=[F_SV_FILE_PATH, F_SV_STATUS, F_SV_CREATED_DATE,
+                    F_SV_TARGET_ACCOUNT, F_SV_TARGET_PROFILE],
+            filter_formula=formula,
+        )
+        out: list = []
+        for record in rows:
+            fields = record.get("fields", {}) or {}
+            accounts = fields.get(F_SV_TARGET_ACCOUNT) or []
+            profiles = fields.get(F_SV_TARGET_PROFILE) or []
+            out.append({
+                "id": record.get("id"),
+                "file_path": (str(fields.get(F_SV_FILE_PATH) or "").strip() or None),
+                "status": _select_name(fields.get(F_SV_STATUS)),
+                "account_id": accounts[0] if accounts else None,
+                "profile_id": profiles[0] if profiles else None,
+                "created": fields.get(F_SV_CREATED_DATE),
+            })
+        return out
+
+    def list_queue_rows(self, statuses=None) -> list:
+        """Posting Queue rows with the fields slot creation needs to see.
+
+        `statuses` filters on Post Status; **None means every status**, which is
+        what the slot runner wants: a slot whose post already landed (Posted) or
+        was abandoned (Failed) has been served, and only a full listing can tell
+        it that. The Pending-only listing is `list_pending_posts`."""
+        formula = None
+        if statuses:
+            clauses = ",".join(f"{{{F_PQ_POST_STATUS}}}='{s}'" for s in statuses)
+            formula = f"OR({clauses})"
+        return self._list_table(
+            TABLE_POSTING_QUEUE,
+            fields=[
+                F_PQ_NAME, F_PQ_SCHEDULED, F_PQ_POST_STATUS, F_PQ_SPOOF_VARIANT,
+                F_PQ_TARGET_ACCOUNT, F_PQ_TARGET_PROFILE,
+            ],
+            filter_formula=formula,
+        )
+
+    def create_posting_queue(self, scheduled_iso: str, variant_id: str,
+                             target_account_id: str | None = None,
+                             target_profile_id: str | None = None,
+                             name: str | None = None,
+                             caption_id: str | None = None) -> str | None:
+        """One scheduled post: Pending, at `scheduled_iso`, for `variant_id`.
+
+        The Spoof Variant link is not optional -- a row without it is rejected by
+        the posting planner ("no Spoof Variant video path"), which is exactly how
+        the Airtable automations this replaces produced dead rows.
+
+        Exactly one target link is written, matching whichever one the variant
+        carries; writing both would make the row ambiguous for the planner, which
+        reads the account first and would post a profile's video on someone
+        else's account."""
+        fields: dict = {
+            F_PQ_POST_STATUS: POST_STATUS_PENDING,
+            F_PQ_SCHEDULED: scheduled_iso,
+            F_PQ_SPOOF_VARIANT: [variant_id],
+        }
+        if name:
+            fields[F_PQ_NAME] = name
+        if target_profile_id:
+            fields[F_PQ_TARGET_PROFILE] = [target_profile_id]
+        elif target_account_id:
+            fields[F_PQ_TARGET_ACCOUNT] = [target_account_id]
+        if caption_id:
+            fields[F_PQ_CAPTION] = [caption_id]
+        return self._create_in(TABLE_POSTING_QUEUE, fields)
 
     def mark_variant_used(self, variant_record_id: str) -> bool:
         """Flag a Spoof Variant as Used so it isn't reused on another post."""
