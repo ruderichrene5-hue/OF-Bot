@@ -271,15 +271,24 @@ def _run_recheck(args, logger) -> int:
     token = _mlx_token(args.mlx_token)
     clients = build_mlx_clients(token)
     automation = build_automation()
-    launch_map = airtable.profile_launch_map()
 
     def read_post_count(profile_id, fields):
-        """Launch the profile, read its post count, shut it down again."""
-        accounts = fields.get(at.F_PQ_TARGET_ACCOUNT) or []
-        launch_id = launch_map.get(accounts[0]) if accounts else None
-        if not launch_id:
-            logger.warning("No launch id for queue row %s; cannot probe", fields.get(at.F_PQ_NAME))
+        """Launch the profile, read its post count, shut it down again.
+
+        `profile_id` comes from the ledger entry and IS the 18-digit MLX launch
+        key -- the flow records `str(profile.id)` at post time. Re-deriving it
+        from the queue row was wrong twice over: it looked an *account* id up in
+        `profile_launch_map()`, which is keyed by Profile record id and returns a
+        dict, so the lookup could never hit; and it read only Target Account, so
+        a profile-driven row had nothing to look up at all. Both failures
+        surfaced identically -- "could not read the profile's post count" -- and
+        the pass reported `unknown` without ever launching a phone.
+        """
+        if not profile_id:
+            logger.warning("No profile id on the ledger entry for %s; cannot probe",
+                           fields.get(at.F_PQ_NAME))
             return None
+        launch_id = profile_id
         captured = {}
 
         def capture(result):
@@ -290,6 +299,14 @@ def _run_recheck(args, logger) -> int:
         run_profile_workflow(
             launch_id, clients.api.bearer_token, clients.api, clients.adb_enable,
             clients.shutdown, automation, logger,
+            # Same readiness budget as posting and warmup. Left at the defaults
+            # (2 x 10s) this probe gave a phone ~20s to come up, while a cold
+            # one here needs 45-120s -- so it reported "could not read the post
+            # count" for a phone that was merely still booting, the row re-parked
+            # in Verifying, and the next pass repeated it. Proven 2026-08-03:
+            # three rechecks, three unknowns, none of which ever read a counter.
+            readiness_wait_seconds=settings.get_saved_readiness_wait(),
+            readiness_max_attempts=settings.get_saved_readiness_attempts(),
             flow_name="reel_post_count_probe", result_callback=capture,
             shutdown_on_success=True, launcher_client=clients.launcher,
         )
