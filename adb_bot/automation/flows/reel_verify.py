@@ -5,12 +5,17 @@ one -- it doesn't always appear, and it can vanish before the next poll. Reporti
 a real post as Failed is the worst outcome: the Posting Queue row gets retried and
 the account posts twice.
 
-So success is decided from several independent signals, strongest first:
+So success is decided from several independent signals:
 
-1. **Post-count delta** -- the account's own profile post count going up. A
-   number, not a phrase, so it can't be defeated by wording. The primary signal.
-   Skipped when the UI rounds the count ("1.2K"), where +1 is invisible.
-2. **Banner / toast phrase** -- fast path when it does show.
+1. **Banner / toast phrase** -- checked first on every pass. Not because it is
+   the most reliable (it isn't -- it often doesn't show at all) but because it
+   is the most *perishable*: it's on screen for a few seconds and any
+   navigation wipes it. Reading it costs one passive screen dump, so there is
+   no reason to make it wait behind a probe that would erase it.
+2. **Post-count delta** -- the account's own profile post count going up. A
+   number, not a phrase, so it can't be defeated by wording. The signal that
+   catches a silent success. Skipped when the UI rounds the count ("1.2K"),
+   where +1 is invisible.
 3. **Upload notification** -- Instagram posts an *ongoing* notification while
    uploading. Its presence proves work is still in flight (so we keep waiting
    rather than giving up); its disappearance means the upload finished one way
@@ -38,15 +43,51 @@ DEFAULT_MIN_WAIT_SECONDS = 180     # 3 min: never call it failed before this
 DEFAULT_TIMEOUT_SECONDS = 300      # 5 min: hard ceiling
 DEFAULT_POLL_SECONDS = 3.0
 
+# Timing for callers that have somewhere to put an unproven post -- i.e. a
+# deferred recheck queue rather than a Failed row.
+#
+# The three-minute floor above exists for exactly one reason: when "unproven"
+# meant "Failed", declaring it early turned slow-but-successful uploads into
+# double posts. Once an unproven post becomes *Verifying, look again in 15
+# minutes*, that reason evaporates. Waiting out five minutes on a phone to reach
+# a verdict we're going to revisit anyway is pure cost -- and with a budget of
+# five minutes per profile for the whole post, it was most of the budget.
+#
+# So: keep polling long enough for the common fast confirmations (banner,
+# notification, one post-count refresh at ~25s), then stop and hand off.
+FAST_MIN_WAIT_SECONDS = 20         # composer/no-upload can be called this early
+FAST_TIMEOUT_SECONDS = 45          # then it's the recheck queue's problem
+
+# Don't *start* a post-count probe without at least this long left on the clock.
+# That probe is a full navigation round trip (Home -> feed -> profile ->
+# pull-to-refresh) and measured at 10-15s on these devices. The loop used to
+# test the deadline only after running every probe, so one started at 44s ran to
+# completion regardless -- on a real 56-profile run a 45s budget produced
+# timeouts of up to 148s. Skipping a probe that cannot finish costs nothing now
+# that the deferred recheck reads the same counter later, under better
+# conditions and without holding a phone.
+POST_COUNT_MIN_REMAINING_SECONDS = 12.0
+
 IG_PACKAGE = "com.instagram.android"
 
 # How the post was confirmed (or why it wasn't) -- recorded for the Run Log.
 VIA_POST_COUNT = "post_count"
 VIA_BANNER = "banner"
+VIA_NOTIFICATION = "notification_title"
+VIA_UPLOAD_FINISHED = "upload_finished"
 FAIL_TIMEOUT = "timeout"
 FAIL_ERROR_DIALOG = "error_dialog"
 FAIL_DRAFT = "draft_dialog"
 FAIL_COMPOSER = "still_on_composer"
+
+# Confirmations ordered by how much they prove. Recorded so the Run Log shows
+# whether a post was proven or merely inferred.
+CONFIRMATION_STRENGTH = {
+    VIA_POST_COUNT: "strong",
+    VIA_BANNER: "strong",
+    VIA_NOTIFICATION: "strong",
+    VIA_UPLOAD_FINISHED: "inferred",
+}
 
 # --- screen states ------------------------------------------------------------
 STATE_CONFIRMED = "confirmed"
@@ -99,9 +140,22 @@ class VerifyResult:
     method: str                    # VIA_* when confirmed, FAIL_* when not
     detail: str = ""
     waited_seconds: float = 0.0
+    uncertain: bool = False        # no positive signal AND no proof of failure
+
+    @property
+    def strength(self) -> str:
+        return CONFIRMATION_STRENGTH.get(self.method, "none") if self.confirmed else "none"
 
     def summary(self) -> str:
-        state = "CONFIRMED" if self.confirmed else "NOT CONFIRMED"
+        if self.confirmed:
+            state = f"CONFIRMED ({self.strength})"
+        elif self.uncertain:
+            # The distinction that matters: we could not tell, which is NOT the
+            # same as knowing it failed. Retrying an uncertain post is how an
+            # account ends up posting the same reel twice.
+            state = "UNCERTAIN"
+        else:
+            state = "FAILED"
         return f"{state} via {self.method} after {self.waited_seconds:.0f}s" + (f" ({self.detail})" if self.detail else "")
 
 
@@ -200,6 +254,7 @@ def verify_reel_posted(
     min_wait: float = DEFAULT_MIN_WAIT_SECONDS,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
+    post_count_min_remaining: float = POST_COUNT_MIN_REMAINING_SECONDS,
     should_stop=None,
     logger=None,
     emit=None,
@@ -230,25 +285,31 @@ def verify_reel_posted(
 
     last_negative = None
     saw_upload_in_flight = False
+    upload_finished = False
+
+    # A rounded counter ("1.2K") can never show a +1, so the strongest signal is
+    # unavailable for this account. Say so rather than letting it silently never
+    # fire and look like the post failed.
+    if baseline_count is not None and not baseline_count.exact:
+        log("warning", "Post count is rounded (%s) -- the +1 check cannot work for this "
+                       "account; relying on banner/notification signals",
+            baseline_count.value)
+    elif baseline_count is None:
+        log("warning", "No baseline post count -- the strongest signal is unavailable; "
+                       "relying on banner/notification signals")
 
     while True:
         if callable(should_stop) and should_stop():
             return VerifyResult(False, FAIL_TIMEOUT, "aborted", now() - started)
 
-        # --- strongest positive: the profile's post count went up -------------
-        if callable(get_post_count) and baseline_count is not None:
-            try:
-                current = get_post_count()
-            except Exception as exc:
-                current = None
-                log("warning", "Post-count probe failed: %s", exc)
-            if count_increased(baseline_count, current):
-                return VerifyResult(
-                    True, VIA_POST_COUNT,
-                    f"post count {baseline_count.value} -> {current.value}", now() - started,
-                )
-
-        # --- banner / toast, plus conclusive negatives ------------------------
+        # --- what's on screen right now, plus conclusive negatives ------------
+        # Read the screen FIRST, before the post-count probe. Both signals count
+        # as "strong", so nothing is given up by asking this one first -- but the
+        # two are not equally polite. Reading the screen is passive and cheap;
+        # the count probe navigates off the feed to the profile and back, which
+        # *destroys the banner it would have read*. Asking the expensive probe
+        # first meant a reel that announced itself on the feed got no credit and
+        # the flow went hunting for a counter instead.
         state = STATE_UNKNOWN
         if callable(get_screen_text):
             try:
@@ -264,14 +325,59 @@ def verify_reel_posted(
         if state == STATE_COMPOSER:
             last_negative = FAIL_COMPOSER   # not conclusive yet: the banner may still be pending
 
-        # --- upload notification: proof that work is still in flight ----------
+        # --- the profile's post count went up ---------------------------------
+        # Only start this if there is room to finish it (see
+        # POST_COUNT_MIN_REMAINING_SECONDS) -- it is the one probe that can
+        # overrun the whole budget on its own.
+        if callable(get_post_count) and baseline_count is not None:
+            remaining = deadline - now()
+            if remaining < post_count_min_remaining:
+                log("info", "Skipping the post-count probe: only %.0fs left of the "
+                            "verification budget and it needs ~%.0fs", remaining, post_count_min_remaining)
+            else:
+                try:
+                    current = get_post_count()
+                except Exception as exc:
+                    current = None
+                    log("warning", "Post-count probe failed: %s", exc)
+                if count_increased(baseline_count, current):
+                    return VerifyResult(
+                        True, VIA_POST_COUNT,
+                        f"post count {baseline_count.value} -> {current.value}", now() - started,
+                    )
+
+        # --- upload notification: in flight, then finished --------------------
         if callable(get_notification_state):
             try:
                 notif = get_notification_state()
             except Exception:
                 notif = None
-            if notif is not None and notif.ongoing:
-                saw_upload_in_flight = True
+            if notif is not None:
+                if notif.ongoing:
+                    saw_upload_in_flight = True
+                elif saw_upload_in_flight:
+                    # It was uploading and now it isn't. Nothing else to wait for.
+                    upload_finished = True
+
+                # Instagram's own notification text is a positive signal in its
+                # own right, and survives longer than the on-screen banner that
+                # a 3-second poll routinely misses.
+                for title in (notif.titles or ()):
+                    if any(p in str(title).lower() for p in CONFIRMATION_PHRASES):
+                        return VerifyResult(True, VIA_NOTIFICATION,
+                                            f"notification: {str(title)[:60]}", now() - started)
+
+        # An upload that started and finished, with no error, no draft prompt and
+        # not sitting on the composer, means the reel went out. This is weaker
+        # than seeing the count rise, but it is *evidence*, and the alternative is
+        # reporting a real post as failed -- which gets it posted twice. The
+        # profile counter is cached on Instagram's side and often does not move
+        # inside our window, so waiting for it alone is what produced the
+        # false negatives.
+        if upload_finished and state not in (STATE_COMPOSER, STATE_ERROR, STATE_DRAFT):
+            return VerifyResult(True, VIA_UPLOAD_FINISHED,
+                                "upload notification appeared and then cleared with no error",
+                                now() - started)
 
         elapsed = now() - started
         if elapsed >= timeout or now() >= deadline:
@@ -281,8 +387,14 @@ def verify_reel_posted(
         if last_negative == FAIL_COMPOSER and elapsed >= min_wait and not saw_upload_in_flight:
             return VerifyResult(False, FAIL_COMPOSER,
                                 "still on the composer and no upload in progress", elapsed)
-        sleep(poll_seconds)
+        # Never sleep past the deadline -- on a short budget a full poll
+        # interval is a meaningful fraction of it.
+        sleep(max(0.0, min(poll_seconds, deadline - now())))
 
     waited = now() - started
+    # Timing out is not proof of failure -- it is the absence of proof. Only the
+    # conclusive negatives (error dialog / draft prompt / stuck on the composer)
+    # mean the post definitely did not go out.
+    method = last_negative or FAIL_TIMEOUT
     detail = "upload was still in progress at timeout" if saw_upload_in_flight else "no positive signal"
-    return VerifyResult(False, last_negative or FAIL_TIMEOUT, detail, waited)
+    return VerifyResult(False, method, detail, waited, uncertain=(method == FAIL_TIMEOUT))

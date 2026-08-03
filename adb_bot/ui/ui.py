@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import requests
 import sys
 import threading
@@ -10,7 +11,6 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 if __package__ in {None, ""}:
     repo_root = Path(__file__).resolve().parents[2]
@@ -22,6 +22,7 @@ from adb_bot.automation.workflow import run_profile_workflow
 from adb_bot.config import get_bearer_token
 from adb_bot.config.settings import load_settings, save_settings, get_saved_bearer_token, get_saved_batch_launch_delay, get_saved_readiness_wait, get_saved_readiness_attempts, get_app_data_dir, get_scheduler_config, save_scheduler_config, get_saved_flow_speed, get_folder_media_paths, save_folder_media_paths
 from adb_bot.automation import scheduling as scheduler_admin
+from adb_bot.core.batching import LaunchGate, resolve_concurrency, run_rolling
 from adb_bot.core.logger import get_logger
 from adb_bot.core.models import Profile
 from adb_bot.clients.api import MultiloginApiClient
@@ -32,7 +33,7 @@ from adb_bot.clients.multilogin import (
     MultiloginMobileListClient,
     MultiloginShutdownClient,
 )
-from adb_bot.automation.flows import InstagramLikeFeedFlow, InstagramNotificationsFlow, InstagramScrollFlow, InstagramStoryUploadFlow, InstagramReelUploadFlow, InstagramReelUploadU2Flow, InstagramUpdateBioFlow, InstagramUpdateBioU2Flow, InstagramUpdateProfilePictureU2Flow, InstagramWarmUpDay1Flow, PushMediaTestFlow
+from adb_bot.automation.flows import InstagramLikeFeedFlow, InstagramNotificationsFlow, InstagramScrollFlow, InstagramStoryUploadFlow, InstagramReelUploadFlow, InstagramReelUploadU2Flow, InstagramReelIntentProbeFlow, InstagramUpdateBioFlow, InstagramUpdateBioU2Flow, InstagramUpdateProfilePictureU2Flow, InstagramWarmUpDay1Flow, PushMediaTestFlow
 from adb_bot.ui.helpers import (
     REEL_FLOWS,
     build_foldered_profile_groups,
@@ -190,6 +191,9 @@ class WorkflowUI:
         self.profile_labels: dict[str, str] = {}
         self.profile_status_vars: dict[str, tk.StringVar] = {}
         self.profile_last_status: dict[str, str] = {}  # profile_id -> normalized terminal status, for the run summary
+        # One row per profile from the last run: (category, name, detail).
+        self._run_summary_rows: list[tuple[str, str, str]] = []
+        self._run_summary_sort: tuple[str, bool] | None = None  # (column, descending)
         self.profile_progress_vars: dict[str, tk.StringVar] = {}
         self.profile_manual_continue_events: dict[str, threading.Event] = {}
         self.profile_manual_continue_buttons: dict[str, ttk.Button] = {}
@@ -304,7 +308,7 @@ class WorkflowUI:
         right_panel = ttk.LabelFrame(main, text="Workflow", padding=12)
         right_panel.grid(row=1, column=1, sticky="nsew")
         right_panel.columnconfigure(0, weight=1)
-        right_panel.rowconfigure(8, weight=1)
+        right_panel.rowconfigure(5, weight=1)  # the summary/logs paned window takes the slack
 
         ttk.Label(left_panel, text="Select the profiles to run:").grid(row=0, column=0, sticky="w")
         
@@ -400,26 +404,85 @@ class WorkflowUI:
         )
         self.shutdown_on_success_checkbox.grid(row=4, column=0, sticky="w", pady=(8, 0))
 
-        self.run_summary_var = tk.StringVar(value="")
-        summary_frame = ttk.LabelFrame(right_panel, text="Last run summary", padding=(8, 4))
-        summary_frame.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        # Summary and logs split the rest of the panel through a draggable sash:
+        # a 58-profile run needs a tall sheet, a 3-profile run needs none of it.
+        summary_logs = ttk.PanedWindow(right_panel, orient="vertical")
+        summary_logs.grid(row=5, column=0, sticky="nsew", pady=(10, 0))
+        try:
+            # The native sash is a 1px hairline nobody notices; widen it so the
+            # drag handle is findable.
+            ttk.Style(self.root).configure("Sash", sashthickness=8, gripcount=12)
+        except tk.TclError:
+            pass
+
+        summary_frame = ttk.LabelFrame(summary_logs, text="Last run summary", padding=(8, 4))
         summary_frame.columnconfigure(0, weight=1)
-        ttk.Label(
+        summary_frame.rowconfigure(1, weight=1)
+        # weight=0: the sheet keeps its requested height and the logs absorb the
+        # window's slack, so growing the window never shrinks the sheet.
+        summary_logs.add(summary_frame, weight=0)
+
+        # Headline counts stay a label -- one glance, no scrolling.
+        self.run_summary_var = tk.StringVar(value="")
+        headline = ttk.Label(
             summary_frame,
             textvariable=self.run_summary_var,
             justify="left",
             anchor="w",
-            wraplength=520,
-        ).grid(row=0, column=0, sticky="ew")
+        )
+        headline.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        # Wrap against the frame, not the label: measuring the label itself would
+        # feed its own width back in and oscillate.
+        summary_frame.bind(
+            "<Configure>",
+            lambda event: headline.configure(wraplength=max(event.width - 24, 160)),
+        )
 
-        log_buttons = ttk.Frame(right_panel)
-        log_buttons.grid(row=6, column=0, sticky="ew", pady=(16, 6))
+        self.summary_tree = ttk.Treeview(
+            summary_frame,
+            columns=("profile", "outcome", "detail"),
+            show="headings",
+            height=6,
+            selectmode="extended",
+        )
+        for key, title, width, minwidth, stretch in (
+            ("profile", "Profile", 130, 80, False),
+            ("outcome", "Outcome", 155, 90, False),  # fits "⚠ Needs attention"
+            ("detail", "Detail", 240, 80, True),
+        ):
+            self.summary_tree.heading(
+                key,
+                text=title,
+                anchor="w",
+                command=lambda column=key: self._sort_run_summary(column),
+            )
+            self.summary_tree.column(key, width=width, minwidth=minwidth, stretch=stretch, anchor="w")
+        summary_scroll = ttk.Scrollbar(summary_frame, orient="vertical", command=self.summary_tree.yview)
+        self.summary_tree.configure(yscrollcommand=summary_scroll.set)
+        self.summary_tree.grid(row=1, column=0, sticky="nsew")
+        summary_scroll.grid(row=1, column=1, sticky="ns", padx=(4, 0))
+        # Same palette as the log levels, so a red row here means what a red word
+        # means down there.
+        self.summary_tree.tag_configure("success", foreground="#16a34a")
+        self.summary_tree.tag_configure("failed", foreground="#ef4444")
+        self.summary_tree.tag_configure("attention", foreground="#f59e0b")
+        self.summary_tree.tag_configure("skipped", foreground="#6b7280")
+        self.summary_tree.tag_configure("incomplete", foreground="#6b7280")
+        self.summary_tree.tag_configure("stripe", background="#f3f4f6")
+
+        logs_frame = ttk.Frame(summary_logs)
+        logs_frame.columnconfigure(0, weight=1)
+        logs_frame.rowconfigure(2, weight=1)
+        summary_logs.add(logs_frame, weight=1)
+
+        log_buttons = ttk.Frame(logs_frame)
+        log_buttons.grid(row=0, column=0, sticky="ew", pady=(10, 6))
         ttk.Button(log_buttons, text="Clear logs", command=self.clear_logs).pack(side="left")
         ttk.Button(log_buttons, text="Save logs", command=self.save_logs).pack(side="left", padx=(8, 0))
 
-        ttk.Label(right_panel, text="Live logs:").grid(row=7, column=0, sticky="w", pady=(6, 6))
-        self.log_output = scrolledtext.ScrolledText(right_panel, height=22, state="disabled")
-        self.log_output.grid(row=8, column=0, sticky="nsew")
+        ttk.Label(logs_frame, text="Live logs:").grid(row=1, column=0, sticky="w", pady=(0, 6))
+        self.log_output = scrolledtext.ScrolledText(logs_frame, height=14, state="disabled")
+        self.log_output.grid(row=2, column=0, sticky="nsew")
         self.log_output.bind("<MouseWheel>", self._on_log_mousewheel)
         self.log_output.bind("<Button-4>", self._on_log_mousewheel)
         self.log_output.bind("<Button-5>", self._on_log_mousewheel)
@@ -1215,6 +1278,10 @@ class WorkflowUI:
         "human_verification": "human verification requested",
         "banned": "banned / suspended",
         "action_block": "action blocked (temporary)",
+        # Share was tapped but the post could not be proven. Deliberately worded
+        # as "may have posted": the wrong move here is to re-post it, which puts
+        # the same reel on the account twice.
+        "uncertain": "uncertain — may have posted, check first",
         "done": "done",
     }
 
@@ -1224,9 +1291,17 @@ class WorkflowUI:
             return normalized
         return ""
 
-    def _set_profile_status(self, profile_id: str, status: str | None) -> None:
+    def _set_profile_status(self, profile_id: str, status: str | None, detail: str = "") -> None:
         normalized_status = self._normalize_profile_status(status)
         display_status = self._STATUS_DISPLAY.get(normalized_status, normalized_status)
+
+        # How the flow decided, e.g. "via post_count [strong]" or
+        # "via timeout: no positive signal". Logged rather than squeezed into the
+        # status column, which has to stay short.
+        if detail and normalized_status in ("done", "uncertain", "failed"):
+            self.logger.info("Profile %s -> %s (%s)",
+                             self.profile_labels.get(profile_id, profile_id),
+                             display_status, detail)
 
         def _apply() -> None:
             if normalized_status:
@@ -1521,6 +1596,7 @@ class WorkflowUI:
             automation.register_flow(InstagramUpdateProfilePictureU2Flow())
             automation.register_flow(InstagramWarmUpDay1Flow())
             automation.register_flow(PushMediaTestFlow())
+            automation.register_flow(InstagramReelIntentProbeFlow())
 
             airtable = AirtableClient(token, base_id, table_name)
             run_airtable_queue(
@@ -1595,52 +1671,55 @@ class WorkflowUI:
             automation.register_flow(InstagramUpdateProfilePictureU2Flow())
             automation.register_flow(InstagramWarmUpDay1Flow())
             automation.register_flow(PushMediaTestFlow())
+            automation.register_flow(InstagramReelIntentProbeFlow())
 
-            self.logger.info("Launching profiles %s on Multilogin", selected_ids)
-            for profile_id in selected_ids:
+            # A rolling window: at most `concurrency` phones live at once, and the
+            # next selected profile starts the moment one finishes. This path used
+            # to launch every selected profile up front and size the pool to match,
+            # so picking 20 booted 20 phones and ran 20 flows at once -- which does
+            # not fail outright, it just makes every flow slow together. The
+            # headless runners were capped long ago; this one was missed.
+            concurrency = resolve_concurrency(None)
+            gate = LaunchGate(self._batch_launch_delay_seconds)
+
+            def launch_and_run(profile_id: str) -> None:
                 if self.abort_requested or run_token != self._run_token:
                     self.logger.info("Abort requested before launching profile %s", profile_id)
                     return
-                launch_response = launcher_client.start_profiles([profile_id])
-                if launch_response.get("status") == "error":
+                launch_response = gate.launch(
+                    lambda: launcher_client.start_profiles([profile_id]))
+                if isinstance(launch_response, dict) and launch_response.get("status") == "error":
                     self.logger.error(
                         "Failed to launch profile %s on Multilogin. Response: %s",
                         profile_id,
                         launch_response,
                     )
-                    continue
+                    return
                 self.logger.info("Launched profile %s successfully", profile_id)
-                if self._batch_launch_delay_seconds > 0:
-                    time.sleep(self._batch_launch_delay_seconds)
+                # _run_single_profile waits for *this* profile to become ready,
+                # so the old global readiness sleep is no longer needed.
+                self._run_single_profile(
+                    profile_id,
+                    bearer_token,
+                    api_client,
+                    adb_enable_client,
+                    shutdown_client,
+                    automation,
+                    run_token,
+                    readiness_wait_seconds=self._readiness_wait_seconds,
+                    readiness_max_attempts=self._readiness_max_attempts,
+                    should_stop=lambda: self.abort_requested,
+                    manual_continue_event=self.profile_manual_continue_events.get(profile_id),
+                    manual_continue_callback=self._enable_manual_continue_button,
+                    shutdown_on_success=self._shutdown_on_success,
+                    launcher_client=launcher_client,
+                )
 
-            if self.abort_requested:
-                return
-
-            self.logger.info("Waiting %s seconds before checking profile readiness", self._readiness_wait_seconds)
-            time.sleep(self._readiness_wait_seconds)
-
-            with ThreadPoolExecutor(max_workers=len(selected_ids)) as executor:
-                futures = [
-                    executor.submit(
-                        self._run_single_profile,
-                        profile_id,
-                        bearer_token,
-                        api_client,
-                        adb_enable_client,
-                        shutdown_client,
-                        automation,
-                        run_token,
-                        readiness_wait_seconds=self._readiness_wait_seconds,
-                        readiness_max_attempts=self._readiness_max_attempts,
-                        should_stop=lambda: self.abort_requested,
-                        manual_continue_event=self.profile_manual_continue_events.get(profile_id),
-                        manual_continue_callback=self._enable_manual_continue_button,
-                        shutdown_on_success=self._shutdown_on_success,
-                    )
-                    for profile_id in selected_ids
-                ]
-                for future in as_completed(futures):
-                    future.result()
+            self.logger.info("Running %s profile(s), up to %s at a time (rolling)",
+                             len(selected_ids), concurrency)
+            run_rolling(selected_ids, launch_and_run, concurrency=concurrency,
+                        should_stop=lambda: self.abort_requested or run_token != self._run_token,
+                        logger=self.logger)
         finally:
             self.root.after(0, self._finish_run, run_token)
 
@@ -1666,7 +1745,7 @@ class WorkflowUI:
         except Exception as exc:  # pragma: no cover - UI protection path
             messagebox.showerror("Save failed", f"Unable to save logs: {exc}")
 
-    def _run_single_profile(self, profile_id: str, bearer_token: str, api_client: MultiloginApiClient, adb_enable_client: MultiloginAdbEnableClient, shutdown_client: MultiloginShutdownClient, automation: AutomationRunner, run_token: int, readiness_wait_seconds: int = 10, readiness_max_attempts: int = 2, should_stop=None, manual_continue_event=None, manual_continue_callback=None, shutdown_on_success: bool = False) -> None:
+    def _run_single_profile(self, profile_id: str, bearer_token: str, api_client: MultiloginApiClient, adb_enable_client: MultiloginAdbEnableClient, shutdown_client: MultiloginShutdownClient, automation: AutomationRunner, run_token: int, readiness_wait_seconds: int = 10, readiness_max_attempts: int = 2, should_stop=None, manual_continue_event=None, manual_continue_callback=None, shutdown_on_success: bool = False, launcher_client=None) -> None:
         if self.abort_requested or run_token != self._run_token:
             self.logger.info("Abort requested, skipping profile %s", profile_id)
             return
@@ -1706,6 +1785,9 @@ class WorkflowUI:
             bio=(self.bio_var.get().strip()[:150] or None) if selected_flow in ("update_bio", "update_bio_u2") else None,
             picture=(self.picture_var.get().strip() or None) if selected_flow == "update_profile_picture" else None,
             media_path=folder_media_path,
+            # Lets readiness relaunch a profile whose launch didn't take,
+            # instead of re-enabling ADB on something that isn't running.
+            launcher_client=launcher_client,
         )
 
         self._disable_manual_continue_button(profile_id)
@@ -1719,60 +1801,133 @@ class WorkflowUI:
                 status_var.set("")
             except Exception:
                 pass
+        self._clear_run_summary()
+
+    # Sheet order and labels. Problems first: with 58 rows the whole point is
+    # not having to hunt for the ones that need a human.
+    _SUMMARY_CATEGORIES = (
+        ("failed", "✗ Failed"),
+        ("attention", "⚠ Needs attention"),
+        ("incomplete", "… Incomplete"),
+        ("skipped", "– Skipped"),
+        ("success", "✓ Success"),
+    )
+
+    @staticmethod
+    def _natural_key(text: str) -> list:
+        """Sort "Jasmin 2" before "Jasmin 10" instead of after it."""
+        return [
+            int(part) if part.isdigit() else part.lower()
+            for part in re.split(r"(\d+)", text)
+        ]
+
+    def _sort_run_summary(self, column: str) -> None:
+        """Header click: sort by that column, second click reverses it."""
+        previous_column, descending = self._run_summary_sort or (None, False)
+        descending = (column == previous_column) and not descending
+        self._run_summary_sort = (column, descending)
+        self._render_run_summary()
+
+    def _render_run_summary(self) -> None:
+        """Redraw the sheet from self._run_summary_rows in the current sort."""
+        tree = getattr(self, "summary_tree", None)
+        if tree is None or not tree.winfo_exists():
+            return
+
+        labels = dict(self._SUMMARY_CATEGORIES)
+        severity = {key: index for index, (key, _label) in enumerate(self._SUMMARY_CATEGORIES)}
+        rows = list(self._run_summary_rows)
+        column, descending = self._run_summary_sort or ("outcome", False)
+        if column == "profile":
+            rows.sort(key=lambda row: self._natural_key(row[1]), reverse=descending)
+        elif column == "detail":
+            rows.sort(key=lambda row: (row[2].lower(), self._natural_key(row[1])), reverse=descending)
+        else:
+            rows.sort(key=lambda row: (severity.get(row[0], 99), self._natural_key(row[1])), reverse=descending)
+
+        tree.delete(*tree.get_children())
+        for index, (category, name, detail) in enumerate(rows):
+            tags = [category] + (["stripe"] if index % 2 else [])
+            tree.insert("", "end", values=(name, labels.get(category, category), detail), tags=tuple(tags))
+
+    def _clear_run_summary(self) -> None:
+        self._run_summary_rows = []
         if getattr(self, "run_summary_var", None) is not None:
             try:
                 self.run_summary_var.set("")
             except Exception:
                 pass
+        self._render_run_summary()
 
-    def _build_run_summary(self) -> tuple[str, bool]:
+    def _build_run_summary(self) -> tuple[list[tuple[str, str, str]], str, bool]:
         """Classify each profile's final status from the run that just finished
         into success / failed / needs-verification / skipped / incomplete and
-        return (report_text, had_failures)."""
+        return (sheet_rows, headline, had_failures)."""
         success_keys = {"done"}
         skipped_keys = {"already_had_bio"}
         failed_keys = {"failed", "adb_connect_failed"}
-        attention_keys = {"human_verification", "banned", "action_block"}
+        # Uncertain sits with the attention group, not with failures: these are
+        # the ones a human should look at, and specifically the ones that must
+        # NOT be blindly re-run.
+        attention_keys = {"human_verification", "banned", "action_block", "uncertain"}
         incomplete_keys = {"starting", "connecting", "running", "manual_continue"}
 
-        success, skipped, failed, attention, incomplete = [], [], [], [], []
+        rows: list[tuple[str, str, str]] = []
         for profile_id, norm in self.profile_last_status.items():
             if not norm:
                 continue
             name = self.profile_labels.get(profile_id, profile_id)
             display = self._STATUS_DISPLAY.get(norm, norm)
             if norm in success_keys:
-                success.append(name)
+                # No detail on a plain success: 43 rows of "done" is noise.
+                rows.append(("success", name, ""))
             elif norm in skipped_keys:
-                skipped.append(f"{name} — {display}")
+                rows.append(("skipped", name, display))
             elif norm in failed_keys:
-                failed.append(f"{name} — {display}")
+                # Plain "failed" is already the Outcome cell; only the specific
+                # failures (ADB connect) earn a detail.
+                rows.append(("failed", name, "" if norm == "failed" else display))
             elif norm in attention_keys:
-                # verification shows just the name; ban/action-block name the issue
-                attention.append(name if norm == "human_verification" else f"{name} — {display}")
+                rows.append(("attention", name, display))
             elif norm in incomplete_keys:
-                incomplete.append(f"{name} — {display}")
+                rows.append(("incomplete", name, display))
 
-        total = len(success) + len(skipped) + len(failed) + len(attention) + len(incomplete)
-        if total == 0:
-            return ("No profiles ran.", False)
+        if not rows:
+            return ([], "No profiles ran.", False)
+
+        counts = {key: 0 for key, _label in self._SUMMARY_CATEGORIES}
+        for category, _name, _detail in rows:
+            counts[category] = counts.get(category, 0) + 1
+
+        parts = [f"Last run: {len(rows)} profile(s)", f"✓ Success {counts['success']}"]
+        parts.extend(
+            f"{label} {counts[key]}"
+            for key, label in self._SUMMARY_CATEGORIES
+            if key != "success" and counts[key]
+        )
+        return (rows, "  ·  ".join(parts), bool(counts["failed"]))
+
+    def _format_run_summary_log(self, rows: list[tuple[str, str, str]]) -> str:
+        """The same report as one log line, so saved logs still name the profiles
+        the sheet lists."""
+        if not rows:
+            return "No profiles ran."
 
         def _join(names: list[str], cap: int = 25) -> str:
             if len(names) <= cap:
                 return ", ".join(names)
             return ", ".join(names[:cap]) + f", +{len(names) - cap} more"
 
-        lines = [f"Last run: {total} profile(s)"]
-        lines.append(f"✓ Success ({len(success)}): {_join(success)}" if success else "✓ Success (0)")
-        if failed:
-            lines.append(f"✗ Failed ({len(failed)}): {_join(failed)}")
-        if attention:
-            lines.append(f"⚠ Needs attention ({len(attention)}): {_join(attention)}")
-        if skipped:
-            lines.append(f"– Skipped ({len(skipped)}): {_join(skipped)}")
-        if incomplete:
-            lines.append(f"… Incomplete/aborted ({len(incomplete)}): {_join(incomplete)}")
-        return ("\n".join(lines), bool(failed))
+        chunks = [f"Last run: {len(rows)} profile(s)"]
+        for key, label in self._SUMMARY_CATEGORIES:
+            names = [
+                name if not detail else f"{name} — {detail}"
+                for category, name, detail in rows
+                if category == key
+            ]
+            if names or key == "success":
+                chunks.append(f"{label} ({len(names)}): {_join(names)}" if names else f"{label} (0)")
+        return " | ".join(chunks)
 
     def _finish_run(self, run_token: int | None = None) -> None:
         if run_token is not None and run_token != self._run_token:
@@ -1789,10 +1944,12 @@ class WorkflowUI:
         else:
             self.logger.info("Workflow run complete")
 
-        summary_text, _had_failures = self._build_run_summary()
+        rows, headline, _had_failures = self._build_run_summary()
+        self._run_summary_rows = rows
         if getattr(self, "run_summary_var", None) is not None:
-            self.run_summary_var.set(summary_text)
-        self.logger.info("Run summary — %s", summary_text.replace("\n", " | "))
+            self.run_summary_var.set(headline)
+        self._render_run_summary()
+        self.logger.info("Run summary — %s", self._format_run_summary_log(rows))
 
     def start(self) -> None:
         self.root.mainloop()

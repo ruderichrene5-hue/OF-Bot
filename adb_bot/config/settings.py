@@ -190,7 +190,10 @@ def get_saved_spoofed_videos_dir() -> str:
 # The flows the per-folder media mapping feeds. Only these read a Profile's
 # media_path, so mapping a folder must not change any other flow's behaviour.
 # Lives here (a leaf module) so both the UI and the headless runners can use it.
-REEL_FLOWS = ("instagram_reel_upload", "instagram_reel_upload_u2")
+REEL_FLOWS = ("instagram_reel_upload", "instagram_reel_upload_u2",
+              # The share-Intent probe pushes a real reel video, so it needs the
+              # same per-folder media. It reads media_path and ignores caption.
+              "instagram_reel_intent_probe")
 
 
 def get_folder_media_paths() -> dict:

@@ -175,4 +175,8 @@ def get_available_flows() -> list[dict[str, str]]:
         {"value": "instagram_reel_upload_u2", "label": "Instagram Reels Upload (BETA)"},
         {"value": "update_bio_u2", "label": "Update Bio (BETA)"},
         {"value": "update_profile_picture", "label": "Update Profile Picture (BETA)"},
+        # Diagnostic, not a posting flow: it pushes a video, fires the share
+        # Intent variants and reports which screen Instagram lands on. It never
+        # publishes. Labelled so nobody reaches for it expecting a reel to go up.
+        {"value": "instagram_reel_intent_probe", "label": "Reel Share-Intent Probe (DIAGNOSTIC, never posts)"},
     ]

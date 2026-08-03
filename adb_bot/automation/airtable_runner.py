@@ -8,8 +8,6 @@ today, and the in-app scheduler (planned) will call the exact same function.
 from __future__ import annotations
 
 import os
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from adb_bot.clients.airtable import (
@@ -32,7 +30,7 @@ from adb_bot.automation.airtable_planner import plan_airtable_runs
 from adb_bot.automation import incidents
 from adb_bot.automation import attachments
 from adb_bot.core.locks import ProfileLocks
-from adb_bot.core.batching import chunked, resolve_concurrency
+from adb_bot.core.batching import LaunchGate, resolve_concurrency, run_rolling
 from adb_bot.config.settings import REEL_FLOWS
 from adb_bot.clients.airtable import (
     RESULT_DONE,
@@ -98,6 +96,10 @@ def _map_terminal_status(status: str):
     (starting/connecting/running) so they produce no write-back."""
     if status == "done":
         return (RESULT_DONE, None, None)
+    if status == "uncertain":
+        return (RESULT_FAILED,
+                "UNCERTAIN: Share was tapped but the post could not be confirmed -- "
+                "check the account before re-running", None)
     if status == "already_had_bio":
         return (RESULT_SKIPPED, "already had a bio", None)
     if status == "adb_connect_failed":
@@ -276,10 +278,12 @@ def _launch_and_run_flows(plan, launch_ids, airtable, launcher_client, shutdown_
             )
 
             def make_cb(fr, rid, acc_id):
-                def _cb(pid: str, status: str) -> None:
+                def _cb(pid: str, status: str, detail: str = "") -> None:
                     nonlocal had_failure
                     if callable(status_callback):
                         try:
+                            status_callback(pid, status, detail)
+                        except TypeError:
                             status_callback(pid, status)
                         except Exception:
                             pass
@@ -287,6 +291,9 @@ def _launch_and_run_flows(plan, launch_ids, airtable, launcher_client, shutdown_
                     if mapped is None:
                         return
                     result, note, incident = mapped
+                    # Which signal decided this -- see the note in posting_runner.
+                    if detail:
+                        note = f"{note} ({detail})" if note else detail
                     if result == RESULT_FAILED:
                         had_failure = True
                     last_result = f"{result}: {fr.flow}" + (f" ({note})" if note else "")
@@ -342,6 +349,9 @@ def _launch_and_run_flows(plan, launch_ids, airtable, launcher_client, shutdown_
                     bio=flow_run.bio,
                     picture=picture,
                     media_path=folder_media,
+                    # Lets readiness relaunch a profile whose launch didn't
+                    # take, instead of re-enabling ADB on something stopped.
+                    launcher_client=launcher_client,
                 )
             finally:
                 if temp_picture:
@@ -362,42 +372,40 @@ def _launch_and_run_flows(plan, launch_ids, airtable, launcher_client, shutdown_
                 except Exception as exc:
                     logger.warning("Failed to shut down profile %s after its flows: %s", account_plan.launch_id, exc)
 
-    # Launch and run in batches so no more than `concurrency` phones are ever
-    # live at once -- launching all of them up front is what pinned the CPU.
+    # A rolling window of at most `concurrency` phones. Fixed batches ran only as
+    # fast as their slowest account and left finished phones idle until the whole
+    # group was done; here a finished profile is replaced immediately.
     concurrency = resolve_concurrency(max_concurrent_profiles)
-    batches = chunked(launch_ids, concurrency)
     plans_by_launch: dict = {}
     for account_plan in plan.plans:
         plans_by_launch.setdefault(account_plan.launch_id, []).append(account_plan)
 
-    logger.info("Running %s profile(s) in %s batch(es) of up to %s",
-                len(launch_ids), len(batches), concurrency)
+    gate = LaunchGate(batch_launch_delay_seconds)
 
-    for batch_index, batch in enumerate(batches, start=1):
-        if aborted():
-            return {"processed": 0, "aborted": True}
-        logger.info("Batch %s/%s: launching %s profile(s)", batch_index, len(batches), len(batch))
-        for launch_id in batch:
+    def run_profile(launch_id) -> None:
+        """Launch one profile, then run everything due on it, sequentially.
+
+        The account plans for a launch id share one phone, and `run_account`
+        shuts the profile down when its flows succeed -- so overlapping them
+        would have one plan's shutdown cut another off mid-flow.
+        """
+        launch_response = gate.launch(lambda: launcher_client.start_profiles([launch_id]))
+        if isinstance(launch_response, dict) and launch_response.get("status") == "error":
+            logger.error("Failed to launch profile %s on Multilogin: %s", launch_id, launch_response)
+        else:
+            logger.info("Launched profile %s", launch_id)
+        # No batch-wide readiness sleep: run_account waits for *this* profile.
+        for account_plan in plans_by_launch.get(launch_id, []):
             if aborted():
-                return {"processed": 0, "aborted": True}
-            launch_response = launcher_client.start_profiles([launch_id])
-            if isinstance(launch_response, dict) and launch_response.get("status") == "error":
-                logger.error("Failed to launch profile %s on Multilogin: %s", launch_id, launch_response)
-            else:
-                logger.info("Launched profile %s", launch_id)
-            if batch_launch_delay_seconds > 0:
-                time.sleep(batch_launch_delay_seconds)
+                return
+            run_account(account_plan)
 
-        if aborted():
-            return {"processed": 0, "aborted": True}
-        logger.info("Waiting %s seconds for profiles to become ready", readiness_wait_seconds)
-        time.sleep(readiness_wait_seconds)
-
-        batch_plans = [p for lid in batch for p in plans_by_launch.get(lid, [])]
-        with ThreadPoolExecutor(max_workers=max(1, len(batch_plans))) as executor:
-            futures = [executor.submit(run_account, p) for p in batch_plans]
-            for future in as_completed(futures):
-                future.result()
+    logger.info("Running %s profile(s), up to %s at a time (rolling)",
+                len(launch_ids), concurrency)
+    outcome = run_rolling(launch_ids, run_profile, concurrency=concurrency,
+                          should_stop=should_stop, logger=logger)
+    if outcome["aborted"]:
+        return {"processed": 0, "aborted": True}
 
     total_flows = sum(len(p.runs) for p in plan.plans)
     logger.info("Airtable run complete (%s account(s), %s flow-run(s))", len(plan.plans), total_flows)

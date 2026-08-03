@@ -7,15 +7,22 @@ from unittest import TestCase
 
 from adb_bot.automation import retention
 from adb_bot.automation.spoof_pipeline import MAX_VARIANTS_PER_RUN, RawVideo, run_pipeline
-from adb_bot.core.batching import MAX_CONCURRENT_PROFILES, chunked, resolve_concurrency
+from adb_bot.core.batching import (
+    LaunchGate,
+    MAX_CONCURRENT_PROFILES,
+    chunked,
+    resolve_concurrency,
+    run_rolling,
+)
 
 LOG = logging.getLogger("test")
 
 
 class BatchingTest(TestCase):
-    def test_default_cap_is_ten_profiles(self):
-        self.assertEqual(MAX_CONCURRENT_PROFILES, 10)
-        self.assertEqual(resolve_concurrency(None), 10)
+    def test_default_cap_is_five_profiles(self):
+        # Above five, the flows do not fail -- they all get slower together.
+        self.assertEqual(MAX_CONCURRENT_PROFILES, 5)
+        self.assertEqual(resolve_concurrency(None), 5)
 
     def test_chunks_are_capped(self):
         batches = chunked(range(25), 10)
@@ -25,7 +32,7 @@ class BatchingTest(TestCase):
     def test_no_batch_exceeds_the_cap_for_a_big_fleet(self):
         # 91 profiles is the real MultiLogin workspace size.
         for batch in chunked(range(91), resolve_concurrency(None)):
-            self.assertLessEqual(len(batch), 10)
+            self.assertLessEqual(len(batch), 5)
 
     def test_empty_input(self):
         self.assertEqual(chunked([], 10), [])
@@ -34,18 +41,150 @@ class BatchingTest(TestCase):
         self.assertEqual(resolve_concurrency(3), 3)
         self.assertEqual(resolve_concurrency(0), 1)      # never zero
         self.assertEqual(resolve_concurrency(-5), 1)
-        self.assertEqual(resolve_concurrency("nonsense"), 10)
+        self.assertEqual(resolve_concurrency("nonsense"), 5)
 
-    def test_runners_use_the_batching_helper(self):
+    def test_every_run_path_uses_the_rolling_window(self):
+        """Including the UI. The headless runners were capped long ago, but the
+        UI's own run path launched every selected profile up front and sized its
+        pool to match -- selecting 20 ran 20 phones at once."""
         import inspect
         from adb_bot.automation import airtable_runner, posting_runner
+        from adb_bot.ui import ui as ui_module
+        for module in (airtable_runner, posting_runner, ui_module):
+            src = inspect.getsource(module)
+            self.assertIn("run_rolling", src, module.__name__)
+            self.assertIn("resolve_concurrency", src, module.__name__)
+        ui_src = inspect.getsource(ui_module)
+        # The specific unbounded pool that made 20 selected profiles run at once.
+        self.assertNotIn("max_workers=len(selected_ids)", ui_src)
         for module in (airtable_runner, posting_runner):
             src = inspect.getsource(module)
-            self.assertIn("resolve_concurrency", src)
-            self.assertIn("chunked(launch_ids", src)
-            # The old unbounded pool sized to the whole plan must be gone.
             self.assertNotIn("max_workers=max(1, len(plan.plans))", src)
             self.assertNotIn("max_workers=max(1, len(launch_ids))", src)
+
+
+class RollingWindowTest(TestCase):
+    """The window must hold at `concurrency`, and a finished unit must be
+    replaced immediately rather than waiting for a whole batch to drain."""
+
+    def _tracker(self):
+        import threading
+        state = {"live": 0, "peak": 0, "order": []}
+        lock = threading.Lock()
+
+        def enter(unit):
+            with lock:
+                state["live"] += 1
+                state["peak"] = max(state["peak"], state["live"])
+
+        def leave(unit):
+            with lock:
+                state["live"] -= 1
+                state["order"].append(unit)
+
+        return state, enter, leave
+
+    def test_never_exceeds_the_cap(self):
+        state, enter, leave = self._tracker()
+
+        def unit(n):
+            enter(n)
+            time.sleep(0.02)
+            leave(n)
+
+        run_rolling(range(20), unit, concurrency=5)
+        self.assertLessEqual(state["peak"], 5)
+        self.assertEqual(len(state["order"]), 20)
+
+    def test_a_slow_unit_does_not_hold_up_the_others(self):
+        """The reason for the change. With fixed batches of 2, the slow unit's
+        partner is the ONLY other unit that can run alongside it -- everything
+        else waits for that batch to drain. Rolling keeps feeding the free slot,
+        so several finish while the slow one is still going."""
+        state, enter, leave = self._tracker()
+        finished_before_slow = []
+
+        def unit(n):
+            enter(n)
+            if n == 0:
+                time.sleep(0.5)
+                finished_before_slow.extend(state["order"])
+            else:
+                time.sleep(0.01)
+            leave(n)
+
+        run_rolling(range(6), unit, concurrency=2)
+        self.assertGreaterEqual(
+            len(finished_before_slow), 3,
+            "only a batched implementation would leave the free slot idle")
+
+    def test_all_units_run_even_when_one_raises(self):
+        """One bad profile must not abandon the rest of the run."""
+        done = []
+
+        def unit(n):
+            if n == 2:
+                raise RuntimeError("boom")
+            done.append(n)
+
+        counts = run_rolling(range(5), unit, concurrency=2, logger=LOG)
+        self.assertEqual(sorted(done), [0, 1, 3, 4])
+        self.assertEqual(counts["failed"], 1)
+        self.assertEqual(counts["completed"], 4)
+
+    def test_abort_stops_starting_new_units(self):
+        started = []
+        stop = {"now": False}
+
+        def unit(n):
+            started.append(n)
+            stop["now"] = True
+
+        counts = run_rolling(range(20), unit, concurrency=1,
+                             should_stop=lambda: stop["now"])
+        self.assertEqual(len(started), 1)
+        self.assertTrue(counts["aborted"])
+
+    def test_empty_units(self):
+        counts = run_rolling([], lambda n: None, concurrency=5)
+        self.assertEqual(counts["completed"], 0)
+        self.assertFalse(counts["aborted"])
+
+
+class LaunchGateTest(TestCase):
+    """Launching is the one step that stays sequential: five simultaneous launch
+    calls is the burst that used to bring profiles up unready."""
+
+    def test_launches_do_not_overlap(self):
+        import threading
+        gate = LaunchGate(0)
+        live = {"n": 0, "peak": 0}
+        lock = threading.Lock()
+
+        def launch():
+            with lock:
+                live["n"] += 1
+                live["peak"] = max(live["peak"], live["n"])
+            time.sleep(0.01)
+            with lock:
+                live["n"] -= 1
+
+        run_rolling(range(8), lambda n: gate.launch(launch), concurrency=4)
+        self.assertEqual(live["peak"], 1)
+
+    def test_delay_is_applied_between_launches(self):
+        gate = LaunchGate(0.05)
+        started = time.time()
+        for _ in range(3):
+            gate.launch(lambda: None)
+        self.assertGreaterEqual(time.time() - started, 0.10)
+
+    def test_zero_delay_does_not_sleep(self):
+        gate = LaunchGate(0)
+        started = time.time()
+        for _ in range(5):
+            gate.launch(lambda: None)
+        self.assertLess(time.time() - started, 0.2)
 
 
 class FakePipelineClient:
@@ -242,3 +381,112 @@ class EmptyDirPruneTest(TestCase):
     def test_no_root_is_safe(self):
         self.assertEqual(retention.prune_empty_dirs(None), 0)
         self.assertEqual(retention.prune_empty_dirs("/no/such/dir"), 0)
+
+
+class RunnerConcurrencyTest(TestCase):
+    """End-to-end through the real runners with fakes: the cap has to hold where
+    it actually matters, and the change must not alter what gets launched, run,
+    or written back."""
+
+    def _plan(self, launch_ids, posts_per_profile=1):
+        from unittest.mock import MagicMock
+        items = []
+        for lid in launch_ids:
+            for n in range(posts_per_profile):
+                items.append(MagicMock(launch_id=lid, account_id=f"acc-{lid}",
+                                       account_name=f"Acct {lid}", queue_id=f"q-{lid}-{n}",
+                                       caption="c", video_path="/v.mp4", variant_id="var",
+                                       retry_count=0))
+        return MagicMock(to_post=items, skipped=[])
+
+    def _run_posting(self, launch_ids, concurrency, posts_per_profile=1):
+        from unittest.mock import MagicMock, patch
+        from adb_bot.automation import posting_runner
+        import threading
+
+        state = {"live": 0, "peak": 0}
+        lock = threading.Lock()
+        ran, launched = [], []
+
+        def fake_workflow(launch_id, *a, **k):
+            with lock:
+                state["live"] += 1
+                state["peak"] = max(state["peak"], state["live"])
+            time.sleep(0.02)
+            with lock:
+                state["live"] -= 1
+                ran.append(launch_id)
+
+        launcher = MagicMock()
+        launcher.start_profiles.side_effect = lambda ids: launched.extend(ids) or {"status": "ok"}
+
+        plan = self._plan(launch_ids, posts_per_profile)
+        with patch.object(posting_runner, "run_profile_workflow", side_effect=fake_workflow), \
+             patch.object(posting_runner, "apply_post_result"):
+            result = posting_runner._launch_and_post(
+                plan, list(launch_ids), MagicMock(), launcher, MagicMock(), MagicMock(),
+                MagicMock(), MagicMock(), LOG, 0, 1, 0, None, None, None, "flow",
+                max_concurrent_profiles=concurrency,
+            )
+        return result, state, ran, launched
+
+    def test_never_more_than_five_phones_live(self):
+        result, state, ran, launched = self._run_posting([f"p{i}" for i in range(20)], 5)
+        self.assertLessEqual(state["peak"], 5)
+        self.assertEqual(len(ran), 20)          # every post still ran
+        self.assertEqual(len(launched), 20)     # every profile still launched
+        self.assertEqual(result["processed"], 20)
+
+    def test_each_profile_is_launched_exactly_once(self):
+        _result, _state, _ran, launched = self._run_posting([f"p{i}" for i in range(8)], 3)
+        self.assertEqual(sorted(launched), sorted(set(launched)))
+
+    def test_posts_on_one_profile_never_overlap(self):
+        """Two posts for the same account share one phone, and the workflow shuts
+        the profile down when it succeeds -- so overlapping them would pull the
+        device out from under the second."""
+        from unittest.mock import MagicMock, patch
+        from adb_bot.automation import posting_runner
+        import threading
+
+        live_per_profile, peak_per_profile = {}, {}
+        lock = threading.Lock()
+
+        def fake_workflow(launch_id, *a, **k):
+            with lock:
+                live_per_profile[launch_id] = live_per_profile.get(launch_id, 0) + 1
+                peak_per_profile[launch_id] = max(peak_per_profile.get(launch_id, 0),
+                                                  live_per_profile[launch_id])
+            time.sleep(0.02)
+            with lock:
+                live_per_profile[launch_id] -= 1
+
+        plan = self._plan(["p1", "p2"], posts_per_profile=3)
+        with patch.object(posting_runner, "run_profile_workflow", side_effect=fake_workflow), \
+             patch.object(posting_runner, "apply_post_result"):
+            posting_runner._launch_and_post(
+                plan, ["p1", "p2"], MagicMock(), MagicMock(), MagicMock(), MagicMock(),
+                MagicMock(), MagicMock(), LOG, 0, 1, 0, None, None, None, "flow",
+                max_concurrent_profiles=5,
+            )
+        self.assertEqual(set(peak_per_profile.values()), {1}, peak_per_profile)
+
+    def test_uses_the_default_cap_when_none_requested(self):
+        _result, state, _ran, _launched = self._run_posting([f"p{i}" for i in range(12)], None)
+        self.assertLessEqual(state["peak"], MAX_CONCURRENT_PROFILES)
+
+    def test_abort_before_start_processes_nothing(self):
+        from unittest.mock import MagicMock, patch
+        from adb_bot.automation import posting_runner
+        ran = []
+        plan = self._plan(["p1", "p2", "p3"])
+        with patch.object(posting_runner, "run_profile_workflow",
+                          side_effect=lambda *a, **k: ran.append(1)), \
+             patch.object(posting_runner, "apply_post_result"):
+            result = posting_runner._launch_and_post(
+                plan, ["p1", "p2", "p3"], MagicMock(), MagicMock(), MagicMock(), MagicMock(),
+                MagicMock(), MagicMock(), LOG, 0, 1, 0, lambda: True, None, None, "flow",
+                max_concurrent_profiles=5,
+            )
+        self.assertEqual(ran, [])
+        self.assertTrue(result.get("aborted"))
