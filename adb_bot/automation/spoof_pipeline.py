@@ -260,7 +260,8 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
                  spoof_fn=None, source=None, dry_run: bool = True,
                  drive_folder_id: str | None = None, service_account_json: str | None = None,
                  max_variants: int | None = MAX_VARIANTS_PER_RUN,
-                 targets: str = TARGETS_ACCOUNTS) -> PipelineReport:
+                 targets: str = TARGETS_ACCOUNTS,
+                 only_handles=None) -> PipelineReport:
     """Scan for new raw videos and spoof one variant per target under the model.
 
     `targets` picks what a "target" is:
@@ -272,6 +273,12 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
 
     Either way a target is ``{'handle': str}`` plus an id, so everything below
     this point is the same for both.
+
+    `only_handles` narrows the run to those target handles (account handle or
+    profile name, case-insensitive). Models left with no target after filtering
+    are dropped entirely rather than reported as skips -- they were never asked
+    for. Use it to try one profile end to end before committing to a full
+    fan-out, which is 28 serial encodes at the current inventory.
 
     `spoof_fn(raw_path, out_dir, seed, logger) -> Path|None` does the actual
     encoding; if omitted, real runs need one (dry-runs don't call it).
@@ -310,11 +317,25 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
     by_profile = targets == TARGETS_PROFILES
     active_by_model = (airtable.profile_targets_by_model() if by_profile
                        else airtable.active_accounts_by_model())
+    if only_handles:
+        wanted = {str(h).strip().lower() for h in only_handles if str(h).strip()}
+        active_by_model = {
+            model: kept
+            for model, targets_for_model in active_by_model.items()
+            if (kept := [t for t in targets_for_model if str(t["handle"]).lower() in wanted])
+        }
+        logger.info("pipeline: restricted to %s target(s): %s",
+                    sum(len(v) for v in active_by_model.values()),
+                    ", ".join(sorted(t["handle"] for v in active_by_model.values() for t in v)) or "none")
     model_ids = airtable.models_by_name()
 
     capped = False
     for model, videos in by_model.items():
         accounts = active_by_model.get(model.lower(), [])
+        if only_handles and not accounts:
+            # Filtered out, not missing: reporting every other model as a skip on
+            # a one-profile run would bury the skips that actually mean something.
+            continue
         for video in videos:
             if video.name in existing:
                 continue  # already processed on a prior run

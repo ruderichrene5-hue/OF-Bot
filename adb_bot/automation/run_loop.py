@@ -157,6 +157,7 @@ def _run_pipeline(args, logger) -> int:
         max_variants=(spoof_pipeline.MAX_VARIANTS_PER_RUN if args.max_variants is None
                       else (args.max_variants or None)),
         targets=args.targets,
+        only_handles=[h for h in (args.profile or "").split(",") if h.strip()] or None,
     )
     logger.info("pipeline result: %s", report.summary())
     return 1 if report.errors else 0
@@ -293,6 +294,9 @@ def main(argv=None) -> int:
                         help="posting/warmup: max profiles running at once (default 10).")
     parser.add_argument("--max-variants", type=int, default=None,
                         help="pipeline: max variants produced per run (default 20; 0 = no cap).")
+    parser.add_argument("--profile", default=None,
+                        help="pipeline: restrict to these target handles (comma-separated, "
+                             "e.g. 'Jil 1'). Use to try one profile end to end.")
     parser.add_argument("--targets", choices=("accounts", "profiles"), default="accounts",
                         help="pipeline: what to spoof for -- Airtable Accounts at Lifecycle "
                              "Stage Active (default), or the MLX profile inventory, for models "

@@ -114,6 +114,24 @@ def _emit(logger, level, message, *args) -> None:
         print(message)
 
 
+def account_flag_u2(d) -> str | None:
+    """Classify an IG block screen from the u2 hierarchy: a ban_detection kind
+    ("banned" / "human_verification" / "action_block"), or None if the screen
+    isn't one. Reads the whole dumped hierarchy, so bans and action-blocks are
+    caught too, not just the human-verification checkpoint.
+
+    Module-level on purpose: the reel-upload flow is not part of the u2 bio
+    flow's class tree, and a checkpoint stops a reel post exactly as dead as it
+    stops a bio edit. Keeping one implementation means a new marker in
+    ban_detection reaches every flow at once.
+    """
+    try:
+        xml = d.dump_hierarchy()
+    except Exception:
+        xml = ""
+    return ban_detection.classify_block_text(xml)
+
+
 def _u2_describe(sel) -> str:
     """Compact one-line description of a uiautomator2 element for logging:
     its text, content-desc, resource-id, class, bounds and clickable/enabled
@@ -4762,11 +4780,7 @@ class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):
         ban_detection kind ("banned" / "human_verification" / "action_block") or
         None. Reads the whole dumped hierarchy so ban/suspend/action-block
         screens are caught, not just the human-verification checkpoint."""
-        try:
-            xml = d.dump_hierarchy()
-        except Exception:
-            xml = ""
-        return ban_detection.classify_block_text(xml)
+        return account_flag_u2(d)
 
     def _looks_like_human_verification_u2(self, d) -> bool:
         """Back-compat: True if any IG account-flag screen is showing."""

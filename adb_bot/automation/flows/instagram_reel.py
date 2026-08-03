@@ -863,6 +863,9 @@ class InstagramReelUploadU2Flow:
         # --- Step 1: open the reel composer ----------------------------------
         emit("info", "Opening reel composer for %s", target)
         if not self._open_reel_composer_u2(d, target, emit, log):
+            flagged = self._account_flag_result_u2(d, profile, target, emit, "opening the composer")
+            if flagged:
+                return flagged
             emit("warning", "Unable to open the Instagram reel composer for %s (leaving Instagram open)", target)
             return {"profile_id": profile.id, "target": target, "aborted": False, "success": False, "failed": True}
         mark_step()
@@ -872,6 +875,9 @@ class InstagramReelUploadU2Flow:
         # --- Step 2: select REEL mode + first media --------------------------
         emit("info", "Selecting reel media for %s", target)
         if not self._select_media_u2(d, target, emit, log):
+            flagged = self._account_flag_result_u2(d, profile, target, emit, "selecting media")
+            if flagged:
+                return flagged
             emit("warning", "Unable to select reel media for %s", target)
             return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
         mark_step()
@@ -937,8 +943,12 @@ class InstagramReelUploadU2Flow:
             emit("warning", "Share button was not detected after reel compose for %s", target)
 
         if not reel_posted:
-            # Share was never tapped, so nothing can have gone out. This is the
-            # one unambiguous failure: definitely safe to retry.
+            # Share was never tapped, so nothing can have gone out. Safe to
+            # retry -- unless what blocked Share was an account flag, which no
+            # number of retries will clear.
+            flagged = self._account_flag_result_u2(d, profile, target, emit, "the Share step")
+            if flagged:
+                return flagged
             emit("warning", "Instagram reel upload (u2) did not complete successfully for %s "
                             "(the Share button was never tapped -- nothing was posted)", target)
             return {"profile_id": profile.id, "target": target, "aborted": False,
@@ -1272,6 +1282,28 @@ class InstagramReelUploadU2Flow:
                   "u2: best create candidate for %s -> score=%s id=%r desc=%r class=%r bounds=%s center=%s",
                   target, best_score, rid, desc, cls, bounds, best)
         return best
+
+    def _account_flag_result_u2(self, d, profile, target, emit, what: str):
+        """If an IG block screen is what stopped the flow, return the result dict
+        that says so; None if the screen isn't one.
+
+        Called at every point the flow gives up *before* Share. Without it a
+        checkpoint reads as a plain failure, and a plain failure is retryable --
+        so a challenged account gets relaunched forever and nobody is told a
+        person has to tap it through. Proven 2026-08-03: a "Confirm you're
+        human" screen produced `Failed - Needs Retry` with a retry bump.
+
+        Only pre-Share paths use it. After Share the post may exist, and the
+        uncertain/verify path owns that decision -- flagging the account there
+        could discard a live post.
+        """
+        flag = instagram_module.account_flag_u2(d)
+        if not flag:
+            return None
+        emit("warning", "Instagram flagged %s during %s: %s -- not a retryable failure",
+             target, what, flag)
+        return {"profile_id": profile.id, "target": target, "aborted": False,
+                "success": False, "account_flag": flag}
 
     def _open_reel_composer_u2(self, d, target, emit, logger=None) -> bool:
         # Make sure Instagram is the foreground app before hunting for the + --

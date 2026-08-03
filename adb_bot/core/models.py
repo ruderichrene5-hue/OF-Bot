@@ -13,6 +13,11 @@ class Profile:
     bio: str | None = None
     picture: str | None = None
     media_path: str | None = None   # per-run reel/post video (Posting Queue loop)
+    # Posting Queue row this run belongs to. The reel flow stamps it on the
+    # local post ledger, and the deferred recheck matches ledger entries to
+    # Airtable rows by it -- without it every entry is unmatchable and a
+    # Verifying row can never be resolved.
+    queue_id: str | None = None
 
     @property
     def target(self) -> str | None:

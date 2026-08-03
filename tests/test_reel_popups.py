@@ -512,3 +512,68 @@ class BrowseRefreshGestureTest(TestCase):
     def test_feed_gesture_pulls_downward_to_reload(self):
         first = self._swipes()[0]
         self.assertLess(first[0], first[1], "should pull down (reload), not scroll away")
+
+
+class ReelAccountFlagTest(TestCase):
+    """A checkpoint must not be reported as a retryable failure.
+
+    Live evidence, 2026-08-03: Jil 1 sat on ChallengeActivity showing "Confirm
+    you're human to use your account, helenadiecutee". The composer never
+    opened, the flow returned a bare failure, and the queue row landed on
+    `Failed - Needs Retry` with the retry counter bumped -- queueing a blind
+    relaunch of an account only a person can unblock.
+    """
+
+    # The text the real challenge screen actually carried.
+    CHALLENGE = hierarchy(
+        node(text="Confirm you're human to use your account, helenadiecutee", clickable="false"),
+        node(text="Continue"),
+        node(text="Log out helenadiecutee"),
+    )
+    ORDINARY = hierarchy(node(text="Something went wrong", clickable="false"))
+
+    def setUp(self):
+        self.flow = InstagramReelUploadU2Flow()
+        self.profile = mock.Mock(id="628337668232577352")
+        self.emitted = []
+
+    def _result(self, xml):
+        return self.flow._account_flag_result_u2(
+            FakeDevice(xml), self.profile, "1.2.3.4:5555",
+            lambda level, msg, *a: self.emitted.append(msg % a if a else msg),
+            "opening the composer",
+        )
+
+    def test_challenge_screen_is_classified_as_human_verification(self):
+        result = self._result(self.CHALLENGE)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["account_flag"], "human_verification")
+        self.assertFalse(result["success"])
+        self.assertFalse(result["aborted"])
+        # No "failed" key: that is what routes it to the retryable path.
+        self.assertNotIn("failed", result)
+
+    def test_ordinary_failure_is_left_alone(self):
+        self.assertIsNone(self._result(self.ORDINARY))
+
+    def test_unreadable_screen_is_not_guessed_at(self):
+        class Broken:
+            def dump_hierarchy(self):
+                raise RuntimeError("device offline")
+
+        result = self.flow._account_flag_result_u2(
+            Broken(), self.profile, "t", lambda *a: None, "opening the composer")
+        self.assertIsNone(result)
+
+    def test_the_flag_reaches_a_non_retryable_write_back(self):
+        """End of the chain: the flag maps to Human Verification Required, and
+        crucially not to Failed - Needs Retry."""
+        from adb_bot.clients import airtable as at
+        from adb_bot.automation.posting_runner import _map_post_status
+
+        post_status, issue_type, incident, _run_result, _note = _map_post_status(
+            self._result(self.CHALLENGE)["account_flag"])
+        self.assertEqual(post_status, at.POST_STATUS_FAILED)
+        self.assertEqual(issue_type, at.ISSUE_HUMAN_VERIFICATION)
+        self.assertNotEqual(issue_type, at.ISSUE_NEEDS_RETRY)
+        self.assertEqual(incident, "human_verification")

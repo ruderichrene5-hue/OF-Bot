@@ -241,6 +241,12 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
             shutdown_on_success=True,
             caption=item.caption,
             media_path=item.video_path,
+            # Stamps the local post ledger, which is how the deferred recheck
+            # matches a ledger entry back to its Verifying row. Without it every
+            # entry is written with an empty queue_id and the recheck can never
+            # resolve anything -- proven 2026-08-03, two Verifying rows returned
+            # "no local ledger entry" against a ledger that held both posts.
+            queue_id=item.queue_id,
             # Lets readiness relaunch a profile whose launch didn't take,
             # instead of re-enabling ADB on something that isn't running.
             launcher_client=launcher_client,

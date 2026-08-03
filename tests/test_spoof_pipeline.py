@@ -181,6 +181,30 @@ class RunPipelineTest(TestCase):
         paths = [row[2] for row in client.variant_profile_rows]
         self.assertEqual(len(set(paths)), 2)
 
+    def test_only_handles_narrows_to_one_target(self):
+        client = FakePipelineClient(
+            profiles={"nikki": [{"profile_id": "p1", "handle": "Nikki 1", "launch_id": "111"},
+                                {"profile_id": "p2", "handle": "Nikki 2", "launch_id": "222"}]},
+            model_ids={"nikki": "recModelN"},
+        )
+        report = run_pipeline(client, LOG, raw_root="/raw", out_root="/out",
+                              source=FakeSource(_one_video()), dry_run=True,
+                              targets="profiles", only_handles=["nikki 1"])   # case-insensitive
+        self.assertEqual(report.variants_created, 1)
+
+    def test_only_handles_drops_models_with_no_match_rather_than_skipping(self):
+        """A model nobody asked for is not a skip -- reporting it as one would
+        bury the real skips under noise on every filtered run."""
+        client = FakePipelineClient(
+            profiles={"nikki": [{"profile_id": "p1", "handle": "Nikki 1", "launch_id": "111"}]},
+            model_ids={"nikki": "recModelN"},
+        )
+        report = run_pipeline(client, LOG, raw_root="/raw", out_root="/out",
+                              source=FakeSource(_one_video()), dry_run=True,
+                              targets="profiles", only_handles=["Jil 1"])
+        self.assertEqual(report.variants_created, 0)
+        self.assertEqual(report.skipped, [])
+
     def test_profile_targets_skip_reason_names_profiles(self):
         client = FakePipelineClient(active={"nikki": [{"account_id": "a1", "handle": "n1"}]},
                                     profiles={})
