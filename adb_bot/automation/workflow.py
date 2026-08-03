@@ -168,6 +168,43 @@ def normalize_profile_ids(profile_ids: list[str] | None = None, fallback_ids: li
     return list(dict.fromkeys(combined_ids))
 
 
+# Multilogin's code for "profile is not running; ADB toggle skipped". It is the
+# normal answer while a profile is still booting -- every profile in a 56-profile
+# run hit it at least once -- so it is not on its own a failure.
+MLX_PROFILE_NOT_RUNNING_CODE = 42002
+
+# How many *consecutive* not-running answers mean the launch genuinely did not
+# take, rather than the profile still coming up. Measured from a real 56-profile
+# run: healthy profiles needed at most 11 attempts, while every profile that
+# reached the 15-attempt cap had failed to start at all and never recovered.
+# 12 therefore separates the two populations without disturbing a slow boot.
+DEFAULT_RELAUNCH_AFTER_ATTEMPTS = 12
+
+
+def _enable_reported_not_running(response, profile_id: str) -> bool:
+    """Whether an enable_adb response said this profile isn't running.
+
+    Worth reading rather than ignoring: enabling ADB on a stopped profile can
+    never succeed, so repeating it is guaranteed waste. The response shape
+    varies, so this stays tolerant and treats anything unparseable as "no
+    opinion" rather than as a failure.
+    """
+    try:
+        details = ((response or {}).get("data") or {}).get("fail_details") or []
+    except AttributeError:
+        return False
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        if str(detail.get("id") or "") not in ("", str(profile_id)):
+            continue
+        if detail.get("code") == MLX_PROFILE_NOT_RUNNING_CODE:
+            return True
+        if "not running" in str(detail.get("msg") or "").lower():
+            return True
+    return False
+
+
 def prepare_profile_for_adb(
     profile_id: str,
     api_client: MultiloginApiClient,
@@ -179,17 +216,41 @@ def prepare_profile_for_adb(
     bio: str | None = None,
     picture: str | None = None,
     media_path: str | None = None,
+    launcher_client=None,
+    relaunch_after_attempts: int = DEFAULT_RELAUNCH_AFTER_ATTEMPTS,
 ):
-    profile = None
+    """Wait for a launched profile to become ADB-ready.
 
-    for attempt in range(1, max_attempts + 1):
-        logger.info("Waiting for profile %s readiness, attempt %s/%s", profile_id, attempt, max_attempts)
+    The loop used to do one thing on every attempt -- enable ADB, check
+    credentials -- regardless of what Multilogin said. When the answer was
+    "profile is not running", that repeated a call which *cannot* succeed:
+    nothing here restarts the profile, so the outcome was fixed from the first
+    attempt and the remaining ~4 minutes of retries were spent confirming it,
+    holding a concurrency slot the whole time.
+
+    Now a persistent not-running answer triggers the thing that can actually
+    fix it -- a relaunch -- and if that still doesn't take, we stop early
+    instead of running out the budget.
+    """
+    profile = None
+    consecutive_not_running = 0
+    relaunched = False
+    attempt = 0
+    budget = max_attempts
+
+    while attempt < budget:
+        attempt += 1
+        logger.info("Waiting for profile %s readiness, attempt %s/%s", profile_id, attempt, budget)
         logger.info("Sleeping %s seconds before checking again", wait_seconds)
         time.sleep(wait_seconds)
 
         logger.info("Enabling ADB for profile %s before checking credentials", profile_id)
         adb_enable_response = adb_enable_client.enable_adb([profile_id], enabled=True)
         logger.info("ADB enable response for %s: %s", profile_id, adb_enable_response)
+        if _enable_reported_not_running(adb_enable_response, profile_id):
+            consecutive_not_running += 1
+        else:
+            consecutive_not_running = 0
 
         logger.info("Checking ADB credentials for %s", profile_id)
         api_response = api_client.fetch_adb_credentials([profile_id])
@@ -200,7 +261,31 @@ def prepare_profile_for_adb(
             logger.info("Profile %s is ready after ADB enable attempt %s", profile_id, attempt)
             return profile
 
-        if attempt < max_attempts:
+        if consecutive_not_running >= relaunch_after_attempts:
+            if launcher_client is not None and not relaunched:
+                logger.warning(
+                    "Profile %s has reported 'not running' %s times in a row -- the launch did not "
+                    "take. Relaunching instead of enabling ADB again (which cannot work on a "
+                    "stopped profile).", profile_id, consecutive_not_running)
+                try:
+                    response = launcher_client.start_profiles([profile_id])
+                    logger.info("Relaunch response for %s: %s", profile_id, response)
+                except Exception as exc:
+                    logger.warning("Relaunch failed for profile %s: %s", profile_id, exc)
+                relaunched = True
+                consecutive_not_running = 0
+                # A relaunched profile needs the same boot time as a fresh one,
+                # so give it a full budget rather than whatever was left over.
+                budget = attempt + max_attempts
+                continue
+
+            logger.warning(
+                "Profile %s is still not running after %s attempts%s -- stopping early rather than "
+                "spending the rest of the budget on a call that cannot succeed.",
+                profile_id, attempt, " and a relaunch" if relaunched else "")
+            break
+
+        if attempt < budget:
             logger.info("Profile %s still not ready after attempt %s; retrying enable and check", profile_id, attempt)
 
     logger.warning("Profile %s is not ready for ADB automation", profile_id)
@@ -265,10 +350,38 @@ def run_profile_workflow(
     media_path: str | None = None,
     heartbeat_interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
     heartbeat_shutdown_on_failure: bool = True,
+    result_callback=None,
+    launcher_client=None,
 ) -> None:
     adb_client = ADBClient()
-    if callable(status_callback):
-        status_callback(profile_id, "starting")
+
+    def emit_status(pid, status, result=None) -> None:
+        """Report a status, carrying *how* the flow reached it when it knows.
+
+        The reel flow works out which signal proved (or failed to prove) the
+        post -- post count, banner, notification, upload lifecycle -- and that
+        was being discarded here, because the callback only ever took
+        (profile_id, status). Without it there is no way to see which signal is
+        firing, and so no way to tell a detection problem from a posting one.
+        """
+        if not callable(status_callback):
+            return
+        detail = ""
+        if isinstance(result, dict):
+            method = result.get("verify_method") or ""
+            strength = result.get("verify_strength") or ""
+            extra = result.get("verify_detail") or ""
+            if method:
+                detail = f"via {method}" + (f" [{strength}]" if strength else "")
+                if extra:
+                    detail += f": {extra}"
+        try:
+            status_callback(pid, status, detail)
+        except TypeError:
+            # Callbacks that only accept (profile_id, status) still work.
+            status_callback(pid, status)
+
+    emit_status(profile_id, "starting")
 
     profile = prepare_profile_for_adb(
         profile_id,
@@ -281,6 +394,7 @@ def run_profile_workflow(
         bio=bio,
         picture=picture,
         media_path=media_path,
+        launcher_client=launcher_client,
     )
     if not profile:
         if callable(status_callback):
@@ -398,6 +512,16 @@ def run_profile_workflow(
 
         try:
             flow_result = _wrap_flow_run()
+            # Hand the raw flow result to anyone who asked for it. The status
+            # callback only ever carries a rendered detail *string*, which is
+            # right for logs and useless to a caller that needs a value back --
+            # the deferred recheck needs the actual post count, not a sentence
+            # about it.
+            if callable(result_callback) and isinstance(flow_result, dict):
+                try:
+                    result_callback(flow_result)
+                except Exception:
+                    pass
         except Exception as exc:
             logger.exception("Workflow failed for profile %s: %s", profile_id_value, exc)
             if callable(status_callback):
@@ -469,15 +593,22 @@ def run_profile_workflow(
             if callable(status_callback):
                 status_callback(profile_id_value, "already_had_bio")
             return
+        # "Uncertain" is checked first: the flow reached the Share tap but could
+        # not prove the outcome, so the reel may be live. Reporting that as
+        # "failed" is what gets it posted a second time.
+        if flow_result.get("uncertain", False) and not flow_result.get("aborted", False):
+            logger.warning("Workflow outcome UNCERTAIN for profile %s -- Share was tapped but "
+                           "the post could not be confirmed; check before re-posting",
+                           profile_id_value)
+            emit_status(profile_id_value, "uncertain", flow_result)
+            return
         if flow_result.get("aborted", False) or flow_result.get("failed", False) or flow_result.get("success") is False:
             logger.info("Workflow failed for profile %s", profile_id_value)
-            if callable(status_callback):
-                status_callback(profile_id_value, "failed")
+            emit_status(profile_id_value, "failed", flow_result)
             return
 
     logger.info("Workflow completed for profile %s", profile_id_value)
-    if callable(status_callback):
-        status_callback(profile_id_value, "done")
+    emit_status(profile_id_value, "done", flow_result if isinstance(flow_result, dict) else None)
 
     if shutdown_on_success:
         logger.info("Shutting down Multilogin profile %s after successful flow '%s' completion", profile_id_value, flow_name)

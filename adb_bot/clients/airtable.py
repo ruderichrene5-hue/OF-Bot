@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -93,9 +93,22 @@ ISSUE_NEEDS_RETRY = "Failed - Needs Retry"
 ISSUE_BANNED_BLOCKED = "Banned / Blocked"
 ISSUE_HUMAN_VERIFICATION = "Human Verification Required"
 ISSUE_OTHER = "Other"
+F_PQ_NOTES = "Notes"
+F_PQ_RECHECK_AFTER = "Recheck After"     # dateTime; when the deferred pass may look
+
 POST_STATUS_PENDING = "Pending"
 POST_STATUS_POSTED = "Posted"
 POST_STATUS_FAILED = "Failed"
+# Share was tapped but the post could not be proven inside the run's budget.
+# Deliberately NOT Failed: an unproven post is very often a live one, and
+# marking it Failed is what got the same reel posted twice. The row waits here
+# until Recheck After passes and the deferred pass resolves it either way.
+POST_STATUS_VERIFYING = "Verifying"
+
+# How long an unproven post waits before the deferred check looks at it. Long
+# enough that Instagram has finished processing and the profile counter has
+# refreshed, so the recheck gets a clean answer rather than racing the upload.
+RECHECK_DELAY_SECONDS = 15 * 60
 
 # Caption Pool
 TABLE_CAPTION_POOL = "Caption Pool"
@@ -180,6 +193,10 @@ RESULT_RUNNING = "Running"
 RESULT_DONE = "Done"
 RESULT_SKIPPED = "Skipped"
 RESULT_FAILED = "Failed"
+# Sent, outcome unknown. Kept distinct from both Done and Failed so the Run Log
+# shows honestly how often we post blind -- if this dominates, verification is
+# broken, which a Failed/Done split would hide.
+RESULT_UNVERIFIED = "Unverified"
 
 
 class AirtableClient:
@@ -535,6 +552,42 @@ class AirtableClient:
             fields[F_PQ_RETRY_COUNT] = retry_count
         return self._patch_in(TABLE_POSTING_QUEUE, queue_record_id, fields)
 
+    def mark_post_pending_verification(self, queue_record_id: str,
+                                       delay_seconds: float = RECHECK_DELAY_SECONDS,
+                                       note: str | None = None) -> bool:
+        """Park a row that was sent but not proven: Post Status=Verifying and a
+        Recheck After stamp `delay_seconds` out.
+
+        Deliberately does NOT touch Retry Count or Issue Type. The post is not a
+        failure -- it is an open question, and burning a retry on it would both
+        misreport the account's health and push the row towards a re-send that
+        the ledger would then have to block."""
+        fields: dict = {
+            F_PQ_POST_STATUS: POST_STATUS_VERIFYING,
+            F_PQ_RECHECK_AFTER: _iso_in(delay_seconds),
+        }
+        if note:
+            fields[F_PQ_NOTES] = note[:1000]
+        return self._patch_in(TABLE_POSTING_QUEUE, queue_record_id, fields)
+
+    def list_posts_awaiting_recheck(self) -> list:
+        """Verifying rows whose Recheck After has passed -- the deferred pass's
+        work queue. Rows still inside their wait are filtered out by Airtable so
+        we don't pull the whole table every tick."""
+        formula = (
+            f"AND({{{F_PQ_POST_STATUS}}}='{POST_STATUS_VERIFYING}',"
+            f"{{{F_PQ_RECHECK_AFTER}}}!='',"
+            f"IS_BEFORE({{{F_PQ_RECHECK_AFTER}}}, NOW()))"
+        )
+        return self._list_table(
+            TABLE_POSTING_QUEUE,
+            fields=[
+                F_PQ_NAME, F_PQ_SCHEDULED, F_PQ_POST_STATUS, F_PQ_RETRY_COUNT,
+                F_PQ_CAPTION, F_PQ_SPOOF_VARIANT, F_PQ_TARGET_ACCOUNT, F_PQ_RECHECK_AFTER,
+            ],
+            filter_formula=formula,
+        )
+
     def mark_variant_used(self, variant_record_id: str) -> bool:
         """Flag a Spoof Variant as Used so it isn't reused on another post."""
         return self._patch_in(TABLE_SPOOF_VARIANTS, variant_record_id, {F_SV_STATUS: SV_STATUS_USED})
@@ -634,6 +687,11 @@ def _select_name(value):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _iso_in(seconds: float) -> str:
+    """An ISO timestamp `seconds` from now, for Recheck After."""
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).replace(microsecond=0).isoformat()
 
 
 def _now_date() -> str:

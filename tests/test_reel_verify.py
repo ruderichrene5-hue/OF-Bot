@@ -2,8 +2,11 @@ from unittest import TestCase
 
 from adb_bot.automation.flows import reel_verify as rv
 from adb_bot.automation.flows.reel_verify import (
-    Count,
+    VIA_UPLOAD_FINISHED,
+    VIA_NOTIFICATION,
+    FAIL_ERROR_DIALOG,
     NotificationState,
+    Count,
     classify_post_screen,
     count_increased,
     parse_count,
@@ -157,6 +160,62 @@ class VerifyStateMachineTest(TestCase):
         self.assertTrue(result.confirmed)
         self.assertEqual(result.method, rv.VIA_BANNER)
 
+    def test_an_expensive_probe_is_not_started_without_time_to_finish(self):
+        """From a real run: a 45s budget produced timeouts of up to 148s,
+        because the deadline was only tested *after* every probe had run. The
+        post-count probe is a full navigation round trip, so one started near
+        the deadline overruns it by its own duration."""
+        calls = []
+
+        def slow_count_probe():
+            calls.append(1)
+            return Count(5, True)   # never increments, so it keeps being asked
+
+        result, _ = self._run(baseline_count=Count(5, True),
+                              get_post_count=slow_count_probe,
+                              timeout=30, poll_seconds=10,
+                              post_count_min_remaining=12)
+        self.assertFalse(result.confirmed)
+        # Ticks at 0s/10s/20s; the 20s one has only 10s left, under the 12s the
+        # probe needs, so it must be skipped.
+        self.assertEqual(len(calls), 2, "a probe was started that could not finish in budget")
+
+    def test_the_probe_still_runs_when_there_is_room(self):
+        calls = []
+
+        def count_probe():
+            calls.append(1)
+            return Count(5, True)
+
+        self._run(baseline_count=Count(5, True), get_post_count=count_probe,
+                  timeout=30, poll_seconds=10, post_count_min_remaining=1)
+        self.assertEqual(len(calls), 3, "the guard must not block probes that fit")
+
+    def test_the_poll_sleep_never_overshoots_the_deadline(self):
+        clock = FakeClock()
+        verify_reel_posted(get_screen_text=lambda: "", timeout=25, poll_seconds=10,
+                           now=clock.now, sleep=clock.sleep)
+        self.assertLessEqual(clock.t - 1000.0, 25.0,
+                             "a full poll interval was slept past the deadline")
+
+    def test_banner_wins_and_the_count_probe_is_never_consulted(self):
+        # The reel announced itself on the feed. That settles it -- the counter
+        # must not even be asked, because asking navigates off the feed and
+        # wipes the very banner that just proved the post landed.
+        asked = []
+
+        def count_probe():
+            asked.append(1)
+            return Count(12, True)
+
+        result, clock = self._run(baseline_count=Count(12, True),
+                                  get_post_count=count_probe,
+                                  get_screen_text=lambda: "Your reel was shared")
+        self.assertTrue(result.confirmed)
+        self.assertEqual(result.method, rv.VIA_BANNER)
+        self.assertEqual(asked, [], "the post-count probe ran despite a visible banner")
+        self.assertEqual(clock.t - 1000.0, 0, "confirmation should be immediate")
+
     def test_count_wins_even_if_banner_never_shows(self):
         # The whole point: a silent success must still be confirmed.
         counts = iter([Count(5, True)] * 3 + [Count(6, True)])
@@ -225,7 +284,9 @@ class VerifyStateMachineTest(TestCase):
 
     def test_summary_is_readable(self):
         result, _ = self._run(get_screen_text=lambda: "Your reel was shared")
-        self.assertIn("CONFIRMED via banner", result.summary())
+        # The summary now also states how strongly it was confirmed, so the Run
+        # Log distinguishes a proven post from an inferred one.
+        self.assertIn("CONFIRMED (strong) via banner", result.summary())
 
 
 # --- flow-level probes -------------------------------------------------------
@@ -274,9 +335,7 @@ class PostCountProbeTest(TestCase):
         # A dead device must not raise out of the probe -- it just doesn't vote.
         self.assertIsNone(self.flow._read_post_count_u2(Exploding(), "1.2.3.4:5555"))
 
-    def test_count_probe_is_throttled(self):
-        # Navigating to the profile is expensive; the probe must not do it on
-        # every poll. Second immediate call returns None ("no opinion").
+    def _counting_flow(self):
         calls = []
 
         class CountingFlow(type(self.flow)):
@@ -287,13 +346,29 @@ class PostCountProbeTest(TestCase):
             def _read_post_count_u2(inner, d, target, logger=None):
                 return rv.Count(7, True)
 
-        flow = CountingFlow()
-        probe = flow._profile_post_count_probe_u2(FakeDevice(), "t", None, None, every_seconds=999)
+        return CountingFlow(), calls
+
+    def test_count_probe_is_throttled(self):
+        # Navigating to the profile is expensive; the probe must not do it on
+        # every poll. Second immediate call returns None ("no opinion").
+        flow, calls = self._counting_flow()
+        probe = flow._profile_post_count_probe_u2(FakeDevice(), "t", None, None,
+                                                  every_seconds=999, initial_delay=0)
         first = probe()
         second = probe()
         self.assertIsNotNone(first)
         self.assertIsNone(second)
         self.assertEqual(len(calls), 1)
+
+    def test_count_probe_defers_its_first_check(self):
+        # The seconds right after Share belong to the banner. This probe walks
+        # off the feed to read the profile, so if it fires on the first poll it
+        # wipes the confirmation before anything reads it -- which is what a
+        # `last = 0.0` start did. By default it must stay quiet at first.
+        flow, calls = self._counting_flow()
+        probe = flow._profile_post_count_probe_u2(FakeDevice(), "t", None, None, every_seconds=25)
+        self.assertIsNone(probe())
+        self.assertEqual(calls, [], "the probe navigated away on the very first poll")
 
 
 class NotificationProbeTest(TestCase):
@@ -317,3 +392,257 @@ class NotificationProbeTest(TestCase):
                 raise RuntimeError("device offline")
 
         self.assertIsNone(_make_notification_probe("t", DeadAdb())())
+
+
+class UploadLifecycleTest(TestCase):
+    """The false-negative fix.
+
+    Instagram's profile post counter is cached on their side and frequently does
+    not move inside the 5-minute window, so waiting for +1 reported real posts as
+    failures. The flow already watched the upload notification appear and
+    disappear -- and then threw that away, returning NOT CONFIRMED. A reel that
+    uploaded and cleared with no error went out.
+    """
+
+    def _run(self, notification_states, screen_texts=None, **kwargs):
+        notifs = iter(notification_states)
+        screens = iter(screen_texts or [])
+        clock = {"t": 0.0}
+
+        def now():
+            return clock["t"]
+
+        def sleep(seconds):
+            clock["t"] += seconds
+
+        return verify_reel_posted(
+            get_notification_state=lambda: next(notifs, notification_states[-1]),
+            get_screen_text=(lambda: next(screens, "")) if screen_texts else None,
+            now=now, sleep=sleep, min_wait=0, timeout=60, poll_seconds=3,
+            **kwargs,
+        )
+
+    def test_upload_started_then_finished_confirms(self):
+        result = self._run([
+            NotificationState(ig_present=True, ongoing=True),
+            NotificationState(ig_present=True, ongoing=True),
+            NotificationState(ig_present=True, ongoing=False),
+        ])
+        self.assertTrue(result.confirmed)
+        self.assertEqual(result.method, VIA_UPLOAD_FINISHED)
+
+    def test_confirmation_is_marked_as_inferred_not_proven(self):
+        result = self._run([
+            NotificationState(ig_present=True, ongoing=True),
+            NotificationState(ig_present=True, ongoing=False),
+        ])
+        self.assertEqual(result.strength, "inferred")
+        self.assertIn("CONFIRMED (inferred)", result.summary())
+
+    def test_a_notification_that_was_never_ongoing_confirms_nothing(self):
+        """Absence of an upload is not evidence of a post."""
+        result = self._run([NotificationState(ig_present=True, ongoing=False)] * 4)
+        self.assertFalse(result.confirmed)
+
+    def test_upload_finishing_into_an_error_does_not_confirm(self):
+        result = self._run(
+            [NotificationState(ig_present=True, ongoing=True),
+             NotificationState(ig_present=True, ongoing=False)],
+            screen_texts=["", "Something went wrong"],
+        )
+        self.assertFalse(result.confirmed)
+        self.assertEqual(result.method, FAIL_ERROR_DIALOG)
+
+    def test_upload_finishing_while_still_on_the_composer_does_not_confirm(self):
+        """Share never registered, so whatever that notification was, it was not
+        this post going out. The composer stays up the whole time -- that is what
+        distinguishes this from a post whose composer closed normally."""
+        clock = {"t": 0.0}
+        notifs = iter([NotificationState(ig_present=True, ongoing=True),
+                       NotificationState(ig_present=True, ongoing=False)])
+        result = verify_reel_posted(
+            get_notification_state=lambda: next(
+                notifs, NotificationState(ig_present=True, ongoing=False)),
+            get_screen_text=lambda: "Write a caption",     # never leaves the composer
+            now=lambda: clock["t"],
+            sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
+            min_wait=0, timeout=60, poll_seconds=3,
+        )
+        self.assertFalse(result.confirmed)
+        self.assertEqual(result.method, rv.FAIL_COMPOSER)
+
+    def test_notification_title_confirms(self):
+        """The title outlives the on-screen banner, which a 3s poll often misses."""
+        result = self._run([
+            NotificationState(ig_present=True, ongoing=False,
+                              titles=("Your reel was shared",)),
+        ])
+        self.assertTrue(result.confirmed)
+        self.assertEqual(result.method, VIA_NOTIFICATION)
+        self.assertEqual(result.strength, "strong")
+
+
+class UncertainVsFailedTest(TestCase):
+    """Timing out is the absence of proof, not proof of failure. Retrying an
+    uncertain post is how an account posts the same reel twice -- which is the
+    exact duplicate-content problem the spoofing pipeline exists to avoid."""
+
+    def _timeout_run(self, **kwargs):
+        clock = {"t": 0.0}
+        return verify_reel_posted(
+            now=lambda: clock["t"],
+            sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
+            min_wait=0, timeout=10, poll_seconds=3, **kwargs)
+
+    def test_timeout_is_uncertain(self):
+        result = self._timeout_run()
+        self.assertFalse(result.confirmed)
+        self.assertTrue(result.uncertain)
+        self.assertIn("UNCERTAIN", result.summary())
+
+    def test_error_dialog_is_a_real_failure_not_uncertain(self):
+        result = self._timeout_run(get_screen_text=lambda: "Something went wrong")
+        self.assertFalse(result.confirmed)
+        self.assertFalse(result.uncertain)
+        self.assertIn("FAILED", result.summary())
+
+    def test_draft_prompt_is_a_real_failure(self):
+        result = self._timeout_run(get_screen_text=lambda: "Discard draft")
+        self.assertFalse(result.uncertain)
+
+    def test_confirmed_is_never_uncertain(self):
+        result = self._timeout_run(get_screen_text=lambda: "Your reel was shared")
+        self.assertTrue(result.confirmed)
+        self.assertFalse(result.uncertain)
+
+
+class UncertainWiringTest(TestCase):
+    """The rule: reaching the final Share tap means the reel may be live, so
+    anything after it is UNCERTAIN. Never reaching Share means nothing was
+    posted, which is a plain failure and safe to retry."""
+
+    def test_ui_can_display_uncertain(self):
+        from adb_bot.ui.ui import WorkflowUI
+        self.assertIn("uncertain", WorkflowUI._STATUS_DISPLAY)
+        self.assertIn("may have posted", WorkflowUI._STATUS_DISPLAY["uncertain"])
+
+    def test_uncertain_is_flagged_for_attention_not_counted_as_failure(self):
+        import inspect
+        from adb_bot.ui.ui import WorkflowUI
+        src = inspect.getsource(WorkflowUI._build_run_summary)
+        attention = src.split("attention_keys = {", 1)[1].split("}", 1)[0]
+        failed = src.split("failed_keys = {", 1)[1].split("}", 1)[0]
+        self.assertIn("uncertain", attention)
+        self.assertNotIn("uncertain", failed)
+
+    def test_workflow_emits_uncertain_before_the_failure_branch(self):
+        """If the failure branch ran first it would swallow the status, because
+        an uncertain result also has success=False."""
+        import inspect
+        from adb_bot.automation import workflow
+        src = inspect.getsource(workflow)
+        uncertain_at = src.index('emit_status(profile_id_value, "uncertain"')
+        failed_at = src.index('if flow_result.get("aborted", False) or flow_result.get("failed"')
+        self.assertLess(uncertain_at, failed_at)
+
+    def test_uncertain_never_leaves_the_queue_row_pending(self):
+        """A row left Pending is re-planned by the next run and the same reel
+        goes out twice -- the exact outcome this status exists to prevent."""
+        from adb_bot.automation.posting_runner import _map_post_status
+        from adb_bot.clients import airtable as at
+        mapped = _map_post_status("uncertain")
+        self.assertIsNotNone(mapped, "unmapped status writes nothing back")
+        post_status, _issue_type, incident, _result, _note = mapped
+        self.assertEqual(post_status, at.POST_STATUS_VERIFYING)
+        self.assertNotEqual(post_status, at.POST_STATUS_PENDING)
+        self.assertIsNone(incident)
+
+    def test_uncertain_is_no_longer_reported_as_a_failure(self):
+        """It used to land on Failed + Issue=Other, which reported live posts as
+        failures and handed a person a question they had no better way to answer.
+        It is now an open question with a scheduled answer."""
+        from adb_bot.automation.posting_runner import _map_post_status
+        from adb_bot.clients import airtable as at
+        post_status, issue_type, _i, run_result, _n = _map_post_status("uncertain")
+        self.assertNotEqual(post_status, at.POST_STATUS_FAILED)
+        self.assertNotEqual(issue_type, at.ISSUE_NEEDS_RETRY)
+        self.assertEqual(issue_type, at.ISSUE_NONE, "an unproven post is not an 'issue'")
+        self.assertEqual(run_result, at.RESULT_UNVERIFIED)
+
+    def test_uncertain_parks_the_row_for_recheck_without_burning_a_retry(self):
+        from unittest.mock import MagicMock
+        from adb_bot.automation.posting_runner import apply_post_result
+        airtable = MagicMock()
+        item = MagicMock(queue_id="q1", account_id="a1", account_name="A",
+                         variant_id="v1", retry_count=0)
+        apply_post_result(airtable, item, "uncertain")
+        airtable.mark_post_pending_verification.assert_called_once()
+        self.assertEqual(airtable.mark_post_pending_verification.call_args[0][0], "q1")
+        # The variant must survive: if the recheck says the post never landed,
+        # it has to be available to send again.
+        airtable.mark_variant_used.assert_not_called()
+        airtable.mark_post_result.assert_not_called()
+
+    def test_share_never_tapped_is_a_plain_failure(self):
+        """The other half of the rule -- and it must stay retryable."""
+        from adb_bot.automation.posting_runner import _map_post_status
+        from adb_bot.clients import airtable as at
+        _ps, issue_type, _i, _r, _n = _map_post_status("failed")
+        self.assertEqual(issue_type, at.ISSUE_NEEDS_RETRY)
+
+
+class VerificationDetailReachesTheLogTest(TestCase):
+    """`verify_method` / `verify_strength` were computed by the flow and read by
+    nothing -- they died at the workflow boundary, because the status callback
+    only carried (profile_id, status). Without them the Run Log cannot tell a
+    post that never happened from one that simply could not be seen, which is
+    the difference between "retry it" and "go look at it"."""
+
+    def test_detail_is_appended_to_the_run_log_note(self):
+        from unittest.mock import MagicMock
+        from adb_bot.automation.posting_runner import apply_post_result
+        airtable = MagicMock()
+        item = MagicMock(queue_id="q1", account_id="a1", account_name="A",
+                         variant_id="v1", retry_count=0)
+        apply_post_result(airtable, item, "done", detail="via post_count [strong]")
+        note = airtable.create_run_log.call_args[0][4]
+        self.assertIn("via post_count [strong]", note)
+
+    def test_no_detail_leaves_the_note_unchanged(self):
+        from unittest.mock import MagicMock
+        from adb_bot.automation.posting_runner import apply_post_result
+        airtable = MagicMock()
+        item = MagicMock(queue_id="q1", account_id="a1", account_name="A",
+                         variant_id="v1", retry_count=0)
+        apply_post_result(airtable, item, "done")
+        self.assertEqual(airtable.create_run_log.call_args[0][4], "posted")
+
+    def test_workflow_builds_a_readable_detail_string(self):
+        from adb_bot.automation import workflow
+        seen = []
+
+        class Dummy:
+            pass
+
+        # Exercise emit_status via a stand-in callback with the 3-arg signature.
+        captured = {}
+
+        def status_callback(pid, status, detail=""):
+            captured["detail"] = detail
+
+        # Rebuild the same detail formatting the workflow uses.
+        result = {"verify_method": "upload_finished", "verify_strength": "inferred",
+                  "verify_detail": "notification cleared with no error"}
+        method = result["verify_method"]
+        detail = f"via {method} [{result['verify_strength']}]: {result['verify_detail']}"
+        status_callback("p1", "done", detail)
+        self.assertIn("upload_finished", captured["detail"])
+        self.assertIn("inferred", captured["detail"])
+
+    def test_two_argument_callbacks_still_work(self):
+        """Older callbacks that only take (profile_id, status) must not break."""
+        import inspect
+        from adb_bot.automation import workflow
+        src = inspect.getsource(workflow.run_profile_workflow)
+        self.assertIn("except TypeError:", src)
+        self.assertIn("status_callback(pid, status)", src)

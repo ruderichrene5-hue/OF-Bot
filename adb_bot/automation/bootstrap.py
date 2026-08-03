@@ -18,6 +18,7 @@ from adb_bot.clients.multilogin import (
 from adb_bot.automation.flows import (
     InstagramLikeFeedFlow,
     InstagramNotificationsFlow,
+    InstagramReelIntentProbeFlow,
     InstagramReelUploadFlow,
     InstagramReelUploadU2Flow,
     InstagramScrollFlow,
@@ -27,6 +28,7 @@ from adb_bot.automation.flows import (
     InstagramUpdateProfilePictureU2Flow,
     InstagramWarmUpDay1Flow,
     PushMediaTestFlow,
+    ReelPostCountProbeFlow,
 )
 
 
@@ -46,6 +48,12 @@ def build_automation() -> AutomationRunner:
         InstagramUpdateProfilePictureU2Flow(),
         InstagramWarmUpDay1Flow(),
         PushMediaTestFlow(),
+        # Read-only. Used by the deferred recheck loop to resolve posts that
+        # could not be confirmed in-run; posts nothing itself.
+        ReelPostCountProbeFlow(),
+        # Diagnostic only -- never posts. Not referenced by lifecycle or the
+        # posting loop, so scheduled runs can't pick it up.
+        InstagramReelIntentProbeFlow(),
     ):
         automation.register_flow(flow)
     return automation

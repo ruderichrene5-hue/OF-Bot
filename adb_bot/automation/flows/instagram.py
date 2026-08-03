@@ -932,6 +932,26 @@ def _adb_resolve_story_media_path(logger=None) -> str | None:
     return None
 
 
+_VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
+_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+
+
+def _media_store_collection(remote_media_path: str) -> str:
+    """The MediaStore collection a pushed file lands in, from its extension.
+
+    Videos live in `external/video/media` and images in `external/images/media`.
+    Querying the generic `external/file` table for a video returned an empty
+    result on the MLX phones, which is half of why the index check never
+    confirmed anything.
+    """
+    suffix = Path(remote_media_path).suffix.lower()
+    if suffix in _VIDEO_SUFFIXES:
+        return "content://media/external/video/media"
+    if suffix in _IMAGE_SUFFIXES:
+        return "content://media/external/images/media"
+    return "content://media/external/file"
+
+
 def _adb_wait_for_media_store_index(target: str, remote_media_path: str, logger=None, max_attempts: int = 4, delay_seconds: float = 0.5) -> bool:
     """Best-effort poll for MediaStore to index a just-pushed file before the picker opens.
 
@@ -940,31 +960,43 @@ def _adb_wait_for_media_store_index(target: str, remote_media_path: str, logger=
     Android/OEM builds restrict `content query`, so a failure here is not fatal —
     callers should proceed with the existing fixed-sleep behavior either way.
 
-    `max_attempts` is deliberately small: on the MLX cloud phones `content query`
-    returns nothing at all, so every attempt is ~2 s of pure waiting before the
-    flow proceeds anyway (the picker has always had the file regardless). Keep it
-    cheap rather than thorough.
+    This used to query `external/file` with `_data='<path>'` and never once
+    succeeded — every push spent ~9 s exhausting its attempts and then proceeded
+    unconfirmed. Two reasons, both fixed here and both verified on a real MLX
+    phone: `_data` is the raw filesystem path, deprecated and unqueryable under
+    scoped storage on Android 10+; and a video is not in the generic `file`
+    table. `_display_name='<basename>'` against the right collection resolves
+    immediately (it returned `content://media/external/video/media/110`).
+
+    `_data` is still tried as a fallback for older builds where it does work.
     """
-    quoted_uri = shlex.quote(f"content://media/external/file")
-    where_clause = f"_data='{remote_media_path}'"
-    query_command = [
-        "adb",
-        "-s",
-        target,
-        "shell",
-        "content",
-        "query",
-        "--uri",
-        quoted_uri,
-        "--where",
-        shlex.quote(where_clause),
-    ]
+    collection = _media_store_collection(remote_media_path)
+    basename = Path(remote_media_path).name
+
+    def query(where_clause: str) -> bool:
+        command = [
+            "adb", "-s", target, "shell",
+            "content", "query",
+            "--uri", shlex.quote(collection),
+            "--projection", "_id",
+            # adb joins the post-`shell` arguments without escaping them, so this
+            # is quoted for the *device* shell that ultimately parses it.
+            "--where", shlex.quote(where_clause),
+        ]
+        result = _run_hidden(command, shell=False, check=False, capture_output=True, text=True)
+        output = (result.stdout or "").strip()
+        return bool(output) and "no result" not in output.lower()
+
     for attempt in range(1, max_attempts + 1):
         try:
-            result = _run_hidden(query_command, shell=False, check=False, capture_output=True, text=True)
-            output = (result.stdout or "").strip()
-            if output and "no result" not in output.lower():
-                _emit(logger, "info", "MediaStore indexed %s for %s after %s attempt(s)", remote_media_path, target, attempt)
+            if query(f"_display_name='{basename}'"):
+                _emit(logger, "info", "MediaStore indexed %s for %s after %s attempt(s)",
+                      remote_media_path, target, attempt)
+                return True
+            # Legacy builds where the deprecated path column still answers.
+            if attempt == max_attempts and query(f"_data='{remote_media_path}'"):
+                _emit(logger, "info", "MediaStore indexed %s for %s via _data (legacy)",
+                      remote_media_path, target)
                 return True
         except Exception as exc:
             _emit(logger, "info", "MediaStore index check failed for %s: %s", target, exc)
@@ -3562,21 +3594,11 @@ class InstagramReelUploadFlow(InstagramStoryUploadFlow):
             emit("warning", "adb push failed for profile %s on target %s", profile.id, target)
             return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
         emit("info", "adb push succeeded for profile %s on target %s", profile.id, target)
-
-        max_push_attempts = 3
-        attempt = 1
-        while attempt <= max_push_attempts:
-            remote_exists = _adb_verify_remote_media_exists(target, remote_media_path, logger=log)
-            if remote_exists and _adb_verify_remote_media_matches_local(target, media_path, remote_media_path, logger=log):
-                emit("info", "Verified pushed reel media content on device for %s", target)
-                break
-            if attempt >= max_push_attempts:
-                emit("warning", "Failed to verify pushed reel media on device after %s attempts for %s", max_push_attempts, target)
-                return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
-            emit("info", "Remote media verification failed or content mismatch; retrying push (%s/%s) for %s", attempt + 1, max_push_attempts, target)
-            if not _adb_push_media_to_device(target, media_path, remote_media_path, logger=log):
-                emit("warning", "adb push failed on retry %s for %s", attempt + 1, target)
-            attempt += 1
+        # Push + media scan only: the on-device file matched the local one on
+        # every run we checked, so the ls + sha256sum verification (and its
+        # 3x re-push loop) was removed. The trade-off is that a push which
+        # reports success over a half-dead adb tunnel is no longer caught here
+        # -- it surfaces later, as the picker not finding the clip.
 
         # Pushing a file to the phone is not the same as posting it: the media is
         # only marked used once the reel actually goes out, so a failed run

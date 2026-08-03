@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from adb_bot.core.models import Profile
+from adb_bot.automation import post_ledger
 
 from . import instagram as instagram_module
 from . import reel_verify
@@ -21,8 +22,6 @@ _u2_click = instagram_module._u2_click
 _sleep_after_instagram_launch = instagram_module._sleep_after_instagram_launch
 _adb_resolve_story_media_path = instagram_module._adb_resolve_story_media_path
 _adb_push_media_to_device = instagram_module._adb_push_media_to_device
-_adb_verify_remote_media_exists = instagram_module._adb_verify_remote_media_exists
-_adb_verify_remote_media_matches_local = instagram_module._adb_verify_remote_media_matches_local
 _adb_find_instagram_reel_create_center = instagram_module._adb_find_instagram_reel_create_center
 _adb_find_instagram_start_new_video_center = instagram_module._adb_find_instagram_start_new_video_center
 _adb_wait_for_instagram_reel_composer = instagram_module._adb_wait_for_instagram_reel_composer
@@ -116,21 +115,11 @@ class InstagramReelUploadFlow:
             emit("warning", "adb push failed for profile %s on target %s", profile.id, target)
             return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
         emit("info", "adb push succeeded for profile %s on target %s", profile.id, target)
-
-        max_push_attempts = 3
-        attempt = 1
-        while attempt <= max_push_attempts:
-            remote_exists = _adb_verify_remote_media_exists(target, remote_media_path, logger=log)
-            if remote_exists and _adb_verify_remote_media_matches_local(target, media_path, remote_media_path, logger=log):
-                emit("info", "Verified pushed reel media content on device for %s", target)
-                break
-            if attempt >= max_push_attempts:
-                emit("warning", "Failed to verify pushed reel media on device after %s attempts for %s", max_push_attempts, target)
-                return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
-            emit("info", "Remote media verification failed or content mismatch; retrying push (%s/%s) for %s", attempt + 1, max_push_attempts, target)
-            if not _adb_push_media_to_device(target, media_path, remote_media_path, logger=log):
-                emit("warning", "adb push failed on retry %s for %s", attempt + 1, target)
-            attempt += 1
+        # Push + media scan only: the on-device file matched the local one on
+        # every run we checked, so the ls + sha256sum verification (and its
+        # 3x re-push loop) was removed. The trade-off is that a push which
+        # reports success over a half-dead adb tunnel is no longer caught here
+        # -- it surfaces later, as the picker not finding the clip.
 
         # NOTE: the media is deliberately NOT marked used here. Pushing a file to
         # the phone is not the same as posting it -- if the flow fails later the
@@ -616,7 +605,7 @@ class InstagramReelUploadU2Flow:
     """uiautomator2 version of the reel-upload flow, for side-by-side testing
     against InstagramReelUploadFlow (dump + OCR).
 
-    The media resolve/push/verify half is byte-for-byte the same ADB logic --
+    The media resolve/push half is byte-for-byte the same ADB logic --
     it never touched the UI tree, so there's nothing to improve there. Only the
     on-screen half changes: each control is selected from the live view tree by
     text / content-desc / class (with implicit waits) instead of dumping XML and
@@ -751,6 +740,24 @@ class InstagramReelUploadU2Flow:
         else:
             selected_media = media_source
 
+        # Have we already sent this exact clip to this account? The ledger is
+        # written the instant Share is tapped, so it answers even when the
+        # previous run crashed mid-verification or never reached Airtable. This
+        # is the guard that makes an unproven post safe to leave unproven --
+        # without it, every "we couldn't tell" eventually becomes a second post.
+        ledger = post_ledger.PostLedger()
+        media_hash = post_ledger.media_fingerprint(media_path)
+        prior = ledger.lookup(str(profile.id), media_hash)
+        if prior is not None and prior.blocks_repost():
+            emit("warning",
+                 "Refusing to post %s to profile %s again -- Share was already tapped for this "
+                 "clip %.0f min ago (%s). Not a failure: the earlier post is live or still "
+                 "being verified.",
+                 Path(media_path).name, profile.id, prior.age_seconds / 60.0, prior.status)
+            return {"profile_id": profile.id, "target": target, "aborted": False,
+                    "success": False, "uncertain": False, "already_shared": True,
+                    "verify_method": "ledger", "verify_detail": f"already shared ({prior.status})"}
+
         remote_media_path = self._build_remote_media_path(media_path)
         emit("info", "Preparing to push reel media for profile %s: %s -> %s", profile.id, media_path, remote_media_path)
         mark_step()
@@ -758,21 +765,11 @@ class InstagramReelUploadU2Flow:
             emit("warning", "adb push failed for profile %s on target %s", profile.id, target)
             return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
         emit("info", "adb push succeeded for profile %s on target %s", profile.id, target)
-
-        max_push_attempts = 3
-        attempt = 1
-        while attempt <= max_push_attempts:
-            if _adb_verify_remote_media_exists(target, remote_media_path, logger=log) and \
-                    _adb_verify_remote_media_matches_local(target, media_path, remote_media_path, logger=log):
-                emit("info", "Verified pushed reel media content on device for %s", target)
-                break
-            if attempt >= max_push_attempts:
-                emit("warning", "Failed to verify pushed reel media on device after %s attempts for %s", max_push_attempts, target)
-                return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
-            emit("info", "Remote media verification failed; retrying push (%s/%s) for %s", attempt + 1, max_push_attempts, target)
-            if not _adb_push_media_to_device(target, media_path, remote_media_path, logger=log):
-                emit("warning", "adb push failed on retry %s for %s", attempt + 1, target)
-            attempt += 1
+        # Push + media scan only: the on-device file matched the local one on
+        # every run we checked, so the ls + sha256sum verification (and its
+        # 3x re-push loop) was removed. The trade-off is that a push which
+        # reports success over a half-dead adb tunnel is no longer caught here
+        # -- it surfaces later, as the picker not finding the clip.
 
         # NOTE: the media is deliberately NOT marked used here. Pushing a file to
         # the phone is not the same as posting it -- if the flow fails later the
@@ -920,6 +917,17 @@ class InstagramReelUploadU2Flow:
         reel_posted = False
         if self._tap_share_u2(d, target, emit, log):
             emit("info", "Tapped Share for %s", target)
+            # Write the ledger entry NOW -- before the settle, before
+            # verification, before anything that can crash or hang. From this
+            # instant a reel may exist on the account, and that fact has to
+            # outlive this process. Everything after here only refines the
+            # record; nothing after here is allowed to be the thing that
+            # creates it.
+            ledger.record_share(str(profile.id), media_path,
+                                caption=getattr(profile, "caption", "") or "",
+                                queue_id=getattr(profile, "queue_id", "") or "",
+                                media_hash=media_hash,
+                                baseline_count=baseline_count)
             # Share registered once the composer is gone (we're back on a feed
             # tab). Verification below does the real confirmation work.
             waits.settle(8, ready=waits.u2_ready(d, {"resourceId": "com.instagram.android:id/feed_tab"}),
@@ -929,40 +937,97 @@ class InstagramReelUploadU2Flow:
             emit("warning", "Share button was not detected after reel compose for %s", target)
 
         if not reel_posted:
-            emit("warning", "Instagram reel upload (u2) did not complete successfully for %s", target)
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+            # Share was never tapped, so nothing can have gone out. This is the
+            # one unambiguous failure: definitely safe to retry.
+            emit("warning", "Instagram reel upload (u2) did not complete successfully for %s "
+                            "(the Share button was never tapped -- nothing was posted)", target)
+            return {"profile_id": profile.id, "target": target, "aborted": False,
+                    "success": False, "uncertain": False}
 
         # --- Step 5: confirm the post ----------------------------------------
-        # Tap the IG Home (house) icon -- NOT the Android home key -- so we stay
-        # inside Instagram, then wait for the post-confirmation banner
-        # ("Posted" / "High five" / "Thumbs up" ...) and alert on it. We do NOT
-        # close Instagram afterwards.
-        # Posting is a common moment for Instagram to throw up a prompt (the
-        # "Rate Instagram" dialog turns up here). Clear it before verification so
-        # it can't block the feed/profile navigation the post-count check needs.
-        self._dismiss_popups_u2(d, logger=log, max_rounds=2)
-        self._tap_ig_home_icon_u2(d, target, emit, log)
-        # Success is only declared once the phone proves the post landed. The
-        # banner alone is unreliable (it doesn't always show), so verification
-        # combines several signals -- strongest first, the profile's post count
-        # going up -- and never gives up before the 3-minute floor.
-        verdict = reel_verify.verify_reel_posted(
-            baseline_count=baseline_count,
-            get_post_count=self._profile_post_count_probe_u2(d, target, emit, log),
-            get_screen_text=self._screen_text_probe_u2(d, target, logger=log),
-            get_notification_state=self._notification_probe(target, adb_client, logger=log),
-            should_stop=should_stop,
-            emit=emit,
-        )
+        # Look at the screen before touching it. Share has just landed and the
+        # composer has closed, which is the exact moment Instagram shows its
+        # confirmation -- and it is the last moment we can be sure of seeing it,
+        # because both of the next two steps destroy it: dismissing popups can
+        # tap it away, and the home tap re-renders the feed under it. If the
+        # phone is already saying the reel went out, that is the answer; there is
+        # nothing a post counter could add.
+        verdict = None
+        try:
+            early_text = self._screen_text_probe_u2(d, target, logger=log)()
+            if reel_verify.classify_post_screen(early_text) == reel_verify.STATE_CONFIRMED:
+                verdict = reel_verify.VerifyResult(
+                    True, reel_verify.VIA_BANNER,
+                    "confirmation seen on the feed immediately after Share",
+                )
+        except Exception as exc:
+            _emit(log, "info", "u2: early confirmation read failed for %s (%s); "
+                               "falling through to full verification", target, exc)
+
+        if verdict is None:
+            # Tap the IG Home (house) icon -- NOT the Android home key -- so we
+            # stay inside Instagram. We do NOT close Instagram afterwards.
+            # Posting is a common moment for Instagram to throw up a prompt (the
+            # "Rate Instagram" dialog turns up here). Clear it before
+            # verification so it can't block the feed/profile navigation the
+            # post-count check needs.
+            self._dismiss_popups_u2(d, logger=log, max_rounds=2)
+            self._tap_ig_home_icon_u2(d, target, emit, log)
+            # Success is only declared once the phone proves the post landed.
+            # The banner is checked first each pass because it is perishable;
+            # the post count is what catches a silent success. Never gives up
+            # before the 3-minute floor.
+            # Fast budget: ~45s, no 3-minute failure floor. An unproven post is
+            # no longer reported as Failed -- it goes to the recheck queue -- so
+            # there is nothing to protect against by waiting longer here, and a
+            # profile must not sit on a phone for five minutes per post.
+            verdict = reel_verify.verify_reel_posted(
+                baseline_count=baseline_count,
+                get_post_count=self._profile_post_count_probe_u2(d, target, emit, log),
+                get_screen_text=self._screen_text_probe_u2(d, target, logger=log),
+                get_notification_state=self._notification_probe(target, adb_client, logger=log),
+                min_wait=reel_verify.FAST_MIN_WAIT_SECONDS,
+                timeout=reel_verify.FAST_TIMEOUT_SECONDS,
+                should_stop=should_stop,
+                emit=emit,
+            )
         post_confirmed = verdict.confirmed
         mark_step()
+
+        # Fold the verdict back into the ledger. Only a *conclusive* negative
+        # clears the clip for another send; a timeout leaves it blocked, which
+        # is the safe direction to be wrong in.
+        if post_confirmed:
+            ledger.resolve(str(profile.id), media_hash,
+                           post_ledger.STATUS_CONFIRMED, verdict.method)
+        elif not verdict.uncertain:
+            ledger.resolve(str(profile.id), media_hash,
+                           post_ledger.STATUS_DISPROVED, verdict.method)
 
         if callable(should_stop) and should_stop():
             return {"profile_id": profile.id, "target": target, "aborted": True}
 
+        # Share WAS tapped, so the reel may well be live. Whether we could prove
+        # it decides the outcome:
+        #   confirmed                  -> success
+        #   conclusive negative        -> failed (error dialog / draft / composer)
+        #   nothing conclusive         -> UNCERTAIN, never "failed"
+        # Retrying an uncertain post is how an account posts the same reel twice.
+        uncertain = (not post_confirmed) and verdict.uncertain
+
         if post_confirmed:
             commit_media_used()
             emit("info", "Instagram reel upload (u2) for %s: %s", target, verdict.summary())
+        elif uncertain:
+            # Not a failure and not a success -- an open question, handed to the
+            # deferred recheck rather than guessed at now. The clip stays in the
+            # queue but the ledger blocks a blind re-send until the recheck says
+            # otherwise.
+            keep_media_for_retry("outcome uncertain -- queued for recheck")
+            emit("warning", "Instagram reel upload (u2) for %s: %s -- Share was tapped, so the "
+                            "reel may well be live. Handing off to the deferred recheck; the "
+                            "ledger blocks a re-post until it resolves. Leaving Instagram open.",
+                 target, verdict.summary())
         else:
             keep_media_for_retry("post not confirmed")
             emit("warning", "Instagram reel upload (u2) for %s: %s -- leaving Instagram open "
@@ -972,9 +1037,15 @@ class InstagramReelUploadU2Flow:
             "target": target,
             "aborted": False,
             "success": post_confirmed,
+            "uncertain": uncertain,
             "post_confirmed": post_confirmed,
             "verify_method": verdict.method,
+            "verify_strength": verdict.strength,
             "verify_detail": verdict.detail,
+            # Carried out so the recheck pass can close the ledger entry for
+            # this exact clip without re-hashing the file.
+            "media_hash": media_hash,
+            "media_path": media_path,
         }
 
     def build_launch_commands(self, target: str) -> list[str]:
@@ -1389,7 +1460,16 @@ class InstagramReelUploadU2Flow:
         if not self._select_reel_mode_u2(d, target, emit, logger=logger):
             _emit(logger, "warning", "u2: could not confirm REEL mode for %s; not selecting media to avoid posting a non-reel", target)
             return False
-        time.sleep(1.5)
+        # Wait for a gallery cell rather than a flat 1.5s -- the very selectors
+        # the click below uses are what "the gallery has repainted" means, so a
+        # responsive phone proceeds as soon as a thumbnail is there.
+        waits.settle(1.5, ready=waits.u2_ready(
+            d,
+            {"descriptionStartsWith": "Video"},
+            {"descriptionStartsWith": "Photo"},
+            {"descriptionContains": "Video"},
+            {"descriptionContains": "Photo"},
+        ), logger=logger, what="reel gallery thumbnails")
 
         # Pick the first gallery thumbnail. Reels are video, so prefer a video
         # cell; gallery cells carry a "Video, ..." / "Photo, ..." content-desc.
@@ -1438,14 +1518,18 @@ class InstagramReelUploadU2Flow:
                 d.press("back")
             except Exception as exc:
                 _emit(logger, "warning", "u2: Back press failed during recovery for %s: %s", target, exc)
-            time.sleep(1.2)
+            # The condition was already checked on the next line -- poll it
+            # instead of paying the whole sleep first. Ceiling unchanged.
+            waits.settle(1.2, ready=lambda: _current_pkg() == self.IG_PACKAGE,
+                         logger=logger, what="Instagram back in the foreground")
             if _current_pkg() == self.IG_PACKAGE:
                 _emit(logger, "info", "u2: back in Instagram after %s Back press(es) for %s", attempt, target)
                 return True
         try:
             _emit(logger, "info", "u2: bringing Instagram to the foreground (no restart) for %s", target)
             d.app_start(self.IG_PACKAGE, stop=False)
-            time.sleep(2)
+            waits.settle(2, ready=lambda: _current_pkg() == self.IG_PACKAGE,
+                         logger=logger, what="Instagram foregrounded")
         except Exception as exc:
             _emit(logger, "warning", "u2: app_start recovery failed for %s: %s", target, exc)
         ok = _current_pkg() == self.IG_PACKAGE
@@ -1505,7 +1589,8 @@ class InstagramReelUploadU2Flow:
             logger=logger,
             purpose="editing-app pop-up dismiss control",
         ):
-            time.sleep(1.2)
+            waits.settle(1.2, ready=lambda: self._next_visible_u2(d),
+                         logger=logger, what="Next button back after dismissing the pop-up")
             if self._next_visible_u2(d):
                 _emit(logger, "info", "u2: Next reappeared after tapping a dismiss control for %s", target)
                 return
@@ -1517,7 +1602,8 @@ class InstagramReelUploadU2Flow:
             d.press("back")
         except Exception as exc:
             _emit(logger, "warning", "u2: Back press failed for %s: %s", target, exc)
-        time.sleep(1.2)
+        waits.settle(1.2, ready=lambda: self._next_visible_u2(d),
+                     logger=logger, what="Next button back after dismissing the pop-up")
         if self._next_visible_u2(d):
             _emit(logger, "info", "u2: Next reappeared after Back for %s", target)
             return
@@ -1528,7 +1614,8 @@ class InstagramReelUploadU2Flow:
             d.click(0.5, 0.06)
         except Exception as exc:
             _emit(logger, "warning", "u2: tap-outside failed for %s: %s", target, exc)
-        time.sleep(1.2)
+        waits.settle(1.2, ready=lambda: self._next_visible_u2(d),
+                     logger=logger, what="Next button back after tapping outside")
 
         if self._next_visible_u2(d):
             _emit(logger, "info", "u2: Next is visible after dismissing the pop-up for %s", target)
@@ -1778,15 +1865,19 @@ class InstagramReelUploadU2Flow:
             width, height = (1080, 2340)
         mid_x = int(width * 0.5)
 
-        # Feed: a short scroll down and back up.
+        # Feed: one pull-down. This used to scroll away and then scroll back,
+        # but the second gesture only undid the first -- what actually forces the
+        # count to update is leaving for the feed and returning to the profile
+        # below. One pull at the top of the feed reloads it and reads as ordinary
+        # browsing, at half the gesture cost. This probe runs every ~25s for up
+        # to three minutes, so the saving repeats.
         self._tap_ig_home_icon_u2(d, target, lambda *a, **k: None, logger)
         waits.settle(1.0)
-        for start, end in (((0.72, 0.35)), ((0.35, 0.72))):
-            try:
-                d.swipe(mid_x, int(height * start), mid_x, int(height * end), 0.35)
-            except Exception:
-                break
+        try:
+            d.swipe(mid_x, int(height * 0.35), mid_x, int(height * 0.72), 0.35)
             waits.settle(0.6)
+        except Exception:
+            pass
 
         # Back to the profile -- this is the re-render that updates the count.
         if not self._open_profile_tab_u2(d, target, logger=logger):
@@ -1802,18 +1893,30 @@ class InstagramReelUploadU2Flow:
             pass
         return True
 
-    def _profile_post_count_probe_u2(self, d, target, emit, logger=None, every_seconds: float = 25.0):
+    def _profile_post_count_probe_u2(self, d, target, emit, logger=None, every_seconds: float = 25.0,
+                                     initial_delay: float | None = None):
         """A throttled post-count probe. Each check browses feed -> profile and
         pulls to refresh (see :meth:`_browse_and_refresh_profile_u2`), which is
         too expensive to do on every poll -- so it only really looks every
-        `every_seconds` and returns None in between (None = 'no opinion')."""
-        state = {"last": 0.0}
+        `every_seconds` and returns None in between (None = 'no opinion').
+
+        It also holds off for `initial_delay` (default: one full interval) before
+        the *first* check. That delay is the point, not a detail: the seconds
+        right after Share are when the confirmation banner is on screen, and
+        this probe navigates away from the feed to read the profile. It used to
+        start from `last = 0.0`, so the very first poll cleared the throttle
+        instantly and walked off the feed before the banner had ever been read.
+        Letting the cheap screen probe own that window costs nothing -- the
+        counter is cached on Instagram's side and rarely moves that fast anyway.
+        """
+        wait_first = every_seconds if initial_delay is None else initial_delay
+        state = {"next": time.time() + wait_first}
 
         def probe():
             now = time.time()
-            if now - state["last"] < every_seconds:
+            if now < state["next"]:
                 return None
-            state["last"] = now
+            state["next"] = now + every_seconds
             if not self._browse_and_refresh_profile_u2(d, target, logger=logger):
                 return None
             return self._read_post_count_u2(d, target, logger=logger)
@@ -1923,3 +2026,95 @@ class InstagramReelUploadU2Flow:
                 _emit(logger, "info", "u2: %s did not appear within %.0fs", purpose, wait_seconds)
                 return None
             time.sleep(0.4)
+
+
+class ReelPostCountProbeFlow(InstagramReelUploadU2Flow):
+    """Read an account's post count. Posts nothing, uploads nothing, taps no
+    Share button.
+
+    This is the device half of the deferred recheck: fifteen minutes after a
+    post we could not confirm, something has to go and look. It exists as a flow
+    rather than as ad-hoc ADB calls so it goes through the same launch ->
+    connect -> shut down lifecycle as everything else (profile locking, MLX
+    launch, readiness retries) instead of reimplementing that badly.
+
+    Subclasses the upload flow purely to reuse its profile-navigation helpers --
+    `_browse_and_refresh_profile_u2` in particular, which knows that sitting on
+    the profile does not refresh the counter. `run` is fully overridden; nothing
+    of the upload path executes.
+    """
+
+    name = "reel_post_count_probe"
+
+    def get_progress_total_steps(self, target: str) -> int:
+        return 2
+
+    def run(
+        self,
+        profile: Profile,
+        adb_client=None,
+        logger=None,
+        should_stop=None,
+        status_callback=None,
+        manual_continue_event=None,
+        manual_continue_callback=None,
+    ):
+        if not adb_client:
+            raise ValueError("adb_client is required")
+        if not profile.target:
+            raise ValueError("Profile target is missing")
+
+        log = logger
+        target = profile.target
+
+        def emit(level: str, message: str, *args) -> None:
+            _emit(log, level, message, *args)
+
+        def mark_step() -> None:
+            if hasattr(adb_client, "mark_progress_step"):
+                adb_client.mark_progress_step()
+
+        if u2 is None:
+            emit("warning", "uiautomator2 is not importable; cannot probe the post count for %s", profile.id)
+            return {"profile_id": profile.id, "target": target, "aborted": False,
+                    "success": False, "post_count": None}
+
+        if callable(should_stop) and should_stop():
+            return {"profile_id": profile.id, "target": target, "aborted": True}
+
+        try:
+            d = u2.connect(target)
+            d.implicitly_wait(self.SELECTOR_WAIT_SECONDS)
+        except Exception as exc:
+            emit("warning", "uiautomator2 could not connect to %s: %s", target, exc)
+            return {"profile_id": profile.id, "target": target, "aborted": False,
+                    "success": False, "post_count": None}
+
+        waits.settle(
+            10,
+            ready=waits.u2_ready(
+                d,
+                {"resourceId": "com.instagram.android:id/feed_tab"},
+                {"resourceIdMatches": r"com\.instagram\.android:id/.*(tab_bar|profile_tab).*"},
+            ),
+            logger=log, what="Instagram UI loaded",
+        )
+        mark_step()
+
+        # Same browse-and-refresh as the in-run probe: leaving for the feed and
+        # coming back is what actually re-fetches the counter. Cheap here, since
+        # unlike the in-run path nothing is racing us.
+        self._browse_and_refresh_profile_u2(d, target, logger=log)
+        count = self._read_post_count_u2(d, target, logger=log)
+        mark_step()
+
+        emit("info", "Post-count probe for %s: %s", target,
+             f"{count.value} (exact={count.exact})" if count else "unreadable")
+        return {
+            "profile_id": profile.id,
+            "target": target,
+            "aborted": False,
+            "success": count is not None,
+            "post_count": count.value if count else None,
+            "post_count_exact": bool(count.exact) if count else False,
+        }
