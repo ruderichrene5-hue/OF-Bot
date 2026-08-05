@@ -63,13 +63,15 @@ class FakeQueueClient:
         return list(self._queue_rows)
 
     def create_posting_queue(self, scheduled_iso, variant_id, target_account_id=None,
-                             target_profile_id=None, name=None, caption_id=None):
+                             target_profile_id=None, name=None, caption_id=None,
+                             ig_handle=None, account_slot=None):
         if self._create_fails:
             return None
         self.created.append({
             "scheduled": scheduled_iso, "variant_id": variant_id,
             "account_id": target_account_id, "profile_id": target_profile_id,
             "name": name, "caption_id": caption_id,
+            "ig_handle": ig_handle, "account_slot": account_slot,
         })
         return f"recPQ{len(self.created)}"
 

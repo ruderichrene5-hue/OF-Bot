@@ -8,6 +8,7 @@ from adb_bot.core.models import Profile
 from adb_bot.automation import post_ledger
 
 from . import instagram as instagram_module
+from . import instagram_accounts
 from . import reel_verify
 from . import waits
 
@@ -718,6 +719,17 @@ class InstagramReelUploadU2Flow:
 
         emit("info", "Starting Instagram reel upload (u2) flow for profile %s", profile.id)
 
+        # Which Instagram account this run posts as. Empty on the ~115
+        # single-account phones, which post as whoever is signed in. On a
+        # two-account phone it names one of the two handles, and it also splits
+        # the post ledger: without it the phone's first account posting a clip
+        # would block the second from ever posting it, since both share one
+        # profile id.
+        ig_handle = instagram_accounts.normalize_handle(getattr(profile, "ig_handle", None))
+        if ig_handle:
+            emit("info", "Profile %s is a two-account phone; this post goes to %r",
+                 profile.id, ig_handle)
+
         # --- Media resolve + push (identical ADB logic to the dump/OCR flow) --
         # A per-run video (the Posting Queue's Spoof Variant) wins over the global
         # media setting/folder used for manual/warmup reel runs.
@@ -747,7 +759,7 @@ class InstagramReelUploadU2Flow:
         # without it, every "we couldn't tell" eventually becomes a second post.
         ledger = post_ledger.PostLedger()
         media_hash = post_ledger.media_fingerprint(media_path)
-        prior = ledger.lookup(str(profile.id), media_hash)
+        prior = ledger.lookup(str(profile.id), media_hash, ig_handle)
         if prior is not None and prior.blocks_repost():
             emit("warning",
                  "Refusing to post %s to profile %s again -- Share was already tapped for this "
@@ -844,6 +856,38 @@ class InstagramReelUploadU2Flow:
         if check_abort():
             return {"profile_id": profile.id, "target": target, "aborted": True}
 
+        # --- Step 0: be the right account -----------------------------------
+        # On a phone with two Instagram accounts, switch before anything else
+        # touches the app. It must happen here, ahead of the baseline post-count
+        # read: a baseline taken from the previous account would be compared
+        # against the new one's count afterwards and "prove" a post that never
+        # happened (or deny one that did).
+        #
+        # A failure here abandons the run. That is deliberate -- the fallback
+        # would be to post as whoever is signed in, which publishes a model's
+        # clip on the wrong account, and unlike a missed slot that cannot be
+        # undone. The row is left Pending so the retry pass can try again.
+        if ig_handle:
+            switched = instagram_accounts.ensure_account(
+                d, ig_handle,
+                settle=lambda seconds, what: waits.settle(seconds, logger=log, what=what),
+                logger=log,
+            )
+            if not switched:
+                emit("warning",
+                     "Could not switch %s to Instagram account %r -- abandoning this post "
+                     "rather than posting as whoever is signed in", target, ig_handle)
+                keep_media_for_retry("account switch failed")
+                return {"profile_id": profile.id, "target": target, "aborted": False,
+                        "success": False, "failed": True,
+                        "verify_method": "account_switch",
+                        "verify_detail": f"could not switch to {ig_handle}"}
+            # Deliberately not a progress step: `get_progress_total_steps` is a
+            # fixed 7 for every run, and counting a step only some phones take
+            # would make the bar mean two different things.
+            if check_abort():
+                return {"profile_id": profile.id, "target": target, "aborted": True}
+
         # Baseline for post-verification: read the account's post count BEFORE
         # uploading, so afterwards a +1 proves the reel landed even if Instagram
         # never shows its confirmation banner. Best-effort -- if it can't be
@@ -929,7 +973,7 @@ class InstagramReelUploadU2Flow:
             # outlive this process. Everything after here only refines the
             # record; nothing after here is allowed to be the thing that
             # creates it.
-            ledger.record_share(str(profile.id), media_path,
+            ledger.record_share(str(profile.id), media_path, ig_handle=ig_handle,
                                 caption=getattr(profile, "caption", "") or "",
                                 queue_id=getattr(profile, "queue_id", "") or "",
                                 media_hash=media_hash,
@@ -1009,10 +1053,12 @@ class InstagramReelUploadU2Flow:
         # is the safe direction to be wrong in.
         if post_confirmed:
             ledger.resolve(str(profile.id), media_hash,
-                           post_ledger.STATUS_CONFIRMED, verdict.method)
+                           post_ledger.STATUS_CONFIRMED, verdict.method,
+                           ig_handle=ig_handle)
         elif not verdict.uncertain:
             ledger.resolve(str(profile.id), media_hash,
-                           post_ledger.STATUS_DISPROVED, verdict.method)
+                           post_ledger.STATUS_DISPROVED, verdict.method,
+                           ig_handle=ig_handle)
 
         if callable(should_stop) and should_stop():
             return {"profile_id": profile.id, "target": target, "aborted": True}

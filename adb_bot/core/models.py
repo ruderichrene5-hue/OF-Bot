@@ -18,6 +18,11 @@ class Profile:
     # Airtable rows by it -- without it every entry is unmatchable and a
     # Verifying row can never be resolved.
     queue_id: str | None = None
+    # Which Instagram account to post as, on the phones that have two logged
+    # into one Instagram install. Empty (the normal case) means "post as
+    # whoever is signed in"; set, the reel flow switches to it first and
+    # abandons the post if it cannot confirm the switch took.
+    ig_handle: str | None = None
 
     @property
     def target(self) -> str | None:

@@ -30,6 +30,9 @@ class PostingItem:
     variant_id: str | None
     scheduled: str | None
     retry_count: int = 0
+    # Which Instagram account on that phone to post as. Empty for the ~115
+    # single-account phones, which post as whoever is signed in.
+    ig_handle: str = ""
 
 
 @dataclass
@@ -170,6 +173,12 @@ def plan_posting_queue(
         except (TypeError, ValueError):
             retry = 0
 
+        ig_handle = str(fields.get(at.F_PQ_IG_HANDLE) or "").strip().lstrip("@").strip().lower()
+        # A two-account row is only meaningful with the handle on it; the name
+        # says which account a person meant, so carry it into the logs too.
+        if ig_handle:
+            account_name = f"{account_name} [{ig_handle}]"
+
         plan.to_post.append(PostingItem(
             queue_id=queue_id,
             account_id=account_id,
@@ -180,6 +189,7 @@ def plan_posting_queue(
             variant_id=variant_id,
             scheduled=fields.get(at.F_PQ_SCHEDULED),
             retry_count=retry,
+            ig_handle=ig_handle,
         ))
 
     return plan

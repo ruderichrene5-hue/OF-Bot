@@ -134,7 +134,7 @@ def get_profile_id(profile) -> str | None:
     return getattr(profile, "id", None)
 
 
-def coerce_profile(profile, profile_id: str, caption: str | None = None, bio: str | None = None, picture: str | None = None, media_path: str | None = None, queue_id: str | None = None) -> Profile:
+def coerce_profile(profile, profile_id: str, caption: str | None = None, bio: str | None = None, picture: str | None = None, media_path: str | None = None, queue_id: str | None = None, ig_handle: str | None = None) -> Profile:
     if isinstance(profile, Profile):
         if caption is not None:
             profile.caption = caption
@@ -146,6 +146,8 @@ def coerce_profile(profile, profile_id: str, caption: str | None = None, bio: st
             profile.media_path = media_path
         if queue_id is not None:
             profile.queue_id = queue_id
+        if ig_handle is not None:
+            profile.ig_handle = ig_handle
         return profile
 
     if isinstance(profile, dict):
@@ -160,6 +162,7 @@ def coerce_profile(profile, profile_id: str, caption: str | None = None, bio: st
             picture=picture,
             media_path=media_path,
             queue_id=queue_id,
+            ig_handle=ig_handle,
         )
 
     return Profile(
@@ -173,6 +176,7 @@ def coerce_profile(profile, profile_id: str, caption: str | None = None, bio: st
         picture=picture,
         media_path=media_path,
         queue_id=queue_id,
+        ig_handle=ig_handle,
     )
 
 
@@ -262,6 +266,7 @@ def prepare_profile_for_adb(
     picture: str | None = None,
     media_path: str | None = None,
     queue_id: str | None = None,
+    ig_handle: str | None = None,
     launcher_client=None,
     relaunch_after_attempts: int | None = None,
 ):
@@ -310,7 +315,8 @@ def prepare_profile_for_adb(
         profile = next((item for item in profiles if profile_matches_id(item, profile_id) and profile_is_ready(item)), None)
         if profile:
             profile = coerce_profile(profile, profile_id, caption=caption, bio=bio,
-                                     picture=picture, media_path=media_path, queue_id=queue_id)
+                                     picture=picture, media_path=media_path, queue_id=queue_id,
+                                     ig_handle=ig_handle)
             logger.info("Profile %s is ready after ADB enable attempt %s", profile_id, attempt)
             return profile
 
@@ -513,6 +519,7 @@ def _run_profile_workflow(
     picture: str | None = None,
     media_path: str | None = None,
     queue_id: str | None = None,
+    ig_handle: str | None = None,
     heartbeat_interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
     heartbeat_shutdown_on_failure: bool = True,
     result_callback=None,
@@ -560,6 +567,7 @@ def _run_profile_workflow(
         picture=picture,
         media_path=media_path,
         queue_id=queue_id,
+        ig_handle=ig_handle,
         launcher_client=launcher_client,
     )
     if not profile:

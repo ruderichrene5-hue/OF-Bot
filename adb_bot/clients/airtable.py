@@ -170,6 +170,29 @@ PROFILE_ISSUE_BANNED = "Banned / Blocked"
 PROFILE_ISSUE_REPEATED = "Repeated Failures"
 PROFILE_ISSUE_UNREACHABLE = "Device Unreachable"
 
+# Two-Instagram-account phones ("overview" accounts: same model, second handle).
+# One MLX profile = one phone = one Instagram install, so a second account can't
+# be a second Profiles row -- mlx_sync matches rows to MLX on serial_no and would
+# fight it. It's an attribute of the profile instead, and the *queue row* carries
+# which of the two handles it posts as (F_PQ_IG_HANDLE below).
+#
+# The handles are written by the discovery pass, which reads them off the phone's
+# account switcher. They are deliberately NOT taken from the MLX remark: the
+# remarks are hand-typed and were already stale on the first phone checked.
+F_PROF_HAS_SECOND = "Has Second Account"      # checkbox
+F_PROF_PRIMARY_HANDLE = "Primary IG Handle"   # singleLineText, no leading '@'
+F_PROF_SECOND_HANDLE = "Second IG Handle"     # singleLineText, no leading '@'
+F_PROF_ACCOUNTS_CHECKED = "Accounts Checked At"  # dateTime -- last device read
+F_PROF_ACCOUNTS_NOTES = "Second Account Notes"   # multilineText, newest first
+
+# Which handle a Posting Queue row posts as. Empty means "whatever is signed in",
+# which is correct for the ~115 single-account phones and keeps every existing
+# row working unchanged.
+F_PQ_IG_HANDLE = "Target IG Handle"    # singleLineText
+F_PQ_ACCOUNT_SLOT = "Account Slot"     # singleSelect: Primary / Second
+SLOT_PRIMARY = "Primary"
+SLOT_SECOND = "Second"
+
 # Written to a queue row whose Retry Count hit the limit. Distinct from
 # `Failed - Needs Retry`, which is the only value the retry pass re-queues: an
 # exhausted row left on that value reads as "still queued for another go" when
@@ -803,7 +826,9 @@ class AirtableClient:
                              target_account_id: str | None = None,
                              target_profile_id: str | None = None,
                              name: str | None = None,
-                             caption_id: str | None = None) -> str | None:
+                             caption_id: str | None = None,
+                             ig_handle: str | None = None,
+                             account_slot: str | None = None) -> str | None:
         """One scheduled post: Pending, at `scheduled_iso`, for `variant_id`.
 
         The Spoof Variant link is not optional -- a row without it is rejected by
@@ -813,7 +838,11 @@ class AirtableClient:
         Exactly one target link is written, matching whichever one the variant
         carries; writing both would make the row ambiguous for the planner, which
         reads the account first and would post a profile's video on someone
-        else's account."""
+        else's account.
+
+        `ig_handle` is which Instagram account on that phone the row posts as.
+        It is only set for the two-account phones; left empty the flow posts as
+        whoever is signed in, which is what every single-account row does."""
         fields: dict = {
             F_PQ_POST_STATUS: POST_STATUS_PENDING,
             F_PQ_SCHEDULED: scheduled_iso,
@@ -827,7 +856,34 @@ class AirtableClient:
             fields[F_PQ_TARGET_ACCOUNT] = [target_account_id]
         if caption_id:
             fields[F_PQ_CAPTION] = [caption_id]
+        if _clean_handle(ig_handle):
+            fields[F_PQ_IG_HANDLE] = _clean_handle(ig_handle)
+        if account_slot:
+            fields[F_PQ_ACCOUNT_SLOT] = account_slot
         return self._create_in(TABLE_POSTING_QUEUE, fields)
+
+    def record_profile_accounts(self, record_id: str, primary: str | None,
+                                second: str | None, note: str | None = None,
+                                existing_notes: str | None = None) -> bool:
+        """Write what a phone's account switcher actually showed.
+
+        `Has Second Account` is set from whether a second handle was found, so a
+        profile that MLX tags but that only has one account logged in stops
+        producing a second queue slot -- the tag is a claim, this is the
+        observation.
+        """
+        fields: dict = {
+            F_PROF_HAS_SECOND: bool(_clean_handle(second)),
+            F_PROF_ACCOUNTS_CHECKED: _now_iso(),
+        }
+        fields[F_PROF_PRIMARY_HANDLE] = _clean_handle(primary)
+        fields[F_PROF_SECOND_HANDLE] = _clean_handle(second)
+        if note:
+            stamped = f"{_now_iso()} - {note}"
+            fields[F_PROF_ACCOUNTS_NOTES] = (
+                f"{stamped}\n{existing_notes}".strip() if existing_notes else stamped
+            )
+        return self._patch_in(TABLE_PROFILES, record_id, fields)
 
     def mark_variant_used(self, variant_record_id: str) -> bool:
         """Flag a Spoof Variant as Used so it isn't reused on another post."""
@@ -903,10 +959,23 @@ class AirtableClient:
         of the run short of deleting its row. Setting Status to Inactive in
         Airtable is now how a person parks a profile: it stops both the spoof
         pipeline making variants for it and the queue creating slots for it.
+
+        **Two-account phones.** A profile with `Has Second Account` ticked and
+        both handles filled in yields TWO entries -- one per Instagram account
+        on that one phone -- so the pipeline spoofs twice as much for it and the
+        queue creates twice as many slots. They share `profile_id` and
+        `launch_id` (it is one phone, launched once) and differ in `ig_handle`,
+        which is what the reel flow switches to before posting. A profile that
+        is tagged in MLX but whose handles have not been discovered yet yields
+        one entry, exactly as before: without a handle to switch to there is
+        nothing safe to post as.
         """
         out: dict = {}
-        for record in self._list_table(TABLE_PROFILES,
-                                       fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_STATUS]):
+        for record in self._list_table(
+            TABLE_PROFILES,
+            fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_STATUS,
+                    F_PROF_HAS_SECOND, F_PROF_PRIMARY_HANDLE, F_PROF_SECOND_HANDLE],
+        ):
             fields = record.get("fields", {}) or {}
             name = str(fields.get(F_PROF_NAME) or "").strip()
             if not name:
@@ -922,13 +991,61 @@ class AirtableClient:
             if not launch_id:
                 continue
             model_key = name.split()[0].lower()
-            out.setdefault(model_key, []).append({
-                "profile_id": record.get("id"),
-                "handle": name,
-                "launch_id": launch_id,
-            })
+
+            primary = _clean_handle(fields.get(F_PROF_PRIMARY_HANDLE))
+            second = _clean_handle(fields.get(F_PROF_SECOND_HANDLE))
+            # Both handles are required to split a phone in two. With only one
+            # (or none) we cannot tell the accounts apart on the device, and
+            # posting "the second account" without knowing its name would mean
+            # posting as whoever happens to be signed in.
+            two_up = bool(fields.get(F_PROF_HAS_SECOND)) and bool(primary) and bool(second)
+
+            if two_up:
+                out.setdefault(model_key, []).extend([
+                    {"profile_id": record.get("id"), "handle": name, "launch_id": launch_id,
+                     "ig_handle": primary, "slot": SLOT_PRIMARY},
+                    {"profile_id": record.get("id"), "handle": f"{name} ({second})",
+                     "launch_id": launch_id, "ig_handle": second, "slot": SLOT_SECOND},
+                ])
+            else:
+                out.setdefault(model_key, []).append({
+                    "profile_id": record.get("id"),
+                    "handle": name,
+                    "launch_id": launch_id,
+                    # Empty means "post as whoever is signed in", which is right
+                    # for a one-account phone and keeps every caller unchanged.
+                    "ig_handle": "",
+                    "slot": "",
+                })
         for targets in out.values():
             targets.sort(key=lambda t: t["handle"])
+        return out
+
+    def second_account_profiles(self) -> dict:
+        """MLX serial -> the second-account state Airtable holds for that profile.
+
+        Used by the discovery pass to see what is already recorded before it
+        spends a phone launch re-reading it.
+        """
+        out: dict = {}
+        for record in self._list_table(
+            TABLE_PROFILES,
+            fields=[F_PROF_NAME, F_PROF_MLX_SERIAL, F_PROF_MLX_API_ID, F_PROF_HAS_SECOND,
+                    F_PROF_PRIMARY_HANDLE, F_PROF_SECOND_HANDLE, F_PROF_ACCOUNTS_CHECKED],
+        ):
+            fields = record.get("fields", {}) or {}
+            serial = str(fields.get(F_PROF_MLX_SERIAL) or "").strip()
+            if not serial:
+                continue
+            out[serial] = {
+                "record_id": record.get("id"),
+                "name": fields.get(F_PROF_NAME),
+                "launch_id": (str(fields.get(F_PROF_MLX_API_ID) or "").strip() or None),
+                "has_second": bool(fields.get(F_PROF_HAS_SECOND)),
+                "primary": _clean_handle(fields.get(F_PROF_PRIMARY_HANDLE)),
+                "second": _clean_handle(fields.get(F_PROF_SECOND_HANDLE)),
+                "checked_at": fields.get(F_PROF_ACCOUNTS_CHECKED),
+            }
         return out
 
     def content_pipeline_names(self) -> set:
@@ -990,6 +1107,17 @@ def _select_name(value):
     if isinstance(value, dict):
         return value.get("name")
     return value
+
+
+def _clean_handle(value) -> str:
+    """An Instagram handle as the phone renders it: bare, lower-cased, no '@'.
+
+    People type these into Airtable as "@name"; the device's account switcher
+    shows "name". Everything that compares the two goes through here, or a
+    perfectly good match reads as a mismatch and the post is abandoned.
+    """
+    text = str(value or "").strip().lstrip("@").strip()
+    return text.lower()
 
 
 def _now_iso() -> str:

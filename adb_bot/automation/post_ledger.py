@@ -44,6 +44,18 @@ DEFAULT_MAX_AGE_DAYS = 30
 _HASH_CHUNK = 1024 * 1024
 
 
+def ledger_key(profile_id, media_hash, ig_handle="") -> str:
+    """Identity of "this clip, on this account".
+
+    The handle is only appended when there is one, so a single-account phone
+    keys as "<profile>:<hash>" -- byte-identical to every record written before
+    two-account phones existed.
+    """
+    handle = str(ig_handle or "").strip().lstrip("@").strip().lower()
+    base = f"{profile_id}:{media_hash}"
+    return f"{base}:{handle}" if handle else base
+
+
 @dataclass
 class ShareRecord:
     """One "we tapped Share" event, plus whatever we later learned about it."""
@@ -57,6 +69,13 @@ class ShareRecord:
     caption: str = ""
     queue_id: str = ""
     detail: str = ""
+    # Which Instagram account on that phone the clip went to. One MLX profile
+    # can hold two accounts, so `profile_id` alone stops identifying an account
+    # -- without this, the first account to post a clip would block the second
+    # from ever posting it. Empty on the single-account phones (and on every
+    # record written before this field existed), which keys them exactly as
+    # before, so the whole existing ledger keeps working untouched.
+    ig_handle: str = ""
     # The account's post count as it was just before this share. The deferred
     # recheck has no other baseline to work from -- it arrives fifteen minutes
     # later with no memory of the run -- so carrying it here is what turns the
@@ -67,7 +86,7 @@ class ShareRecord:
 
     @property
     def key(self) -> str:
-        return f"{self.profile_id}:{self.media_hash}"
+        return ledger_key(self.profile_id, self.media_hash, self.ig_handle)
 
     @property
     def age_seconds(self) -> float:
@@ -136,12 +155,12 @@ class PostLedger:
             folded[record.key] = record
         return folded
 
-    def lookup(self, profile_id: str, media_hash: str):
+    def lookup(self, profile_id: str, media_hash: str, ig_handle: str = ""):
         if not profile_id or not media_hash:
             return None
-        return self.load().get(f"{profile_id}:{media_hash}")
+        return self.load().get(ledger_key(profile_id, media_hash, ig_handle))
 
-    def already_shared(self, profile_id: str, media_path) -> bool:
+    def already_shared(self, profile_id: str, media_path, ig_handle: str = "") -> bool:
         """True when this clip has been sent to this account and nothing has
         since disproved it. The guard a retry path should consult *before*
         posting.
@@ -151,7 +170,7 @@ class PostLedger:
         because blocking every post on a hashing failure would be worse than
         the risk it removes.
         """
-        record = self.lookup(profile_id, media_fingerprint(media_path))
+        record = self.lookup(profile_id, media_fingerprint(media_path), ig_handle)
         return bool(record and record.blocks_repost())
 
     # -- writing ---------------------------------------------------------
@@ -172,7 +191,7 @@ class PostLedger:
 
     def record_share(self, profile_id: str, media_path, caption: str = "",
                      queue_id: str = "", media_hash: str | None = None,
-                     baseline_count=None) -> ShareRecord | None:
+                     baseline_count=None, ig_handle: str = "") -> ShareRecord | None:
         """Note that Share was just tapped. Call this *before* verification.
 
         `baseline_count` is the reel_verify.Count read before the upload (or
@@ -192,18 +211,20 @@ class PostLedger:
             media_path=str(media_path or ""),
             caption=str(caption or "")[:500],
             queue_id=str(queue_id or ""),
+            ig_handle=str(ig_handle or "").strip().lstrip("@").strip().lower(),
             baseline_count=int(getattr(baseline_count, "value", -1)),
             baseline_exact=bool(getattr(baseline_count, "exact", False)),
         )
         self._append(record)
         return record
 
-    def resolve(self, profile_id: str, media_hash: str, status: str, detail: str = "") -> bool:
+    def resolve(self, profile_id: str, media_hash: str, status: str, detail: str = "",
+                ig_handle: str = "") -> bool:
         """Record what we eventually learned. `status` is STATUS_CONFIRMED or
         STATUS_DISPROVED; only the latter re-opens the clip for another send."""
         if not profile_id or not media_hash:
             return False
-        existing = self.lookup(profile_id, media_hash)
+        existing = self.lookup(profile_id, media_hash, ig_handle)
         record = ShareRecord(
             profile_id=str(profile_id),
             media_hash=str(media_hash),
@@ -213,6 +234,8 @@ class PostLedger:
             media_path=existing.media_path if existing else "",
             caption=existing.caption if existing else "",
             queue_id=existing.queue_id if existing else "",
+            ig_handle=(existing.ig_handle if existing
+                       else str(ig_handle or "").strip().lstrip("@").strip().lower()),
             detail=str(detail or "")[:300],
         )
         return self._append(record)

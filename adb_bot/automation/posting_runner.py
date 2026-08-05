@@ -313,6 +313,11 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
             # resolve anything -- proven 2026-08-03, two Verifying rows returned
             # "no local ledger entry" against a ledger that held both posts.
             queue_id=item.queue_id,
+            # On a phone with two Instagram accounts, which one this row posts
+            # as. The flow switches to it before opening the composer and gives
+            # up if it can't confirm the switch -- posting a model's clip on the
+            # wrong handle is worse than not posting it.
+            ig_handle=item.ig_handle,
             # Lets readiness relaunch a profile whose launch didn't take,
             # instead of re-enabling ADB on something that isn't running.
             launcher_client=launcher_client,

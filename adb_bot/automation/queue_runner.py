@@ -68,13 +68,33 @@ VARIANT_HELD_BY = (at.POST_STATUS_PENDING, at.POST_STATUS_VERIFYING,
 
 @dataclass
 class SlotTarget:
-    """One thing that gets posts scheduled for it: an Account or an MLX profile."""
+    """One thing that gets posts scheduled for it: an Account or an MLX profile.
+
+    A two-Instagram-account phone produces two of these -- same `record_id` and
+    the same phone, different `ig_handle`. That split is why there are two keys:
+
+    - `key` identifies a *posting identity* and includes the handle, so the
+      "this slot is already filled" guard treats the phone's two accounts as
+      separate and each gets its own row at 09:00.
+    - `pool_key` identifies the *profile*, because Spoof Variants link a
+      Profiles row and know nothing about handles. Both accounts therefore draw
+      from one shared pool of that model's clips, and since a variant is popped
+      as it is assigned, they are always given different videos -- two accounts
+      of the same model posting the identical clip in the same slot is the most
+      obviously automated thing this could do.
+    """
     kind: str          # TARGET_ACCOUNT | TARGET_PROFILE
     record_id: str
     name: str          # handle / profile name -- for logs and the row's Name
+    ig_handle: str = ""    # which IG account on that phone; "" = whoever is signed in
+    slot_label: str = ""   # at.SLOT_PRIMARY / at.SLOT_SECOND, for the queue row
 
     @property
     def key(self) -> tuple:
+        return (self.kind, self.record_id, self.ig_handle or "")
+
+    @property
+    def pool_key(self) -> tuple:
         return (self.kind, self.record_id)
 
 
@@ -200,6 +220,11 @@ def _slot_label_from_name(value) -> str | None:
         return None
 
 
+def _handle_of(value) -> str:
+    """A queue row's Target IG Handle, normalised the way the device shows it."""
+    return str(value or "").strip().lstrip("@").strip().lower()
+
+
 def _variant_target_key(variant: dict) -> tuple | None:
     """Which target a Spoof Variant belongs to. Profile link wins if both are
     set (same precedence as create_spoof_variant / the posting planner)."""
@@ -252,8 +277,14 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
             held_variants[variant_id] = status
         account_id = _first_link(fields, at.F_PQ_TARGET_ACCOUNT)
         profile_id = _first_link(fields, at.F_PQ_TARGET_PROFILE)
-        key = ((TARGET_PROFILE, profile_id) if profile_id
-               else (TARGET_ACCOUNT, account_id) if account_id else None)
+        # The handle is part of the identity: on a two-account phone the 09:00
+        # slot is served once per account, so a row for the primary must not
+        # count as filling the second account's slot. Rows written before this
+        # field existed have no handle and key as "", which is exactly what a
+        # single-account target keys as -- so nothing already in the base shifts.
+        row_handle = _handle_of(fields.get(at.F_PQ_IG_HANDLE))
+        key = ((TARGET_PROFILE, profile_id, row_handle) if profile_id
+               else (TARGET_ACCOUNT, account_id, row_handle) if account_id else None)
         slot_key = _slot_key(fields.get(at.F_PQ_SCHEDULED))
         if key and slot_key:
             filled.add((key, slot_key))
@@ -273,8 +304,12 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
     # --- the pool of variants each target may draw from --------------------
     # Oldest first: the queue works through the content backlog in the order it
     # was spoofed instead of leaving early clips stranded forever.
+    # Keyed by pool_key (the profile), not key (the posting identity): a
+    # variant links a Profiles row and has no idea which of the phone's two
+    # accounts will post it. Both accounts share one list, and because a
+    # variant is popped as it is handed out, they are never given the same clip.
     pools: dict = {}
-    targets_by_key = {t.key: t for t in targets}
+    targets_by_key = {t.pool_key: t for t in targets}
     stranded: set = set()
     # What a target's variants are tied up in, so "nothing to post" can say
     # WHICH kind of nothing: no media spoofed yet (the pipeline owes us one) vs
@@ -309,7 +344,7 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
 
     # --- one row per unfilled due slot -------------------------------------
     for target in sorted(targets, key=lambda t: (t.name or "", t.record_id)):
-        pool = pools.get(target.key, [])
+        pool = pools.get(target.pool_key, [])
         for label, moment in due:
             slot_key = _slot_key(moment)
             if (target.key, slot_key) in filled or (target.key, label) in filled_labels:
@@ -318,7 +353,7 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
                 # One skip per target, not per slot: a target waiting on the
                 # spoof pipeline would otherwise add five identical lines to
                 # every run's log and bury the skips that mean something.
-                holders = tied_up.get(target.key)
+                holders = tied_up.get(target.pool_key)
                 if holders:
                     # Not "no media" -- media that an existing row still owns.
                     # A Failed holder is the retry pass's to recover or to give
@@ -360,7 +395,16 @@ def collect_targets(airtable, include_profiles: bool = True) -> list:
     if include_profiles:
         for entries in (airtable.profile_targets_by_model() or {}).values():
             for entry in entries:
-                targets.append(SlotTarget(TARGET_PROFILE, entry["profile_id"], entry.get("handle") or entry["profile_id"]))
+                targets.append(SlotTarget(
+                    TARGET_PROFILE,
+                    entry["profile_id"],
+                    entry.get("handle") or entry["profile_id"],
+                    # A two-account phone arrives here as two entries that share
+                    # a profile_id; the handle is what makes them distinct
+                    # targets rather than one target seen twice.
+                    ig_handle=_handle_of(entry.get("ig_handle")),
+                    slot_label=entry.get("slot") or "",
+                ))
     return targets
 
 
@@ -412,6 +456,8 @@ def run_queue_slots(airtable, logger, slot_times=DEFAULT_SLOT_TIMES,
             target_account_id=row.target.record_id if row.target.kind == TARGET_ACCOUNT else None,
             target_profile_id=row.target.record_id if row.target.kind == TARGET_PROFILE else None,
             name=row.name,
+            ig_handle=row.target.ig_handle,
+            account_slot=row.target.slot_label,
         )
         if not record_id:
             report.errors.append((row.name, "failed to create the Posting Queue row"))

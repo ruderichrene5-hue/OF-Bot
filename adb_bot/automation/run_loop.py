@@ -39,7 +39,7 @@ LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "warmup", "mlx-sync
 # `report` renders the operational page; like `doctor` it is a command rather
 # than a loop, and unlike `doctor` it is not in the recommended set, so it never
 # gets a timer -- the live view is the always-on report server.
-COMMANDS = LOOPS + ("doctor", "report")
+COMMANDS = LOOPS + ("doctor", "report", "second-accounts")
 
 
 def _mlx_token(cli_value=None) -> str:
@@ -84,6 +84,45 @@ def _run_mlx_sync(args, logger) -> int:
     report = sync_cli.run_sync(token, airtable_token, base_id, dry_run=not args.apply,
                                skip_staging=args.skip_staging)
     return 1 if report.errors else 0
+
+
+def _run_second_accounts(args, logger) -> int:
+    """Read the two-account phones' Instagram handles and record them.
+
+    Slow by nature -- it launches each tagged phone -- so it is its own command
+    rather than part of mlx-sync: you run it after tagging phones in MultiLogin,
+    not on a daily timer.
+    """
+    from adb_bot.automation import second_account_sync
+    from adb_bot.clients.api import MultiloginApiClient
+    from adb_bot.clients.multilogin import (
+        MultiloginAdbEnableClient, MultiloginLauncherClient, MultiloginShutdownClient,
+    )
+    from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
+
+    token = _mlx_token(args.mlx_token)
+    if not token:
+        raise SystemExit("[fatal] No MultiLogin token (MULTILOGIN_TOKEN / dev settings / --mlx-token).")
+
+    airtable = _airtable(args.base_id, args.airtable_token)
+    mlx_items = MultiloginMobileListClient(token).list_mobile_profiles()
+
+    report = second_account_sync.run_second_account_sync(
+        airtable, mlx_items,
+        api_client=MultiloginApiClient(token),
+        adb_enable_client=MultiloginAdbEnableClient(token),
+        launcher_client=MultiloginLauncherClient(token),
+        shutdown_client=MultiloginShutdownClient(token),
+        logger=logger,
+        dry_run=not args.apply,
+        only_serials=[s.strip() for s in (args.serials or "").split(",") if s.strip()] or None,
+        limit=args.max_phones,
+        recheck_known=args.recheck,
+    )
+    for observed in report.checked:
+        logger.info("  %s: primary=%s second=%s%s", observed.name, observed.primary or "-",
+                    observed.second or "-", f"  ERROR: {observed.error}" if observed.error else "")
+    return 1 if report.failed else 0
 
 
 def _run_posting(args, logger) -> int:
@@ -416,6 +455,7 @@ _DISPATCH = {
     "queue": _run_queue,
     "retry": _run_retry,
     "mlx-sync": _run_mlx_sync,
+    "second-accounts": _run_second_accounts,
     "cleanup": _run_cleanup,
     "doctor": _run_doctor,
     "report": _run_report,
@@ -451,6 +491,15 @@ def main(argv=None) -> int:
                              "that have phones but no Accounts rows yet.")
     parser.add_argument("--skip-staging", action="store_true",
                         help="mlx-sync: skip staging profiles that belong to no model.")
+    parser.add_argument("--serials", default=None,
+                        help="second-accounts: restrict to these MLX serials (comma-separated). "
+                             "Use to try one phone before launching twenty.")
+    parser.add_argument("--max-phones", type=int, default=None,
+                        help="second-accounts: stop after launching this many phones "
+                             "(each costs a couple of minutes).")
+    parser.add_argument("--recheck", action="store_true",
+                        help="second-accounts: re-read phones whose handles Airtable already "
+                             "holds (default: only the ones still missing).")
     parser.add_argument("--out", default=None,
                         help="report: file to write the HTML to (default logs/report.html).")
     parser.add_argument("--raw-root", default=None, help="pipeline: raw-videos root (overrides config).")

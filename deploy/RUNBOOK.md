@@ -230,6 +230,13 @@ First run on a fresh base wants to create many profiles — that's correct.
 Add `--skip-staging` to ignore MLX's unnamed "Default folder" profiles.
 
 ```bash
+.venv/bin/python -m adb_bot.automation.run_loop second-accounts
+```
+**Expect:** `MLX tag scan -- second-account profiles=N`, then one
+`would launch <name>` line per phone. See §5a below — this one is not part of
+the daily rotation.
+
+```bash
 .venv/bin/python -m adb_bot.automation.run_loop pipeline
 ```
 **Expect:** `would spoof <file> for N account(s) under <Model>`. If it says
@@ -248,6 +255,61 @@ every account is past Day 4 (they're in the posting phase).
 **Expect:** one `POST <account> -> <launch id> | video=… | caption=…` per due
 row. Empty means the `Posting Queue` has no Pending rows due yet — check that
 Airtable's own 5×/day automations are actually creating them.
+
+## 5a. Two-account phones ("overview" accounts)
+
+Some MLX profiles run **one** Instagram app with **two** accounts logged in —
+the same model, a second handle. Those phones can post twice as often, and the
+bot handles them as two posting targets on one phone.
+
+**How a phone gets there.** Tag it in MultiLogin. The workspace uses two
+spellings and both work: `Second Account` (the Jil/Jasmin phones) and
+`2 accounts` (the Nikki ones).
+
+**The tag alone is not enough.** It says a phone has two accounts; it does not
+say *which*. The MLX `remark` usually names one by hand and is not trustworthy —
+Jasmin 5's remark says `@jasjasmin00` while the phone is actually signed into
+`jasmindiecoolee` and `naughty_jasminn`. So the handles are read off the phone:
+
+```bash
+# what it would read -- launches nothing
+.venv/bin/python -m adb_bot.automation.run_loop second-accounts
+
+# actually read them (one phone launch each, ~2-3 min per phone)
+.venv/bin/python -m adb_bot.automation.run_loop second-accounts --apply
+
+# try one phone first, by MLX serial
+.venv/bin/python -m adb_bot.automation.run_loop second-accounts --apply --serials 173486
+```
+
+It writes `Primary IG Handle`, `Second IG Handle`, `Has Second Account` and
+`Accounts Checked At` on **Profiles (Cloning)**. Useful flags:
+`--max-phones N` (stop after N launches), `--recheck` (re-read phones already
+recorded — otherwise a repeat run only picks up the ones still missing).
+
+Run it **after tagging phones in MultiLogin**, not on a timer. It is the only
+loop that launches phones without posting anything.
+
+**What changes once a phone has both handles:**
+
+- `profile_targets_by_model()` returns **two** targets for it, so the spoof
+  pipeline makes two variants per raw video and `queue` creates two rows per
+  slot — one per account.
+- Each queue row carries `Target IG Handle` + `Account Slot` (Primary/Second).
+- Before posting, the reel flow switches Instagram to that handle and
+  **verifies** it. If it can't, it abandons the post and leaves the row for the
+  retry pass — posting a model's clip on the wrong account can't be undone.
+- The two accounts draw from the *same* pool of that profile's variants, so
+  they never get the same clip in the same slot.
+
+**Troubleshooting:**
+
+| Symptom | Cause |
+|---|---|
+| A tagged phone makes only one row per slot | Its handles aren't recorded yet — run `second-accounts --apply`. Both handles are required; one alone is ignored. |
+| `X is not logged into this phone` in a posting log | Somebody logged the account out, or the handle changed. Re-run with `--recheck`. |
+| `has no second-account tag but its remark mentions one` | A tagging gap: tag it in MultiLogin to double its posts. |
+| A phone was tagged but only shows one account | Recorded as single-account (the phone wins over the tag), so it stops making a second slot that could only fail. |
 
 ## 6. First real run — one account
 
