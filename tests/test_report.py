@@ -5,6 +5,7 @@ matter most are the degraded ones -- Airtable unreachable, no log file, a run
 still in flight, phones open that no slot accounts for.
 """
 
+import re
 import tempfile
 import time
 import unittest
@@ -1055,12 +1056,32 @@ class VideoRunTest(unittest.TestCase):
         self.assertEqual([(v.model, v.number) for v in videos],
                          [("Jasmin", 1), ("Nikki", 2), ("Nikki", 10)])
 
+    def test_the_days_clips_count_from_one_whatever_the_folder_says(self):
+        """`run4` is the fourth clip ever, not the fourth clip today."""
+        root, _ = self._tree(model="Nikki", run="run4")
+        for name in ("run5", "run6"):
+            folder = root / "Nikki" / name
+            folder.mkdir(parents=True)
+            (folder / f"clip_{name}__Nikki_1.mp4").write_bytes(b"x")
+        videos = report.video_runs(spoof_dir=root)
+        self.assertEqual([v.day_number for v in videos], [1, 2, 3])
+        self.assertEqual([v.title for v in videos],
+                         ["Nikki · run 1", "Nikki · run 2", "Nikki · run 3"])
+        self.assertEqual([v.run for v in videos], ["run4", "run5", "run6"])
+
+    def test_each_model_gets_its_own_count(self):
+        root, _ = self._tree(model="Nikki", run="run7")
+        (root / "Jasmin" / "run3").mkdir(parents=True)
+        (root / "Jasmin" / "run3" / "clip__Jasmin_1.mp4").write_bytes(b"x")
+        titles = [v.title for v in report.video_runs(spoof_dir=root)]
+        self.assertEqual(titles, ["Jasmin · run 1", "Nikki · run 1"])
+
 
 class VideoSectionRenderTest(RenderTest):
     """The section a person opens to ask "who got today's clip?"."""
 
     def _videos(self):
-        video = report.VideoRun(model="Nikki", run="run4", number=4,
+        video = report.VideoRun(model="Nikki", run="run4", number=4, day_number=1,
                                 source="nikki_3_I_5_aug", built="2026-08-05 15:08:00")
         video.profiles = [
             report.ProfileRun(name="Nikki 1", outcome="posted"),
@@ -1071,7 +1092,7 @@ class VideoSectionRenderTest(RenderTest):
             report.ProfileRun(name="Nikki 3", outcome="pending",
                               detail="no post scheduled for it yet"),
         ]
-        clean = report.VideoRun(model="Katja", run="run5", number=5,
+        clean = report.VideoRun(model="Katja", run="run5", number=5, day_number=1,
                                 source="Katja_2_I_5_aug", built="2026-08-05 14:56:00")
         clean.profiles = [report.ProfileRun(name="Katja 1", outcome="posted")]
         return [clean, video]
@@ -1080,7 +1101,8 @@ class VideoSectionRenderTest(RenderTest):
         page = report_html.render(self._data(videos=self._videos()))
         panel = page.split('id="panel-technical"')[1].split("</section>")[0]
         self.assertIn("Run by run — one video at a time", panel)
-        self.assertIn("Nikki · run 4", panel)
+        self.assertIn("Nikki · run 1", panel)          # the day's first Nikki clip
+        self.assertIn("run4", panel)                   # ...which lives in run4
         self.assertIn("nikki_3_I_5_aug", panel)
         for name in ("Nikki 1", "Nikki 2", "Nikki 3", "Katja 1"):
             self.assertIn(name, panel)
@@ -1092,9 +1114,10 @@ class VideoSectionRenderTest(RenderTest):
 
     def test_a_clip_that_reached_everybody_folds_away(self):
         page = report_html.render(self._data(videos=self._videos()))
-        katja = page.split("Katja · run 5")[0].rsplit("<details", 1)[-1]
-        self.assertNotIn(" open", katja)          # the clean clip is closed
-        self.assertIn('<details class="run" open>', page)   # the other one is not
+        cards = {summary.split("<span")[0].strip(): tag for tag, summary in
+                 re.findall(r'<details class="run"( open)?><summary>(.*?)</summary>', page)}
+        self.assertEqual(cards["Katja · run 1"], "")        # nothing missing: closed
+        self.assertEqual(cards["Nikki · run 1"], " open")   # something missing: open
 
     def test_a_video_name_cannot_inject_markup(self):
         videos = self._videos()

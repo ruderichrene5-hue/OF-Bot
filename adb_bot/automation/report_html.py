@@ -429,9 +429,12 @@ def _count_pills(counts: dict, unknown_label: str = "no result") -> str:
 def _video_card(video) -> str:
     """One clip: which profiles it was made for, and where each one got to."""
     counts = video.counts()
+    # The folder name is kept in the meta line: the card counts from 1 for the
+    # day, and this is what you `cd` into when you want the files themselves.
     summary = (f'<summary>{_e(video.title)} '
                f'<span class="when">{_e(video.source)} · built '
-               f'{_e(video.built[11:16])}</span> {_count_pills(counts)}</summary>')
+               f'{_e(video.built[11:16])} · {_e(video.run)}</span> '
+               f'{_count_pills(counts)}</summary>')
     body = _profile_table(video.sorted_profiles())
     # Open a clip that has not reached everybody; a fully delivered one is a line.
     unresolved = counts.get("failed", 0) + counts.get("pending", 0) + counts.get("unknown", 0)

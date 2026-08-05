@@ -651,14 +651,24 @@ class VideoRun:
 
     model: str = ""
     run: str = ""                   # the folder name, e.g. "run4"
-    number: int = 0                 # its number, for ordering
+    number: int = 0                 # the folder's number, which counts from the
+                                    # day the model was set up and never resets
+    day_number: int = 0             # this clip's place in *today*, counting from 1
     source: str = ""                # the raw clip's name, without the handle
     built: str = ""                 # when the variants were written
     profiles: list = field(default_factory=list)
 
     @property
     def title(self) -> str:
-        return f"{self.model} · run {self.number}" if self.model else self.run
+        """`Nikki · run 2` -- the day's second Nikki clip.
+
+        A page about one day counts from one. The folder number keeps rising
+        forever (today's first Nikki clip lives in `run4`), so showing it here
+        would make a Monday morning start at run 47.
+        """
+        if not self.model:
+            return self.run
+        return f"{self.model} · run {self.day_number or self.number}"
 
     def counts(self) -> dict:
         return outcome_counts(self.profiles)
@@ -1169,7 +1179,12 @@ def video_runs(spoof_dir=None, day: str = "", ledger=None, tick_runs=None,
                 entry.next_step = "the recheck pass will confirm or fail it"
                 entry.next_tone = "warn"
 
-    videos.sort(key=lambda v: (v.model.lower(), v.number))
+    videos.sort(key=lambda v: (v.model.lower(), v.built, v.number))
+    # Number each model's clips within the listing, in the order they were made.
+    seen: Counter = Counter()
+    for video in videos:
+        seen[video.model] += 1
+        video.day_number = seen[video.model]
     return videos
 
 
