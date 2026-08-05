@@ -46,11 +46,18 @@ RECHECK_LOG = "loop_recheck.log"
 # the order the page lists them in: the reason to open a run is what went wrong.
 OUTCOME_FAILED = "failed"
 OUTCOME_UNKNOWN = "unknown"
+OUTCOME_PENDING = "pending"
 OUTCOME_SKIPPED = "skipped"
 OUTCOME_VERIFYING = "verifying"
 OUTCOME_POSTED = "posted"
-OUTCOME_ORDER = (OUTCOME_FAILED, OUTCOME_UNKNOWN, OUTCOME_SKIPPED,
+OUTCOME_ORDER = (OUTCOME_FAILED, OUTCOME_UNKNOWN, OUTCOME_PENDING, OUTCOME_SKIPPED,
                  OUTCOME_VERIFYING, OUTCOME_POSTED)
+
+# `<model>/run<N>/<source>__<Handle>.mp4` -- one run folder is one source video
+# spoofed once per profile of that model, which is the unit a person means by
+# "the run": one clip, everybody who was supposed to get it.
+_SPOOF_RUN_DIR = re.compile(r"^run(\d+)$", re.I)
+_VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".webm", ".mkv")
 
 _RUN_START = re.compile(
     r"^(?P<ts>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)[,.]\d+ .*?Posting (?P<planned>\d+) profile\(s\)")
@@ -575,11 +582,25 @@ class ProfileRun:
     detail: str = ""
     next_step: str = ""
     next_tone: str = ""             # "", "ok", "warn", "bad" -- for the pill
+    media: str = ""                 # the variant this profile was given
+    at: str = ""                    # when the attempt happened, if known
 
     @property
     def label(self) -> str:
         """Name if we know it, the MLX id if we do not."""
         return self.name or self.launch_id
+
+
+def outcome_counts(profiles) -> dict:
+    """How many of `profiles` ended in each outcome, every key present."""
+    tally = Counter(p.outcome for p in profiles)
+    return {name: tally.get(name, 0) for name in OUTCOME_ORDER}
+
+
+def sort_profiles(profiles) -> list:
+    """Worst outcome first, then alphabetical -- problems at the top."""
+    rank = {name: index for index, name in enumerate(OUTCOME_ORDER)}
+    return sorted(profiles, key=lambda p: (rank.get(p.outcome, 99), p.label.lower()))
 
 
 @dataclass
@@ -613,15 +634,37 @@ class RunSummary:
         return entry
 
     def counts(self) -> dict:
-        """How many profiles ended in each outcome."""
-        tally = Counter(p.outcome for p in self.profiles)
-        return {name: tally.get(name, 0) for name in OUTCOME_ORDER}
+        return outcome_counts(self.profiles)
 
     def sorted_profiles(self) -> list:
-        """Worst outcome first, then alphabetical -- problems at the top."""
-        rank = {name: index for index, name in enumerate(OUTCOME_ORDER)}
-        return sorted(self.profiles,
-                      key=lambda p: (rank.get(p.outcome, 99), p.label.lower()))
+        return sort_profiles(self.profiles)
+
+
+@dataclass
+class VideoRun:
+    """One source video, and every profile it was spoofed for.
+
+    This is the run a person means: `Nikki / run4` is one clip, encoded once
+    per Nikki profile, and the question about it is always the same -- who got
+    it, who did not, and is anyone still trying.
+    """
+
+    model: str = ""
+    run: str = ""                   # the folder name, e.g. "run4"
+    number: int = 0                 # its number, for ordering
+    source: str = ""                # the raw clip's name, without the handle
+    built: str = ""                 # when the variants were written
+    profiles: list = field(default_factory=list)
+
+    @property
+    def title(self) -> str:
+        return f"{self.model} · run {self.number}" if self.model else self.run
+
+    def counts(self) -> dict:
+        return outcome_counts(self.profiles)
+
+    def sorted_profiles(self) -> list:
+        return sort_profiles(self.profiles)
 
 
 def name_from_media_path(path: str) -> str:
@@ -731,6 +774,9 @@ def _note_profile_event(run: RunSummary, line: str) -> None:
     if media:
         entry = run.profile(media.group("id"))
         entry.name = entry.name or name_from_media_path(media.group("path"))
+        # Which clip this profile was given -- the join that lets the report be
+        # read the other way round, one video at a time.
+        entry.media = media.group("path")
         return
 
     for pattern, outcome, note in (
@@ -899,6 +945,25 @@ def retry_events(log_path=None, day: str = "") -> list:
     return events
 
 
+def _apply_retry_verdict(entry, floor: str, events) -> None:
+    """Say what the retry pass decided about this failure, after `floor`.
+
+    Matched on profile name because that is all the retry log knows, and on
+    "the first decision after the attempt" because a profile that failed twice
+    today gets two verdicts and each belongs to its own attempt.
+    """
+    key = (entry.name or "").strip().lower()
+    decision = None
+    if key:
+        decision = next((e for e in events
+                         if e["profile"] == key and e["ts"] >= floor), None)
+    if decision:
+        entry.next_step, entry.next_tone = decision["next"], decision["tone"]
+    else:
+        entry.next_step = "waiting for the next retry pass"
+        entry.next_tone = "warn"
+
+
 def annotate_runs(runs, names=None, events=None) -> list:
     """Fill in profile names, and what happened to each failure afterwards.
 
@@ -922,17 +987,188 @@ def annotate_runs(runs, names=None, events=None) -> list:
                 continue
             if entry.outcome != OUTCOME_FAILED:
                 continue
-            key = entry.name.strip().lower()
-            decision = None
-            if key:
-                decision = next((e for e in events
-                                 if e["profile"] == key and e["ts"] >= floor), None)
-            if decision:
-                entry.next_step, entry.next_tone = decision["next"], decision["tone"]
-            else:
-                entry.next_step = "waiting for the next retry pass"
-                entry.next_tone = "warn"
+            _apply_retry_verdict(entry, floor, events)
     return runs
+
+
+def spoof_root(spoof_dir=None) -> Path:
+    """Where the pipeline writes `<model>/run<N>/` folders."""
+    if spoof_dir:
+        return Path(spoof_dir)
+    from adb_bot.config import settings
+
+    return Path(settings.get_saved_spoofed_videos_dir() or "")
+
+
+def scan_video_runs(spoof_dir=None) -> list:
+    """Every `<model>/run<N>` folder on disk, with one entry per variant in it.
+
+    The folder is the only place that knows who a clip was *meant* for. A
+    profile that never got a queue row is invisible everywhere else, and it is
+    exactly the profile a person is looking for when they ask why an account
+    did not post today.
+    """
+    root = spoof_root(spoof_dir)
+    out: list = []
+    try:
+        models = sorted(p for p in root.iterdir() if p.is_dir())
+    except OSError:
+        return out
+
+    for model_dir in models:
+        try:
+            run_dirs = sorted(p for p in model_dir.iterdir() if p.is_dir())
+        except OSError:
+            continue
+        for run_dir in run_dirs:
+            match = _SPOOF_RUN_DIR.match(run_dir.name)
+            if not match:
+                continue
+            try:
+                files = sorted(p for p in run_dir.iterdir()
+                               if p.suffix.lower() in _VIDEO_EXTS)
+            except OSError:
+                continue
+            if not files:
+                continue
+            newest = max(p.stat().st_mtime for p in files)
+            video = VideoRun(
+                model=model_dir.name,
+                run=run_dir.name,
+                number=int(match.group(1)),
+                # Some raw clips carry ".mp4" inside their own name, so the part
+                # before the handle can end in it twice; show it once.
+                source=re.sub(r"\.(mp4|mov|m4v|webm|mkv)$", "",
+                              files[0].name.rsplit("__", 1)[0], flags=re.I),
+                built=datetime.fromtimestamp(newest).strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            for path in files:
+                video.profiles.append(ProfileRun(name=name_from_media_path(str(path)),
+                                                 outcome=OUTCOME_PENDING,
+                                                 media=str(path)))
+            out.append(video)
+    return out
+
+
+def _ledger_by_path(ledger=None) -> dict:
+    """Variant path -> the most recent share record for it."""
+    from adb_bot.automation.post_ledger import PostLedger
+
+    try:
+        records = (ledger or PostLedger()).load()
+    except Exception:
+        return {}
+    out: dict = {}
+    for record in (records or {}).values():
+        path = getattr(record, "media_path", "") or ""
+        if not path:
+            continue
+        known = out.get(path)
+        if known is None or (getattr(record, "shared_at", 0.0) or 0.0) > (
+                getattr(known, "shared_at", 0.0) or 0.0):
+            out[path] = record
+    return out
+
+
+def _queue_by_path(queue_rows=None, variants=None) -> dict:
+    """Variant path -> the Posting Queue row that claimed it."""
+    out: dict = {}
+    for row in (queue_rows or []):
+        fields = row.get("fields", {}) or {}
+        linked = fields.get("Spoof Variant") or []
+        if not linked:
+            continue
+        variant = (variants or {}).get(linked[0]) or {}
+        path = variant.get("file_path")
+        if path:
+            out[path] = {"status": fields.get("Post Status") or "",
+                         "name": fields.get("Name") or ""}
+    return out
+
+
+def video_runs(spoof_dir=None, day: str = "", ledger=None, tick_runs=None,
+               events=None, queue_rows=None, variants=None) -> list:
+    """Today's clips, each with what happened to every profile it was made for.
+
+    Four sources, in order of how much they actually prove: the post ledger
+    (we tapped Share, and whether it was later confirmed), the posting log (why
+    an attempt died before that), the queue row (it is claimed but untried),
+    and the folder itself (nobody has touched this one).
+    """
+    videos = scan_video_runs(spoof_dir)
+    if not videos:
+        return []
+
+    by_ledger = _ledger_by_path(ledger)
+    by_log: dict = {}
+    for run in (tick_runs or []):
+        for entry in run.profiles:
+            if entry.media:
+                by_log[entry.media] = (entry, run.finished or run.started)
+    by_queue = _queue_by_path(queue_rows, variants)
+
+    for video in videos:
+        for entry in video.profiles:
+            record = by_ledger.get(entry.media)
+            if record is not None:
+                shared = getattr(record, "shared_at", 0.0) or 0.0
+                entry.at = (datetime.fromtimestamp(shared).strftime("%Y-%m-%d %H:%M:%S")
+                            if shared else "")
+                status = getattr(record, "status", "")
+                if status == "confirmed":
+                    entry.outcome, entry.detail = OUTCOME_POSTED, ""
+                elif status == "disproved":
+                    entry.outcome = OUTCOME_FAILED
+                    entry.detail = _trim(getattr(record, "detail", "")
+                                         or "the recheck could not find the post")
+                else:
+                    entry.outcome = OUTCOME_VERIFYING
+                    entry.detail = "share tapped, not yet confirmed"
+                continue
+
+            logged = by_log.get(entry.media)
+            if logged is not None:
+                attempt, when = logged
+                entry.outcome = attempt.outcome
+                entry.detail = attempt.detail
+                entry.launch_id = attempt.launch_id
+                entry.at = when
+                continue
+
+            claimed = by_queue.get(entry.media)
+            if claimed is not None:
+                status = (claimed.get("status") or "").strip()
+                if status == "Posted":
+                    entry.outcome, entry.detail = OUTCOME_POSTED, ""
+                elif status == "Verifying":
+                    entry.outcome = OUTCOME_VERIFYING
+                    entry.detail = "share tapped, not yet confirmed"
+                elif status == "Failed":
+                    entry.outcome = OUTCOME_FAILED
+                    entry.detail = "the attempt never reached the phone"
+                else:
+                    entry.outcome = OUTCOME_PENDING
+                    entry.detail = f"waiting in the queue ({claimed.get('name') or status})"
+                continue
+
+            entry.outcome = OUTCOME_PENDING
+            entry.detail = "no post scheduled for it yet"
+
+    if day:
+        videos = [v for v in videos
+                  if v.built.startswith(day)
+                  or any(p.at.startswith(day) for p in v.profiles)]
+
+    for video in videos:
+        for entry in video.profiles:
+            if entry.outcome == OUTCOME_FAILED:
+                _apply_retry_verdict(entry, entry.at or video.built, events or [])
+            elif entry.outcome == OUTCOME_VERIFYING:
+                entry.next_step = "the recheck pass will confirm or fail it"
+                entry.next_tone = "warn"
+
+    videos.sort(key=lambda v: (v.model.lower(), v.number))
+    return videos
 
 
 def ledger_today(ledger=None, day: str = "") -> dict:
@@ -1193,13 +1429,19 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
     day = _today(now)
 
     runs = parse_posting_runs(day=day)
+    retries: list = []
     try:
-        annotate_runs(runs, names=profile_names(), events=retry_events(day=day))
+        retries = retry_events(day=day)
+        annotate_runs(runs, names=profile_names(), events=retries)
     except Exception:
         # Names and retry verdicts are the nice-to-have half of the run detail;
         # the outcomes themselves are already parsed. Losing the annotation must
         # not cost the page the runs.
         pass
+    try:
+        videos = video_runs(day=day, tick_runs=runs, events=retries)
+    except Exception:
+        videos = []
     posts_today = sum(r.posts for r in runs)
     run_seconds = sum(r.seconds for r in runs if r.seconds)
     attempts = sum(r.attempts for r in runs)
@@ -1217,6 +1459,7 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         "phones": phone_processes(),
         "timers": timer_states(),
         "runs": runs,
+        "videos": videos,
         "totals": {
             "runs": len(runs),
             "posts": posts_today,
@@ -1245,6 +1488,13 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             data["queue"] = queue_today(airtable, day, rows=rows)
             data["content"] = content_stock(airtable, claimed=claimed_variant_ids(rows))
             data["needs_human"] = needs_human(airtable)
+            # Redo the per-video view with the queue in hand: a clip whose
+            # profile never reached a phone leaves no trace on this box, and
+            # only its queue row can say whether it is waiting or was written
+            # off. Local sources still win where they disagree.
+            data["videos"] = video_runs(day=day, tick_runs=runs, events=retries,
+                                        queue_rows=rows,
+                                        variants=airtable.variants_by_id())
         except Exception as exc:
             # A dashboard that 500s because Airtable is having a moment is worse
             # than one that says so and still shows everything local.

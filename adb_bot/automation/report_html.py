@@ -387,58 +387,97 @@ _OUTCOME_PILL = {
     "posted": ("ok", "posted"),
     "verifying": ("warn", "verifying"),
     "failed": ("bad", "did not post"),
+    "pending": ("warn", "not sent yet"),
     "skipped": ("warn", "skipped"),
     "unknown": ("warn", "no result"),
 }
+_PILL_ORDER = ("posted", "verifying", "failed", "pending", "skipped", "unknown")
+
+
+def _profile_table(profiles, unknown_label: str = "") -> str:
+    """Who got the clip and who did not, worst first."""
+    head = ("<tr><th>Profile</th><th>Result</th><th>What happened</th>"
+            "<th>What happens next</th></tr>")
+    rows = []
+    for entry in profiles:
+        tone, label = _OUTCOME_PILL.get(entry.outcome, ("warn", entry.outcome))
+        if entry.outcome == "unknown" and unknown_label:
+            label = unknown_label
+        next_step = ""
+        if entry.next_step:
+            next_tone = entry.next_tone or "warn"
+            next_step = f'<span class="pill {next_tone}">{_e(entry.next_step)}</span>'
+        rows.append(
+            f"<tr><td class='mono'>{_e(entry.label)}</td>"
+            f"<td><span class='pill {tone}'>{_e(label)}</span></td>"
+            f"<td class='wrap-cell'>{_e(entry.detail)}</td>"
+            f"<td class='wrap-cell'>{next_step}</td></tr>")
+    return f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>'
+
+
+def _count_pills(counts: dict, unknown_label: str = "no result") -> str:
+    pills = []
+    for outcome in _PILL_ORDER:
+        if counts.get(outcome):
+            tone, label = _OUTCOME_PILL[outcome]
+            if outcome == "unknown":
+                label = unknown_label
+            pills.append(f'<span class="pill {tone}">{counts[outcome]} {label}</span>')
+    return "".join(pills)
+
+
+def _video_card(video) -> str:
+    """One clip: which profiles it was made for, and where each one got to."""
+    counts = video.counts()
+    summary = (f'<summary>{_e(video.title)} '
+               f'<span class="when">{_e(video.source)} · built '
+               f'{_e(video.built[11:16])}</span> {_count_pills(counts)}</summary>')
+    body = _profile_table(video.sorted_profiles())
+    # Open a clip that has not reached everybody; a fully delivered one is a line.
+    unresolved = counts.get("failed", 0) + counts.get("pending", 0) + counts.get("unknown", 0)
+    return f'<details class="run"{" open" if unresolved else ""}>{summary}{body}</details>'
+
+
+def _section_videos(videos) -> str:
+    if not videos:
+        return ('<p class="empty">No spoofed clip has been built for today yet — '
+                'the pipeline makes one folder per video.</p>')
+    totals = Counter()
+    for video in videos:
+        totals.update(video.counts())
+    planned = sum(totals[key] for key in _PILL_ORDER)
+    lead = (f'<p class="sub">{len(videos)} clip(s), {planned} profile-copies in all · '
+            f'{totals["posted"]} posted · {totals["verifying"]} verifying · '
+            f'{totals["failed"]} did not post · {totals["pending"]} not sent yet. '
+            'One card per video: the pipeline spoofs a clip once per profile of '
+            'that model, and these are all of them — including the copies nobody '
+            'has tried yet. Clips that have not reached everybody are open. '
+            '"What happens next" is the retry pass\'s own verdict, so a red row '
+            'with a green pill needs nobody.</p>')
+    return lead + "".join(_video_card(video) for video in videos)
 
 
 def _run_detail(run, index: int) -> str:
-    """One run as a collapsible card: the counts, then every profile in it."""
+    """One posting tick as a collapsible card, with every profile it touched."""
     counts = run.counts()
     # A run still in flight has profiles with no result *yet*. Calling those
     # "no result" would read as a fault; they are simply mid-post.
     running = not run.finished
     unknown_label = "still going" if running else "no result"
-    pills = []
-    for outcome, label in (("posted", "posted"), ("verifying", "verifying"),
-                           ("failed", "did not post"), ("skipped", "skipped"),
-                           ("unknown", unknown_label)):
-        if counts.get(outcome):
-            tone = _OUTCOME_PILL[outcome][0]
-            pills.append(f'<span class="pill {tone}">{counts[outcome]} {label}</span>')
-    if not pills:
-        pills.append('<span class="pill warn">no profile reached a phone</span>')
+    pills = _count_pills(counts, unknown_label) or (
+        '<span class="pill warn">no profile reached a phone</span>')
 
     finished = _e(run.finished[11:16]) if run.finished else "running"
-    summary = (f'<summary>Run {index} '
+    summary = (f'<summary>Tick {index} '
                f'<span class="when">{_e(run.started[11:16])} → {finished}</span> '
-               f'{"".join(pills)}</summary>')
+               f'{pills}</summary>')
 
     if not run.profiles:
         body = ('<p class="empty">No profile is named in this run\'s log — it '
                 'planned work but nothing reached a phone.</p>')
     else:
-        head = ("<tr><th>Profile</th><th>Result</th><th>What happened</th>"
-                "<th>What happens next</th></tr>")
-        rows = []
-        for entry in run.sorted_profiles():
-            tone, label = _OUTCOME_PILL.get(entry.outcome, ("warn", entry.outcome))
-            if entry.outcome == "unknown":
-                label = unknown_label
-            next_step = ""
-            if entry.next_step:
-                next_tone = entry.next_tone or "warn"
-                next_step = f'<span class="pill {next_tone}">{_e(entry.next_step)}</span>'
-            rows.append(
-                f"<tr><td class='mono'>{_e(entry.label)}</td>"
-                f"<td><span class='pill {tone}'>{_e(label)}</span></td>"
-                f"<td class='wrap-cell'>{_e(entry.detail)}</td>"
-                f"<td class='wrap-cell'>{next_step}</td></tr>")
-        body = f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>'
-
-    # Open the runs that lost something; a clean run is a line, not a page.
-    unresolved = counts.get("failed", 0) + (0 if running else counts.get("unknown", 0))
-    return f'<details class="run"{" open" if unresolved else ""}>{summary}{body}</details>'
+        body = _profile_table(run.sorted_profiles(), unknown_label)
+    return f'<details class="run">{summary}{body}</details>'
 
 
 def _section_run_detail(runs) -> str:
@@ -453,13 +492,12 @@ def _section_run_detail(runs) -> str:
             in_flight += counts.get("unknown", 0)
     missed = totals["failed"] + totals["unknown"] - in_flight
     still = f' · {in_flight} still going' if in_flight else ""
-    lead = (f'<p class="sub">{len(runs)} run(s) today · {totals["posted"]} posted · '
+    lead = (f'<p class="sub">The same day seen the other way round: one card per '
+            f'posting tick (the loop runs every 5 minutes and takes whatever is '
+            f'due that minute), which is where the timing and the MultiLogin '
+            f'failures live. {len(runs)} tick(s) · {totals["posted"]} posted · '
             f'{totals["verifying"]} verifying · {missed} did not post{still}. '
-            'Counted per profile per run, so a profile that failed twice appears '
-            'twice — unlike the Posts column above, which counts profiles a run '
-            'worked on, not posts that landed. Runs that lost a profile are open; '
-            'the rest fold away. "What happens next" is the retry pass\'s own '
-            'verdict, so a red row with a green pill needs nobody.</p>')
+            'A profile that failed twice today appears twice.</p>')
     cards = [_run_detail(run, index) for index, run in enumerate(runs, start=1)]
     return lead + "".join(cards)
 
@@ -754,10 +792,13 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
       <h2>Today</h2>
       {_section_today(data)}
 
+      <h2>Run by run — one video at a time</h2>
+      {_section_videos(data.get('videos') or [])}
+
       <h2>Runs</h2>
       {_section_runs(data['runs'])}
 
-      <h2>Run by run</h2>
+      <h2>The same day by posting tick</h2>
       {_section_run_detail(data['runs'])}
 
       <h2>Failed queue rows</h2>

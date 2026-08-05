@@ -6,6 +6,7 @@ still in flight, phones open that no slot accounts for.
 """
 
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -197,7 +198,7 @@ class ProfileOutcomeTest(unittest.TestCase):
     def test_counts_and_ordering_put_the_problems_first(self):
         run = self._run()
         self.assertEqual(run.counts(),
-                         {"failed": 2, "unknown": 1, "skipped": 0,
+                         {"failed": 2, "unknown": 1, "pending": 0, "skipped": 0,
                           "verifying": 1, "posted": 1})
         self.assertEqual([p.outcome for p in run.sorted_profiles()][:2], ["failed", "failed"])
 
@@ -931,6 +932,180 @@ class MonitoringRenderTest(RenderTest):
         self.assertIn("var(--bad)", report_html.render(data))
 
 
+class VideoRunTest(unittest.TestCase):
+    """The run a person means: one clip, everybody it was made for."""
+
+    def _tree(self, *, model="Nikki", run="run4",
+              handles=("Nikki_1", "Nikki_2", "Nikki_3")):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        folder = root / model / run
+        folder.mkdir(parents=True)
+        for handle in handles:
+            (folder / f"nikki_3_I_5_aug__{handle}.mp4").write_bytes(b"x")
+        return root, folder
+
+    def _ledger(self, records):
+        class FakeLedger:
+            def load(self):
+                return {f"{i}": r for i, r in enumerate(records)}
+        return FakeLedger()
+
+    def _record(self, path, status, shared_at=1785950000.0, detail=""):
+        class Rec:
+            pass
+        rec = Rec()
+        rec.media_path, rec.status, rec.shared_at, rec.detail = path, status, shared_at, detail
+        return rec
+
+    def test_a_run_is_one_clip_and_every_profile_it_was_made_for(self):
+        root, folder = self._tree()
+        videos = report.video_runs(spoof_dir=root)
+        self.assertEqual(len(videos), 1)
+        video = videos[0]
+        self.assertEqual((video.model, video.number, video.source),
+                         ("Nikki", 4, "nikki_3_I_5_aug"))
+        self.assertEqual(sorted(p.name for p in video.profiles),
+                         ["Nikki 1", "Nikki 2", "Nikki 3"])
+
+    def test_a_profile_nobody_tried_says_so_rather_than_vanishing(self):
+        root, _ = self._tree()
+        video = report.video_runs(spoof_dir=root)[0]
+        self.assertEqual({p.outcome for p in video.profiles}, {"pending"})
+
+    def test_the_ledger_decides_posted_verifying_and_failed(self):
+        root, folder = self._tree()
+        ledger = self._ledger([
+            self._record(str(folder / "nikki_3_I_5_aug__Nikki_1.mp4"), "confirmed"),
+            self._record(str(folder / "nikki_3_I_5_aug__Nikki_2.mp4"), "shared"),
+            self._record(str(folder / "nikki_3_I_5_aug__Nikki_3.mp4"), "disproved",
+                         detail="post count is still 46 after 107 min"),
+        ])
+        video = report.video_runs(spoof_dir=root, ledger=ledger)[0]
+        got = {p.name: p.outcome for p in video.profiles}
+        self.assertEqual(got, {"Nikki 1": "posted", "Nikki 2": "verifying",
+                               "Nikki 3": "failed"})
+        failed = [p for p in video.profiles if p.name == "Nikki 3"][0]
+        self.assertIn("post count is still 46", failed.detail)
+
+    def test_a_failure_before_the_share_comes_from_the_posting_log(self):
+        """No ledger record exists for a phone that never came up."""
+        root, folder = self._tree()
+        media = str(folder / "nikki_3_I_5_aug__Nikki_2.mp4")
+        tick = report.RunSummary(started="2026-08-05 18:11:14", finished="2026-08-05 18:16:00")
+        tick.profiles.append(report.ProfileRun(launch_id="900", name="Nikki 2",
+                                               outcome="failed", media=media,
+                                               detail="phone never became ADB-ready"))
+        video = report.video_runs(spoof_dir=root, tick_runs=[tick])[0]
+        entry = [p for p in video.profiles if p.name == "Nikki 2"][0]
+        self.assertEqual(entry.outcome, "failed")
+        self.assertEqual(entry.detail, "phone never became ADB-ready")
+
+    def test_a_queue_row_explains_a_copy_that_never_reached_a_phone(self):
+        root, folder = self._tree()
+        media = str(folder / "nikki_3_I_5_aug__Nikki_1.mp4")
+        rows = [{"id": "rec1", "fields": {"Name": "Nikki 1 / 20:00",
+                                          "Post Status": "Failed",
+                                          "Spoof Variant": ["var1"]}}]
+        video = report.video_runs(spoof_dir=root, queue_rows=rows,
+                                  variants={"var1": {"file_path": media}})[0]
+        entry = [p for p in video.profiles if p.name == "Nikki 1"][0]
+        self.assertEqual(entry.outcome, "failed")
+        self.assertIn("never reached the phone", entry.detail)
+
+    def test_the_ledger_wins_over_the_queue_row(self):
+        """Airtable can lag; "we tapped Share" is a local fact."""
+        root, folder = self._tree()
+        media = str(folder / "nikki_3_I_5_aug__Nikki_1.mp4")
+        rows = [{"id": "rec1", "fields": {"Name": "Nikki 1 / 20:00",
+                                          "Post Status": "Failed",
+                                          "Spoof Variant": ["var1"]}}]
+        video = report.video_runs(spoof_dir=root, queue_rows=rows,
+                                  variants={"var1": {"file_path": media}},
+                                  ledger=self._ledger([self._record(media, "confirmed")]))[0]
+        entry = [p for p in video.profiles if p.name == "Nikki 1"][0]
+        self.assertEqual(entry.outcome, "posted")
+
+    def test_yesterdays_clip_is_left_out_unless_it_was_tried_today(self):
+        root, folder = self._tree()
+        import os
+        old = time.mktime(time.strptime("2026-08-01", "%Y-%m-%d"))
+        for path in folder.iterdir():
+            os.utime(path, (old, old))
+        self.assertEqual(report.video_runs(spoof_dir=root, day="2026-08-05"), [])
+
+        media = str(folder / "nikki_3_I_5_aug__Nikki_1.mp4")
+        shared = datetime(2026, 8, 5, 18, 0).timestamp()
+        videos = report.video_runs(spoof_dir=root, day="2026-08-05",
+                                   ledger=self._ledger([self._record(media, "confirmed",
+                                                                     shared_at=shared)]))
+        self.assertEqual(len(videos), 1)
+
+    def test_a_missing_spoof_folder_is_empty_not_an_error(self):
+        self.assertEqual(report.video_runs(spoof_dir="/nonexistent/spoofed"), [])
+
+    def test_runs_are_ordered_by_model_then_run_number(self):
+        root, _ = self._tree(model="Nikki", run="run10")
+        (root / "Nikki" / "run2").mkdir(parents=True)
+        (root / "Nikki" / "run2" / "clip__Nikki_1.mp4").write_bytes(b"x")
+        (root / "Jasmin" / "run1").mkdir(parents=True)
+        (root / "Jasmin" / "run1" / "clip__Jasmin_1.mp4").write_bytes(b"x")
+        videos = report.video_runs(spoof_dir=root)
+        self.assertEqual([(v.model, v.number) for v in videos],
+                         [("Jasmin", 1), ("Nikki", 2), ("Nikki", 10)])
+
+
+class VideoSectionRenderTest(RenderTest):
+    """The section a person opens to ask "who got today's clip?"."""
+
+    def _videos(self):
+        video = report.VideoRun(model="Nikki", run="run4", number=4,
+                                source="nikki_3_I_5_aug", built="2026-08-05 15:08:00")
+        video.profiles = [
+            report.ProfileRun(name="Nikki 1", outcome="posted"),
+            report.ProfileRun(name="Nikki 2", outcome="failed",
+                              detail="phone never became ADB-ready",
+                              next_step="retrying by itself — attempt 2/3, next try in 30 min",
+                              next_tone="ok"),
+            report.ProfileRun(name="Nikki 3", outcome="pending",
+                              detail="no post scheduled for it yet"),
+        ]
+        clean = report.VideoRun(model="Katja", run="run5", number=5,
+                                source="Katja_2_I_5_aug", built="2026-08-05 14:56:00")
+        clean.profiles = [report.ProfileRun(name="Katja 1", outcome="posted")]
+        return [clean, video]
+
+    def test_each_clip_is_a_card_naming_its_video_and_its_profiles(self):
+        page = report_html.render(self._data(videos=self._videos()))
+        panel = page.split('id="panel-technical"')[1].split("</section>")[0]
+        self.assertIn("Run by run — one video at a time", panel)
+        self.assertIn("Nikki · run 4", panel)
+        self.assertIn("nikki_3_I_5_aug", panel)
+        for name in ("Nikki 1", "Nikki 2", "Nikki 3", "Katja 1"):
+            self.assertIn(name, panel)
+
+    def test_a_copy_nobody_tried_is_visible_as_not_sent(self):
+        page = report_html.render(self._data(videos=self._videos()))
+        self.assertIn("1 not sent yet", page)
+        self.assertIn("no post scheduled for it yet", page)
+
+    def test_a_clip_that_reached_everybody_folds_away(self):
+        page = report_html.render(self._data(videos=self._videos()))
+        katja = page.split("Katja · run 5")[0].rsplit("<details", 1)[-1]
+        self.assertNotIn(" open", katja)          # the clean clip is closed
+        self.assertIn('<details class="run" open>', page)   # the other one is not
+
+    def test_a_video_name_cannot_inject_markup(self):
+        videos = self._videos()
+        videos[0].source = "<script>x</script>"
+        page = report_html.render(self._data(videos=videos))
+        self.assertNotIn("<script>x", page)
+
+    def test_no_clip_says_so_rather_than_rendering_nothing(self):
+        page = report_html.render(self._data(videos=[]))
+        self.assertIn("No spoofed clip has been built for today yet", page)
+
+
 class RunByRunTest(RenderTest):
     """The daily read: run 1, who posted, who did not, who is coming back."""
 
@@ -952,18 +1127,21 @@ class RunByRunTest(RenderTest):
         running.profiles = [report.ProfileRun(launch_id="4", name="Jil 5")]
         return [finished, running]
 
-    def test_each_run_is_numbered_and_carries_its_profiles(self):
+    def test_each_tick_is_numbered_and_carries_its_profiles(self):
         page = report_html.render(self._data(runs=self._runs()))
         panel = page.split('id="panel-technical"')[1].split("</section>")[0]
-        self.assertIn("Run by run", panel)
-        self.assertIn("Run 1", panel)
-        self.assertIn("Run 2", panel)
+        self.assertIn("The same day by posting tick", panel)
+        self.assertIn("Tick 1", panel)
+        self.assertIn("Tick 2", panel)
         for name in ("Katja 2", "Nikki 3", "Luisa 7", "Jil 5"):
             self.assertIn(name, panel)
 
-    def test_a_run_that_lost_a_profile_is_open_by_default(self):
+    def test_tick_cards_stay_closed(self):
+        """The per-video view is the daily read; this one is the backup."""
         page = report_html.render(self._data(runs=self._runs()))
-        self.assertIn('<details class="run" open>', page)
+        ticks = page.split("The same day by posting tick")[1]
+        self.assertIn('<details class="run">', ticks)
+        self.assertNotIn('<details class="run" open>', ticks)
 
     def test_a_failure_the_bot_is_handling_reads_green_not_red(self):
         page = report_html.render(self._data(runs=self._runs()))
