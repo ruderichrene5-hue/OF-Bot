@@ -1155,9 +1155,11 @@ def video_runs(spoof_dir=None, day: str = "", ledger=None, tick_runs=None,
             entry.detail = "no post scheduled for it yet"
 
     if day:
-        videos = [v for v in videos
-                  if v.built.startswith(day)
-                  or any(p.at.startswith(day) for p in v.profiles)]
+        # The day's clips, by the day they were *made*. An older clip that
+        # happened to go out this morning belongs to the run it came from, and
+        # letting those in turned a daily page into a growing pile -- yesterday's
+        # runs reappear every time one of their leftovers is retried.
+        videos = [v for v in videos if v.built.startswith(day)]
 
     for video in videos:
         for entry in video.profiles:

@@ -1026,20 +1026,21 @@ class VideoRunTest(unittest.TestCase):
         entry = [p for p in video.profiles if p.name == "Nikki 1"][0]
         self.assertEqual(entry.outcome, "posted")
 
-    def test_yesterdays_clip_is_left_out_unless_it_was_tried_today(self):
+    def test_the_day_means_the_clips_made_that_day(self):
+        """Even a leftover posted this morning belongs to yesterday's run."""
         root, folder = self._tree()
         import os
         old = time.mktime(time.strptime("2026-08-01", "%Y-%m-%d"))
         for path in folder.iterdir():
             os.utime(path, (old, old))
-        self.assertEqual(report.video_runs(spoof_dir=root, day="2026-08-05"), [])
 
         media = str(folder / "nikki_3_I_5_aug__Nikki_1.mp4")
         shared = datetime(2026, 8, 5, 18, 0).timestamp()
-        videos = report.video_runs(spoof_dir=root, day="2026-08-05",
-                                   ledger=self._ledger([self._record(media, "confirmed",
-                                                                     shared_at=shared)]))
-        self.assertEqual(len(videos), 1)
+        ledger = self._ledger([self._record(media, "confirmed", shared_at=shared)])
+        self.assertEqual(report.video_runs(spoof_dir=root, day="2026-08-05",
+                                           ledger=ledger), [])
+        self.assertEqual(len(report.video_runs(spoof_dir=root, day="2026-08-01",
+                                               ledger=ledger)), 1)
 
     def test_a_missing_spoof_folder_is_empty_not_an_error(self):
         self.assertEqual(report.video_runs(spoof_dir="/nonexistent/spoofed"), [])
