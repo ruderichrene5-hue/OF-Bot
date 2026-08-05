@@ -39,6 +39,18 @@ CACHE_SECONDS = 20.0
 # module parses for wall-clock and launch health.
 LOG_DIR = "logs"
 POSTING_LOG = "loop_posting.log"
+RETRY_LOG = "loop_retry.log"
+RECHECK_LOG = "loop_recheck.log"
+
+# What one profile's turn in a run came to. Ordered worst-first, which is also
+# the order the page lists them in: the reason to open a run is what went wrong.
+OUTCOME_FAILED = "failed"
+OUTCOME_UNKNOWN = "unknown"
+OUTCOME_SKIPPED = "skipped"
+OUTCOME_VERIFYING = "verifying"
+OUTCOME_POSTED = "posted"
+OUTCOME_ORDER = (OUTCOME_FAILED, OUTCOME_UNKNOWN, OUTCOME_SKIPPED,
+                 OUTCOME_VERIFYING, OUTCOME_POSTED)
 
 _RUN_START = re.compile(
     r"^(?P<ts>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)[,.]\d+ .*?Posting (?P<planned>\d+) profile\(s\)")
@@ -51,6 +63,48 @@ _LAUNCH_HEALTH = re.compile(
     r"(?P<attempts>\d+) attempt\(s\), (?P<ok>\d+) ok, (?P<mlx>\d+) MLX-side 500 "
     r"\((?P<rate>[\d.]+)%\), (?P<other>\d+) our-side/other failure\(s\), "
     r"(?P<burned>\d+) queue retry")
+
+# --- one profile's turn inside a run -----------------------------------------
+#
+# The posting loop writes one `Post result for <name> (profile <id>): <status>`
+# line per finished post (posting_runner._cb), which is all this needs. The
+# other patterns reconstruct the same thing for the failures that never reach
+# that line -- a launch that 500ed, a phone that never became ADB-ready -- and
+# for logs written before that line existed. Together they answer "which
+# profiles posted, which did not" for every profile the run touched.
+_POST_RESULT = re.compile(
+    r"Post result for (?P<name>.+?) \(profile (?P<id>\d+)\): (?P<status>[a-z_]+)"
+    r"(?: -- (?P<detail>.*))?$")
+_MEDIA_PUSH = re.compile(
+    r"Preparing to push reel media for profile (?P<id>\d+): (?P<path>\S+)")
+_LAUNCH_500 = re.compile(r"Failed to launch profile (?P<id>\d+) -- MultiLogin-side 500")
+_LAUNCH_FAILED = re.compile(r"Failed to launch profile (?P<id>\d+): (?P<why>.*)")
+_LAUNCHED = re.compile(r"Launched profile (?P<id>\d+)")
+_WF_DONE = re.compile(r"Workflow completed for profile (?P<id>\d+)")
+_WF_UNCERTAIN = re.compile(r"Workflow outcome UNCERTAIN for profile (?P<id>\d+)")
+_WF_FAILED = re.compile(r"Workflow failed for profile (?P<id>\d+)(?:: (?P<why>.*))?$")
+_WF_FLAGGED = re.compile(r"Instagram flagged profile (?P<id>\d+) \((?P<kind>[^)]+)\)")
+_WF_HEARTBEAT = re.compile(r"Workflow aborted for profile (?P<id>\d+) by the heartbeat")
+_WF_ADB = re.compile(r"ADB connection failed for profile (?P<id>\d+)")
+_WF_NOT_READY = re.compile(r"Profile (?P<id>\d+) is not ready for ADB automation")
+_WF_ALREADY_SHARED = re.compile(
+    r"Skipping profile (?P<id>\d+): this clip was already sent to it")
+_CEILING_SKIP = re.compile(r"Skipping profile (?P<id>\d+) this round")
+
+# What the retry pass decided about a failed row afterwards. Its log is the only
+# place that says "this one is coming back" in words, and it names the queue row
+# ("<Profile> / <slot>"), not the MLX id -- so the join is on the profile name.
+_RETRY_REQUEUE = re.compile(
+    r"^(?P<ts>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)[,.]\d+ .*?Re-queueing (?P<name>.+?) in "
+    r"(?P<mins>[\d.]+) min \(attempt (?P<attempt>\d+)/(?P<max>\d+)\)")
+_RETRY_PARKED = re.compile(
+    r"^(?P<ts>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)[,.]\d+ .*?Not retrying (?P<name>.+?): (?P<why>.*)")
+_RETRY_HUMAN = re.compile(
+    r"^(?P<ts>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)[,.]\d+ .*?Profile needs a human for "
+    r"(?P<name>.+?): (?P<why>.*)")
+# `Recheck for <Name> (<id>)` is the one line anywhere that carries both, which
+# makes the recheck log a free id -> name dictionary for the posting log.
+_RECHECK_NAME = re.compile(r"Recheck for (?P<name>.+?) \((?P<id>\d+)\):")
 
 # Strip the ANSI colour the logger writes to a tty; the log file keeps it.
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -111,6 +165,57 @@ def live_phones() -> int:
         return int(out.strip() or 0)
     except Exception:
         return 0
+
+
+def profile_locks() -> tuple:
+    """(live, stale) profile locks, each with who holds it and for how long.
+
+    Two lists, not one. A lock whose owner died still sits on disk until the
+    45-minute TTL lets the next loop steal it, and counting those as "held by a
+    running loop" reports the exact condition that cost 17 minutes of dead time
+    on 2026-08-04 as if it were healthy work in progress.
+
+    The lock file records `pid=... owner=<loop> at=<time>`, and the phone
+    processes carry the profile's name in argv, so both can be shown instead of
+    an 18-digit id nobody can read.
+    """
+    from adb_bot.core import locks
+
+    try:
+        paths = sorted(locks.lock_dir().glob("*.lock"))
+    except Exception:
+        return [], []
+
+    names = {}
+    try:
+        from adb_bot.automation import phone_reaper
+        names = {phone.profile_id: phone.name
+                 for phone in phone_reaper.list_phones() if phone.profile_id}
+    except Exception:
+        pass
+
+    now = time.time()
+    live, stale = [], []
+    for path in paths:
+        try:
+            payload = path.read_text(encoding="utf-8", errors="replace")
+            age = max(0.0, now - path.stat().st_mtime)
+        except OSError:
+            continue
+        owner = ""
+        pid = ""
+        for token in payload.split():
+            key, _, value = token.partition("=")
+            if key == "owner":
+                owner = value
+            elif key == "pid":
+                pid = value
+        entry = {"profile_id": path.stem, "name": names.get(path.stem, ""),
+                 "owner": owner or "unknown", "pid": pid, "age_seconds": age}
+        (stale if age > locks.DEFAULT_TTL_SECONDS else live).append(entry)
+    live.sort(key=lambda e: e["age_seconds"])
+    stale.sort(key=lambda e: e["age_seconds"], reverse=True)
+    return live, stale
 
 
 def server_stats() -> dict:
@@ -424,16 +529,14 @@ def running_now() -> dict:
         ceiling = locks.max_live_profiles()
     except Exception:
         ceiling = 0
-    try:
-        held = sorted(p.stem for p in locks.lock_dir().glob("*.lock"))
-    except Exception:
-        held = []
+    held, stale = profile_locks()
 
     states = systemd_state()
     return {
         "loops": states,
         "active_loops": [name for name, state in states if state in ("active", "activating")],
         "profiles": held,
+        "stale_locks": stale,
         "slots_held": slots_in_use,
         "slot_ceiling": ceiling,
         "phones": live_phones(),
@@ -457,6 +560,29 @@ def mlx_agent_up() -> bool:
 # --- what ran today -----------------------------------------------------------
 
 @dataclass
+class ProfileRun:
+    """What one profile did in one run.
+
+    `outcome` is what the run itself achieved; `next_step` is what the *retry
+    pass* decided about it afterwards. Keeping them apart is the point -- a
+    failure that is already re-queued needs nobody, and a failure that is not
+    needs somebody, and on the old report both looked identical.
+    """
+
+    launch_id: str = ""
+    name: str = ""
+    outcome: str = OUTCOME_UNKNOWN
+    detail: str = ""
+    next_step: str = ""
+    next_tone: str = ""             # "", "ok", "warn", "bad" -- for the pill
+
+    @property
+    def label(self) -> str:
+        """Name if we know it, the MLX id if we do not."""
+        return self.name or self.launch_id
+
+
+@dataclass
 class RunSummary:
     """One posting run, reconstructed from its own log lines."""
 
@@ -471,10 +597,78 @@ class RunSummary:
     mlx_rate: float = 0.0
     other_failures: int = 0
     retries_burned: int = 0
+    profiles: list = field(default_factory=list)
 
     @property
     def seconds_per_post(self) -> float:
         return (self.seconds / self.posts) if self.posts else 0.0
+
+    def profile(self, launch_id: str) -> ProfileRun:
+        """This run's record for `launch_id`, created on first sight."""
+        for entry in self.profiles:
+            if entry.launch_id == launch_id:
+                return entry
+        entry = ProfileRun(launch_id=launch_id)
+        self.profiles.append(entry)
+        return entry
+
+    def counts(self) -> dict:
+        """How many profiles ended in each outcome."""
+        tally = Counter(p.outcome for p in self.profiles)
+        return {name: tally.get(name, 0) for name in OUTCOME_ORDER}
+
+    def sorted_profiles(self) -> list:
+        """Worst outcome first, then alphabetical -- problems at the top."""
+        rank = {name: index for index, name in enumerate(OUTCOME_ORDER)}
+        return sorted(self.profiles,
+                      key=lambda p: (rank.get(p.outcome, 99), p.label.lower()))
+
+
+def name_from_media_path(path: str) -> str:
+    """`.../nikki_1_I_5_aug__Nikki_15.mp4` -> `Nikki 15`.
+
+    `spoof_pipeline.finalize_variant` stamps the profile handle onto every
+    variant filename after a double underscore, which is why a run's media-push
+    line can name a profile the posting log otherwise only knows by MLX id.
+    Anything that does not have that shape returns "" rather than a guess.
+    """
+    stem = path.rsplit("/", 1)[-1]
+    if "__" not in stem:
+        return ""
+    tail = stem.rsplit("__", 1)[-1]
+    tail = re.sub(r"\.(mp4|mov|m4v|webm|mkv)$", "", tail, flags=re.I)
+    return tail.replace("_", " ").strip()
+
+
+def profile_names(ledger=None, log_dir=None) -> dict:
+    """MLX launch id -> profile name, built from what is already on disk.
+
+    Airtable holds the authoritative map, but the report must stay readable
+    when Airtable is unreachable -- and the failures worth reading are exactly
+    the ones that happen when something else is unreachable too. Both sources
+    here are local: the post ledger (media path per share) and the recheck log
+    (the one line that prints a name and an id together).
+    """
+    names: dict = {}
+
+    try:
+        from adb_bot.automation.post_ledger import PostLedger
+        records = (ledger or PostLedger()).load()
+    except Exception:
+        records = {}
+    for record in (records or {}).values():
+        name = name_from_media_path(getattr(record, "media_path", "") or "")
+        if name and getattr(record, "profile_id", ""):
+            names.setdefault(str(record.profile_id), name)
+
+    base = Path(log_dir) if log_dir else (_repo_root() / LOG_DIR)
+    try:
+        text = (base / RECHECK_LOG).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    for match in _RECHECK_NAME.finditer(text):
+        names.setdefault(match.group("id"), match.group("name").strip())
+    return names
 
 
 def rotated_logs(path: Path) -> list:
@@ -494,6 +688,95 @@ def rotated_logs(path: Path) -> list:
         else:
             break
     return list(reversed(backups)) + [path]      # .3, .2, .1, then the live one
+
+
+def _trim(text: str, limit: int = 120) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+# A `Post result` status, as the page should say it.
+_RESULT_OUTCOMES = {
+    "done": (OUTCOME_POSTED, ""),
+    "uncertain": (OUTCOME_VERIFYING, "share tapped, not yet confirmed"),
+    "already_shared": (OUTCOME_SKIPPED, "clip had already been sent to this profile"),
+    "human_verification": (OUTCOME_FAILED, "Instagram asked for human verification"),
+    "banned": (OUTCOME_FAILED, "account banned or suspended"),
+    "action_block": (OUTCOME_FAILED, "action blocked (temporary)"),
+    "adb_connect_failed": (OUTCOME_FAILED, "ADB connect failed"),
+    "heartbeat_lost": (OUTCOME_FAILED, "phone lost mid-post (heartbeat)"),
+    "failed": (OUTCOME_FAILED, "the flow reported a failure"),
+}
+
+
+def _note_profile_event(run: RunSummary, line: str) -> None:
+    """Fold one log line into the run's per-profile record.
+
+    Last event wins, because that is how the log reads: a launch that 500s and
+    then succeeds on the relaunch ends the run posted, and saying otherwise
+    would turn MultiLogin's flakiness into a fake failure. The name, once
+    learned, is never unlearned.
+    """
+    result = _POST_RESULT.search(line)
+    if result:
+        entry = run.profile(result.group("id"))
+        entry.name = entry.name or _trim(result.group("name"), 60)
+        outcome, note = _RESULT_OUTCOMES.get(result.group("status"),
+                                             (OUTCOME_FAILED, result.group("status")))
+        entry.outcome = outcome
+        entry.detail = _trim(result.group("detail") or note)
+        return
+
+    media = _MEDIA_PUSH.search(line)
+    if media:
+        entry = run.profile(media.group("id"))
+        entry.name = entry.name or name_from_media_path(media.group("path"))
+        return
+
+    for pattern, outcome, note in (
+        (_WF_DONE, OUTCOME_POSTED, ""),
+        (_WF_UNCERTAIN, OUTCOME_VERIFYING, "share tapped, not yet confirmed"),
+        (_WF_HEARTBEAT, OUTCOME_FAILED, "phone lost mid-post (heartbeat)"),
+        (_WF_ADB, OUTCOME_FAILED, "ADB connect failed"),
+        (_WF_NOT_READY, OUTCOME_FAILED, "phone never became ADB-ready"),
+        (_WF_ALREADY_SHARED, OUTCOME_SKIPPED, "clip had already been sent to this profile"),
+        (_LAUNCH_500, OUTCOME_FAILED, "MultiLogin-side 500 on launch"),
+        (_CEILING_SKIP, OUTCOME_SKIPPED, "deferred to the next run by the phone ceiling"),
+    ):
+        match = pattern.search(line)
+        if match:
+            entry = run.profile(match.group("id"))
+            entry.outcome = outcome
+            entry.detail = note
+            return
+
+    flagged = _WF_FLAGGED.search(line)
+    if flagged:
+        entry = run.profile(flagged.group("id"))
+        entry.outcome = OUTCOME_FAILED
+        entry.detail = f"Instagram flagged the account ({flagged.group('kind')})"
+        return
+
+    failed = _WF_FAILED.search(line)
+    if failed:
+        entry = run.profile(failed.group("id"))
+        entry.outcome = OUTCOME_FAILED
+        entry.detail = _trim(failed.group("why") or "the flow reported a failure")
+        return
+
+    launch_failed = _LAUNCH_FAILED.search(line)
+    if launch_failed:
+        entry = run.profile(launch_failed.group("id"))
+        entry.outcome = OUTCOME_FAILED
+        entry.detail = _trim(f"launch failed: {launch_failed.group('why')}")
+        return
+
+    launched = _LAUNCHED.search(line)
+    if launched:
+        # Seen but not yet finished. If nothing else ever arrives for this id
+        # the run ends with it `unknown`, which is exactly the right answer for
+        # a post that was still going when the log ran out.
+        run.profile(launched.group("id"))
 
 
 def parse_posting_runs(log_path=None, day: str = "") -> list:
@@ -536,6 +819,8 @@ def parse_posting_runs(log_path=None, day: str = "") -> list:
             open_run = RunSummary(started=start.group("ts"),
                                   planned=int(start.group("planned")))
             continue
+        if open_run is not None:
+            _note_profile_event(open_run, line)
         done = _RUN_DONE.search(line)
         if done and open_run is not None:
             open_run.finished = done.group("ts")
@@ -561,6 +846,92 @@ def parse_posting_runs(log_path=None, day: str = "") -> list:
 
     if day:
         runs = [r for r in runs if r.started.startswith(day)]
+    return runs
+
+
+def retry_events(log_path=None, day: str = "") -> list:
+    """What the retry pass decided about each failed row, oldest first.
+
+    Keyed by profile name rather than MLX id because that is all the retry log
+    knows -- its rows are queue rows ("Nikki 15 / 20:00"), and the profile name
+    is the part before the slot.
+    """
+    path = Path(log_path) if log_path else (_repo_root() / LOG_DIR / RETRY_LOG)
+    events: list = []
+    for candidate in rotated_logs(path):
+        try:
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for raw in text.splitlines():
+            line = _ANSI.sub("", raw)
+            requeue = _RETRY_REQUEUE.search(line)
+            if requeue:
+                events.append({
+                    "ts": requeue.group("ts"),
+                    "profile": requeue.group("name").split(" / ")[0].strip().lower(),
+                    "next": (f"retrying by itself — attempt {requeue.group('attempt')}"
+                             f"/{requeue.group('max')}, next try in "
+                             f"{float(requeue.group('mins')):.0f} min"),
+                    "tone": "ok",
+                })
+                continue
+            human = _RETRY_HUMAN.search(line)
+            if human:
+                events.append({
+                    "ts": human.group("ts"),
+                    "profile": human.group("name").split(" / ")[0].strip().lower(),
+                    "next": f"needs a person — {_trim(human.group('why'), 80)}",
+                    "tone": "bad",
+                })
+                continue
+            parked = _RETRY_PARKED.search(line)
+            if parked:
+                events.append({
+                    "ts": parked.group("ts"),
+                    "profile": parked.group("name").split(" / ")[0].strip().lower(),
+                    "next": f"not retried — {_trim(parked.group('why'), 80)}",
+                    "tone": "warn",
+                })
+    if day:
+        events = [e for e in events if e["ts"].startswith(day)]
+    events.sort(key=lambda e: e["ts"])
+    return events
+
+
+def annotate_runs(runs, names=None, events=None) -> list:
+    """Fill in profile names, and what happened to each failure afterwards.
+
+    The retry decision is looked up by "the first thing the retry pass said
+    about this profile *after* the run ended" -- which is what makes the page
+    able to say `retrying, attempt 2/3` instead of leaving a red row that
+    somebody then investigates for nothing.
+    """
+    names = names or {}
+    events = events or []
+    for run in runs:
+        floor = run.finished or run.started
+        for entry in run.profiles:
+            if not entry.name:
+                entry.name = names.get(entry.launch_id, "")
+            if entry.outcome == OUTCOME_POSTED:
+                continue
+            if entry.outcome == OUTCOME_VERIFYING:
+                entry.next_step = "the recheck pass will confirm or fail it"
+                entry.next_tone = "warn"
+                continue
+            if entry.outcome != OUTCOME_FAILED:
+                continue
+            key = entry.name.strip().lower()
+            decision = None
+            if key:
+                decision = next((e for e in events
+                                 if e["profile"] == key and e["ts"] >= floor), None)
+            if decision:
+                entry.next_step, entry.next_tone = decision["next"], decision["tone"]
+            else:
+                entry.next_step = "waiting for the next retry pass"
+                entry.next_tone = "warn"
     return runs
 
 
@@ -822,6 +1193,13 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
     day = _today(now)
 
     runs = parse_posting_runs(day=day)
+    try:
+        annotate_runs(runs, names=profile_names(), events=retry_events(day=day))
+    except Exception:
+        # Names and retry verdicts are the nice-to-have half of the run detail;
+        # the outcomes themselves are already parsed. Losing the annotation must
+        # not cost the page the runs.
+        pass
     posts_today = sum(r.posts for r in runs)
     run_seconds = sum(r.seconds for r in runs if r.seconds)
     attempts = sum(r.attempts for r in runs)

@@ -117,6 +117,160 @@ class ParsePostingRunsTest(unittest.TestCase):
         self.assertEqual([r.posts for r in runs], [1])
 
 
+# One run with every shape of per-profile ending the log can produce: a clean
+# post, a share that could not be proven, a launch MultiLogin 500ed, a phone
+# that never came up, and a post that was still going when the log ended.
+PROFILE_LOG = """\
+2026-08-05 18:11:14,000 | INFO | Posting 5 profile(s), up to 10 at a time (rolling, global ceiling 12)
+2026-08-05 18:11:20,000 | INFO | Launched profile 1001
+2026-08-05 18:11:21,000 | INFO | Launched profile 1002
+2026-08-05 18:11:22,000 | ERROR | Failed to launch profile 1003 -- MultiLogin-side 500 (their cloud; self-heals, but it still spends this row's retry budget): {'status': 'error'}
+2026-08-05 18:11:30,000 | INFO | Preparing to push reel media for profile 1002: /opt/adbbot/spoofed/Nikki/run4/nikki_3_I_5_aug__Nikki_15.mp4 -> /sdcard/Download/x.mp4
+2026-08-05 18:12:00,000 | INFO | Post result for Laila 2 (profile 1001): done
+2026-08-05 18:13:00,000 | WARNING | Workflow outcome UNCERTAIN for profile 1002 -- Share was tapped but the post could not be confirmed; check before re-posting
+2026-08-05 18:14:00,000 | WARNING | Profile 1004 is not ready for ADB automation
+2026-08-05 18:15:00,000 | INFO | Launched profile 1005
+2026-08-05 18:16:00,000 | INFO | Posting run complete (4 post(s)); MLX launch health: 6 attempt(s), 4 ok, 1 MLX-side 500 (16.7%), 0 our-side/other failure(s), 1 queue retry(s) burned by MLX 500s
+"""
+
+RETRY_LOG_TEXT = """\
+2026-08-05 18:20:00,000 | INFO | Re-queueing Nikki 3 / 18:00 in 30 min (attempt 2/3)
+2026-08-05 18:20:01,000 | INFO | Not retrying Laila 4 / 21:00: issue type is Retries Exhausted -- not a retryable failure
+2026-08-05 18:20:02,000 | INFO | Profile needs a human for Luisa 7 / 18:00: Human Verification Required
+2026-08-04 09:00:00,000 | INFO | Re-queueing Nikki 3 / 09:00 in 15 min (attempt 1/3)
+"""
+
+
+class ProfileOutcomeTest(unittest.TestCase):
+    """Which profiles posted, which did not -- the run's own log is the source."""
+
+    def _log(self, text=PROFILE_LOG):
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False)
+        tmp.write(text)
+        tmp.close()
+        self.addCleanup(lambda: Path(tmp.name).unlink(missing_ok=True))
+        return tmp.name
+
+    def _run(self):
+        return report.parse_posting_runs(self._log(), day="2026-08-05")[0]
+
+    def _outcomes(self):
+        return {p.launch_id: p.outcome for p in self._run().profiles}
+
+    def test_every_profile_the_run_touched_is_accounted_for(self):
+        self.assertEqual(set(self._outcomes()), {"1001", "1002", "1003", "1004", "1005"})
+
+    def test_the_named_result_line_gives_both_outcome_and_name(self):
+        posted = [p for p in self._run().profiles if p.launch_id == "1001"][0]
+        self.assertEqual((posted.name, posted.outcome), ("Laila 2", "posted"))
+
+    def test_a_share_that_could_not_be_proven_is_verifying_not_failed(self):
+        self.assertEqual(self._outcomes()["1002"], "verifying")
+
+    def test_a_name_is_recovered_from_the_variant_filename(self):
+        unproven = [p for p in self._run().profiles if p.launch_id == "1002"][0]
+        self.assertEqual(unproven.name, "Nikki 15")
+
+    def test_a_launch_that_500ed_did_not_post(self):
+        entry = [p for p in self._run().profiles if p.launch_id == "1003"][0]
+        self.assertEqual(entry.outcome, "failed")
+        self.assertIn("MultiLogin", entry.detail)
+
+    def test_a_phone_that_never_came_up_is_a_failure_with_a_reason(self):
+        entry = [p for p in self._run().profiles if p.launch_id == "1004"][0]
+        self.assertEqual(entry.outcome, "failed")
+        self.assertIn("ADB-ready", entry.detail)
+
+    def test_a_post_still_running_is_unknown_not_invented(self):
+        self.assertEqual(self._outcomes()["1005"], "unknown")
+
+    def test_a_relaunch_after_a_500_ends_the_run_posted(self):
+        """MultiLogin flakiness that self-heals must not read as a lost post."""
+        text = PROFILE_LOG.replace(
+            "2026-08-05 18:12:00,000 | INFO | Post result for Laila 2 (profile 1001): done",
+            "2026-08-05 18:12:00,000 | INFO | Post result for Laila 2 (profile 1001): done\n"
+            "2026-08-05 18:12:30,000 | INFO | Post result for Katja 4 (profile 1003): done")
+        runs = report.parse_posting_runs(self._log(text), day="2026-08-05")
+        entry = [p for p in runs[0].profiles if p.launch_id == "1003"][0]
+        self.assertEqual((entry.name, entry.outcome), ("Katja 4", "posted"))
+
+    def test_counts_and_ordering_put_the_problems_first(self):
+        run = self._run()
+        self.assertEqual(run.counts(),
+                         {"failed": 2, "unknown": 1, "skipped": 0,
+                          "verifying": 1, "posted": 1})
+        self.assertEqual([p.outcome for p in run.sorted_profiles()][:2], ["failed", "failed"])
+
+    def test_a_profile_with_no_name_anywhere_is_labelled_by_its_id(self):
+        entry = [p for p in self._run().profiles if p.launch_id == "1005"][0]
+        self.assertEqual(entry.label, "1005")
+
+
+class NameFromMediaPathTest(unittest.TestCase):
+    def test_reads_the_handle_the_pipeline_stamped_on_the_variant(self):
+        self.assertEqual(
+            report.name_from_media_path("/opt/adbbot/spoofed/Nikki/run4/clip__Nikki_6_again.mp4"),
+            "Nikki 6 again")
+
+    def test_a_source_name_that_already_ends_in_mp4_still_parses(self):
+        self.assertEqual(
+            report.name_from_media_path("/x/jasmin_3_I_agency.mp4__Jasmin_1.mp4"), "Jasmin 1")
+
+    def test_a_path_without_the_stamp_returns_nothing_rather_than_a_guess(self):
+        self.assertEqual(report.name_from_media_path("/opt/adbbot/raw/Nikki/clip.mp4"), "")
+
+
+class RetryAnnotationTest(unittest.TestCase):
+    """A failure that is already re-queued needs nobody; the page must say so."""
+
+    def _retry_log(self, text=RETRY_LOG_TEXT):
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False)
+        tmp.write(text)
+        tmp.close()
+        self.addCleanup(lambda: Path(tmp.name).unlink(missing_ok=True))
+        return tmp.name
+
+    def _events(self):
+        return report.retry_events(self._retry_log(), day="2026-08-05")
+
+    def test_only_the_reported_day_is_read(self):
+        self.assertEqual([e["profile"] for e in self._events()],
+                         ["nikki 3", "laila 4", "luisa 7"])
+
+    def test_a_requeued_failure_reads_as_handled(self):
+        run = report.RunSummary(started="2026-08-05 18:11:14", finished="2026-08-05 18:16:00")
+        run.profiles.append(report.ProfileRun(launch_id="1", name="Nikki 3", outcome="failed"))
+        report.annotate_runs([run], events=self._events())
+        self.assertEqual(run.profiles[0].next_tone, "ok")
+        self.assertIn("attempt 2/3", run.profiles[0].next_step)
+
+    def test_a_failure_the_retry_pass_parked_asks_for_a_person(self):
+        run = report.RunSummary(started="2026-08-05 18:11:14", finished="2026-08-05 18:16:00")
+        run.profiles.append(report.ProfileRun(launch_id="2", name="Luisa 7", outcome="failed"))
+        report.annotate_runs([run], events=self._events())
+        self.assertEqual(run.profiles[0].next_tone, "bad")
+        self.assertIn("needs a person", run.profiles[0].next_step)
+
+    def test_a_verdict_from_before_the_run_is_not_borrowed(self):
+        """Yesterday's re-queue says nothing about today's failure."""
+        run = report.RunSummary(started="2026-08-05 19:00:00", finished="2026-08-05 19:05:00")
+        run.profiles.append(report.ProfileRun(launch_id="3", name="Nikki 3", outcome="failed"))
+        report.annotate_runs([run], events=self._events())
+        self.assertEqual(run.profiles[0].next_step, "waiting for the next retry pass")
+
+    def test_a_posted_profile_is_left_alone(self):
+        run = report.RunSummary(started="2026-08-05 18:11:14", finished="2026-08-05 18:16:00")
+        run.profiles.append(report.ProfileRun(launch_id="4", name="Nikki 3", outcome="posted"))
+        report.annotate_runs([run], events=self._events())
+        self.assertEqual(run.profiles[0].next_step, "")
+
+    def test_names_fill_in_from_the_offline_map(self):
+        run = report.RunSummary(started="2026-08-05 18:11:14")
+        run.profiles.append(report.ProfileRun(launch_id="1001", outcome="posted"))
+        report.annotate_runs([run], names={"1001": "Katja 2"})
+        self.assertEqual(run.profiles[0].name, "Katja 2")
+
+
 class ContentStockTest(unittest.TestCase):
     def test_groups_ready_variants_by_model_from_the_file_path(self):
         class FakeAirtable:
@@ -225,8 +379,8 @@ class CollectTest(unittest.TestCase):
     def _patched(self, **overrides):
         defaults = {
             "running_now": lambda: {"loops": [("posting", "active")], "active_loops": ["posting"],
-                                    "profiles": ["Jil 1"], "slots_held": 1, "slot_ceiling": 12,
-                                    "phones": 1, "agent_up": True},
+                                    "profiles": [], "stale_locks": [], "slots_held": 1,
+                                    "slot_ceiling": 12, "phones": 1, "agent_up": True},
             "parse_posting_runs": lambda **kw: [],
             "ledger_today": lambda **kw: {"total": 0, "by_status": {}, "verify_seconds": 0.0},
             "health": lambda: {"loops": [], "bad": []},
@@ -268,8 +422,8 @@ class CollectTest(unittest.TestCase):
 
         def counting_now():
             calls.append(1)
-            return {"loops": [], "active_loops": [], "profiles": [], "slots_held": 0,
-                    "slot_ceiling": 12, "phones": 0, "agent_up": True}
+            return {"loops": [], "active_loops": [], "profiles": [], "stale_locks": [],
+                    "slots_held": 0, "slot_ceiling": 12, "phones": 0, "agent_up": True}
 
         patches = self._patched(running_now=counting_now)
         for p in patches:
@@ -288,7 +442,9 @@ class RenderTest(unittest.TestCase):
         data = {
             "generated_at": "2026-08-05 18:30:00", "day": "2026-08-05",
             "now": {"loops": [("posting", "active")], "active_loops": ["posting"],
-                    "profiles": ["Jil 1"], "slots_held": 1, "slot_ceiling": 12,
+                    "profiles": [{"profile_id": "111", "name": "Jil 1", "owner": "posting",
+                                  "pid": "42", "age_seconds": 30.0}],
+                    "stale_locks": [], "slots_held": 1, "slot_ceiling": 12,
                     "phones": 1, "agent_up": True},
             "runs": [],
             "totals": {"runs": 0, "posts": 0, "seconds": 0.0, "seconds_per_post": 0.0,
@@ -775,6 +931,61 @@ class MonitoringRenderTest(RenderTest):
         self.assertIn("var(--bad)", report_html.render(data))
 
 
+class RunByRunTest(RenderTest):
+    """The daily read: run 1, who posted, who did not, who is coming back."""
+
+    def _runs(self):
+        finished = report.RunSummary(started="2026-08-05 18:11:14",
+                                     finished="2026-08-05 18:16:00", planned=3, posts=3)
+        finished.profiles = [
+            report.ProfileRun(launch_id="1", name="Katja 2", outcome="posted"),
+            report.ProfileRun(launch_id="2", name="Nikki 3", outcome="failed",
+                              detail="ADB connect failed",
+                              next_step="retrying by itself — attempt 2/3, next try in 30 min",
+                              next_tone="ok"),
+            report.ProfileRun(launch_id="3", name="Luisa 7", outcome="verifying",
+                              detail="share tapped, not yet confirmed",
+                              next_step="the recheck pass will confirm or fail it",
+                              next_tone="warn"),
+        ]
+        running = report.RunSummary(started="2026-08-05 18:20:00", planned=1)
+        running.profiles = [report.ProfileRun(launch_id="4", name="Jil 5")]
+        return [finished, running]
+
+    def test_each_run_is_numbered_and_carries_its_profiles(self):
+        page = report_html.render(self._data(runs=self._runs()))
+        panel = page.split('id="panel-technical"')[1].split("</section>")[0]
+        self.assertIn("Run by run", panel)
+        self.assertIn("Run 1", panel)
+        self.assertIn("Run 2", panel)
+        for name in ("Katja 2", "Nikki 3", "Luisa 7", "Jil 5"):
+            self.assertIn(name, panel)
+
+    def test_a_run_that_lost_a_profile_is_open_by_default(self):
+        page = report_html.render(self._data(runs=self._runs()))
+        self.assertIn('<details class="run" open>', page)
+
+    def test_a_failure_the_bot_is_handling_reads_green_not_red(self):
+        page = report_html.render(self._data(runs=self._runs()))
+        self.assertIn('<span class="pill ok">retrying by itself — attempt 2/3', page)
+
+    def test_a_run_still_going_does_not_report_its_posts_as_lost(self):
+        page = report_html.render(self._data(runs=self._runs()))
+        self.assertIn("still going", page)
+        self.assertIn("1 did not post", page)      # the running profile is not counted
+
+    def test_a_profile_name_cannot_inject_markup(self):
+        runs = self._runs()
+        runs[0].profiles[0].name = "<script>x</script>"
+        page = report_html.render(self._data(runs=runs))
+        self.assertNotIn("<script>x", page)
+        self.assertIn("&lt;script&gt;x", page)
+
+    def test_no_run_says_so_rather_than_rendering_an_empty_card(self):
+        page = report_html.render(self._data(runs=[]))
+        self.assertIn("No posting run has started today.", page)
+
+
 class TabsTest(RenderTest):
     """Three views on one page, switched without JavaScript.
 
@@ -873,3 +1084,111 @@ class ProfilesViewTest(RenderTest):
         page = report_html.render(self._with("Human Verification Required"))
         self.assertIn("Being checked (Verifying)", page)
         self.assertIn("resolves by itself", page)
+
+
+class ProfileLocksTest(unittest.TestCase):
+    """Live locks and abandoned ones are different facts.
+
+    A lock whose owner died sits on disk until the 45-minute TTL lets the next
+    loop steal it. Counting those as "held by a running loop" reported the exact
+    condition that cost 17 minutes of dead time on 2026-08-04 as healthy work.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def _lock(self, profile_id, owner="posting", age_seconds=0.0, pid=4242):
+        import os, time
+        path = self.dir / f"{profile_id}.lock"
+        path.write_text(f"pid={pid} owner={owner} at=2026-08-05 19:42:02\n")
+        when = time.time() - age_seconds
+        os.utime(path, (when, when))
+        return path
+
+    def _collect(self, phones=()):
+        from adb_bot.core import locks
+        from adb_bot.automation import phone_reaper
+
+        with mock.patch.object(locks, "lock_dir", return_value=self.dir), \
+             mock.patch.object(phone_reaper, "list_phones", return_value=list(phones)):
+            return report.profile_locks()
+
+    def test_a_fresh_lock_is_live(self):
+        self._lock("111", owner="posting", age_seconds=30)
+        live, stale = self._collect()
+        self.assertEqual(len(live), 1)
+        self.assertEqual(stale, [])
+        self.assertEqual(live[0]["owner"], "posting")
+        self.assertEqual(live[0]["pid"], "4242")
+        self.assertAlmostEqual(live[0]["age_seconds"], 30, delta=5)
+
+    def test_a_lock_past_its_ttl_is_abandoned_not_live(self):
+        from adb_bot.core import locks
+        self._lock("222", age_seconds=locks.DEFAULT_TTL_SECONDS + 120)
+        live, stale = self._collect()
+        self.assertEqual(live, [])
+        self.assertEqual(len(stale), 1)
+        self.assertEqual(stale[0]["profile_id"], "222")
+
+    def test_the_profile_name_is_resolved_from_its_phone(self):
+        """An 18-digit id tells a person nothing; the phone carries the name."""
+        from adb_bot.automation import phone_reaper
+        self._lock("625727120991322399")
+        live, _ = self._collect(phones=[phone_reaper.Phone(
+            pid=1, profile_id="625727120991322399", name="Viktoria 6")])
+        self.assertEqual(live[0]["name"], "Viktoria 6")
+
+    def test_an_unknown_profile_still_lists_its_id(self):
+        self._lock("999")
+        live, _ = self._collect()
+        self.assertEqual(live[0]["name"], "")
+        self.assertEqual(live[0]["profile_id"], "999")
+
+    def test_a_malformed_lock_file_does_not_break_the_page(self):
+        (self.dir / "333.lock").write_text("garbage without key values\n")
+        live, stale = self._collect()
+        self.assertEqual(len(live) + len(stale), 1)
+        self.assertEqual((live + stale)[0]["owner"], "unknown")
+
+    def test_an_unreadable_lock_directory_is_empty_not_fatal(self):
+        from adb_bot.core import locks
+        with mock.patch.object(locks, "lock_dir", side_effect=OSError("boom")):
+            self.assertEqual(report.profile_locks(), ([], []))
+
+
+class LockRenderTest(RenderTest):
+    def _now(self, **kw):
+        now = {"loops": [], "active_loops": [], "profiles": [], "stale_locks": [],
+               "slots_held": 0, "slot_ceiling": 12, "phones": 0, "agent_up": True}
+        now.update(kw)
+        return self._data(now=now)
+
+    def test_live_locks_show_name_owner_and_age(self):
+        page = report_html.render(self._now(profiles=[
+            {"profile_id": "111", "name": "Viktoria 6", "owner": "posting",
+             "pid": "705725", "age_seconds": 320}]))
+        self.assertIn("Profiles being worked on", page)
+        self.assertIn("Viktoria 6", page)
+        self.assertIn("posting", page)
+        self.assertIn("5m 20s", page)
+        self.assertIn("705725", page)
+
+    def test_abandoned_locks_are_separated_and_explained(self):
+        page = report_html.render(self._now(stale_locks=[
+            {"profile_id": "222", "name": "Jil 1", "owner": "warmup",
+             "pid": "1", "age_seconds": 4000}]))
+        self.assertIn("Abandoned locks", page)
+        self.assertIn("outlived their 45-minute TTL", page)
+        self.assertIn("no longer block anything", page)
+
+    def test_the_locked_tile_counts_only_live_locks(self):
+        page = report_html.render(self._now(
+            profiles=[{"profile_id": "1", "name": "a", "owner": "posting",
+                       "pid": "1", "age_seconds": 10}],
+            stale_locks=[{"profile_id": "2", "name": "b", "owner": "warmup",
+                          "pid": "2", "age_seconds": 5000}]))
+        self.assertIn("being worked on right now", page)
+        self.assertNotIn("held by a running loop", page)
+        self.assertIn("owner died; see below", page)

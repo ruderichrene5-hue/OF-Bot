@@ -13,6 +13,7 @@ listed by name, and everything that is merely interesting is below the fold.
 from __future__ import annotations
 
 import html
+from collections import Counter
 from datetime import datetime
 
 REFRESH_SECONDS = 30
@@ -114,6 +115,24 @@ footer { margin-top: 2.5rem; color: var(--muted); font-size: .78rem;
 .howto dt:first-child { margin-top: 0; }
 .howto dd { margin: .15rem 0 0; color: var(--muted); font-size: .9rem; }
 .lead { font-size: .95rem; margin: 0 0 1rem; }
+
+/* One collapsible card per posting run. <details> is the only disclosure a
+   strict-CSP page can have without script, and it keeps a 46-profile run from
+   burying the four runs under it. Runs that lost a profile open by default --
+   the ones worth reading are the ones with something red in them. */
+details.run { background: var(--card); border: 1px solid var(--line);
+              border-radius: 10px; padding: .55rem .8rem; margin: .55rem 0; }
+details.run > summary { cursor: pointer; font-weight: 600; font-size: .92rem;
+                        list-style: none; display: flex; flex-wrap: wrap;
+                        align-items: center; gap: .4rem; }
+details.run > summary::-webkit-details-marker { display: none; }
+details.run > summary::before { content: "▸"; color: var(--muted); font-weight: 400; }
+details.run[open] > summary::before { content: "▾"; }
+details.run > summary:focus-visible { outline: 2px solid var(--accent);
+                                      outline-offset: 2px; border-radius: 4px; }
+details.run .when { color: var(--muted); font-weight: 400;
+                    font-variant-numeric: tabular-nums; }
+details.run .scroll { margin-top: .6rem; }
 """
 
 
@@ -163,12 +182,16 @@ def _section_now(now: dict) -> str:
     tiles = [
         _tile("Loops running", ", ".join(active) if active else "idle",
               "systemd ActiveState", "ok" if active else ""),
-        _tile("Profiles locked", len(now["profiles"]), "held by a running loop"),
+        _tile("Profiles locked", len(now.get("profiles") or []),
+              "being worked on right now"),
         _tile("Live phones", phones,
               f"{slots} of {ceiling} tracked by the cap", phone_tone),
         _tile("MultiLogin agent", "up" if now["agent_up"] else "DOWN",
               "listening on :45001", "ok" if now["agent_up"] else "bad"),
     ]
+    if now.get("stale_locks"):
+        tiles.insert(2, _tile("Abandoned locks", len(now["stale_locks"]),
+                              "owner died; see below", "warn"))
     body = f'<div class="grid">{"".join(tiles)}</div>'
     if slots > ceiling and ceiling:
         body += (f'<p class="sub" style="margin-top:.7rem">'
@@ -179,10 +202,24 @@ def _section_now(now: dict) -> str:
                  f'{phones - slots} phone(s) open that no slot accounts for — phones still '
                  f'starting, or orphans left by a run that was killed before the close '
                  f'guarantee existed. Nothing reaps those.</p>')
-    if now["profiles"]:
-        body += ('<div class="scroll"><table><tr><th>Profile locks held</th></tr>'
-                 + "".join(f'<tr><td class="mono">{_e(p)}</td></tr>' for p in now["profiles"])
-                 + "</table></div>")
+    def lock_table(entries, heading):
+        rows = "".join(
+            f"<tr><td class='mono'>{_e(entry['name'] or entry['profile_id'])}</td>"
+            f"<td class='mono'>{_e(entry['owner'])}</td>"
+            f"<td class='num'>{_e(_fmt_seconds(entry['age_seconds']))}</td>"
+            f"<td class='num mono'>{_e(entry['pid'])}</td></tr>" for entry in entries)
+        return (f"<h3>{_e(heading)}</h3><div class='scroll'><table>"
+                "<tr><th>Profile</th><th>Held by</th><th class='num'>For</th>"
+                "<th class='num'>PID</th></tr>" + rows + "</table></div>")
+
+    if now.get("profiles"):
+        body += lock_table(now["profiles"], "Profiles being worked on")
+    if now.get("stale_locks"):
+        body += lock_table(now["stale_locks"], "Abandoned locks")
+        body += ('<p class="sub">These locks outlived their 45-minute TTL, so whatever held '
+                 'them is gone. They no longer block anything — the next loop that wants one '
+                 'takes it over — but they are the signature of a run that was killed rather '
+                 'than finishing.</p>')
     return body
 
 
@@ -344,6 +381,87 @@ def _section_runs(runs) -> str:
             f"<td class='num'>{run.mlx_500} ({run.mlx_rate:.0f}%)</td>"
             f"<td class='num'>{run.other_failures}</td></tr>")
     return f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>'
+
+
+_OUTCOME_PILL = {
+    "posted": ("ok", "posted"),
+    "verifying": ("warn", "verifying"),
+    "failed": ("bad", "did not post"),
+    "skipped": ("warn", "skipped"),
+    "unknown": ("warn", "no result"),
+}
+
+
+def _run_detail(run, index: int) -> str:
+    """One run as a collapsible card: the counts, then every profile in it."""
+    counts = run.counts()
+    # A run still in flight has profiles with no result *yet*. Calling those
+    # "no result" would read as a fault; they are simply mid-post.
+    running = not run.finished
+    unknown_label = "still going" if running else "no result"
+    pills = []
+    for outcome, label in (("posted", "posted"), ("verifying", "verifying"),
+                           ("failed", "did not post"), ("skipped", "skipped"),
+                           ("unknown", unknown_label)):
+        if counts.get(outcome):
+            tone = _OUTCOME_PILL[outcome][0]
+            pills.append(f'<span class="pill {tone}">{counts[outcome]} {label}</span>')
+    if not pills:
+        pills.append('<span class="pill warn">no profile reached a phone</span>')
+
+    finished = _e(run.finished[11:16]) if run.finished else "running"
+    summary = (f'<summary>Run {index} '
+               f'<span class="when">{_e(run.started[11:16])} → {finished}</span> '
+               f'{"".join(pills)}</summary>')
+
+    if not run.profiles:
+        body = ('<p class="empty">No profile is named in this run\'s log — it '
+                'planned work but nothing reached a phone.</p>')
+    else:
+        head = ("<tr><th>Profile</th><th>Result</th><th>What happened</th>"
+                "<th>What happens next</th></tr>")
+        rows = []
+        for entry in run.sorted_profiles():
+            tone, label = _OUTCOME_PILL.get(entry.outcome, ("warn", entry.outcome))
+            if entry.outcome == "unknown":
+                label = unknown_label
+            next_step = ""
+            if entry.next_step:
+                next_tone = entry.next_tone or "warn"
+                next_step = f'<span class="pill {next_tone}">{_e(entry.next_step)}</span>'
+            rows.append(
+                f"<tr><td class='mono'>{_e(entry.label)}</td>"
+                f"<td><span class='pill {tone}'>{_e(label)}</span></td>"
+                f"<td class='wrap-cell'>{_e(entry.detail)}</td>"
+                f"<td class='wrap-cell'>{next_step}</td></tr>")
+        body = f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>'
+
+    # Open the runs that lost something; a clean run is a line, not a page.
+    unresolved = counts.get("failed", 0) + (0 if running else counts.get("unknown", 0))
+    return f'<details class="run"{" open" if unresolved else ""}>{summary}{body}</details>'
+
+
+def _section_run_detail(runs) -> str:
+    if not runs:
+        return '<p class="empty">No posting run has started today.</p>'
+    totals = Counter()
+    in_flight = 0
+    for run in runs:
+        counts = run.counts()
+        totals.update(counts)
+        if not run.finished:
+            in_flight += counts.get("unknown", 0)
+    missed = totals["failed"] + totals["unknown"] - in_flight
+    still = f' · {in_flight} still going' if in_flight else ""
+    lead = (f'<p class="sub">{len(runs)} run(s) today · {totals["posted"]} posted · '
+            f'{totals["verifying"]} verifying · {missed} did not post{still}. '
+            'Counted per profile per run, so a profile that failed twice appears '
+            'twice — unlike the Posts column above, which counts profiles a run '
+            'worked on, not posts that landed. Runs that lost a profile are open; '
+            'the rest fold away. "What happens next" is the retry pass\'s own '
+            'verdict, so a red row with a green pill needs nobody.</p>')
+    cards = [_run_detail(run, index) for index, run in enumerate(runs, start=1)]
+    return lead + "".join(cards)
 
 
 def _section_failures(failures) -> str:
@@ -638,6 +756,9 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
 
       <h2>Runs</h2>
       {_section_runs(data['runs'])}
+
+      <h2>Run by run</h2>
+      {_section_run_detail(data['runs'])}
 
       <h2>Failed queue rows</h2>
       {_section_failures(data['queue']['failures'])}

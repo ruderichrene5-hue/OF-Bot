@@ -278,6 +278,16 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
                     status_callback(pid, status)
                 except Exception:
                     pass
+            # One named line per finished post, before the Airtable write can
+            # fail. Everything else in this log knows a profile only by its MLX
+            # id, so without this the daily report can say how many posts a run
+            # made but not *which* accounts they were -- and the id is no use to
+            # the person reading it. Only terminal statuses: the intermediate
+            # ones are progress, not results.
+            if _map_post_status(status) is not None:
+                logger.info("Post result for %s (profile %s): %s%s",
+                            item.account_name, item.launch_id, status,
+                            f" -- {detail}" if detail else "")
             try:
                 apply_post_result(airtable, item, status, flow=flow, logger=logger, detail=detail)
                 # If this row just spent a retry and its profile's launch 500ed
