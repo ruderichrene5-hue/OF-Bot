@@ -23,6 +23,7 @@ from adb_bot.config import get_bearer_token
 from adb_bot.config.settings import load_settings, save_settings, get_saved_bearer_token, get_saved_batch_launch_delay, get_saved_readiness_wait, get_saved_readiness_attempts, get_app_data_dir, get_scheduler_config, save_scheduler_config, get_saved_flow_speed, get_folder_media_paths, save_folder_media_paths
 from adb_bot.automation import scheduling as scheduler_admin
 from adb_bot.core.batching import LaunchGate, resolve_concurrency, run_rolling
+from adb_bot.core.locks import live_profile_count, live_profile_slot
 from adb_bot.core.logger import get_logger
 from adb_bot.core.models import Profile
 from adb_bot.clients.api import MultiloginApiClient
@@ -45,6 +46,14 @@ from adb_bot.ui.helpers import (
 from adb_bot.automation.flows.story_media import discover_story_media_files
 from adb_bot.clients.airtable import AirtableClient
 from adb_bot.automation.airtable_runner import run_airtable_queue
+
+# How long a hand-started profile waits for a place under the global live-phone
+# ceiling before it is given up on. The scheduled loops skip immediately (the
+# next tick retries), but nothing retries for a person, so this path waits --
+# bounded, because a UI that sits there forever is indistinguishable from a hang.
+# 90s is about one posting profile's turnaround, so a run started while a loop is
+# finishing usually just proceeds.
+UI_SLOT_WAIT_SECONDS = 90.0
 
 
 class TextLogHandler(logging.Handler):
@@ -1686,34 +1695,47 @@ class WorkflowUI:
                 if self.abort_requested or run_token != self._run_token:
                     self.logger.info("Abort requested before launching profile %s", profile_id)
                     return
-                launch_response = gate.launch(
-                    lambda: launcher_client.start_profiles([profile_id]))
-                if isinstance(launch_response, dict) and launch_response.get("status") == "error":
-                    self.logger.error(
-                        "Failed to launch profile %s on Multilogin. Response: %s",
+                # The cross-loop ceiling on live phones. The scheduled loops may
+                # already be driving phones on this box, and `concurrency` above
+                # knows nothing about them. Unlike the loops this path waits
+                # first -- a person picked these profiles by hand and a silent
+                # skip would look like a bug -- but the wait is bounded, so a
+                # busy box costs a minute, not a hung UI.
+                with live_profile_slot(owner="ui", wait_seconds=UI_SLOT_WAIT_SECONDS) as slot:
+                    if slot is None:
+                        self.logger.error(
+                            "Not launching profile %s: %s phone(s) are already open across every "
+                            "loop (global ceiling). Try again once the running loops finish.",
+                            profile_id, live_profile_count())
+                        return
+                    launch_response = gate.launch(
+                        lambda: launcher_client.start_profiles([profile_id]))
+                    if isinstance(launch_response, dict) and launch_response.get("status") == "error":
+                        self.logger.error(
+                            "Failed to launch profile %s on Multilogin. Response: %s",
+                            profile_id,
+                            launch_response,
+                        )
+                        return
+                    self.logger.info("Launched profile %s successfully", profile_id)
+                    # _run_single_profile waits for *this* profile to become ready,
+                    # so the old global readiness sleep is no longer needed.
+                    self._run_single_profile(
                         profile_id,
-                        launch_response,
+                        bearer_token,
+                        api_client,
+                        adb_enable_client,
+                        shutdown_client,
+                        automation,
+                        run_token,
+                        readiness_wait_seconds=self._readiness_wait_seconds,
+                        readiness_max_attempts=self._readiness_max_attempts,
+                        should_stop=lambda: self.abort_requested,
+                        manual_continue_event=self.profile_manual_continue_events.get(profile_id),
+                        manual_continue_callback=self._enable_manual_continue_button,
+                        shutdown_on_success=self._shutdown_on_success,
+                        launcher_client=launcher_client,
                     )
-                    return
-                self.logger.info("Launched profile %s successfully", profile_id)
-                # _run_single_profile waits for *this* profile to become ready,
-                # so the old global readiness sleep is no longer needed.
-                self._run_single_profile(
-                    profile_id,
-                    bearer_token,
-                    api_client,
-                    adb_enable_client,
-                    shutdown_client,
-                    automation,
-                    run_token,
-                    readiness_wait_seconds=self._readiness_wait_seconds,
-                    readiness_max_attempts=self._readiness_max_attempts,
-                    should_stop=lambda: self.abort_requested,
-                    manual_continue_event=self.profile_manual_continue_events.get(profile_id),
-                    manual_continue_callback=self._enable_manual_continue_button,
-                    shutdown_on_success=self._shutdown_on_success,
-                    launcher_client=launcher_client,
-                )
 
             self.logger.info("Running %s profile(s), up to %s at a time (rolling)",
                              len(selected_ids), concurrency)

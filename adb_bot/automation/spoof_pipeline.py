@@ -39,6 +39,27 @@ TARGETS_ACCOUNTS = "accounts"
 TARGETS_PROFILES = "profiles"
 
 
+# Raw folders whose name is not the model whose content they hold. Everything
+# here keys off the folder name, so a mislabelled folder matches no targets and
+# every video under it is skipped -- and the skip reads "no MLX profiles under
+# model 'Corina'", which looks like a real inventory gap rather than a label
+# that is simply wrong. Confirmed by the operator on 2026-08-04: 01_Raw_Videos/
+# Corina holds Nikki's content (its files are even named "nikki N ..."), and
+# Mandy's holds Luisa's. Between them they cover 23 of the 52 live profiles.
+#
+# Keys are compared lower-cased; values are the model name as Airtable spells
+# it. Delete an entry once the Drive folder itself is renamed.
+RAW_FOLDER_MODEL_ALIASES = {
+    "corina": "Nikki",
+    "mandy": "Luisa",
+}
+
+
+def resolve_model(folder_name: str) -> str:
+    """The model a raw folder's videos belong to, honouring the alias map."""
+    return RAW_FOLDER_MODEL_ALIASES.get((folder_name or "").strip().lower(), folder_name)
+
+
 @dataclass
 class RawVideo:
     model: str          # folder/model name, e.g. "Nikki"
@@ -330,7 +351,13 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
     model_ids = airtable.models_by_name()
 
     capped = False
-    for model, videos in by_model.items():
+    for raw_folder, videos in by_model.items():
+        # The folder name is only a label for the model; an aliased folder is
+        # treated as its real model everywhere below (targets, the Content
+        # Pipeline link, and the output run folder).
+        model = resolve_model(raw_folder)
+        if model != raw_folder:
+            logger.info("pipeline: raw folder %r holds %s content", raw_folder, model)
         accounts = active_by_model.get(model.lower(), [])
         if only_handles and not accounts:
             # Filtered out, not missing: reporting every other model as a skip on

@@ -125,7 +125,10 @@ def cli_loops() -> tuple[str, ...]:
     stack, which may not be importable on the box doing the installing.
     """
     try:
-        from adb_bot.automation.run_loop import LOOPS as commands
+        # COMMANDS, not LOOPS: `doctor` is not a loop but is schedulable and is
+        # in the recommended set, so asking for LOOPS would silently hold its
+        # timer back exactly the way `queue`/`retry` were held back.
+        from adb_bot.automation.run_loop import COMMANDS as commands
         return tuple(commands)
     except Exception:
         return tuple(LOOPS)

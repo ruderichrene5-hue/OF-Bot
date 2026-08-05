@@ -32,7 +32,8 @@ class ServiceUnitTest(unittest.TestCase):
 
     def test_dry_run_omits_apply(self):
         unit = sd.build_service_unit("pipeline", apply=False, python="/venv/bin/python")
-        self.assertIn("run_loop pipeline\n", unit)
+        # The loop's own scheduled flags stay; only --apply is dropped.
+        self.assertIn("run_loop pipeline --targets profiles\n", unit)
         self.assertNotIn("--apply", unit)
 
     def test_oneshot_so_the_timer_can_own_the_schedule(self):

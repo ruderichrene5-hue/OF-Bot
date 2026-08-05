@@ -246,3 +246,64 @@ class ApplySyncTest(TestCase):
         report = apply_sync(client, plan, models_by_name={}, dry_run=False)
         self.assertEqual(report.updated, ["Nikki 1"])
         self.assertEqual(client.updates, [("recX", {at.F_PROF_MLX_API_ID: "624354174112432228"})])
+
+
+class MobileListPaginationTest(TestCase):
+    """The workspace has grown past one page; the sync must see all of it."""
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.payload
+
+    def _client_over(self, pages, total):
+        """A client whose GET serves `pages` (a list of item-lists) in order."""
+        from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
+
+        calls = []
+
+        def fake_get(url, headers=None, params=None, timeout=None):
+            calls.append(params["page"])
+            index = params["page"] - 1
+            items = pages[index] if index < len(pages) else []
+            return self.FakeResponse({"data": {"items": items, "total": total}})
+
+        client = MultiloginMobileListClient("tok")
+        return client, fake_get, calls
+
+    def test_walks_every_page(self):
+        from unittest.mock import patch
+
+        pages = [[{"serial_no": str(n)} for n in range(100)],
+                 [{"serial_no": str(n)} for n in range(100, 136)]]
+        client, fake_get, calls = self._client_over(pages, total=136)
+        with patch("adb_bot.clients.multilogin.mobile_list.requests.get", fake_get):
+            items = client.list_mobile_profiles()
+        self.assertEqual(len(items), 136)
+        self.assertEqual(calls, [1, 2])
+        # The tail of the list -- the oldest profiles -- is what page 1 dropped.
+        self.assertEqual(items[-1]["serial_no"], "135")
+
+    def test_stops_on_a_short_page_when_total_is_wrong(self):
+        from unittest.mock import patch
+
+        # A `total` that overstates the truth must not spin forever.
+        client, fake_get, calls = self._client_over([[{"serial_no": "1"}], []], total=9999)
+        with patch("adb_bot.clients.multilogin.mobile_list.requests.get", fake_get):
+            items = client.list_mobile_profiles()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(calls, [1, 2])
+
+    def test_single_page_makes_one_request(self):
+        from unittest.mock import patch
+
+        client, fake_get, calls = self._client_over([[{"serial_no": "1"}]], total=1)
+        with patch("adb_bot.clients.multilogin.mobile_list.requests.get", fake_get):
+            client.list_mobile_profiles()
+        self.assertEqual(calls, [1])

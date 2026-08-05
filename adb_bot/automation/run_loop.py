@@ -24,16 +24,22 @@ import logging
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 
+from adb_bot.automation import loop_watchdog, schedule_spec
 from adb_bot.automation.flows import reel_verify
 from adb_bot.clients import airtable as at
 from adb_bot.clients.airtable import AirtableClient
 from adb_bot.config import settings
+from adb_bot.core import locks, shutdown
 from adb_bot.core.logger import get_logger
 
 LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "warmup", "mlx-sync", "cleanup")
 # `doctor` isn't a loop -- it's the preflight check, runnable the same way.
-COMMANDS = LOOPS + ("doctor",)
+# `report` renders the operational page; like `doctor` it is a command rather
+# than a loop, and unlike `doctor` it is not in the recommended set, so it never
+# gets a timer -- the live view is the always-on report server.
+COMMANDS = LOOPS + ("doctor", "report")
 
 
 def _mlx_token(cli_value=None) -> str:
@@ -50,6 +56,20 @@ def _airtable(base_id=None, token=None) -> AirtableClient:
     if not token:
         raise SystemExit("[fatal] No Airtable token (AIRTABLE_TOKEN / dev settings / --airtable-token).")
     return AirtableClient(token, base_id, at.TABLE_PROFILES)
+
+
+def _watch(logger, airtable, observe) -> None:
+    """Record one loop tick with the production watchdog.
+
+    Wrapped in its own try/except and always last: a loop's real work is already
+    done by the time this runs, and a monitor that can fail the thing it watches
+    is worse than no monitor. `observe` takes the watchdog so each loop can pass
+    whatever its own report already counted.
+    """
+    try:
+        observe(loop_watchdog.build_watchdog(logger=logger, airtable=airtable))
+    except Exception as exc:
+        logger.warning("watchdog: could not record this tick: %s", exc)
 
 
 # --- individual loops --------------------------------------------------------
@@ -98,6 +118,10 @@ def _run_posting(args, logger) -> int:
         batch_launch_delay_seconds=settings.get_saved_batch_launch_delay(),
     )
     logger.info("posting result: %s", result)
+    # Did this tick actually produce anything, given what was owed? A dead MLX
+    # agent, stale locks and an empty queue all end here with the same quiet
+    # "posting result"; only the watchdog tells them apart. See loop_watchdog.
+    _watch(logger, airtable, lambda wd: loop_watchdog.observe_posting(wd, airtable, logger=logger))
     return 0
 
 
@@ -160,6 +184,8 @@ def _run_pipeline(args, logger) -> int:
         only_handles=[h for h in (args.profile or "").split(",") if h.strip()] or None,
     )
     logger.info("pipeline result: %s", report.summary())
+    if args.apply:
+        _watch(logger, airtable, lambda wd: loop_watchdog.observe_pipeline(wd, report))
     return 1 if report.errors else 0
 
 
@@ -212,6 +238,8 @@ def _run_queue(args, logger) -> int:
     for name, reason in report.skipped:
         logger.info("queue: skipped %s: %s", name, reason)
     logger.info("queue result: %s", report.summary())
+    if args.apply:
+        _watch(logger, airtable, lambda wd: loop_watchdog.observe_queue(wd, report))
     return 1 if report.errors else 0
 
 
@@ -296,24 +324,40 @@ def _run_recheck(args, logger) -> int:
                 captured["count"] = reel_verify.Count(int(result["post_count"]),
                                                       bool(result.get("post_count_exact")))
 
-        run_profile_workflow(
-            launch_id, clients.api.bearer_token, clients.api, clients.adb_enable,
-            clients.shutdown, automation, logger,
-            # Same readiness budget as posting and warmup. Left at the defaults
-            # (2 x 10s) this probe gave a phone ~20s to come up, while a cold
-            # one here needs 45-120s -- so it reported "could not read the post
-            # count" for a phone that was merely still booting, the row re-parked
-            # in Verifying, and the next pass repeated it. Proven 2026-08-03:
-            # three rechecks, three unknowns, none of which ever read a counter.
-            readiness_wait_seconds=settings.get_saved_readiness_wait(),
-            readiness_max_attempts=settings.get_saved_readiness_attempts(),
-            flow_name="reel_post_count_probe", result_callback=capture,
-            shutdown_on_success=True, launcher_client=clients.launcher,
-        )
+        # This probe opens a phone too, so it takes a slot from the same global
+        # ceiling posting and warmup draw on -- one loop that is "only one
+        # profile" is still one more phone on the box. Without a slot the probe
+        # is not run at all: returning None leaves the row parked in Verifying
+        # (`decide_recheck` calls that unknown), which is the correct answer
+        # here -- nothing was read -- and the next 15-minute pass retries it.
+        with locks.live_profile_slot(owner="recheck") as slot:
+            if slot is None:
+                logger.warning(
+                    "Skipping the recheck probe for %s: %s phone(s) already open across all "
+                    "loops (global ceiling). The row stays in Verifying for the next pass.",
+                    launch_id, locks.live_profile_count())
+                return None
+
+            run_profile_workflow(
+                launch_id, clients.api.bearer_token, clients.api, clients.adb_enable,
+                clients.shutdown, automation, logger,
+                # Same readiness budget as posting and warmup. Left at the
+                # defaults (2 x 10s) this probe gave a phone ~20s to come up,
+                # while a cold one here needs 45-120s -- so it reported "could
+                # not read the post count" for a phone that was merely still
+                # booting, the row re-parked in Verifying, and the next pass
+                # repeated it. Proven 2026-08-03: three rechecks, three unknowns,
+                # none of which ever read a counter.
+                readiness_wait_seconds=settings.get_saved_readiness_wait(),
+                readiness_max_attempts=settings.get_saved_readiness_attempts(),
+                flow_name="reel_post_count_probe", result_callback=capture,
+                shutdown_on_success=True, launcher_client=clients.launcher,
+            )
         return captured.get("count")
 
     tally = recheck_runner.recheck_pending_posts(airtable, read_post_count, logger=logger)
     logger.info("recheck result: %s", tally)
+    _watch(logger, airtable, lambda wd: loop_watchdog.observe_recheck(wd, tally))
     return 0
 
 
@@ -324,7 +368,44 @@ def _run_doctor(args, logger) -> int:
     print(report)
     for line in report.splitlines():
         logger.info("%s", line)
+    # Unlike the loops this runs on every invocation, not just `--apply`: doctor
+    # never writes anything but its own watchdog entry, and a hand-run preflight
+    # that found a dead agent should clear the alert exactly like a timed one.
+    #
+    # Best-effort client: with one, alerts also reach the Airtable Run Log; with
+    # none -- no token, or Airtable itself being the thing that is broken -- the
+    # log and alerts.log sinks still fire, which is the case that matters most.
+    try:
+        airtable = _airtable(args.base_id, args.airtable_token)
+    except (SystemExit, Exception):
+        airtable = None
+    _watch(logger, airtable, lambda wd: doctor.observe_doctor(wd, results))
     return doctor.exit_code(results)
+
+
+def _run_report(args, logger) -> int:
+    """Write the operational report to a file (the shareable snapshot).
+
+    The live view is `report_server`; this is the same collector and the same
+    renderer with the meta-refresh left out, because a snapshot that silently
+    reloads itself into a blank page once it is off the box is a trap.
+    """
+    from adb_bot.automation import report, report_html
+
+    try:
+        airtable = _airtable(args.base_id, args.airtable_token)
+    except (SystemExit, Exception):
+        airtable = None
+        logger.warning("report: no Airtable client; writing local sections only")
+
+    data = report.collect(airtable=airtable, use_cache=False)
+    page = report_html.render(data, live=False)
+    out = Path(args.out or (schedule_spec.repo_root() / "logs" / "report.html"))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(page, encoding="utf-8")
+    logger.info("report: wrote %s (%d bytes)", out, len(page))
+    print(out)
+    return 0
 
 
 _DISPATCH = {
@@ -337,6 +418,7 @@ _DISPATCH = {
     "mlx-sync": _run_mlx_sync,
     "cleanup": _run_cleanup,
     "doctor": _run_doctor,
+    "report": _run_report,
 }
 
 
@@ -369,6 +451,8 @@ def main(argv=None) -> int:
                              "that have phones but no Accounts rows yet.")
     parser.add_argument("--skip-staging", action="store_true",
                         help="mlx-sync: skip staging profiles that belong to no model.")
+    parser.add_argument("--out", default=None,
+                        help="report: file to write the HTML to (default logs/report.html).")
     parser.add_argument("--raw-root", default=None, help="pipeline: raw-videos root (overrides config).")
     parser.add_argument("--out-root", default=None, help="pipeline: spoofed-videos output root (overrides config).")
     parser.add_argument("--drive-folder", default=None, help="pipeline: Google Drive folder id of 01_Raw_Videos.")
@@ -381,6 +465,14 @@ def main(argv=None) -> int:
 
     logger = get_logger(f"loop_{args.loop}", log_file=f"logs/loop_{args.loop}.log")
     logger.setLevel(logging.INFO)
+
+    # Every loop -- posting, warmup, recheck, and the ones that touch no device
+    # -- comes through here, so this is the one place that covers all of them.
+    # Without it a `systemctl stop` leaves this run's profile locks behind for
+    # their 45-minute TTL (the next run then finds every profile "busy" and does
+    # nothing) and leaves its phones running (TODO 3.2 / 3.3).
+    shutdown.install_signal_handlers(logger)
+
     logger.info("=== loop '%s' start (%s) ===", args.loop, "APPLY" if args.apply else "DRY-RUN")
     try:
         code = _DISPATCH[args.loop](args, logger)

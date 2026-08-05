@@ -172,7 +172,7 @@ def check_airtable(token: str, base_id: str) -> CheckResult:
     missing = []
     for table in required:
         try:
-            client._list_table(table, page_size=1)
+            client._list_table(table, page_size=1, max_records=1)
         except Exception as exc:
             text = str(exc)
             if "401" in text or "403" in text:
@@ -301,6 +301,76 @@ def check_locks() -> CheckResult:
                        "locks self-expire, or delete them in " + str(locks.lock_dir()))
 
 
+def check_loop_production() -> CheckResult:
+    """Report any loop the watchdog currently has flagged as stalled.
+
+    The alert already went to `logs/alerts.log` when it tripped; this is so
+    somebody who runs `doctor` an hour later still finds out, instead of having
+    to know which log to read.
+    """
+    from adb_bot.automation import loop_watchdog
+
+    try:
+        # No sinks: this only reads the state files, it must never alert.
+        states = loop_watchdog.LoopWatchdog(sinks=[]).snapshot()
+    except Exception as exc:
+        return CheckResult("Loop production", WARN, f"could not read the watchdog state: {exc}")
+    # Drop doctor's own health entry. It is written by `observe_doctor` from the
+    # result of this very check, so reading it back here would make a single
+    # failing check latch: doctor fails -> entry goes unhealthy -> this check
+    # fails because that entry is unhealthy, and it never recovers.
+    states = {name: s for name, s in states.items()
+              if name != DOCTOR_WATCHDOG_LOOP and s.state != loop_watchdog.STATE_UNHEALTHY}
+    if not states:
+        return CheckResult("Loop production", WARN, "no loop has reported yet",
+                           "Expected until the scheduled loops have each run once.")
+    stalled = [s for s in states.values() if s.stalled]
+    if stalled:
+        names = ", ".join(sorted(s.loop for s in stalled))
+        return CheckResult("Loop production", FAIL,
+                           f"{len(stalled)} loop(s) producing nothing while work is due: {names}",
+                           "See logs/alerts.log for when it started and what to check.")
+    return CheckResult("Loop production", PASS,
+                       f"{len(states)} loop(s) watched, none stalled")
+
+
+# --- alerting ----------------------------------------------------------------
+
+# The watchdog key doctor's own health is filed under. Not a loop in the
+# production sense, but it shares the state dir, the sinks and the status line.
+DOCTOR_WATCHDOG_LOOP = "doctor"
+
+# Checks whose failure does not mean the setup is broken for the loops. The
+# desktop UI is the standing example: a server has no display, that WARNs on
+# every run, and an alert nobody can act on trains people to ignore alerts.
+HEALTH_IGNORED_CHECKS = ("Desktop UI (tkinter)",)
+
+
+def failing_checks(results, include_warnings: bool = False) -> list:
+    """The check names a human should act on. FAILs always; WARNs on request."""
+    bad = (FAIL, WARN) if include_warnings else (FAIL,)
+    return [r.name for r in results
+            if r.status in bad and r.name not in HEALTH_IGNORED_CHECKS]
+
+
+def observe_doctor(watchdog, results, include_warnings: bool = False, now=None):
+    """Report this doctor run to the watchdog, alerting on failing checks.
+
+    Scheduled preflight is the point: the connectivity checks (MLX agent
+    listening, Airtable readable, Drive reachable) previously only ran when a
+    person asked, so a dead agent surfaced as failing launches an hour later
+    rather than as an alert. Routed through the watchdog so it reuses one alert
+    path, one storm guard and one status line.
+    """
+    failures = failing_checks(results, include_warnings=include_warnings)
+    detail = ""
+    if failures:
+        by_name = {r.name: r for r in results}
+        detail = "; ".join(f"{n}: {by_name[n].detail}" for n in failures if n in by_name)
+    return watchdog.observe_health(DOCTOR_WATCHDOG_LOOP, failures,
+                                   checked=len(results), detail=detail, now=now)
+
+
 # --- report ------------------------------------------------------------------
 
 def run_checks(settings_mod=None) -> list:
@@ -334,6 +404,7 @@ def run_checks(settings_mod=None) -> list:
         check_spoofer(spoofer_python, spoofer_root),
         check_scheduler(),
         check_locks(),
+        check_loop_production(),
     ])
     return results
 

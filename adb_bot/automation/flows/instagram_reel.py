@@ -2132,7 +2132,9 @@ class ReelPostCountProbeFlow(InstagramReelUploadU2Flow):
         # including one whose phone had connected perfectly.
         for command in self.build_launch_commands(target):
             adb_client.run_command(command)
-        _sleep_after_instagram_launch()
+        # `target` is required -- calling this bare raised TypeError and took the
+        # whole recheck probe down with it, so every row stayed UNKNOWN.
+        _sleep_after_instagram_launch(target, logger=log, delay_seconds=10)
 
         waits.settle(
             10,

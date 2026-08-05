@@ -110,6 +110,44 @@ client on the server and keep it running; a working cloud token is not enough.
 `doctor`'s **MultiLogin agent** check tells the two apart: `MultiLogin` PASS with
 `MultiLogin agent` FAIL means the token is fine and the agent isn't running.
 
+#### Keep it running: `adbbot-mlx-agent.service`
+
+Do **not** hand-start the agent. It has died unsupervised twice — once to an OOM
+— and each time every phone launch failed for about an hour before a human read
+the logs, because a loose process reports to nobody and does not survive a
+reboot. `deploy/systemd/adbbot-mlx-agent.service` supervises it: `Restart=always`,
+ordered after the display, and `WantedBy=multi-user.target` so it comes back on
+its own.
+
+```bash
+sudo deploy/systemd/install_mlx_agent.sh      # writes the unit; does not start it
+```
+
+It is deliberately not part of `install_units.sh` — that script installs the loop
+*timers*, and its `--apply` flag means "start posting for real".
+
+**Taking over from an already-running hand-started agent.** The loose process
+owns `:45001`, so it has to go first or the unit crash-loops trying to bind:
+
+```bash
+sudo kill $(pgrep -f '^/opt/mlx/agent\.bin$')   # stop the loose one
+sleep 5 && ss -lntp | grep 45001                # expect NO output
+sudo systemctl enable --now adbbot-mlx-agent    # supervised from here on
+sleep 10 && ss -lntp | grep 45001               # expect a LISTEN line
+```
+
+Killing the agent also drops every phone it has open, so do this between posting
+slots. Afterwards:
+
+```bash
+systemctl status adbbot-mlx-agent
+journalctl -u adbbot-mlx-agent -f
+```
+
+The listener on `:45001` is the agent's `launcher-linux_amd64.bin` **child**, not
+`agent.bin` itself — so `ss -lntp | grep 45001` naming a different binary than the
+unit's `ExecStart` is correct, not a mismatch.
+
 ## 2. Credentials
 
 | Variable | Value |
@@ -117,6 +155,12 @@ client on the server and keep it running; a working cloud token is not enough.
 | `MULTILOGIN_TOKEN` | MLX **workspace Automation Token** — not a regular token (those expire in ~1h) |
 | `AIRTABLE_TOKEN` | Airtable Personal Access Token |
 | `AIRTABLE_BASE_ID` | The base to run against (test base until you're confident) |
+
+Optional, same file/mechanism:
+
+| Variable | Value |
+|---|---|
+| `ADBBOT_MAX_LIVE_PROFILES` | How many phones may be open **across every loop at once** (default 12). This is the real ceiling: `--max-concurrent` is per loop, so posting (10) + warmup (10) + recheck (1) would otherwise be 21 phones. A loop that cannot get a place skips that profile and picks it up next tick — "skipped … global ceiling" in its log. Lower it if the box is tight on RAM; 12 assumes ~215 MB per live phone on 15 GB. |
 
 ### Linux
 

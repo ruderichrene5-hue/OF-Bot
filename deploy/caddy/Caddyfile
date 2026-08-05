@@ -1,0 +1,51 @@
+# ADB bot operational report, exposed over TLS with a shared password.
+#
+# Shape: Caddy terminates TLS on :8443 and proxies to the report server, which
+# stays bound to 127.0.0.1 and is never reachable directly. If Caddy is stopped
+# or misconfigured the dashboard becomes unreachable rather than public, which
+# is the failure mode worth having on a box that runs the fleet.
+#
+# The certificate is issued by Caddy's own local CA (`tls internal`), because a
+# publicly-trusted certificate cannot be issued for a bare IP address. Every
+# visitor therefore gets a browser warning on first visit. To silence it on one
+# machine, install Caddy's root once:
+#   /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
+# The real fix is a domain name -- then swap the site address below for the
+# hostname and delete the `tls internal` line; Caddy gets a trusted cert
+# automatically.
+{
+	admin off
+	auto_https disable_redirects
+}
+
+https://167.235.141.50:8443 {
+	tls internal
+
+	# One shared account. bcrypt, cost 14. Rotate with:
+	#   caddy hash-password --plaintext '<new>'
+	# then replace the hash below, update /etc/adbbot/report-credentials and
+	# `systemctl reload caddy`.
+	basic_auth {
+		adbbot $2a$14$hTOzj/gQiQKm35teaOeKA.oknT0pusuW2SyPmWemQuipOy3aYaYPW
+	}
+
+	header {
+		# Served only over TLS, and it lists account names -- so no caching,
+		# no framing, no referrer leakage.
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Cache-Control "no-store"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:8080
+
+	log {
+		output file /var/log/caddy/adbbot-report.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
+}

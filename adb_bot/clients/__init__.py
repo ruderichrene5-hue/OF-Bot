@@ -6,10 +6,14 @@ from .multilogin import (
     MultiloginShutdownClient,
     MultiloginFolderClient,
     MultiloginMobileListClient,
+    CountingLauncherClient,
+    LaunchStats,
 )
 
 __all__ = [
     "ADBClient",
+    "CountingLauncherClient",
+    "LaunchStats",
     "MultiloginApiClient",
     "MultiloginLauncherClient",
     "MultiloginAdbEnableClient",

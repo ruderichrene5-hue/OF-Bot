@@ -155,6 +155,27 @@ F_PROF_STATUS = "Status"                  # singleSelect: Active / Inactive
 F_PROF_APP_PACKAGE = "App Package Name"   # constant com.instagram.android for these
 F_PROF_DEVICE = "Device"                  # link -> Devices
 
+# Where a profile the bot has given up on is surfaced to a person. The Accounts
+# table has had `Needs Human Verification` all along, but posting is
+# profile-driven -- most of the ~90 MLX profiles have no Accounts row at all --
+# so a flag there reached nobody. Added 2026-08-04.
+F_PROF_NEEDS_HUMAN = "Needs Human Check"  # checkbox
+F_PROF_ISSUE_REASON = "Issue Reason"      # singleSelect, see PROFILE_ISSUE_*
+F_PROF_ISSUE_NOTES = "Issue Notes"        # multilineText, newest entry first
+F_PROF_FLAGGED_AT = "Flagged At"          # dateTime
+
+PROFILE_ISSUE_EXHAUSTED = "Retries Exhausted"
+PROFILE_ISSUE_VERIFICATION = "Human Verification Required"
+PROFILE_ISSUE_BANNED = "Banned / Blocked"
+PROFILE_ISSUE_REPEATED = "Repeated Failures"
+PROFILE_ISSUE_UNREACHABLE = "Device Unreachable"
+
+# Written to a queue row whose Retry Count hit the limit. Distinct from
+# `Failed - Needs Retry`, which is the only value the retry pass re-queues: an
+# exhausted row left on that value reads as "still queued for another go" when
+# nothing will ever pick it up again.
+ISSUE_RETRIES_EXHAUSTED = "Retries Exhausted"
+
 # Devices
 F_DEV_DEVICE_ID = "Device ID"
 F_DEV_PHONE_MODEL_OS = "Phone Model / OS"
@@ -265,9 +286,21 @@ class AirtableClient:
     def _url_for_table(self, table: str) -> str:
         return f"{API_BASE}/{self.base_id}/{urllib.parse.quote(table)}"
 
-    def _list_table(self, table: str, fields: list | None = None, filter_formula: str | None = None, page_size: int = 100) -> list:
+    def _list_table(self, table: str, fields: list | None = None, filter_formula: str | None = None,
+                    page_size: int = 100, max_records: int | None = None) -> list:
+        """Every record in `table`, following Airtable's offset pagination.
+
+        `max_records` stops after that many rows and is what a caller wants when
+        it only needs to know the table is *there*. Without it a small
+        `page_size` is a trap rather than an optimisation: the loop below
+        paginates to the end regardless, so `page_size=1` means one HTTP request
+        per record. That is what made `doctor`'s reachability probe take minutes
+        once the tables had grown (2026-08-05).
+        """
         url = self._url_for_table(table)
         params: dict = {"pageSize": page_size}
+        if max_records is not None:
+            params["maxRecords"] = max_records
         if fields:
             params["fields[]"] = fields
         if filter_formula:
@@ -282,9 +315,9 @@ class AirtableClient:
             payload = response.json()
             records.extend(payload.get("records", []) or [])
             offset = payload.get("offset")
-            if not offset:
+            if not offset or (max_records is not None and len(records) >= max_records):
                 break
-        return records
+        return records[:max_records] if max_records is not None else records
 
     def _create_in(self, table: str, fields: dict, typecast: bool = True) -> str | None:
         url = self._url_for_table(table)
@@ -294,6 +327,19 @@ class AirtableClient:
             return response.json().get("id")
         except Exception as exc:  # pragma: no cover - network/diagnostic path
             print(f"[-] Airtable create failed on {table}: {exc}")
+            return None
+
+    def _get_field(self, table: str, record_id: str, field: str):
+        """One field off one record. Returns None if the read fails -- callers
+        use this to append to a field, and losing the history is better than
+        losing the write that was the point of the call."""
+        url = f"{self._url_for_table(table)}/{record_id}"
+        try:
+            response = requests.get(url, headers=self._headers, timeout=30)
+            response.raise_for_status()
+            return (response.json().get("fields") or {}).get(field)
+        except Exception as exc:  # pragma: no cover - network/diagnostic path
+            print(f"[-] Airtable read failed on {table}/{record_id}: {exc}")
             return None
 
     def _patch_in(self, table: str, record_id: str, fields: dict, typecast: bool = True) -> bool:
@@ -377,6 +423,48 @@ class AirtableClient:
 
     def update_profile(self, record_id: str, fields: dict) -> bool:
         return self._patch_in(TABLE_PROFILES, record_id, fields)
+
+    def flag_profile_for_human(self, record_id: str, reason: str, note: str,
+                               when_iso: str | None = None,
+                               max_notes_chars: int = 4000) -> bool:
+        """Mark a profile as needing a person, and record why.
+
+        The bot sets this and never clears it: clearing is the signal that
+        somebody actually looked. Notes are prepended, so the newest reason is
+        the first line and the history below it survives -- a profile that fails
+        the same way for three nights should read as three nights, not one.
+
+        Older entries are dropped once the field would exceed `max_notes_chars`
+        rather than letting it grow without bound (Airtable's long-text limit is
+        generous but not infinite, and a 100 KB cell is unreadable anyway).
+        """
+        stamp = when_iso or _now_iso()
+        body = f"{reason}: {note}".strip()
+        entry = f"[{stamp}] {body}"
+        existing = ""
+        try:
+            existing = str(self._get_field(TABLE_PROFILES, record_id, F_PROF_ISSUE_NOTES) or "")
+        except Exception:
+            # A failed read must not cost the flag -- the checkbox is the part
+            # that actually surfaces the profile to a person.
+            existing = ""
+
+        # The retry pass reconsiders every Failed row on every tick, so without
+        # this the same unchanged problem is re-recorded every 30 minutes: ~48
+        # identical lines per profile per day, which buries the one line that
+        # says what is wrong and burns a write each time. A repeat of a problem
+        # already recorded is not news; a *different* problem still appends.
+        if body and body in existing:
+            return True
+        combined = f"{entry}\n{existing}".strip() if existing else entry
+        if len(combined) > max_notes_chars:
+            combined = combined[:max_notes_chars].rsplit("\n", 1)[0] + "\n[older entries trimmed]"
+        return self._patch_in(TABLE_PROFILES, record_id, {
+            F_PROF_NEEDS_HUMAN: True,
+            F_PROF_ISSUE_REASON: reason,
+            F_PROF_ISSUE_NOTES: combined,
+            F_PROF_FLAGGED_AT: stamp,
+        })
 
     def todays_completed_runs(self) -> set:
         """Set of (account_record_id, flow_name) that already ran to Done/Running
@@ -544,6 +632,20 @@ class AirtableClient:
             ],
             filter_formula=formula,
         )
+
+    def mark_post_retries_exhausted(self, queue_record_id: str) -> bool:
+        """Retire a row that has used every retry.
+
+        Post Status stays Failed; only Issue Type moves, off
+        `Failed - Needs Retry` and onto `Retries Exhausted`. That value is what
+        the retry pass keys on, so this is also what stops it reconsidering the
+        row every 30 minutes -- and, for a person reading the base, the
+        difference between "waiting for another attempt" and "nothing else will
+        happen to this without you".
+        """
+        return self._patch_in(TABLE_POSTING_QUEUE, queue_record_id, {
+            F_PQ_ISSUE_TYPE: ISSUE_RETRIES_EXHAUSTED,
+        })
 
     def requeue_post(self, queue_record_id: str, scheduled_iso: str,
                      note: str | None = None) -> bool:
@@ -787,16 +889,32 @@ class AirtableClient:
         ``<Model> <N>`` ("Jil 1", "Katja 3"), so the first word is the only
         reliable key.
 
-        Skipped by default: the per-model "Link" profile (`Jasmin Link`,
-        `Jil I Link Account`), which is the fixed link-in-bio account rather than
-        a posting target, and any profile with no MLX API ID -- without the
-        18-digit launch key nothing can be launched for it anyway.
+        Skipped: any profile whose Status is not Active, the per-model "Link"
+        profile (`Jasmin Link`, `Jil I Link Account`), which is the fixed
+        link-in-bio account rather than a posting target, and any profile with no
+        MLX API ID -- without the 18-digit launch key nothing can be launched for
+        it anyway.
+
+        Status is the ONLY switch a profile-driven target has. An Accounts row
+        carries three health guards (Lifecycle Stage, Automation Mode, Needs
+        Human Verification) that the planners honour, but most profiles have no
+        Accounts row at all, so without this check there was no way to take a
+        flagged account -- or an unused MLX staging profile ("Blank ...") -- out
+        of the run short of deleting its row. Setting Status to Inactive in
+        Airtable is now how a person parks a profile: it stops both the spoof
+        pipeline making variants for it and the queue creating slots for it.
         """
         out: dict = {}
-        for record in self._list_table(TABLE_PROFILES, fields=[F_PROF_NAME, F_PROF_MLX_API_ID]):
+        for record in self._list_table(TABLE_PROFILES,
+                                       fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_STATUS]):
             fields = record.get("fields", {}) or {}
             name = str(fields.get(F_PROF_NAME) or "").strip()
             if not name:
+                continue
+            # An empty Status is treated as Active: rows created before the field
+            # was filled in must not silently drop out of the run.
+            status = _select_name(fields.get(F_PROF_STATUS))
+            if status is not None and status != STATUS_SELECT_ACTIVE:
                 continue
             if not include_link_profiles and "link" in name.lower():
                 continue
