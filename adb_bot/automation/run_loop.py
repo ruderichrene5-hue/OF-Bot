@@ -107,6 +107,23 @@ def _run_second_accounts(args, logger) -> int:
     airtable = _airtable(args.base_id, args.airtable_token)
     mlx_items = MultiloginMobileListClient(token).list_mobile_profiles()
 
+    if args.report:
+        # Reporting only: render the operator dashboard from what Airtable and
+        # MLX already say and stop. No phone is launched, so this is safe to run
+        # any time -- including while a posting loop is working.
+        from adb_bot.automation import second_account_report
+        data = second_account_report.collect(airtable, mlx_items)
+        page = second_account_report.render(data, generated_at=datetime.now().strftime("%Y-%m-%d %H:%M"))
+        out = Path(args.report)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(page, encoding="utf-8")
+        logger.info("second-accounts: wrote %s (%d bytes) -- %s of %s tagged phones post twice, "
+                    "%s profiles need a manual check", out, len(page),
+                    data["totals"]["doubled"], data["totals"]["tagged"],
+                    data["totals"]["needs_human"])
+        print(out)
+        return 0
+
     report = second_account_sync.run_second_account_sync(
         airtable, mlx_items,
         api_client=MultiloginApiClient(token),
@@ -500,6 +517,9 @@ def main(argv=None) -> int:
     parser.add_argument("--recheck", action="store_true",
                         help="second-accounts: re-read phones whose handles Airtable already "
                              "holds (default: only the ones still missing).")
+    parser.add_argument("--report", default=None, metavar="PATH",
+                        help="second-accounts: write the operator dashboard to PATH and exit "
+                             "without launching any phone.")
     parser.add_argument("--out", default=None,
                         help="report: file to write the HTML to (default logs/report.html).")
     parser.add_argument("--raw-root", default=None, help="pipeline: raw-videos root (overrides config).")

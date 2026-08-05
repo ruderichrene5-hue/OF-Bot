@@ -302,14 +302,42 @@ loop that launches phones without posting anything.
 - The two accounts draw from the *same* pool of that profile's variants, so
   they never get the same clip in the same slot.
 
+**When a switch fails, a person is told.** If the row's account can't be made
+active — logged out, renamed, or the switcher won't open — the run is abandoned
+rather than posting as whoever *is* signed in. That outcome is **not retryable**
+(no retry logs an account back in), so it spends none of the row's retries and
+instead flags the profile:
+
+- Posting Queue → `Issue Type` = **Account Switch Failed** (so the retry pass
+  leaves the row alone)
+- Profiles (Cloning) → `Needs Human Check` ticked, `Issue Reason` =
+  **Account Switch Failed**, the handle in `Issue Notes`, `Flagged At` stamped
+
+The bot never clears those. **Clearing `Needs Human Check` is how you record
+that somebody looked.** Filter Profiles (Cloning) on that box for the morning
+worklist.
+
+**The dashboard.** One page showing which phones post twice, which are tagged
+but held up, and every profile flagged for a manual check:
+
+```bash
+.venv/bin/python -m adb_bot.automation.run_loop second-accounts \
+  --report logs/second_accounts.html
+```
+
+Launches nothing and writes nothing — safe to run at any time, including while
+a posting loop is working. Re-run it to refresh.
+
 **Troubleshooting:**
 
 | Symptom | Cause |
 |---|---|
 | A tagged phone makes only one row per slot | Its handles aren't recorded yet — run `second-accounts --apply`. Both handles are required; one alone is ignored. |
-| `X is not logged into this phone` in a posting log | Somebody logged the account out, or the handle changed. Re-run with `--recheck`. |
+| `X is not logged into this phone` in a posting log | Somebody logged the account out, or the handle changed. Log it back in, then re-run with `--recheck`. |
+| Profile flagged `Account Switch Failed` | Open the phone and check the second account is still logged into Instagram. |
 | `has no second-account tag but its remark mentions one` | A tagging gap: tag it in MultiLogin to double its posts. |
 | A phone was tagged but only shows one account | Recorded as single-account (the phone wins over the tag), so it stops making a second slot that could only fail. |
+| A phone was tagged but the switcher couldn't be read | Reported as a failure and **nothing is written** — an unread switcher is not evidence of a one-account phone, so existing handles are left alone. |
 
 ## 6. First real run — one account
 
