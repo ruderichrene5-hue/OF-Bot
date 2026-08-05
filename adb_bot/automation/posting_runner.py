@@ -56,6 +56,16 @@ def _map_post_status(status: str):
         return (at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY, None, at.RESULT_FAILED, "ADB connect failed")
     if status == "failed":
         return (at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY, None, at.RESULT_FAILED, "flow reported a failure (see app logs)")
+    if status == "account_switch_failed":
+        # The phone came up and Instagram opened, but the account this row is
+        # for could not be made active -- logged out, renamed, or the switcher
+        # would not open. Terminal and NOT retryable: Issue Type is anything but
+        # "Failed - Needs Retry" precisely so the retry pass leaves it alone,
+        # and that pass then flags the *profile* for a human (see
+        # retry_runner._profile_issue_reason). The counter is not bumped: the
+        # post was never attempted, so it did not use an attempt.
+        return (at.POST_STATUS_FAILED, at.ISSUE_ACCOUNT_SWITCH, None, at.RESULT_FAILED,
+                "could not switch to this row's Instagram account -- needs a manual check")
     if status == "already_shared":
         # The ledger stopped a second send of a clip this profile already got.
         # Terminal and NOT retryable: the queue row asks for something that has
@@ -93,9 +103,10 @@ def consumes_retry_budget(status: str) -> bool:
     post_status, _issue, incident, _result, _note = mapped
     if post_status != at.POST_STATUS_FAILED:
         return False
-    # Incidents (ban / verification / action block) and `already_shared` are
-    # terminal but deliberately do NOT bump the counter.
-    return not incident and status != "already_shared"
+    # Incidents (ban / verification / action block), `already_shared` and a
+    # failed account switch are terminal but deliberately do NOT bump the
+    # counter -- none of them was an attempt at posting.
+    return not incident and status not in ("already_shared", "account_switch_failed")
 
 
 def apply_post_result(airtable, item, status, flow=POST_FLOW, logger=None, detail="") -> bool:
@@ -144,11 +155,13 @@ def apply_post_result(airtable, item, status, flow=POST_FLOW, logger=None, detai
         # exist. Still stamp the queue row so the incident is visible and the row
         # is not retried blindly -- but no retry bump, same as the account path.
         airtable.mark_post_result(item.queue_id, at.POST_STATUS_FAILED, issue_type)
-    elif status == "already_shared":
-        # Terminal, but not an attempt: the send never happened because the clip
-        # was already out. Bumping the counter here would spend a retry the row
-        # never used -- and the row is not retryable anyway, so the only effect
-        # would be a misleading number in front of whoever reads it.
+    elif status in ("already_shared", "account_switch_failed"):
+        # Terminal, but not an attempt. `already_shared`: the send never happened
+        # because the clip was already out. `account_switch_failed`: the composer
+        # was never opened, because the row's account could not be made active.
+        # Bumping the counter here would spend a retry the row never used -- and
+        # neither row is retryable anyway, so the only effect would be a
+        # misleading number in front of whoever reads it.
         airtable.mark_post_result(item.queue_id, at.POST_STATUS_FAILED, issue_type)
     else:
         airtable.mark_post_result(

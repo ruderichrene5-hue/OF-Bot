@@ -878,8 +878,12 @@ class InstagramReelUploadU2Flow:
                      "Could not switch %s to Instagram account %r -- abandoning this post "
                      "rather than posting as whoever is signed in", target, ig_handle)
                 keep_media_for_retry("account switch failed")
+                # Reported as its own outcome rather than a generic failure. A
+                # retry cannot fix an account that is logged out or renamed, so
+                # this must not spend three phone launches proving that -- it
+                # goes straight to a person via Profiles.Needs Human Check.
                 return {"profile_id": profile.id, "target": target, "aborted": False,
-                        "success": False, "failed": True,
+                        "success": False, "failed": True, "account_switch_failed": True,
                         "verify_method": "account_switch",
                         "verify_detail": f"could not switch to {ig_handle}"}
             # Deliberately not a progress step: `get_progress_total_steps` is a

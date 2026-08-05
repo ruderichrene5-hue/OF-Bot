@@ -68,6 +68,22 @@ def get_flow_progress(flow_name: str, completed_actions: int, total_actions: int
     return round(min(100.0, max(0.0, percent)), 2)
 
 
+def is_account_switch_failure(flow_result) -> bool:
+    """Whether a flow result means "the row's Instagram account is unreachable".
+
+    Its own outcome rather than a generic failure, because "failed" means "try
+    again" and no retry logs an account back in. An abort does NOT count: a
+    user-requested stop says nothing about the account, and reporting it as a
+    broken one would flag a healthy profile for a person to go and look at.
+
+    Split out of `_run_profile_workflow` so the rule is testable -- that function
+    needs a phone, a launcher and an Airtable client before it will run at all.
+    """
+    if not isinstance(flow_result, dict):
+        return False
+    return bool(flow_result.get("account_switch_failed")) and not flow_result.get("aborted", False)
+
+
 def should_shutdown_profile_after_flow(flow_name: str) -> bool:
     """Backward-compatible placeholder for flow-level shutdown decisions.
 
@@ -785,6 +801,17 @@ def _run_profile_workflow(
             logger.info("Skipping profile %s: this clip was already sent to it (%s)",
                         profile_id_value, flow_result.get("verify_detail") or "ledger")
             emit_status(profile_id_value, "already_shared", flow_result)
+            return
+
+        if is_account_switch_failure(flow_result):
+            # A two-account phone whose wanted Instagram account could not be
+            # made active. Checked before the generic failure below because
+            # "failed" means "try again", and trying again cannot log an account
+            # back in -- it just burns the row's retries and three more launches.
+            logger.warning("Profile %s could not switch Instagram account (%s); flagging for a "
+                           "person rather than retrying", profile_id_value,
+                           flow_result.get("verify_detail") or "no detail")
+            emit_status(profile_id_value, "account_switch_failed", flow_result)
             return
 
         if flow_result.get("aborted", False) or flow_result.get("failed", False) or flow_result.get("success") is False:

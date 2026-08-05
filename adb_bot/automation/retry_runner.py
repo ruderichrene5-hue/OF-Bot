@@ -200,6 +200,13 @@ def _profile_issue_reason(outcome: str, fields: dict) -> str | None:
             return at.PROFILE_ISSUE_BANNED
         if issue == at.ISSUE_HUMAN_VERIFICATION:
             return at.PROFILE_ISSUE_VERIFICATION
+        if issue == at.ISSUE_ACCOUNT_SWITCH:
+            # A two-account phone whose second account could not be selected.
+            # Nothing here can fix it -- somebody has to open the phone and log
+            # the account back in -- and until they do, that account posts
+            # nothing while the other one carries on, which is easy to miss
+            # unless the profile is flagged.
+            return at.PROFILE_ISSUE_ACCOUNT_SWITCH
         # `Other` is how a person parks a row by hand (the six duplicate rows
         # parked on 2026-08-04 use it). Flagging the profile for a row somebody
         # deliberately retired says the profile is broken when the operator was

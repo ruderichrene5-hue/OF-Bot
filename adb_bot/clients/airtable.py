@@ -169,6 +169,18 @@ PROFILE_ISSUE_VERIFICATION = "Human Verification Required"
 PROFILE_ISSUE_BANNED = "Banned / Blocked"
 PROFILE_ISSUE_REPEATED = "Repeated Failures"
 PROFILE_ISSUE_UNREACHABLE = "Device Unreachable"
+# A two-account phone whose second account could not be selected: it is not
+# logged in any more, was renamed, or Instagram would not open the switcher.
+# No retry fixes any of those -- somebody has to open the phone and log in --
+# so this flags the profile instead of spending three launches finding out.
+# Both this and ISSUE_ACCOUNT_SWITCH below are created on first write by
+# Airtable's typecast (see _patch_in), so no schema change is needed for them.
+PROFILE_ISSUE_ACCOUNT_SWITCH = "Account Switch Failed"
+
+# The matching Posting Queue Issue Type. Deliberately NOT `Failed - Needs
+# Retry`: that is the only value the retry pass re-queues, and re-queueing this
+# would launch the phone again to fail the same way.
+ISSUE_ACCOUNT_SWITCH = "Account Switch Failed"
 
 # Two-Instagram-account phones ("overview" accounts: same model, second handle).
 # One MLX profile = one phone = one Instagram install, so a second account can't
