@@ -28,7 +28,7 @@ PLANNED_LOOPS = ("queue", "retry")
 
 # Everything an unattended server should have scheduled.
 RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "warmup",
-                     "mlx-sync", "cleanup")
+                     "mlx-sync", "cleanup", "doctor", "reap-phones")
 
 # Recommended cadence in minutes. The UI can override per loop; these are what
 # `install_units.sh` installs. Ordered by the flow a reel goes through, because
@@ -66,6 +66,18 @@ RECOMMENDED_INTERVALS = {
     "mlx-sync": 1440,
     # Disk housekeeping (old used media). Once a night, off-peak (04:00).
     "cleanup": 1440,
+    # Preflight, on a timer rather than only when a person asks. Its checks are
+    # what the loops silently depend on -- the MLX agent listening, Airtable
+    # readable, Drive reachable -- and on 2026-08-04 a dead agent went unnoticed
+    # for ~1 h because nothing probed it. 30 min bounds that to one tick; the
+    # run is cheap (no phones, no encodes, bounded Airtable reads).
+    "doctor": 30,
+    # Close phones no loop owns any more. Nothing else reaps them: the workflow
+    # that would have closed them died with the run, and a stale phone keeps a
+    # MultiLogin cloud session alive on a real account for hours. It only acts
+    # on phones older than the 45-minute lock TTL, so a 20-minute cadence never
+    # races a live run and still catches a leak within the hour.
+    "reap-phones": 20,
 }
 
 # Historical name -- the UI, both backends and install_units.sh read this.
@@ -92,6 +104,8 @@ DESCRIPTIONS = {
     "pipeline": "ADB bot spoofing pipeline (Drive/raw -> Spoof Variants)",
     "mlx-sync": "ADB bot MultiLogin->Airtable profile sync",
     "cleanup": "ADB bot cleanup loop (old used media)",
+    "doctor": "ADB bot preflight checks (alerts on failures)",
+    "reap-phones": "ADB bot orphan-phone reaper (closes abandoned phones)",
 }
 
 
@@ -128,9 +142,45 @@ def python_exe() -> str:
     return sys.executable
 
 
+# Flags a scheduled loop needs that its CLI default does not give it. A timer
+# gets no arguments beyond the loop name, so a default that is wrong for THIS
+# deployment makes the timer a silent no-op rather than an error.
+#
+# `--targets profiles`: both loops default to `accounts`, i.e. Airtable Accounts
+# at Lifecycle Stage Active. Here the real targets are the ~90 MLX profiles --
+# only 11 Accounts rows exist and none is Active -- so on the default the
+# pipeline builds no variants and the queue finds no targets, forever, quietly.
+#
+# `--slots`: TONIGHT'S GRID ONLY (2026-08-05). 140 fresh variants finish
+# spoofing at ~17:30 Berlin (the Nikki/Corina clips encode at ~29s each, far
+# slower than the ~6s of the other models), and `due_slots` only creates rows
+# for slots that have already come round -- so starting on the standing grid
+# mid-afternoon would create 09:00/11:00/13:00/15:00 all at once, and the
+# posting planner's only gate is `Scheduled DateTime <= now`, with no
+# per-account cool-down. These three forward-looking times clear the spoof run
+# by ~30 min and keep the runs a real two hours apart.
+#
+# TO REVERT to the standing 09:00-21:00 grid (DEFAULT_SLOT_TIMES in
+# queue_runner): drop the "--slots" pair below and re-run
+# `sudo deploy/systemd/install_units.sh --apply`. Do that tomorrow morning --
+# left in place, these three times are the only slots that will ever fill.
+LOOP_EXTRA_ARGS = {
+    "pipeline": ("--targets", "profiles"),
+    "queue": ("--targets", "profiles", "--slots", "18:00,20:00,22:00"),
+}
+
+
+# Commands with no dry-run/apply split. `doctor` only reads, so `--apply` would
+# be noise on the command line and a lie in the journal.
+READ_ONLY_COMMANDS = ("doctor",)
+
+
 def loop_arguments(loop: str, apply: bool = True) -> str:
     """The argument string handed to the interpreter for one loop."""
-    return f"-m adb_bot.automation.run_loop {loop}" + (" --apply" if apply else "")
+    extra = "".join(f" {arg}" for arg in LOOP_EXTRA_ARGS.get(loop, ()))
+    apply = apply and loop not in READ_ONLY_COMMANDS
+    return (f"-m adb_bot.automation.run_loop {loop}"
+            + (" --apply" if apply else "") + extra)
 
 
 def description(loop: str) -> str:

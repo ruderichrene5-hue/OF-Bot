@@ -169,6 +169,45 @@ def resolve_profile_id(fields: dict, accounts_by_id: dict, profiles_by_recid: di
     return str(info.get("launch_id") or "")
 
 
+def _profile_record_id(fields: dict, accounts_by_id: dict) -> str:
+    """The Profiles (Cloning) *record* id a queue row targets.
+
+    Distinct from :func:`resolve_profile_id`, which returns the 18-digit MLX
+    launch key -- that is the ledger's key and cannot address an Airtable row.
+    """
+    account_id = _first_link(fields, at.F_PQ_TARGET_ACCOUNT)
+    if account_id:
+        account = accounts_by_id.get(account_id) or {}
+        recid = _first_link(account, at.F_ACC_PROFILE)
+        if recid:
+            return recid
+    return _first_link(fields, at.F_PQ_TARGET_PROFILE) or ""
+
+
+def _profile_issue_reason(outcome: str, fields: dict) -> str | None:
+    """Which `Issue Reason` a non-retryable outcome deserves, or None to skip.
+
+    Only outcomes a person can actually act on are flagged. `blocked` and
+    `unresolved` are deliberately excluded: they mean the bot and the ledger
+    disagree about what already happened, which is an operator/data question
+    rather than something wrong with the profile itself.
+    """
+    if outcome == OUTCOME_EXHAUSTED:
+        return at.PROFILE_ISSUE_EXHAUSTED
+    if outcome == OUTCOME_NEEDS_HUMAN:
+        issue = at._select_name(fields.get(at.F_PQ_ISSUE_TYPE)) or ""
+        if issue == at.ISSUE_BANNED_BLOCKED:
+            return at.PROFILE_ISSUE_BANNED
+        if issue == at.ISSUE_HUMAN_VERIFICATION:
+            return at.PROFILE_ISSUE_VERIFICATION
+        # `Other` is how a person parks a row by hand (the six duplicate rows
+        # parked on 2026-08-04 use it). Flagging the profile for a row somebody
+        # deliberately retired says the profile is broken when the operator was
+        # just tidying up -- and it buries the profiles that really are.
+        return None
+    return None
+
+
 def resolve_media(fields: dict, variants_by_id: dict) -> tuple:
     """(path, media_hash) for the row's Spoof Variant.
 
@@ -271,6 +310,33 @@ def retry_failed_posts(airtable, ledger=None, logger=None, now=time.time,
             level = "warning" if outcome in (OUTCOME_BLOCKED, OUTCOME_UNRESOLVED) else "info"
             log(level, "Not retrying %s: %s", name, detail)
             tally[outcome] += 1  # the outcome constants are the tally's keys
+
+            # Surface it to a person. Until now "exhausted" and "needs_human"
+            # existed only as a number in this pass's log line, so a profile the
+            # bot had permanently given up on looked identical in Airtable to one
+            # still being retried -- its row even kept Issue Type
+            # "Failed - Needs Retry", which says the opposite of what is true.
+            reason = _profile_issue_reason(outcome, fields)
+            if reason and not dry_run:
+                profile_recid = _profile_record_id(fields, accounts_by_id)
+                if profile_recid:
+                    note = f"{name} -- {detail}" if detail else name
+                    try:
+                        airtable.flag_profile_for_human(profile_recid, reason, note)
+                        # Not "flagged": the write is skipped when this exact
+                        # problem is already recorded, which is the common case
+                        # once a profile has been sitting flagged for a while.
+                        log("info", "Profile needs a human for %s: %s", name, reason)
+                    except Exception as exc:
+                        log("warning", "Could not flag profile for %s: %s", name, exc)
+                else:
+                    log("warning", "No profile to flag for %s (%s)", name, reason)
+                if outcome == OUTCOME_EXHAUSTED:
+                    # Stop the row advertising a retry that will never come.
+                    try:
+                        airtable.mark_post_retries_exhausted(queue_id)
+                    except Exception as exc:
+                        log("warning", "Could not mark %s exhausted: %s", name, exc)
             continue
 
         delay = retry_delay_seconds(retry)

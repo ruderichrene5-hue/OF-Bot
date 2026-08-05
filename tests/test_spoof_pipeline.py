@@ -92,6 +92,30 @@ class LocalRawSourceTest(TestCase):
         self.assertEqual(LocalRawSource("/no/such/dir").list_by_model(), {})
 
 
+class ResolveModelTest(TestCase):
+    def test_unaliased_folder_keeps_its_name(self):
+        self.assertEqual(spoof_pipeline.resolve_model("Viktoria"), "Viktoria")
+
+    def test_aliased_folder_maps_to_its_real_model(self):
+        # The Drive folder 'Corina' holds Nikki's content; matching on the
+        # folder name skipped every video under it as "no MLX profiles".
+        self.assertEqual(spoof_pipeline.resolve_model("Corina"), "Nikki")
+        self.assertEqual(spoof_pipeline.resolve_model("  mandy "), "Luisa")
+
+    def test_aliased_folder_fans_out_to_the_real_model_targets(self):
+        client = FakePipelineClient(
+            profiles={"nikki": [{"profile_id": "p1", "handle": "nikki_1"},
+                                {"profile_id": "p2", "handle": "nikki_2"}]},
+            model_ids={"nikki": "recModelN"},
+        )
+        report = run_pipeline(client, LOG, raw_root="/raw", out_root="/out",
+                              source=FakeSource(_one_video(model="Corina")),
+                              targets=spoof_pipeline.TARGETS_PROFILES, dry_run=True)
+        # Without the alias this is 0 variants and one "no MLX profiles" skip.
+        self.assertEqual(report.variants_created, 2)
+        self.assertEqual(report.skipped, [])
+
+
 class RunPipelineTest(TestCase):
     def test_dry_run_counts_but_writes_nothing(self):
         client = FakePipelineClient(active={"nikki": [{"account_id": "a1", "handle": "nikki_1"},

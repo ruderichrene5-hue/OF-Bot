@@ -33,8 +33,11 @@ from zoneinfo import ZoneInfo
 from adb_bot.automation.posting_planner import _first_link, _parse_dt
 from adb_bot.clients import airtable as at
 
-# The five daily slots, mirroring the Airtable automations this replaces.
-DEFAULT_SLOT_TIMES = ("09:00", "12:00", "15:00", "18:00", "21:00")
+# The daily slots. Every eligible target gets one row per slot, so this grid is
+# per-model spacing: two hours apart across the 09:00-21:00 posting day, seven
+# reels per model per day. (Was five slots three hours apart, mirroring the
+# Airtable automations this replaces.)
+DEFAULT_SLOT_TIMES = ("09:00", "11:00", "13:00", "15:00", "17:00", "19:00", "21:00")
 
 # Slots are wall-clock times for the audience, not for the server: the same
 # 09:00 has to mean 09:00 in Berlin whether the box runs on UTC or local time.
@@ -123,7 +126,15 @@ def _zone(name: str, logger=None):
 def parse_slot_times(values) -> list:
     """``['09:00', '12:00']`` (or `time` objects) -> sorted `time` objects.
     Unparseable entries are dropped rather than raising -- a typo in one slot
-    must not cost the other four."""
+    must not cost the other four.
+
+    A bare string is split on commas first. `--slots` is documented as
+    comma-separated and was handed straight in, but a string is iterable, so it
+    was consumed one character at a time: '09:00,11:00' parsed as '0', '9', ':',
+    '0'... and yielded slots at 00:00/01:00/09:00 instead of failing loudly.
+    """
+    if isinstance(values, str):
+        values = values.split(",")
     out: list = []
     for value in values or ():
         if isinstance(value, time):
@@ -170,6 +181,25 @@ def _slot_key(value) -> str | None:
     return moment.strftime("%Y-%m-%dT%H:%M")
 
 
+def _slot_label_from_name(value) -> str | None:
+    """The ``HH:MM`` slot a row was created for, read back off its Name.
+
+    Rows are named ``"<target> / HH:MM"`` by :attr:`PlannedRow.name`, and nothing
+    rewrites the Name afterwards -- unlike Scheduled DateTime, which the retry
+    pass moves. Returns None for a name that does not end in a slot label, so a
+    hand-made row simply falls back to the timestamp guard.
+    """
+    text = str(value or "").strip()
+    if "/" not in text:
+        return None
+    tail = text.rsplit("/", 1)[1].strip()
+    try:
+        hour, _, minute = tail.partition(":")
+        return time(int(hour), int(minute or 0)).strftime("%H:%M")
+    except (TypeError, ValueError):
+        return None
+
+
 def _variant_target_key(variant: dict) -> tuple | None:
     """Which target a Spoof Variant belongs to. Profile link wins if both are
     set (same precedence as create_spoof_variant / the posting planner)."""
@@ -213,6 +243,7 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
     # --- guard state from the existing queue -------------------------------
     held_variants: dict = {}
     filled: set = set()
+    filled_labels: set = set()
     for row in queue_rows or []:
         fields = row.get("fields", {}) or {}
         status = at._select_name(fields.get(at.F_PQ_POST_STATUS))
@@ -226,6 +257,18 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
         slot_key = _slot_key(fields.get(at.F_PQ_SCHEDULED))
         if key and slot_key:
             filled.add((key, slot_key))
+        # ...and again by the slot LABEL the row was created for. Scheduled
+        # DateTime is not stable: the retry pass re-queues a failed row at
+        # now+backoff, which moves it off its slot's timestamp. Keyed only on
+        # that timestamp, this loop then saw the slot as unserved and created a
+        # SECOND row for it, drawing a different variant -- so a profile whose
+        # post failed got the retry AND a fresh post for the same slot. The ledger
+        # never caught it because the clips differ. The Name ("<target> / HH:MM")
+        # is written once at creation and never rewritten, so it still says which
+        # slot the row belongs to. Found live 2026-08-04: six such duplicates.
+        label = _slot_label_from_name(fields.get(at.F_PQ_NAME))
+        if key and label:
+            filled_labels.add((key, label))
 
     # --- the pool of variants each target may draw from --------------------
     # Oldest first: the queue works through the content backlog in the order it
@@ -269,7 +312,7 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
         pool = pools.get(target.key, [])
         for label, moment in due:
             slot_key = _slot_key(moment)
-            if (target.key, slot_key) in filled:
+            if (target.key, slot_key) in filled or (target.key, label) in filled_labels:
                 continue
             if not pool:
                 # One skip per target, not per slot: a target waiting on the

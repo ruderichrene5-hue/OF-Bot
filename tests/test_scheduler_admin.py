@@ -45,7 +45,8 @@ class BuildTaskXmlTest(TestCase):
 
     def test_dry_run_omits_apply(self):
         xml = sa.build_task_xml("pipeline", 20, apply=False, python="py.exe", working_dir="C:/repo")
-        self.assertIn("run_loop pipeline</Arguments>", xml)
+        # The loop's own scheduled flags stay; only --apply is dropped.
+        self.assertIn("run_loop pipeline --targets profiles</Arguments>", xml)
         self.assertNotIn("--apply", xml)
 
     def test_is_well_formed_xml(self):

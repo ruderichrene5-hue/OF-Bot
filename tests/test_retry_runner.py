@@ -27,6 +27,7 @@ from adb_bot.automation.retry_runner import (
     retry_delay_seconds,
 )
 from adb_bot.clients import airtable as at
+from adb_bot.clients.airtable import AirtableClient
 
 PROFILE_ID = "624354174112432228"       # the 18-digit MLX API ID
 NOW = 1_785_000_000.0                   # fixed clock so backoff stamps are exact
@@ -333,3 +334,137 @@ class LedgerContractTest(TestCase):
         # A second hashing implementation would key the ledger differently and
         # every lookup would miss -- which reads as "never posted".
         self.assertNotIn("hashlib", src)
+
+
+class FlagsProfileForHumanTest(TestCase):
+    """A row the bot has given up on must become visible IN AIRTABLE.
+
+    Before 2026-08-04 `exhausted` and `needs_human` existed only as counters in
+    this pass's log line. A profile the bot would never retry again looked
+    identical in the base to one still being worked -- its queue row even kept
+    Issue Type "Failed - Needs Retry", which states the opposite of the truth.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.ledger = PostLedger(root / "ledger.jsonl")
+        self.airtable = MagicMock()
+        self.airtable.accounts_by_id.return_value = {
+            "recAcc1": {at.F_ACC_NAME: "nikki_1", at.F_ACC_PROFILE: ["recProf1"]}}
+        self.airtable.profile_launch_map.return_value = {
+            "recProf1": {"launch_id": PROFILE_ID, "name": "Nikki 1"}}
+        self.airtable.variants_by_id.return_value = {}
+
+    def _run(self, row, dry_run=False):
+        self.airtable.list_failed_posts.return_value = [row]
+        return retry_runner.retry_failed_posts(
+            self.airtable, ledger=self.ledger, now=lambda: NOW, dry_run=dry_run)
+
+    def _flagged(self):
+        self.assertTrue(self.airtable.flag_profile_for_human.called,
+                        "profile was never flagged")
+        return self.airtable.flag_profile_for_human.call_args[0]
+
+    def test_exhausted_row_flags_the_profile_and_retires_the_row(self):
+        tally = self._run(failed_row(retry=3))
+        self.assertEqual(tally["exhausted"], 1)
+        recid, reason, note = self._flagged()
+        self.assertEqual(recid, "recProf1")
+        self.assertEqual(reason, at.PROFILE_ISSUE_EXHAUSTED)
+        self.assertIn("nikki_1", note)
+        # ...and the row stops advertising a retry that will never come.
+        self.airtable.mark_post_retries_exhausted.assert_called_once_with("recQ1")
+
+    def test_verification_lock_flags_with_its_own_reason(self):
+        self._run(failed_row(issue=at.ISSUE_HUMAN_VERIFICATION))
+        _, reason, _ = self._flagged()
+        self.assertEqual(reason, at.PROFILE_ISSUE_VERIFICATION)
+        # Not exhausted -- it still has retries, a person just has to act first.
+        self.airtable.mark_post_retries_exhausted.assert_not_called()
+
+    def test_ban_flags_with_its_own_reason(self):
+        self._run(failed_row(issue=at.ISSUE_BANNED_BLOCKED))
+        _, reason, _ = self._flagged()
+        self.assertEqual(reason, at.PROFILE_ISSUE_BANNED)
+
+    def test_a_hand_parked_row_does_not_flag_the_profile(self):
+        # Issue Type "Other" is how a person retires a row by hand. Flagging the
+        # profile for it says the profile is broken when the operator was just
+        # tidying up -- and buries the profiles that really are.
+        tally = self._run(failed_row(issue=at.ISSUE_OTHER))
+        self.assertEqual(tally["needs_human"], 1)
+        self.airtable.flag_profile_for_human.assert_not_called()
+
+    def test_profile_driven_row_resolves_its_profile_directly(self):
+        # No Accounts row at all -- the common case here, since posting is
+        # profile-driven and most MLX profiles have no account.
+        self._run(failed_row(retry=3, account=None, profile="recProfX"))
+        recid, _, _ = self._flagged()
+        self.assertEqual(recid, "recProfX")
+
+    def test_dry_run_writes_nothing(self):
+        tally = self._run(failed_row(retry=3), dry_run=True)
+        self.assertEqual(tally["exhausted"], 1)
+        self.airtable.flag_profile_for_human.assert_not_called()
+        self.airtable.mark_post_retries_exhausted.assert_not_called()
+
+    def test_a_retryable_row_is_not_flagged(self):
+        self.airtable.requeue_post.return_value = True
+        clip = Path(self.tmp.name) / "v1.mp4"
+        clip.write_bytes(b"reel bytes")
+        self.airtable.variants_by_id.return_value = {
+            "recVar1": {"file_path": str(clip), "status": "Ready"}}
+        tally = self._run(failed_row(retry=1))
+        self.assertEqual(tally["requeued"], 1)
+        self.airtable.flag_profile_for_human.assert_not_called()
+
+
+class FlagIsIdempotentTest(TestCase):
+    """Re-flagging an unchanged problem must not append a duplicate note.
+
+    The retry pass reconsiders every Failed row on every tick, so a
+    verification-locked profile was being re-recorded every 30 minutes: ~48
+    identical lines a day, burying the one line that says what is wrong.
+    """
+
+    def setUp(self):
+        self.patch_calls = []
+        self.notes = ""
+
+        class Client(AirtableClient):
+            def __init__(inner):
+                inner._token = "t"
+                inner._base_id = "app1"
+                inner._table = "Accounts"
+
+            def _get_field(inner, table, rec, field):
+                return self.notes
+
+            def _patch_in(inner, table, rec, fields, typecast=True):
+                self.patch_calls.append(fields)
+                self.notes = fields.get(at.F_PROF_ISSUE_NOTES, self.notes)
+                return True
+
+        self.client = Client()
+
+    def test_same_problem_twice_writes_once(self):
+        self.client.flag_profile_for_human("recP", at.PROFILE_ISSUE_VERIFICATION, "Laila 9 / 21:00")
+        self.client.flag_profile_for_human("recP", at.PROFILE_ISSUE_VERIFICATION, "Laila 9 / 21:00")
+        self.assertEqual(len(self.patch_calls), 1)
+        self.assertEqual(self.notes.count("Laila 9 / 21:00"), 1)
+
+    def test_a_different_problem_still_appends(self):
+        self.client.flag_profile_for_human("recP", at.PROFILE_ISSUE_VERIFICATION, "Laila 9 / 21:00")
+        self.client.flag_profile_for_human("recP", at.PROFILE_ISSUE_EXHAUSTED, "Laila 9 / 23:00")
+        self.assertEqual(len(self.patch_calls), 2)
+        self.assertIn("Laila 9 / 21:00", self.notes)
+        self.assertIn("Laila 9 / 23:00", self.notes)
+        # Newest first.
+        self.assertLess(self.notes.index("23:00"), self.notes.index("21:00"))
+
+    def test_the_flag_itself_is_still_set_on_the_first_write(self):
+        self.client.flag_profile_for_human("recP", at.PROFILE_ISSUE_BANNED, "Jasmin 9")
+        self.assertIs(self.patch_calls[0][at.F_PROF_NEEDS_HUMAN], True)
+        self.assertEqual(self.patch_calls[0][at.F_PROF_ISSUE_REASON], at.PROFILE_ISSUE_BANNED)

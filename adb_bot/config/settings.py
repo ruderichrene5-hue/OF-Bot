@@ -136,6 +136,42 @@ def get_saved_readiness_attempts() -> int:
         return 2
 
 
+# How many MultiLogin phones may be open at once ACROSS EVERY LOOP. This is the
+# ceiling `MAX_CONCURRENT_PROFILES` was always mistaken for: that one is applied
+# by each loop independently, so posting (10) + warmup (10) + recheck (1) could
+# legitimately have 21 phones live with nothing coordinating them.
+#
+# 12 is derived from what the box actually survived on 2026-08-04. The kernel's
+# OOM dump counted 78 WebKitWebProcess (12.8 GB) plus 77 phone processes
+# (3.6 GB) -- ~215 MB of RSS per live phone -- against 15.2 GiB of RAM, so the
+# hard wall is around 68 phones and the machine died at ~172 launches vs 64
+# shutdowns. 12 x 215 MB is ~2.6 GB of driven phones; even if the tail of
+# already-shut-down-but-not-yet-gone phones doubles that, ~5 GB sits on top of a
+# ~4.5 GB baseline (system + MultiLogin agent) and stays inside RAM, leaving the
+# 8 GB of swap as an untouched second line of defence rather than a working set.
+#
+# It is deliberately ABOVE any single loop's cap (10), so ordinary posting is
+# never throttled by it: the ceiling only bites when a second loop overlaps,
+# which is exactly the case that was uncontrolled.
+DEFAULT_MAX_LIVE_PROFILES = 12
+
+
+def get_saved_max_live_profiles() -> int:
+    """The cross-loop ceiling on live phones: saved setting, else
+    ADBBOT_MAX_LIVE_PROFILES, else the default. Never less than 1.
+
+    Not routed through `_get_saved_or_env` because that assumes a string value
+    and would raise on a JSON number, which is how anyone would write this one.
+    """
+    raw = load_settings().get("max_live_profiles", None)
+    if raw is None or str(raw).strip() == "":
+        raw = os.environ.get("ADBBOT_MAX_LIVE_PROFILES", "")
+    try:
+        return max(1, int(str(raw).strip()))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_LIVE_PROFILES
+
+
 def get_saved_flow_speed() -> str:
     """Speed profile for on-device flows: 'fast' (0.5x waits), 'normal', or
     'slow' (1.5x). Only scales fallback sleeps -- a step that confirms the next

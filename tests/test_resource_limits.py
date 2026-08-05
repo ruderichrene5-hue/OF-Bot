@@ -20,10 +20,14 @@ LOG = logging.getLogger("test")
 
 
 class BatchingTest(TestCase):
-    def test_default_cap_is_five_profiles(self):
-        # Above five, the flows do not fail -- they all get slower together.
-        self.assertEqual(MAX_CONCURRENT_PROFILES, 5)
-        self.assertEqual(resolve_concurrency(None), 5)
+    def test_default_cap_is_ten_profiles(self):
+        # Raised to 10 on 2026-08-04, once `run_profile_workflow` was made to
+        # close every phone on every exit path (and force-close anything still
+        # open after 7 min). Before that the live phone count was unbounded by
+        # this cap -- 78 were alive with only five being driven -- and the box
+        # OOMed twice. See batching.py and workflow.py for the full note.
+        self.assertEqual(MAX_CONCURRENT_PROFILES, 10)
+        self.assertEqual(resolve_concurrency(None), 10)
 
     def test_chunks_are_capped(self):
         batches = chunked(range(25), 10)
@@ -33,16 +37,16 @@ class BatchingTest(TestCase):
     def test_no_batch_exceeds_the_cap_for_a_big_fleet(self):
         # 91 profiles is the real MultiLogin workspace size.
         for batch in chunked(range(91), resolve_concurrency(None)):
-            self.assertLessEqual(len(batch), 5)
+            self.assertLessEqual(len(batch), MAX_CONCURRENT_PROFILES)
 
     def test_empty_input(self):
         self.assertEqual(chunked([], 10), [])
 
     def test_explicit_override_and_bad_values(self):
-        self.assertEqual(resolve_concurrency(3), 3)
+        self.assertEqual(resolve_concurrency(7), 7)
         self.assertEqual(resolve_concurrency(0), 1)      # never zero
         self.assertEqual(resolve_concurrency(-5), 1)
-        self.assertEqual(resolve_concurrency("nonsense"), 5)
+        self.assertEqual(resolve_concurrency("nonsense"), MAX_CONCURRENT_PROFILES)
 
     def test_every_run_path_uses_the_rolling_window(self):
         """Including the UI. The headless runners were capped long ago, but the

@@ -27,3 +27,7 @@ logs/
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Claude Code local state: session settings and git worktrees. Not project
+# configuration -- a worktree checked in here would nest a repo inside the repo.
+.claude/

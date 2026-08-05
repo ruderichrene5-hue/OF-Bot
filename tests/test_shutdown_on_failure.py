@@ -1,9 +1,18 @@
-"""A profile is closed only when its flow SUCCEEDS.
+"""Every profile's phone is closed on the way out, whatever the flow did.
 
-The UI flag reads "Close profile when the flow succeeds". Anything that isn't a
-success -- a failed flow, an ADB connect failure, an Instagram ban/verification
-flag -- must leave the profile open so it can be looked at (and, for a
-verification prompt, solved by hand).
+This replaces the older policy, which closed a profile only when its flow
+SUCCEEDED and left failures, ADB connect errors and ban/verification flags open
+"so they can be looked at". That assumed a person was watching. Every caller is
+now a headless loop on a systemd timer, so nobody looks -- and on 2026-08-04 it
+came to 172 launches against 64 shutdowns. The ~108 phones left behind, at
+~150 MB of WebKitWebProcess each, filled a 15 GB box twice and the OOM killer
+took out the MultiLogin agent with them.
+
+`shutdown_on_success` still decides whether the *flow* closes its own profile
+(the UI flag "Close profile when the flow succeeds" is unchanged). The guard in
+`_guarantee_profile_closed` then closes anything the flow left open, so exactly
+one shutdown call is made either way. To inspect a flagged account, open its
+profile in MultiLogin directly -- the Airtable row records why it was flagged.
 """
 
 import unittest
@@ -61,50 +70,53 @@ def run_with(flow_result, shutdown_client, shutdown_on_success=True, connected=T
     return statuses
 
 
-class KeepFailedProfilesOpenTest(unittest.TestCase):
+class EveryProfileGetsClosedTest(unittest.TestCase):
     def test_success_closes_the_profile(self):
         client = RecordingShutdownClient()
         statuses = run_with({"success": True}, client)
         self.assertEqual(client.calls, [["profile-1"]])
         self.assertIn("done", statuses)
 
-    def test_failed_flow_keeps_the_profile_open(self):
+    def test_failed_flow_still_closes_the_profile(self):
         client = RecordingShutdownClient()
         statuses = run_with({"success": False}, client)
-        self.assertEqual(client.calls, [])
+        self.assertEqual(client.calls, [["profile-1"]])
         self.assertIn("failed", statuses)
 
-    def test_adb_connect_failure_keeps_the_profile_open(self):
-        # Previously closed unconditionally -- now kept so the connection
-        # problem can be diagnosed on the running profile.
+    def test_adb_connect_failure_still_closes_the_profile(self):
+        # A phone we cannot even reach over ADB is the least useful one to
+        # leave running.
         client = RecordingShutdownClient()
         statuses = run_with({"success": True}, client, connected=False)
-        self.assertEqual(client.calls, [])
+        self.assertEqual(client.calls, [["profile-1"]])
         self.assertIn("adb_connect_failed", statuses)
 
-    def test_ban_flag_keeps_the_profile_open(self):
+    def test_ban_flag_still_closes_the_profile(self):
         client = RecordingShutdownClient()
         statuses = run_with({"account_flag": "banned"}, client)
-        self.assertEqual(client.calls, [])
+        self.assertEqual(client.calls, [["profile-1"]])
         self.assertIn("banned", statuses)
 
-    def test_human_verification_keeps_the_profile_open(self):
-        # The most important case: a human has to solve the challenge, which
-        # they can't do on a profile the bot just closed.
+    def test_human_verification_still_closes_the_profile(self):
+        # The case the old policy cared most about. Keeping the phone up did
+        # not actually help: these run unattended overnight, so the challenge
+        # was never solved on the open profile -- it just leaked. The flag is
+        # recorded on the Airtable row, and the profile can be opened by hand
+        # in MultiLogin when someone gets to it.
         client = RecordingShutdownClient()
         statuses = run_with({"account_flag": "human_verification"}, client)
-        self.assertEqual(client.calls, [])
+        self.assertEqual(client.calls, [["profile-1"]])
         self.assertIn("human_verification", statuses)
 
-    def test_legacy_human_verification_key_also_keeps_it_open(self):
+    def test_legacy_human_verification_key_also_closes_it(self):
         client = RecordingShutdownClient()
         run_with({"human_verification": True}, client)
-        self.assertEqual(client.calls, [])
+        self.assertEqual(client.calls, [["profile-1"]])
 
-    def test_action_block_keeps_the_profile_open(self):
+    def test_action_block_still_closes_the_profile(self):
         client = RecordingShutdownClient()
         run_with({"account_flag": "action_block"}, client)
-        self.assertEqual(client.calls, [])
+        self.assertEqual(client.calls, [["profile-1"]])
 
     def test_already_had_bio_follows_the_setting(self):
         # Not a failure -- the work was simply already done -- so it closes like
@@ -114,16 +126,18 @@ class KeepFailedProfilesOpenTest(unittest.TestCase):
         self.assertEqual(client.calls, [["profile-1"]])
         self.assertIn("already_had_bio", statuses)
 
-    def test_already_had_bio_stays_open_when_setting_is_off(self):
-        # ...and respects the flag being off, which it used to ignore.
+    def test_already_had_bio_is_closed_by_the_guard_when_setting_is_off(self):
+        # The flow itself leaves it open (the flag is off); the guard closes it.
         client = RecordingShutdownClient()
         run_with({"already_has_bio": True}, client, shutdown_on_success=False)
-        self.assertEqual(client.calls, [])
+        self.assertEqual(client.calls, [["profile-1"]])
 
-    def test_success_with_setting_off_keeps_it_open(self):
+    def test_success_with_setting_off_is_still_closed_by_the_guard(self):
+        # `shutdown_on_success=False` means the FLOW does not close it. The
+        # guard still does, so no phone outlives its run either way.
         client = RecordingShutdownClient()
         run_with({"success": True}, client, shutdown_on_success=False)
-        self.assertEqual(client.calls, [])
+        self.assertEqual(client.calls, [["profile-1"]])
 
 
 class RunnerLevelShutdownTest(unittest.TestCase):

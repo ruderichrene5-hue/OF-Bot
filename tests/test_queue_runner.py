@@ -24,8 +24,11 @@ def _variant(vid, account_id=None, profile_id=None, status=at.SV_STATUS_READY, c
             "account_id": account_id, "profile_id": profile_id, "created": created}
 
 
-def _queue_row(rid, status, scheduled, variant_id=None, account_id=None, profile_id=None):
+def _queue_row(rid, status, scheduled, variant_id=None, account_id=None, profile_id=None,
+               name=None):
     fields = {at.F_PQ_POST_STATUS: status, at.F_PQ_SCHEDULED: scheduled}
+    if name:
+        fields[at.F_PQ_NAME] = name
     if variant_id:
         fields[at.F_PQ_SPOOF_VARIANT] = [variant_id]
     if account_id:
@@ -83,13 +86,13 @@ class SlotTimeTest(TestCase):
 
     def test_only_slots_that_have_arrived_are_due(self):
         due = due_slots(_now(13), DEFAULT_SLOT_TIMES, BERLIN)
-        self.assertEqual([label for label, _ in due], ["09:00", "12:00"])
+        self.assertEqual([label for label, _ in due], ["09:00", "11:00", "13:00"])
 
     def test_naive_now_is_read_as_local_wall_clock(self):
         # A naive `now` from datetime.now() must not silently become UTC, or the
         # 09:00 slot opens two hours late in summer.
         due = due_slots(datetime(2026, 8, 3, 13, 0), DEFAULT_SLOT_TIMES, BERLIN)
-        self.assertEqual([label for label, _ in due], ["09:00", "12:00"])
+        self.assertEqual([label for label, _ in due], ["09:00", "11:00", "13:00"])
 
 
 class RunQueueSlotsTest(TestCase):
@@ -99,12 +102,14 @@ class RunQueueSlotsTest(TestCase):
                                            _variant("v3", account_id="acc1")])
         report = run_queue_slots(client, LOG, now=_now(13), dry_run=False)
 
-        self.assertEqual(report.slots_due, 2)          # 09:00 + 12:00
-        self.assertEqual(report.rows_created, 2)
+        self.assertEqual(report.slots_due, 3)          # 09:00 + 11:00 + 13:00
+        self.assertEqual(report.rows_created, 3)
+        # Berlin is UTC+2 in August, so the local slots land two hours earlier.
         self.assertEqual([row["scheduled"] for row in client.created],
-                         ["2026-08-03T07:00:00+00:00", "2026-08-03T10:00:00+00:00"])
+                         ["2026-08-03T07:00:00+00:00", "2026-08-03T09:00:00+00:00",
+                          "2026-08-03T11:00:00+00:00"])
         # Every row is Pending, carries a variant, and no two share one.
-        self.assertEqual([row["variant_id"] for row in client.created], ["v1", "v2"])
+        self.assertEqual([row["variant_id"] for row in client.created], ["v1", "v2", "v3"])
         self.assertEqual(report.errors, [])
 
     def test_dry_run_writes_nothing(self):
@@ -192,6 +197,38 @@ class RunQueueSlotsTest(TestCase):
         # One skip for the target, not one per due slot.
         self.assertEqual(len(report.skipped), 1)
 
+    def test_requeued_row_still_owns_its_slot(self):
+        """A retried row keeps its slot even though its timestamp moved.
+
+        The retry pass re-queues a failed row at now+backoff, so its Scheduled
+        DateTime no longer matches the slot it was created for. Keyed only on
+        that timestamp this loop saw the slot as free and created a SECOND row
+        with a different variant -- one failed post became two live posts. Six
+        of these were created against the live base on 2026-08-04.
+        """
+        client = _account_client(
+            variants=[_variant("v1", account_id="acc1"), _variant("v2", account_id="acc1")],
+            # Created for the 09:00 slot, then requeued to 13:20 by the retry pass.
+            queue_rows=[_queue_row("pq1", at.POST_STATUS_PENDING, "2026-08-03T11:20:00+00:00",
+                                   variant_id="v0", account_id="acc1",
+                                   name="nikki_1 / 09:00")],
+        )
+        report = run_queue_slots(client, LOG, now=_now(13), dry_run=False)
+
+        # 09:00 is still owned by the requeued row; only 11:00 and 13:00 are open.
+        self.assertEqual([row["scheduled"] for row in client.created],
+                         ["2026-08-03T09:00:00+00:00", "2026-08-03T11:00:00+00:00"])
+
+    def test_unnamed_row_still_guards_by_timestamp(self):
+        """A hand-made row with no slot label falls back to the old guard."""
+        client = _account_client(
+            variants=[_variant("v1", account_id="acc1"), _variant("v2", account_id="acc1")],
+            queue_rows=[_queue_row("pq1", at.POST_STATUS_POSTED, "2026-08-03T07:00:00+00:00",
+                                   variant_id="v0", account_id="acc1")],
+        )
+        report = run_queue_slots(client, LOG, now=_now(13), dry_run=False)
+        self.assertEqual(client.created[0]["scheduled"], "2026-08-03T09:00:00+00:00")
+
     def test_already_filled_slot_is_not_duplicated(self):
         # A Posted row for the 09:00 slot means that slot has been served.
         client = _account_client(
@@ -200,8 +237,10 @@ class RunQueueSlotsTest(TestCase):
                                    variant_id="v0", account_id="acc1")],
         )
         report = run_queue_slots(client, LOG, now=_now(13), dry_run=False)
-        self.assertEqual(report.rows_created, 1)
-        self.assertEqual(client.created[0]["scheduled"], "2026-08-03T10:00:00+00:00")
+        # 09:00 is served, so only 11:00 and 13:00 are open -- and exactly two
+        # variants exist to fill them.
+        self.assertEqual(report.rows_created, 2)
+        self.assertEqual(client.created[0]["scheduled"], "2026-08-03T09:00:00+00:00")
 
     def test_rerunning_the_same_slot_creates_nothing_new(self):
         """Idempotence: the loop runs every few minutes, so a second pass over an
@@ -263,8 +302,8 @@ class PlanSlotRowsTest(TestCase):
         targets = [SlotTarget(TARGET_ACCOUNT, "acc1", "nikki_1")]
         variants = [_variant("v1", account_id="acc1"), _variant("v2", account_id="acc1")]
         report = plan_slot_rows(targets, variants, [], now=_now(22), tz=BERLIN)
-        self.assertEqual(report.slots_due, 5)
-        # Only two variants exist, so only two of the five slots can be filled --
+        self.assertEqual(report.slots_due, 7)
+        # Only two variants exist, so only two of the seven slots can be filled --
         # and each gets a different one.
         used = [row.variant_id for row in report.planned]
         self.assertEqual(used, ["v1", "v2"])

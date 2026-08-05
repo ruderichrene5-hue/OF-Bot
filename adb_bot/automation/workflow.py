@@ -1,3 +1,5 @@
+import functools
+import inspect
 import math
 import time
 import threading
@@ -10,6 +12,7 @@ from adb_bot.config.config import get_bearer_token, get_profile_ids
 from adb_bot.automation.flows.instagram import InstagramLikeFeedFlow, InstagramNotificationsFlow, InstagramScrollFlow, InstagramStoryUploadFlow, InstagramReelUploadFlow, InstagramUpdateBioFlow, InstagramUpdateBioU2Flow, InstagramUpdateProfilePictureU2Flow, InstagramWarmUpDay1Flow
 from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
 from adb_bot.automation.heartbeat import DEFAULT_INTERVAL_SECONDS, ProfileHeartbeat
+from adb_bot.core import shutdown as _shutdown_register
 from adb_bot.core.logger import get_logger
 from adb_bot.core.models import Profile
 from adb_bot.clients.multilogin import (
@@ -19,6 +22,13 @@ from adb_bot.clients.multilogin import (
 )
 
 DEFAULT_PROFILE_IDS = ["626005033091072287", "624310694145163612", "625149430776987991", "622381034276651060", "623102213643829576", "623102253758153032"]
+
+# How long one profile's phone may stay open before it is shut down regardless
+# of what the flow is doing. A posting run that verifies for ~45s and uploads
+# for a minute or two sits well inside this; anything past it is wedged, and a
+# wedged phone costs ~150 MB of WebKitWebProcess until something closes it.
+# See `_guarantee_profile_closed` for what this is protecting against.
+MAX_PROFILE_OPEN_SECONDS = 7 * 60
 
 
 FLOW_ACTION_COUNTS = {
@@ -367,7 +377,118 @@ def connect_with_retries(
     return None
 
 
-def run_profile_workflow(
+def _guarantee_profile_closed(inner):
+    """Wrap the workflow so its phone is actually closed on every exit path.
+
+    A wrapper rather than logic inside the workflow because the guarantee has to
+    hold on *every* exit, and the workflow has a dozen early returns: the failure
+    branch returns without shutting down, warmup passes
+    ``shutdown_on_success=False`` on purpose, and a wedged flow reaches neither.
+    On 2026-08-04 that came to 172 launches against 64 shutdowns -- 108 phones
+    left running at ~150 MB of WebKitWebProcess each, which emptied a 15 GB box
+    twice and had the OOM killer take out the MultiLogin agent with it.
+
+    Two independent guarantees, because they fail in different ways:
+
+    - the ``finally``, for a workflow that returns or raises: whatever path it
+      took, the phone is closed on the way out;
+    - the watchdog timer, for a workflow that does neither. A ``finally`` is no
+      help against a flow that hangs, which is the case that left phones open
+      for hours. It is a daemon thread, so it can never keep the process alive,
+      and it fires at most once;
+    - the process-wide register in `core.shutdown`, for a process that is
+      *killed* rather than finishing. `systemctl stop` and the OOM killer run
+      neither the ``finally`` nor the timer, so the SIGTERM handler needs its
+      own way to reach the phone.
+
+    ``functools.wraps`` matters here beyond tidiness: `inspect.signature` and
+    `inspect.getsource` follow ``__wrapped__``, so the workflow's real parameter
+    list stays visible to callers, IDEs, and the wiring tests that assert a
+    given argument is threaded through.
+
+    **This drops the old "leave a failed profile open so it can be looked at"
+    policy** (tests/test_shutdown_on_failure.py). That rationale assumed someone
+    was watching: every caller is now a headless loop on a timer, so a phone
+    left open at 03:00 is not inspected, it just leaks until the OOM killer
+    arrives. To inspect a flagged account, open its profile in MultiLogin
+    directly -- the Airtable row records why it was flagged.
+    """
+
+    @functools.wraps(inner)
+    def wrapper(*args, max_open_seconds=MAX_PROFILE_OPEN_SECONDS, **kwargs) -> None:
+        bound = inspect.signature(inner).bind_partial(*args, **kwargs)
+        shutdown_client = bound.arguments.get("shutdown_client")
+        profile_id = bound.arguments.get("profile_id")
+        logger = bound.arguments.get("logger")
+        closed = threading.Event()
+
+        class _ObservedShutdownClient:
+            """Passes shutdown calls straight through, and notes that one happened.
+
+            Without this the workflow's own shutdown-on-success and the guard
+            below would both fire, sending two calls for every successful post.
+            Observing instead of counting our own calls also means any *future*
+            shutdown path inside the workflow is covered automatically.
+            """
+
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+
+            def shutdown_profiles(self, profile_ids):
+                closed.set()
+                return self._wrapped.shutdown_profiles(profile_ids)
+
+            def __getattr__(self, name):
+                return getattr(self._wrapped, name)
+
+        def close(reason: str) -> None:
+            if shutdown_client is None or profile_id is None or closed.is_set():
+                return
+            closed.set()
+            try:
+                shutdown_client.shutdown_profiles([str(profile_id)])
+                if logger is not None:
+                    logger.info("Closed profile %s (%s)", profile_id, reason)
+            except Exception:
+                if logger is not None:
+                    logger.exception("Failed to close profile %s (%s)", profile_id, reason)
+
+        if shutdown_client is not None:
+            bound.arguments["shutdown_client"] = _ObservedShutdownClient(shutdown_client)
+
+        watchdog = None
+        if max_open_seconds and float(max_open_seconds) > 0:
+            budget = float(max_open_seconds)
+            watchdog = threading.Timer(budget, lambda: close(f"open longer than {budget:.0f}s"))
+            watchdog.daemon = True
+            watchdog.start()
+
+        # The third guarantee, for the exit path the other two cannot see: the
+        # process being *killed* (`systemctl stop`, OOM). Neither the `finally`
+        # below nor the watchdog above runs then, so the phone leaked exactly as
+        # it did before this wrapper existed (TODO 3.3). Handing `close` to the
+        # process-wide register lets the signal handler in `core.shutdown` call
+        # it. `close` is already idempotent, so it does not matter which of the
+        # three gets there first.
+        close_token = None
+        if shutdown_client is not None and profile_id is not None:
+            close_token = _shutdown_register.register_open_profile(
+                profile_id, lambda: close("process terminating"))
+        try:
+            return inner(*bound.args, **bound.kwargs)
+        finally:
+            if watchdog is not None:
+                watchdog.cancel()
+            if close_token is not None:
+                _shutdown_register.unregister_open_profile(close_token)
+            close("workflow finished")
+
+    return wrapper
+
+
+
+
+def _run_profile_workflow(
     profile_id: str,
     bearer_token: str,
     api_client: MultiloginApiClient,
@@ -674,6 +795,12 @@ def run_profile_workflow(
             logger.exception("Failed to shutdown Multilogin profile %s", profile_id_value)
     else:
         logger.info("Keeping Multilogin profile %s open after successful flow '%s' completion", profile_id_value, flow_name)
+
+
+# The name every caller imports. The inner function keeps all the flow logic and
+# its own shutdown-on-success handling; the decorator only adds the guarantee
+# that the phone is closed however that logic exits.
+run_profile_workflow = _guarantee_profile_closed(_run_profile_workflow)
 
 
 def main() -> None:
