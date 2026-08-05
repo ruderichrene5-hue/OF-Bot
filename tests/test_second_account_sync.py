@@ -202,6 +202,27 @@ class RunSyncTest(TestCase):
 
         self.assertEqual([name for name, _ in report.untagged_hints], ["Nikki 14"])
 
+    def test_an_unread_switcher_never_clears_a_recorded_second_account(self):
+        """`read_phone_accounts` reports that case as an error, and an errored
+        read must not reach Airtable -- otherwise one flaky tap demotes a
+        two-account phone to single and halves its posting."""
+        airtable = FakeAirtable(known=_known(primary="jasmindiecoolee",
+                                             second="naughty_jasminn", has_second=True))
+        original = sync.read_phone_accounts
+        sync.read_phone_accounts = lambda launch_id, name, serial_no, **k: ProfileAccounts(
+            serial_no, launch_id, name, primary="", second="",
+            error="could not read the account switcher (header said 'jasmindiecoolee')")
+        try:
+            report = sync.run_second_account_sync(
+                airtable, TAGGED, api_client=None, adb_enable_client=None,
+                launcher_client=None, shutdown_client=None, logger=LOG,
+                dry_run=False, recheck_known=True)
+        finally:
+            sync.read_phone_accounts = original
+
+        self.assertEqual(airtable.writes, [])
+        self.assertEqual([n for n, _ in report.failed], ["Jasmin 5"])
+
     def test_a_phone_that_would_not_boot_is_reported_and_writes_nothing(self):
         airtable = FakeAirtable(known=_known())
         original = sync.read_phone_accounts

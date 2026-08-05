@@ -352,10 +352,16 @@ def ensure_account(d, wanted: str | None, settle=None, logger=None) -> bool:
 def discover_accounts(d, settle=None, logger=None) -> dict:
     """Read which accounts this phone has, without changing anything.
 
-    Returns ``{"active": handle|None, "accounts": [handle, ...]}``. Used by the
-    discovery pass that fills Airtable in, so the handles come from the phone
-    rather than from a hand-typed MultiLogin remark (which we found to be stale
-    on the first profile we checked).
+    Returns ``{"active": handle|None, "accounts": [handle, ...],
+    "switcher_read": bool}``. Used by the discovery pass that fills Airtable in,
+    so the handles come from the phone rather than from a hand-typed MultiLogin
+    remark (which we found to be stale on the first profile we checked).
+
+    `switcher_read` is the one field the caller must not ignore. "The switcher
+    listed one account" and "the switcher never opened" produce the same empty
+    second handle, and treating the second as the first would record a
+    two-account phone as single-account over one flaky tap -- quietly halving
+    its posting for good. Only a sheet we actually read is evidence.
     """
     def wait(seconds: float, what: str) -> None:
         if callable(settle):
@@ -364,18 +370,21 @@ def discover_accounts(d, settle=None, logger=None) -> dict:
             import time
             time.sleep(seconds)
 
-    result = {"active": None, "accounts": []}
+    result = {"active": None, "accounts": [], "switcher_read": False}
     if not open_profile_tab(d, logger=logger):
         return result
     wait(3, "profile header")
     result["active"] = read_active_handle(d, logger=logger)
 
     if not open_switcher(d, logger=logger):
-        # A phone with one account still has a header; report just that.
-        if result["active"]:
-            result["accounts"] = [result["active"]]
         return result
     wait(3, "account switcher")
-    result["accounts"] = list_accounts(d, logger=logger)
+    listed = list_accounts(d, logger=logger)
     dismiss_switcher(d, logger=logger)
+    if not listed:
+        # The sheet opened but parsed to nothing -- that is a parse we do not
+        # trust, not proof of a one-account phone.
+        return result
+    result["accounts"] = listed
+    result["switcher_read"] = True
     return result

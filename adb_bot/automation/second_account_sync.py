@@ -206,6 +206,16 @@ def read_phone_accounts(launch_id: str, name: str, serial_no: str, *,
         handles = [h for h in handles if h]
         out.all_handles = handles
 
+        # Only a switcher we actually read is evidence about how many accounts
+        # this phone has. Without it, an empty second handle means "we could not
+        # look", not "there is no second account" -- and recording the latter
+        # would clear a working two-account phone back to single, halving its
+        # posting until somebody noticed.
+        if not found.get("switcher_read"):
+            out.error = ("could not read the account switcher"
+                         + (f" (header said {active!r})" if active else ""))
+            return out
+
         if not active and not handles:
             out.error = "could not read any account off the phone"
             return out

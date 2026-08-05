@@ -239,3 +239,37 @@ def test_a_tap_that_does_not_take_is_reported_as_failure():
     device = _FakeDevice("jasmindiecoolee", ["jasmindiecoolee", "naughty_jasminn"],
                          switch_works=False)
     assert ia.ensure_account(device, "naughty_jasminn", settle=_nowait) is False
+
+
+# --- discover_accounts ----------------------------------------------------
+
+class _SwitcherlessDevice(_FakeDevice):
+    """A phone whose account switcher will not open (or parses to nothing)."""
+
+    def on_click(self, key):
+        if key == "trigger":
+            return          # the sheet never opens
+        super().on_click(key)
+
+
+def test_discovery_reports_a_switcher_it_actually_read():
+    device = _FakeDevice("jasmindiecoolee", ["jasmindiecoolee", "naughty_jasminn"])
+    found = ia.discover_accounts(device, settle=_nowait)
+
+    assert found["active"] == "jasmindiecoolee"
+    assert found["accounts"] == ["jasmindiecoolee", "naughty_jasminn"]
+    assert found["switcher_read"] is True
+
+
+def test_a_switcher_that_never_opened_is_not_evidence_of_one_account():
+    """The bug this guards: "listed one account" and "could not look" both leave
+    the second handle empty. Recording the second as the first would clear a
+    working two-account phone back to single over one flaky tap, quietly halving
+    its posting until somebody noticed."""
+    device = _SwitcherlessDevice("jasmindiecoolee", ["jasmindiecoolee", "naughty_jasminn"])
+    found = ia.discover_accounts(device, settle=_nowait)
+
+    assert found["switcher_read"] is False
+    assert found["accounts"] == []
+    # The header is still reported -- it just isn't proof of the account count.
+    assert found["active"] == "jasmindiecoolee"
