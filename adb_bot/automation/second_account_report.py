@@ -57,7 +57,13 @@ def collect(airtable, mlx_items) -> dict:
         info = by_serial.get(p.serial_no, {})
         primary, second = info.get("primary", ""), info.get("second", "")
         status = info.get("status", "?")
-        if not info:
+        # Order matters: a flagged phone is blocked whatever else is true of it.
+        # It posts nothing at all until a person clears the box -- including the
+        # account that has never failed, because the challenge is against the
+        # device, not the handle.
+        if info.get("needs_human"):
+            state = "blocked"
+        elif not info:
             state = "no-airtable-row"
         elif not (primary and second):
             state = "not-read"
@@ -84,6 +90,7 @@ def collect(airtable, mlx_items) -> dict:
             "tagged": len(scan.tagged),
             "doubled": sum(1 for p in phones if p["state"] == "doubled"),
             "parked": sum(1 for p in phones if p["state"] == "parked"),
+            "blocked": sum(1 for p in phones if p["state"] == "blocked"),
             "not_read": sum(1 for p in phones if p["state"] in ("not-read", "no-airtable-row")),
             "profiles_total": len(rows),
             "needs_human": len(needs_human),
@@ -93,11 +100,13 @@ def collect(airtable, mlx_items) -> dict:
 
 STATE_LABEL = {
     "doubled": "Posting twice",
+    "blocked": "Blocked \u2014 needs a human",
     "parked": "Parked in Airtable",
     "not-read": "Accounts not read",
     "no-airtable-row": "No Airtable row",
 }
-STATE_TONE = {"doubled": "ok", "parked": "warn", "not-read": "crit", "no-airtable-row": "crit"}
+STATE_TONE = {"doubled": "ok", "blocked": "crit", "parked": "warn",
+              "not-read": "crit", "no-airtable-row": "crit"}
 
 REASON_HELP = {
     "Retries Exhausted": "Posts kept failing until the row ran out of retries. Open the phone and see what Instagram is showing.",
@@ -109,6 +118,10 @@ REASON_HELP = {
 }
 
 WHY_NOT_DOUBLED = {
+    "blocked": "The bot has flagged this phone, so it posts <b>nothing</b> \u2014 neither account \u2014 "
+               "until somebody clears <b>Needs Human Check</b> in Airtable. Instagram challenges the "
+               "device, not one handle, so the account that has not failed yet is in the same trouble "
+               "as the one that has.",
     "parked": "Both handles are recorded, but the profile's <b>Status</b> is Inactive, so nothing schedules for it. Set it Active and it posts twice from the next slot.",
     "not-read": "Its Instagram accounts have not been read off the phone yet, so there is no second handle to switch to.",
     "no-airtable-row": "Tagged in MultiLogin but there is no Profiles (Cloning) row for this serial. Run <code>mlx-sync</code> first.",
@@ -372,6 +385,15 @@ h2 .count {
 }
 .acct.is-second .handle { color: var(--accent); }
 .accounts .none { font-size: 13px; color: var(--muted); font-style: italic; }
+.accounts.is-halted { border-left-color: var(--crit); margin-top: 2px; }
+.acct .handle.is-stopped { color: var(--muted); text-decoration: line-through; text-decoration-thickness: 1px; }
+.acct .halt {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--crit);
+}
 
 .pill {
   font-size: 11.5px;
@@ -528,7 +550,7 @@ def render(DATA: dict, generated_at: str = "") -> str:
     parts.append(f"""
     <div class="stats">
       <div class="stat is-ok"><span class="n">{t['doubled']}</span><span class="k">phones posting twice</span></div>
-      <div class="stat"><span class="n">{t['tagged']}</span><span class="k">tagged in MultiLogin</span></div>
+      <div class="stat is-crit"><span class="n">{t['blocked']}</span><span class="k">blocked &mdash; both accounts stopped</span></div>
       <div class="stat is-warn"><span class="n">{t['parked'] + t['not_read']}</span><span class="k">tagged but not doubled yet</span></div>
       <div class="stat is-crit"><span class="n">{t['needs_human']}</span><span class="k">profiles need a manual check</span></div>
     </div>
@@ -565,22 +587,38 @@ def render(DATA: dict, generated_at: str = "") -> str:
     blocked = [p for p in DATA["phones"] if p["state"] != "doubled"]
     parts.append('<section id="blocked">')
     parts.append(f'<h2>Tagged, but not doubled yet <span class="count">{len(blocked)} phones</span></h2>')
-    parts.append('<p class="lede">Each of these is tagged as a two-account phone in MultiLogin but is still '
-                 'posting once, for the reason given.</p>')
+    parts.append('<p class="lede">Each of these is tagged as a two-account phone but is not posting twice. '
+                 'A <b>blocked</b> phone posts nothing at all &mdash; the bot refuses to launch it for either '
+                 'account until somebody clears <b>Needs Human Check</b>.</p>')
     parts.append('<div class="blocked">')
     for p in blocked:
         tone = STATE_TONE.get(p["state"], "warn")
-        handles = ""
+        reason = ""
+        if p["state"] == "blocked" and p.get("issue_reason"):
+            reason = f'<span class="reason r-crit">{esc(p["issue_reason"])}</span>'
+        # Both handles, each shown as stopped. A blocked two-account phone is the
+        # case that is easiest to misread: one account is why it got flagged, the
+        # other has done nothing wrong and is off the air all the same.
+        stopped = ""
         if p["primary"] and p["second"]:
-            handles = (f'<span class="reason">{esc(p["primary"])} + {esc(p["second"])}</span>')
+            halt = "not scheduled" if p["state"] == "parked" else "stopped"
+            cls = "" if p["state"] == "parked" else " is-stopped"
+            rows = "".join(
+                f'<div class="acct{" is-second" if slot == "Second" else ""}">'
+                f'<span class="slot">{slot}</span>'
+                f'<span class="handle{cls}">{esc(h)}</span>'
+                f'<span class="halt">{halt}</span></div>'
+                for slot, h in (("Primary", p["primary"]), ("Second", p["second"])))
+            stopped = f'<div class="accounts is-halted">{rows}</div>'
         parts.append(f"""
     <div class="blk {'is-crit' if tone == 'crit' else ''}">
       <div class="top">
         <span class="who">{esc(p['name'])}</span>
         <span class="pill is-{tone}">{STATE_LABEL.get(p['state'], p['state'])}</span>
-        {handles}
+        {reason}
       </div>
       <p class="why">{WHY_NOT_DOUBLED.get(p['state'], '')}</p>
+      {stopped}
     </div>""")
     parts.append("</div></section>")
 

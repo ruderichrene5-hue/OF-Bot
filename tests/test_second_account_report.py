@@ -42,6 +42,7 @@ MLX = [
     _mlx("Jasmin 5", ["Second Account"], "1", "111", "@jasjasmin00 second account"),
     _mlx("Jil 4", ["Second Account"], "2", "222"),
     _mlx("nikki 8", ["2 accounts"], "3", "333"),
+    _mlx("Nikki 12", ["2 accounts"], "6", "666"),
     _mlx("Luisa 9", ["Active / Posting"], "4", "444"),
     _mlx("Nikki 14", ["Active / Posting"], "5", "555", "@lamgirmina\n@minacr2914 second account"),
 ]
@@ -49,6 +50,7 @@ ROWS = [
     _row("Jasmin 5", "1", primary="jasmindiecoolee", second="naughty_jasminn", has_second=True),
     _row("Jil 4", "2", status="Inactive", primary="helenaaacutiee", second="jill4_78", has_second=True),
     _row("nikki 8", "3", needs_human=True, reason="Retries Exhausted"),
+    _row("Nikki 12", "6"),   # tagged, handles never read, NOT flagged
     _row("Luisa 9", "4"),
 ]
 
@@ -59,7 +61,7 @@ class CollectTest(TestCase):
 
     def test_only_tagged_phones_are_listed(self):
         self.assertEqual([p["name"] for p in self.data["phones"]],
-                         ["Jasmin 5", "Jil 4", "nikki 8"])
+                         ["Jasmin 5", "Jil 4", "Nikki 12", "nikki 8"])
 
     def test_an_active_phone_with_both_handles_counts_as_doubled(self):
         jasmin = next(p for p in self.data["phones"] if p["name"] == "Jasmin 5")
@@ -73,9 +75,15 @@ class CollectTest(TestCase):
         self.assertEqual(self.data["totals"]["parked"], 1)
 
     def test_a_phone_without_handles_reads_as_not_read(self):
-        nikki = next(p for p in self.data["phones"] if p["name"] == "nikki 8")
+        nikki = next(p for p in self.data["phones"] if p["name"] == "Nikki 12")
         self.assertEqual(nikki["state"], "not-read")
         self.assertEqual(self.data["totals"]["not_read"], 1)
+
+    def test_a_flag_wins_over_every_other_state(self):
+        """nikki 8 is both flagged and unread. Blocked is the one that decides
+        whether it posts, so it is the one the page must show."""
+        nikki = next(p for p in self.data["phones"] if p["name"] == "nikki 8")
+        self.assertEqual(nikki["state"], "blocked")
 
     def test_flagged_profiles_are_collected_whether_or_not_they_are_two_account(self):
         self.assertEqual([n["name"] for n in self.data["needs_human"]], ["nikki 8"])
@@ -83,6 +91,40 @@ class CollectTest(TestCase):
 
     def test_the_tagging_gap_is_reported(self):
         self.assertEqual([h["name"] for h in self.data["untagged_hints"]], ["Nikki 14"])
+
+    def test_a_flagged_two_account_phone_reads_as_blocked_not_doubled(self):
+        """It has both handles and is Active, so every other rule would call it
+        doubled -- but it posts nothing, and the page must not claim otherwise."""
+        rows = [_row("Jasmin 1", "1", primary="janabahdim", second="jsmin3075",
+                     has_second=True, needs_human=True, reason="Human Verification Required")]
+        data = rep.collect(FakeAirtable(rows), [_mlx("Jasmin 1", ["Second Account"], "1", "111")])
+
+        phone = data["phones"][0]
+        self.assertEqual(phone["state"], "blocked")
+        self.assertEqual(data["totals"]["blocked"], 1)
+        self.assertEqual(data["totals"]["doubled"], 0)
+
+
+class BlockedRenderTest(TestCase):
+    def setUp(self):
+        rows = [_row("Jasmin 1", "1", primary="janabahdim", second="jsmin3075",
+                     has_second=True, needs_human=True, reason="Human Verification Required")]
+        self.page = rep.render(rep.collect(
+            FakeAirtable(rows), [_mlx("Jasmin 1", ["Second Account"], "1", "111")]))
+
+    def test_both_handles_are_shown_as_stopped(self):
+        """The account that never failed is off the air too, and the page has to
+        say so -- otherwise somebody fixes one handle and expects the other to
+        carry on."""
+        self.assertIn("janabahdim", self.page)
+        self.assertIn("jsmin3075", self.page)
+        self.assertEqual(self.page.count("is-stopped"), 3)   # 1 style rule + 2 handles
+
+    def test_it_names_the_reason_the_phone_is_blocked(self):
+        self.assertIn("Human Verification Required", self.page)
+
+    def test_it_does_not_claim_the_phone_is_posting_twice(self):
+        self.assertNotIn("2&times; per slot", self.page)
 
 
 class RenderTest(TestCase):

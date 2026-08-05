@@ -399,15 +399,28 @@ class AirtableClient:
         )
 
     def profile_launch_map(self) -> dict:
-        """record_id -> {'name', 'launch_id', 'serial'} for Profiles (Cloning).
-        `launch_id` is the 18-digit MLX API ID the launcher/ADB actually need."""
+        """record_id -> {'name', 'launch_id', 'serial', 'needs_human', 'issue_reason'}
+        for Profiles (Cloning). `launch_id` is the 18-digit MLX API ID the
+        launcher/ADB actually need.
+
+        `needs_human` rides along because it is a fact about the *phone*, and the
+        posting planner has to refuse a row whose phone is flagged -- see
+        `plan_posting_queue`. It is carried here rather than fetched separately
+        so the planner keeps taking one pre-fetched dict and stays pure.
+        """
         out: dict = {}
-        for record in self._list_table(TABLE_PROFILES, fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_MLX_SERIAL]):
+        for record in self._list_table(
+            TABLE_PROFILES,
+            fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_MLX_SERIAL,
+                    F_PROF_NEEDS_HUMAN, F_PROF_ISSUE_REASON],
+        ):
             fields = record.get("fields", {}) or {}
             out[record.get("id")] = {
                 "name": fields.get(F_PROF_NAME),
                 "launch_id": (str(fields.get(F_PROF_MLX_API_ID) or "").strip() or None),
                 "serial": fields.get(F_PROF_MLX_SERIAL),
+                "needs_human": bool(fields.get(F_PROF_NEEDS_HUMAN)),
+                "issue_reason": _select_name(fields.get(F_PROF_ISSUE_REASON)),
             }
         return out
 
@@ -986,7 +999,8 @@ class AirtableClient:
         for record in self._list_table(
             TABLE_PROFILES,
             fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_STATUS,
-                    F_PROF_HAS_SECOND, F_PROF_PRIMARY_HANDLE, F_PROF_SECOND_HANDLE],
+                    F_PROF_HAS_SECOND, F_PROF_PRIMARY_HANDLE, F_PROF_SECOND_HANDLE,
+                    F_PROF_NEEDS_HUMAN],
         ):
             fields = record.get("fields", {}) or {}
             name = str(fields.get(F_PROF_NAME) or "").strip()
@@ -996,6 +1010,19 @@ class AirtableClient:
             # was filled in must not silently drop out of the run.
             status = _select_name(fields.get(F_PROF_STATUS))
             if status is not None and status != STATUS_SELECT_ACTIVE:
+                continue
+            # A phone the bot has flagged posts nothing until a person clears the
+            # box. This is a property of the *phone*, not of one account on it:
+            # when Instagram challenges a profile it is reacting to the device,
+            # so the second account on a two-account phone is in exactly the same
+            # trouble as the first even though nothing has failed for it yet.
+            # Dropping the profile here drops BOTH of its accounts, and stops the
+            # spoof pipeline making clips nothing may post.
+            #
+            # Status and this are different switches on purpose: Status is how a
+            # person parks a profile, this is how the bot does, and only a person
+            # clears this one.
+            if fields.get(F_PROF_NEEDS_HUMAN):
                 continue
             if not include_link_profiles and "link" in name.lower():
                 continue

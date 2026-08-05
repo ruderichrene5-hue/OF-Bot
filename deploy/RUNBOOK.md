@@ -317,6 +317,33 @@ The bot never clears those. **Clearing `Needs Human Check` is how you record
 that somebody looked.** Filter Profiles (Cloning) on that box for the morning
 worklist.
 
+### A flagged profile does not post — and that means both its accounts
+
+`Needs Human Check` is a hard stop on reel uploads, enforced in two places
+because they cover different rows:
+
+| Where | Stops |
+|---|---|
+| `profile_targets_by_model()` | New queue rows and new spoof variants |
+| `plan_posting_queue()` | Rows that were already Pending when the flag landed |
+
+It keys off the **profile**, not the handle. When Instagram challenges an
+account it is reacting to the *device*, so the second account on a two-account
+phone is in the same trouble as the first even though nothing has failed for it
+yet — posting from it while its twin sits flagged is how one warning becomes
+two. Flagging the profile therefore takes **both** accounts off the air, and the
+dashboard shows them struck through with `stopped` against each.
+
+`Status` and `Needs Human Check` are separate switches on purpose: `Status` is
+how a *person* parks a profile, `Needs Human Check` is how the *bot* does, and
+only a person clears the second one. Either alone stops the profile posting.
+
+The skip is logged with its reason, so a quiet posting run is explicable:
+
+```
+skip Luisa 7: profile needs a human check (Human Verification Required); not posting until it is cleared
+```
+
 **The dashboard.** One page showing which phones post twice, which are tagged
 but held up, and every profile flagged for a manual check:
 

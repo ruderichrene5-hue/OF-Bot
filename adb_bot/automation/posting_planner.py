@@ -146,9 +146,29 @@ def plan_posting_queue(
             continue
 
         launch_id = None
+        profile_info: dict = {}
         if profile_id:
-            info = profiles_by_recid.get(profile_id) or {}
-            launch_id = info.get("launch_id")
+            profile_info = profiles_by_recid.get(profile_id) or {}
+            launch_id = profile_info.get("launch_id")
+
+        # --- the phone-level guard -------------------------------------------
+        # A profile the bot flagged for a person does not post, whatever its rows
+        # say. Checked here as well as in `profile_targets_by_model` because that
+        # only stops NEW rows being created: rows queued before the flag landed
+        # are already Pending and due, and without this they keep posting from a
+        # phone somebody has been told to go and look at.
+        #
+        # It deliberately keys off the profile rather than the row's handle. When
+        # Instagram challenges an account it is reacting to the device, so the
+        # other account on a two-account phone is in the same trouble -- posting
+        # from it while its twin sits flagged is how one warning becomes two.
+        if profile_info.get("needs_human"):
+            reason = profile_info.get("issue_reason") or "flagged for a human"
+            plan.skipped.append(SkippedPost(
+                account_name,
+                f"profile needs a human check ({reason}); not posting until it is cleared"))
+            continue
+
         if not launch_id:
             plan.skipped.append(SkippedPost(account_name, "no MLX API ID on linked profile"))
             continue
