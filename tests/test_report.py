@@ -2585,3 +2585,58 @@ class GridOutlookRenderTest(RenderTest):
         page = report_html.render(self._grid_outlook(profiles=[], queued=[]))
         self.assertNotIn("no posting history yet", page.lower())
         self.assertIn("Next slot", page)
+
+
+class NextSlotClockLabelTest(RenderTest):
+    """"Next slot 20:00" has to say which clock the 20:00 is on.
+
+    The slots are Berlin; every other timestamp on the page is the server's, and
+    this box runs UTC. Read together, an unlabelled "next slot 20:00" against a
+    UTC "generated 16:09" looks like a broken clock or a four-hour wait. It was
+    read exactly that way on 2026-08-06; the countdown was right, the clock it
+    was in was simply never stated.
+    """
+
+    GRID = {"slots": ["18:00", "20:00", "22:00"], "unit": "adbbot-queue.service",
+            "per_model": False, "known": True}
+
+    def _grid_outlook(self, **kw):
+        data = {"queued": [], "profiles": [], "gap_minutes": 120, "default_cap": 7,
+                "timezone": "Europe/Berlin", "eligible_now": 0, "waiting": 0, "capped": 0,
+                "any_fixed": False, "mode": "grid", "slots": ["18:00", "20:00", "22:00"],
+                "next_slot": "20:00", "next_slot_seconds": 5400.0,
+                "server_timezone": "UTC", "same_clock": False, "clock_gap_hours": 2.0,
+                "unit": "adbbot-queue.service"}
+        data.update(kw)
+        return self._data(outlook=data)
+
+    def test_the_next_slot_tile_names_its_timezone(self):
+        page = report_html.render(self._grid_outlook())
+        self.assertIn("Europe/Berlin", page)
+        self.assertIn("in 1h 30m", page)
+
+    def test_a_server_on_another_clock_is_called_out(self):
+        page = report_html.render(self._grid_outlook())
+        self.assertIn("2h behind", page)
+        self.assertIn("not the same clock", page)
+
+    def test_no_clash_note_when_the_server_shares_the_slots_clock(self):
+        page = report_html.render(self._grid_outlook(server_timezone="CEST",
+                                                     same_clock=True,
+                                                     clock_gap_hours=0.0))
+        self.assertNotIn("not the same clock", page)
+
+    def test_the_offset_is_measured_not_assumed(self):
+        """Berlin in August is UTC+2; the page must read that off the clock
+        rather than hard-code a summer offset that is wrong every winter."""
+        from zoneinfo import ZoneInfo
+        summer = report.posting_outlook(
+            [], now=datetime(2026, 8, 6, 18, 30, tzinfo=ZoneInfo("Europe/Berlin")),
+            grid=self.GRID)
+        winter = report.posting_outlook(
+            [], now=datetime(2026, 1, 6, 18, 30, tzinfo=ZoneInfo("Europe/Berlin")),
+            grid=self.GRID)
+        self.assertEqual(summer["timezone"], "Europe/Berlin")
+        # The server here runs UTC, so Berlin leads it by 2h in CEST and 1h in CET.
+        self.assertEqual(summer["clock_gap_hours"], 2.0)
+        self.assertEqual(winter["clock_gap_hours"], 1.0)

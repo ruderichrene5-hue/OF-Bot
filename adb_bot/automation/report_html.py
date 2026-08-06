@@ -1008,10 +1008,18 @@ def _section_outlook(outlook: dict) -> str:
     grid_mode = outlook.get("mode") == "grid"
     slots = ", ".join(outlook.get("slots") or [])
 
+    # A slot time is the audience's clock; every other timestamp on this page is
+    # the server's, and this box runs UTC while the slots are Berlin. Unlabelled,
+    # "next slot 20:00" read against a UTC "generated 16:09" looks two hours out
+    # -- which is exactly how it was read on 2026-08-06. The countdown was right
+    # all along; only the clock it was in went unsaid.
+    server_zone = outlook.get("server_timezone")
+    off_clock = bool(server_zone) and not outlook.get("same_clock", True)
+
     if grid_mode:
         tiles = [
-            _tile("Next slot", outlook.get("next_slot") or "—",
-                  f'in {_fmt_seconds(outlook.get("next_slot_seconds") or 0)}', "ok"),
+            _tile("Next slot", f'{outlook.get("next_slot") or "—"}',
+                  f'in {_fmt_seconds(outlook.get("next_slot_seconds") or 0)} · {zone}', "ok"),
             _tile("Slots a day", len(outlook.get("slots") or []), slots or "none configured"),
             _tile("Queued now", len(queued), "rows with a time on them",
                   "ok" if queued else ""),
@@ -1037,6 +1045,12 @@ def _section_outlook(outlook: dict) -> str:
                  f'loop stuck. The grid comes from <span class="mono">--slots</span> on '
                  f'<span class="mono">{_e(outlook.get("unit") or "the queue unit")}</span>, not '
                  f'from Airtable.</p>')
+        if off_clock:
+            body += (f'<p class="sub">Slot times above are <span class="mono">{_e(zone)}</span> — '
+                     f'the audience\'s clock. Every other time on this page is the server\'s, '
+                     f'which runs <span class="mono">{_e(server_zone)}</span>, '
+                     f'{abs(outlook.get("clock_gap_hours") or 0):g}h behind. A slot time and a '
+                     f'timestamp on this page are not the same clock.</p>')
 
     if queued:
         head = ("<tr><th>Queue row</th><th>Scheduled for</th><th>Goes out</th></tr>")

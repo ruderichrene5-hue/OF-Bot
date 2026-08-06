@@ -1882,6 +1882,12 @@ def posting_outlook(queue_rows, schedules=None, now=None, grid=None) -> dict:
            "default_cap": queue_runner.DEFAULT_ANYTIME_MAX_PER_DAY, "timezone": "",
            "eligible_now": 0, "waiting": 0, "capped": 0, "any_fixed": False,
            "mode": "flexible", "slots": [], "next_slot": "", "next_slot_seconds": 0.0,
+           # Slot times are the audience's wall clock; every other timestamp on
+           # this page is the server's, and this box runs UTC while the slots are
+           # Berlin. A bare "next slot 20:00" next to a UTC "generated 16:09"
+           # reads as a four-hour wait or a broken clock, so the tile has to say
+           # which clock it is in. Asked live 2026-08-06.
+           "server_timezone": "", "same_clock": True, "clock_gap_hours": 0.0,
            "unit": ""}
 
     tz = queue_runner._zone(queue_runner.DEFAULT_TIMEZONE)
@@ -1892,6 +1898,16 @@ def posting_outlook(queue_rows, schedules=None, now=None, grid=None) -> dict:
     # Berlin onto a UTC reading moves every time on this tab by two hours.
     # astimezone reads a naive value as system-local and converts it properly.
     local_now = now.astimezone(tz)
+
+    # Offsets, not names: "CEST" and "Europe/Berlin" are the same clock spelled
+    # two ways, and comparing the spellings would cry wolf every summer.
+    server = local_now.astimezone(datetime.now().astimezone().tzinfo)
+    out["server_timezone"] = server.tzname() or ""
+    out["same_clock"] = server.utcoffset() == local_now.utcoffset()
+    out["clock_gap_hours"] = round(
+        ((local_now.utcoffset() or timedelta()) - (server.utcoffset() or timedelta()))
+        .total_seconds() / 3600.0, 2)
+
     gap = timedelta(minutes=out["gap_minutes"])
 
     # What the loop on this box actually does, not what this module can do.
