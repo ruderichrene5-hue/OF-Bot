@@ -2405,3 +2405,60 @@ class OutlookRenderTest(RenderTest):
     def test_nothing_to_report_is_said_rather_than_left_blank(self):
         page = report_html.render(self._outlook())
         self.assertIn("no profile has a posting history yet", page.lower())
+
+
+class OutlookClockTest(unittest.TestCase):
+    """`collect` hands these collectors a naive `datetime.now()`, which is the
+    *server's* wall clock. Stamping the slot zone onto it instead of converting
+    moved every time on the Schedules tab by the offset between them -- two
+    hours here, and enough to report a row that had already gone out as still
+    to come (2026-08-06)."""
+
+    def _rows(self):
+        return [{"id": "r1", "fields": {"Name": "Viktoria 9 / 19:00",
+                                        "Scheduled DateTime": "2026-08-06T14:39:00.000Z",
+                                        "Post Status": "Failed"}}]
+
+    def test_a_naive_now_is_read_as_the_servers_clock_not_the_slot_zone(self):
+        # 14:39Z is 16:39 Berlin, so the next slot is 18:39. A naive 15:35 on
+        # this UTC box is 17:35 Berlin -- 1h 04m short. Stamped as Berlin it
+        # would read 15:35 and claim 3h 04m, and the anchor would look future.
+        out = report.posting_outlook(self._rows(), now=datetime(2026, 8, 6, 15, 35))
+        entry = out["profiles"][0]
+        self.assertEqual(entry["last"], "16:39")
+        self.assertEqual(entry["next"], "18:39")
+        self.assertEqual(entry["seconds"], 64 * 60)
+        self.assertFalse(entry["ahead"])
+
+    def test_an_aware_now_agrees_with_the_naive_one(self):
+        from zoneinfo import ZoneInfo
+        aware = report.posting_outlook(
+            self._rows(), now=datetime(2026, 8, 6, 15, 35, tzinfo=ZoneInfo("UTC")))
+        naive = report.posting_outlook(self._rows(), now=datetime(2026, 8, 6, 15, 35))
+        self.assertEqual(aware["profiles"], naive["profiles"])
+        self.assertEqual(aware["profiles"][0]["seconds"], 64 * 60)
+
+    def test_a_row_queued_ahead_anchors_the_gap_and_is_marked(self):
+        """The queue loop runs its gap from the latest *scheduled* time, future
+        or not, so this matches the loop -- but it is not a "last post"."""
+        from zoneinfo import ZoneInfo
+        rows = [{"id": "r1", "fields": {"Name": "Laila 3 / 20:00",
+                                        "Scheduled DateTime": "2026-08-06T16:09:00.000Z",
+                                        "Post Status": "Pending"}}]
+        out = report.posting_outlook(rows, now=datetime(2026, 8, 6, 15, 35,
+                                                        tzinfo=ZoneInfo("UTC")))
+        entry = out["profiles"][0]
+        self.assertTrue(entry["ahead"])          # 18:09 Berlin, now is 17:35
+        self.assertEqual(entry["next"], "20:09")
+
+    def test_the_contradiction_is_not_printed(self):
+        """"4h 35m left of the 2h gap" is arithmetic that argues with itself."""
+        page = report_html.render(dict(RenderTest()._data(), outlook={
+            "queued": [], "gap_minutes": 120, "default_cap": 7, "timezone": "Europe/Berlin",
+            "eligible_now": 0, "waiting": 1, "capped": 0, "any_fixed": False,
+            "profiles": [{"profile": "Laila 3", "model": "Laila", "last": "18:09",
+                          "last_day": "2026-08-06", "next": "20:09", "seconds": 16500.0,
+                          "today": 5, "cap": 7, "state": "waiting", "ahead": True}]}))
+        self.assertIn("a row is queued for 18:09; the gap runs from there", page)
+        self.assertNotIn("left of the 2h gap", page)
+        self.assertIn("Last scheduled", page)

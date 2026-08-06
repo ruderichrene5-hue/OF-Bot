@@ -1743,7 +1743,11 @@ def model_schedules(airtable, content=None, now=None) -> dict:
 
     tz = queue_runner._zone(out["timezone"])
     now = now or datetime.now(tz)
-    local_now = now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
+    # `.astimezone(tz)` and not `.replace(tzinfo=tz)`: `collect` hands down a
+    # naive `datetime.now()`, which is the *server's* wall clock, and stamping
+    # Berlin onto a UTC reading moves every time on this tab by two hours.
+    # astimezone reads a naive value as system-local and converts it properly.
+    local_now = now.astimezone(tz)
 
     # Offsets, not names: "CEST" and "Europe/Berlin" are the same clock spelled
     # two ways, and comparing the spellings would cry wolf every summer.
@@ -1839,7 +1843,11 @@ def posting_outlook(queue_rows, schedules=None, now=None) -> dict:
     tz = queue_runner._zone(queue_runner.DEFAULT_TIMEZONE)
     out["timezone"] = queue_runner.DEFAULT_TIMEZONE
     now = now or datetime.now(tz)
-    local_now = now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
+    # `.astimezone(tz)` and not `.replace(tzinfo=tz)`: `collect` hands down a
+    # naive `datetime.now()`, which is the *server's* wall clock, and stamping
+    # Berlin onto a UTC reading moves every time on this tab by two hours.
+    # astimezone reads a naive value as system-local and converts it properly.
+    local_now = now.astimezone(tz)
     gap = timedelta(minutes=out["gap_minutes"])
 
     caps: dict = {}
@@ -1889,6 +1897,11 @@ def posting_outlook(queue_rows, schedules=None, now=None) -> dict:
         out["profiles"].append({
             "profile": who, "model": who.split()[0] if who.split() else who,
             "last": when.strftime("%H:%M"), "last_day": when.strftime("%Y-%m-%d"),
+            # The gap runs from the latest row's *scheduled* time, which is how
+            # the queue loop reads it too -- so a row queued for later today
+            # pushes the next one out from there, and the anchor is a time that
+            # has not happened yet. Calling that "last post" would be a lie.
+            "ahead": when > local_now,
             "next": "now" if state == "ready" else nxt.strftime("%H:%M"),
             "seconds": 0.0 if state == "ready" else max(0.0, (nxt - local_now).total_seconds()),
             "today": posted, "cap": cap, "state": state,

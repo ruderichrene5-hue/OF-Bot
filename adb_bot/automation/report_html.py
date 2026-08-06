@@ -1033,12 +1033,18 @@ def _section_outlook(outlook: dict) -> str:
     # "now" buries the handful that are actually waiting for something.
     held = [entry for entry in profiles if entry["state"] != "ready"]
     if held:
-        head = ("<tr><th>Profile</th><th>Last post</th><th>Next possible</th>"
+        head = ("<tr><th>Profile</th><th>Last scheduled</th><th>Next possible</th>"
                 "<th class='num'>Today</th><th>Why</th></tr>")
         rows = []
         for entry in held[:15]:
-            why = {"waiting": f'{_fmt_seconds(entry["seconds"])} left of the {gap_hours:g}h gap',
-                   "capped": f'{entry["today"]} of {entry["cap"]} posted today'}[entry["state"]]
+            if entry["state"] == "capped":
+                why = f'{entry["today"]} of {entry["cap"]} posted today'
+            elif entry.get("ahead"):
+                # Saying "4h left of the 2h gap" of a row that has not gone out
+                # yet is arithmetic that contradicts itself on the page.
+                why = f'a row is queued for {entry["last"]}; the gap runs from there'
+            else:
+                why = f'{_fmt_seconds(entry["seconds"])} left of the {gap_hours:g}h gap' 
             tone = "warn" if entry["state"] == "waiting" else ""
             nxt = (f'<span class="pill {tone}">{_e(entry["next"])}</span>' if tone
                    else _e(entry["next"]))
