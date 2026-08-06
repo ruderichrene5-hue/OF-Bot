@@ -1555,6 +1555,83 @@ def queue_today(airtable, day: str, rows=None) -> dict:
     }
 
 
+# A day's rate is counted in *rows*, never in attempts. One Posting Queue row is
+# one scheduled post, and its Post Status is that post's final verdict: the retry
+# pass moves a row Failed -> Pending and the row is posted again under the same
+# id, so a clip that needed three goes still ends as a single Posted row. That is
+# the whole reason this reads off Airtable rather than off the posting log, where
+# the same clip appears once per attempt and two failures followed by a success
+# would score 33%.
+#
+# Only these two are a verdict. Pending and Verifying are the day still running:
+# a Pending row may yet post, and a Verifying one has been posted but not proven,
+# so counting either as a failure would libel a day that has not finished.
+SETTLED_STATUSES = ("Posted", "Failed")
+DAILY_HISTORY_DAYS = 30
+
+
+def daily_success(rows=None, limit: int = DAILY_HISTORY_DAYS) -> dict:
+    """Confirmed vs failed posts per day, newest first.
+
+    Grouped by the day a post was *due* (`Scheduled DateTime`), not the day the
+    phone ran. Those differ whenever a retry crosses midnight, and the due day is
+    the one worth reporting: it answers "of the posts that day owed, how many
+    landed?", and it keeps a row's retries on the day whose slot they were
+    filling instead of smearing one clip across two rates.
+    """
+    from adb_bot.clients import airtable as at
+
+    rows = rows if rows is not None else []
+    fields = lambda r: (r.get("fields") or {})            # noqa: E731
+
+    by_day = defaultdict(Counter)
+    undated = 0
+    for row in rows:
+        day = str(fields(row).get(at.F_PQ_SCHEDULED, ""))[:10]
+        if not day:
+            # A row with no slot cannot be attributed to a day. Rare, and never
+            # silently: the count is reported so the totals can be reconciled.
+            undated += 1
+            continue
+        by_day[day][fields(row).get(at.F_PQ_POST_STATUS) or "(empty)"] += 1
+
+    days = []
+    for day in sorted(by_day, reverse=True):
+        counts = by_day[day]
+        posted, failed = counts.get("Posted", 0), counts.get("Failed", 0)
+        settled = posted + failed
+        unsettled = sum(n for status, n in counts.items()
+                        if status not in SETTLED_STATUSES)
+        days.append({
+            "day": day,
+            "posted": posted,
+            "failed": failed,
+            "unsettled": unsettled,
+            "total": settled + unsettled,
+            # None, not 0.0: a day with nothing settled has no rate yet, and
+            # rendering that as "0%" would read as a total wipeout.
+            "rate": (100.0 * posted / settled) if settled else None,
+        })
+
+    omitted = max(0, len(days) - limit)
+    days = days[:limit]
+
+    posted = sum(d["posted"] for d in days)
+    failed = sum(d["failed"] for d in days)
+    settled = posted + failed
+    return {
+        "days": days,
+        "totals": {
+            "posted": posted,
+            "failed": failed,
+            "unsettled": sum(d["unsettled"] for d in days),
+            "rate": (100.0 * posted / settled) if settled else None,
+        },
+        "omitted": omitted,
+        "undated": undated,
+    }
+
+
 def claimed_variant_ids(queue_rows) -> set:
     """Variant ids already attached to a Posting Queue row, in any status.
 
@@ -2144,6 +2221,8 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         "health": health(),
         "alerts": recent_alerts(),
         "queue": {"total": 0, "by_status": {}, "by_slot": {}, "failures": []},
+        "daily": {"days": [], "totals": {"posted": 0, "failed": 0, "unsettled": 0,
+                                         "rate": None}, "omitted": 0, "undated": 0},
         "content": {"ready": 0, "drawable": 0, "held": 0, "by_model": {}, "held_by_model": {}},
         "needs_human": {"rows": [], "retrying": [], "profiles": [], "error": ""},
         "schedules": {"models": [], "timezone": "", "fallback": [], "per_model": True,
@@ -2165,6 +2244,9 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             # row (of any age) has already claimed.
             rows = airtable.list_queue_rows()
             data["queue"] = queue_today(airtable, day, rows=rows)
+            # Same listing again: the history is every row Airtable still holds,
+            # which is exactly what was just fetched for today.
+            data["daily"] = daily_success(rows)
             data["content"] = content_stock(airtable, claimed=claimed_variant_ids(rows))
             data["needs_human"] = needs_human(airtable)
             # After `content`: the schedule table reads its per-model stock from

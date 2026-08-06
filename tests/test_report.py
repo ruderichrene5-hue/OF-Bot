@@ -375,6 +375,143 @@ class QueueTodayTest(unittest.TestCase):
         self.assertEqual(self._queue()["by_slot"], {"16:00": {"Posted": 1, "Failed": 1}})
 
 
+def _row(day, status, **extra):
+    fields = {"Scheduled DateTime": f"{day}T18:00:00.000Z", "Post Status": status}
+    fields.update(extra)
+    return {"id": f"{day}-{status}-{len(extra)}", "fields": fields}
+
+
+class DailySuccessTest(unittest.TestCase):
+    def test_a_retried_post_that_lands_is_confirmed_not_failed(self):
+        # The whole point of counting rows. This clip failed twice before it went
+        # out; the row that remains says Posted, and the day is 100%, not 33%.
+        data = report.daily_success([_row("2026-08-05", "Posted", **{"Retry Count": 2})])
+        day = data["days"][0]
+        self.assertEqual((day["posted"], day["failed"]), (1, 0))
+        self.assertEqual(day["rate"], 100.0)
+
+    def test_only_a_post_that_ran_out_of_retries_counts_as_failed(self):
+        data = report.daily_success([
+            _row("2026-08-05", "Posted"),
+            _row("2026-08-05", "Posted"),
+            _row("2026-08-05", "Posted"),
+            _row("2026-08-05", "Failed", **{"Retry Count": 3}),
+        ])
+        day = data["days"][0]
+        self.assertEqual((day["posted"], day["failed"]), (3, 1))
+        self.assertEqual(day["rate"], 75.0)
+
+    def test_unfinished_rows_are_held_out_of_the_rate(self):
+        # A Pending row may still post and a Verifying one already has; counting
+        # either as a failure would score a day before it has finished.
+        data = report.daily_success([
+            _row("2026-08-06", "Posted"),
+            _row("2026-08-06", "Pending"),
+            _row("2026-08-06", "Verifying"),
+        ])
+        day = data["days"][0]
+        self.assertEqual(day["rate"], 100.0)
+        self.assertEqual(day["unsettled"], 2)
+        self.assertEqual(day["total"], 3)
+
+    def test_a_day_with_nothing_settled_has_no_rate_rather_than_zero(self):
+        data = report.daily_success([_row("2026-08-06", "Pending")])
+        self.assertIsNone(data["days"][0]["rate"])
+
+    def test_days_are_grouped_and_ordered_newest_first(self):
+        data = report.daily_success([
+            _row("2026-08-04", "Posted"), _row("2026-08-06", "Failed"),
+            _row("2026-08-05", "Posted"),
+        ])
+        self.assertEqual([d["day"] for d in data["days"]],
+                         ["2026-08-06", "2026-08-05", "2026-08-04"])
+
+    def test_a_row_is_counted_on_the_day_it_was_due(self):
+        # Not the day the phone ran. A retry that crosses midnight belongs to the
+        # slot it was filling, and the row's Scheduled DateTime is that slot.
+        data = report.daily_success([_row("2026-08-04", "Posted")])
+        self.assertEqual(data["days"][0]["day"], "2026-08-04")
+
+    def test_totals_are_the_rate_across_every_day_shown(self):
+        data = report.daily_success([
+            _row("2026-08-04", "Posted"), _row("2026-08-04", "Failed"),
+            _row("2026-08-05", "Posted"), _row("2026-08-05", "Posted"),
+        ])
+        self.assertEqual(data["totals"]["posted"], 3)
+        self.assertEqual(data["totals"]["failed"], 1)
+        self.assertEqual(data["totals"]["rate"], 75.0)
+
+    def test_older_days_beyond_the_limit_are_dropped_but_counted(self):
+        rows = [_row(f"2026-07-{n:02d}", "Posted") for n in range(1, 6)]
+        data = report.daily_success(rows, limit=2)
+        self.assertEqual([d["day"] for d in data["days"]], ["2026-07-05", "2026-07-04"])
+        self.assertEqual(data["omitted"], 3)
+        # Truncation must not be silent, and the totals describe what is shown.
+        self.assertEqual(data["totals"]["posted"], 2)
+
+    def test_a_row_with_no_slot_belongs_to_no_day_and_is_reported(self):
+        data = report.daily_success([
+            {"id": "x", "fields": {"Post Status": "Posted"}},
+            _row("2026-08-05", "Posted"),
+        ])
+        self.assertEqual(data["undated"], 1)
+        self.assertEqual(len(data["days"]), 1)
+
+    def test_no_rows_is_not_a_crash(self):
+        data = report.daily_success([])
+        self.assertEqual(data["days"], [])
+        self.assertIsNone(data["totals"]["rate"])
+
+
+class DailySuccessRenderTest(unittest.TestCase):
+    def _daily(self, days, **kw):
+        base = {"days": days, "totals": {"posted": 0, "failed": 0, "unsettled": 0,
+                                         "rate": None}, "omitted": 0, "undated": 0}
+        base.update(kw)
+        return base
+
+    def test_the_table_shows_the_day_and_its_rate(self):
+        page = report_html._section_daily(self._daily(
+            [{"day": "2026-08-05", "posted": 9, "failed": 1, "unsettled": 0,
+              "total": 10, "rate": 90.0}]))
+        self.assertIn("2026-08-05", page)
+        self.assertIn("90%", page)
+        self.assertIn("Success rate", page)
+
+    def test_a_strong_day_is_green_and_a_poor_one_red(self):
+        self.assertEqual(report_html._rate_tone(95.0), "ok")
+        self.assertEqual(report_html._rate_tone(80.0), "warn")
+        self.assertEqual(report_html._rate_tone(40.0), "bad")
+
+    def test_a_day_still_in_flight_says_so(self):
+        page = report_html._section_daily(self._daily(
+            [{"day": "2026-08-06", "posted": 2, "failed": 0, "unsettled": 5,
+              "total": 7, "rate": 100.0}]))
+        self.assertIn("5 still to settle", page)
+
+    def test_a_day_with_no_rate_shows_a_dash_not_zero_percent(self):
+        page = report_html._section_daily(self._daily(
+            [{"day": "2026-08-06", "posted": 0, "failed": 0, "unsettled": 3,
+              "total": 3, "rate": None}]))
+        self.assertNotIn("0%", page)
+        self.assertIn("—", page)
+
+    def test_dropped_days_and_undated_rows_are_declared(self):
+        page = report_html._section_daily(self._daily(
+            [{"day": "2026-08-06", "posted": 1, "failed": 0, "unsettled": 0,
+              "total": 1, "rate": 100.0}], omitted=4, undated=2))
+        self.assertIn("4 older day(s) are not shown", page)
+        self.assertIn("2 row(s) carry no scheduled time", page)
+
+    def test_nothing_scheduled_yet_reads_as_empty_not_broken(self):
+        self.assertIn("no rate to show", report_html._section_daily(self._daily([])))
+
+    def test_an_absent_section_reads_as_empty_not_broken(self):
+        # `daily` arrives from Airtable. When that call fails the key is missing
+        # entirely, and the section has to say nothing rather than raise.
+        self.assertIn("no rate to show", report_html._section_daily({}))
+
+
 class CollectTest(unittest.TestCase):
     def setUp(self):
         report.invalidate_cache()
@@ -542,6 +679,25 @@ class RenderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DailySuccessPageTest(RenderTest):
+    def test_the_technical_tab_carries_the_table(self):
+        page = report_html.render(self._data(daily={
+            "days": [{"day": "2026-08-05", "posted": 9, "failed": 1, "unsettled": 0,
+                      "total": 10, "rate": 90.0}],
+            "totals": {"posted": 9, "failed": 1, "unsettled": 0, "rate": 90.0},
+            "omitted": 0, "undated": 0}))
+        self.assertIn("Success rate by day", page)
+        self.assertIn("2026-08-05", page)
+        self.assertIn("90%", page)
+
+    def test_the_page_survives_the_key_going_missing(self):
+        # An Airtable outage leaves `daily` unset; the heading stays, the table
+        # says there is nothing, and nothing raises.
+        page = report_html.render(self._data())
+        self.assertIn("Success rate by day", page)
+        self.assertIn("no rate to show", page)
 
 
 class FragmentRenderTest(RenderTest):

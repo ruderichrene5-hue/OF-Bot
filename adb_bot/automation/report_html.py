@@ -55,6 +55,9 @@ h2 { font-size: 1.05rem; margin: 2rem 0 .6rem; padding-bottom: .3rem;
 h3 { font-size: .9rem; margin: 1.2rem 0 .4rem; color: var(--muted);
      text-transform: uppercase; letter-spacing: .04em; }
 .sub { color: var(--muted); font-size: .85rem; margin-bottom: 1.2rem; }
+/* The inline half of .sub: same grey, no block margins, for a quiet aside that
+   sits inside a table cell rather than under a heading. */
+.dim { color: var(--muted); font-size: .85rem; }
 .grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 .tile { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: .8rem .9rem; }
 .tile .label { color: var(--muted); font-size: .75rem; text-transform: uppercase;
@@ -673,6 +676,73 @@ def _section_run_detail(runs) -> str:
     return lead + "".join(cards)
 
 
+def _rate_tone(rate) -> str:
+    """Colour for a success rate. Deliberately strict.
+
+    A posting fleet that lands nine posts in ten is not "fine" -- the tenth is a
+    profile someone has to open by hand -- so 90% is the floor for green rather
+    than the ceiling. Below three quarters the day is red: that is a rate at
+    which the failures, not the posts, are the day's output.
+    """
+    if rate is None:
+        return ""
+    if rate >= 90:
+        return "ok"
+    return "warn" if rate >= 75 else "bad"
+
+
+def _section_daily(daily: dict) -> str:
+    days = (daily or {}).get("days") or []
+    if not days:
+        return '<p class="empty">No posts have been scheduled yet, so there is no rate to show.</p>'
+
+    totals = daily.get("totals") or {}
+    lead = ('<p class="sub">One <strong>row</strong> per scheduled post, counted on the day it '
+            'was <em>due</em>. A post that failed and was retried until it went out counts once, '
+            'as confirmed — only a post that ran out of retries counts as failed. So this is the '
+            'share of each day’s planned posts that actually reached Instagram, not the '
+            'share of attempts that worked.</p>')
+
+    head = ("<tr><th>Day</th><th class='num'>Confirmed</th><th class='num'>Failed</th>"
+            "<th class='num'>Success rate</th><th class='num'>Not settled</th></tr>")
+
+    body = []
+    for entry in days:
+        rate, unsettled = entry["rate"], entry["unsettled"]
+        if rate is None:
+            cell = '<span class="dim">—</span>'
+        else:
+            cell = f'<span class="pill {_rate_tone(rate)}">{rate:.0f}%</span>'
+        # A day with rows still in flight has a rate that can only move, so say
+        # so rather than letting a half-finished day be read as a verdict.
+        pending = (f"<span class='dim'>{unsettled} still to settle</span>"
+                   if unsettled else "")
+        body.append(
+            f"<tr><td class='mono'>{_e(entry['day'])}</td>"
+            f"<td class='num'>{entry['posted']}</td>"
+            f"<td class='num'>{entry['failed'] or ''}</td>"
+            f"<td class='num'>{cell}</td>"
+            f"<td class='num'>{pending}</td></tr>")
+
+    overall = totals.get("rate")
+    total_cell = ('<span class="dim">—</span>' if overall is None
+                  else f'<span class="pill {_rate_tone(overall)}">{overall:.0f}%</span>')
+    body.append(
+        f"<tr><td><strong>All {len(days)} day(s)</strong></td>"
+        f"<td class='num'><strong>{totals.get('posted', 0)}</strong></td>"
+        f"<td class='num'><strong>{totals.get('failed', 0) or ''}</strong></td>"
+        f"<td class='num'>{total_cell}</td><td class='num'></td></tr>")
+
+    notes = ""
+    if daily.get("omitted"):
+        notes += (f'<p class="sub">{daily["omitted"]} older day(s) are not shown — the table '
+                  f'keeps the most recent {len(days)}.</p>')
+    if daily.get("undated"):
+        notes += (f'<p class="sub">{daily["undated"]} row(s) carry no scheduled time and belong '
+                  f'to no day, so they are in no rate above.</p>')
+    return f'{lead}<div class="scroll"><table>{head}{"".join(body)}</table></div>{notes}'
+
+
 def _section_failures(failures) -> str:
     if not failures:
         return '<p class="empty">Nothing failed today.</p>'
@@ -1250,6 +1320,9 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
 
       <h2>The same day by posting tick</h2>
       {_section_run_detail(data['runs'])}
+
+      <h2>Success rate by day</h2>
+      {_section_daily(data.get('daily') or {})}
 
       <h2>Failed queue rows</h2>
       {_section_failures(data['queue']['failures'])}
