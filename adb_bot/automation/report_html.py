@@ -934,13 +934,17 @@ def _section_schedules(schedules: dict) -> str:
                 f'chose; the rest post whenever a spoofed video is free, up to a daily cap. '
                 f'{where}</p>')
 
-    head = ("<tr><th>Model</th><th>Posts at</th><th class='num'>Profiles</th>"
-            "<th class='num'>Posts/day</th><th>Next</th><th class='num'>Free videos</th>"
-            "<th>Stock covers</th></tr>")
+    head = ("<tr><th>Model</th><th>Scheduled?</th><th>Posts at</th>"
+            "<th class='num'>Profiles</th><th class='num'>Posts/day</th><th>Next</th>"
+            "<th class='num'>Free videos</th><th>Stock covers</th></tr>")
     rows = []
     for entry in active + stray:
-        when = (f'any time <span class="sub">· up to {entry["per_day"]}/day each</span>'
-                if entry["flexible"] else _e(", ".join(entry["times"])))
+        # The distinction the table exists to make, said in a word rather than
+        # left to be inferred from an empty "Next" cell.
+        kind = ('<span class="pill warn">bot decides</span>' if entry["flexible"]
+                else '<span class="pill ok">fixed times</span>')
+        when = (f'whenever a video is free <span class="sub">· max {entry["per_day"]}/day '
+                f'each</span>' if entry["flexible"] else _e(", ".join(entry["times"])))
         # A ceiling and a plan are different numbers and must not look alike.
         per_day = (f'up to {entry["posts_per_day"]}' if entry["flexible"]
                    else str(entry["posts_per_day"]))
@@ -949,10 +953,11 @@ def _section_schedules(schedules: dict) -> str:
         flag = (' <span class="pill bad">not a model</span>' if not entry["known"] else "")
         rows.append(
             f"<tr><td class='mono'>{_e(entry['model'])}{flag}</td>"
+            f"<td>{kind}</td>"
             f"<td>{when}</td>"
             f"<td class='num'>{entry['profiles']}</td>"
             f"<td class='num'>{_e(per_day)}</td>"
-            f"<td class='mono'>{_e(entry['next'] or '—')}</td>"
+            f"<td class='mono'>{_e(entry['next'] or 'see below')}</td>"
             f"<td class='num'>{entry['free']}</td>"
             f"<td>{pill}</td></tr>")
 
@@ -981,6 +986,91 @@ def _section_schedules(schedules: dict) -> str:
         body += (f'<p class="sub">This base has no <span class="mono">Reel Post Times</span> '
                  f'field, so every model is on the standing grid: '
                  f'{_e(", ".join(schedules.get("fallback") or []))}.</p>')
+    return body
+
+
+def _section_outlook(outlook: dict) -> str:
+    """The next posts as times on a clock, not as a policy."""
+    profiles = outlook.get("profiles") or []
+    queued = outlook.get("queued") or []
+    if not profiles and not queued:
+        return ('<p class="empty">No profile has a posting history yet, so there is nothing '
+                'to work a next time out from.</p>')
+
+    zone = outlook.get("timezone") or "local"
+    gap_hours = (outlook.get("gap_minutes") or 0) / 60.0
+    ready, waiting, capped = (outlook.get("eligible_now", 0), outlook.get("waiting", 0),
+                              outlook.get("capped", 0))
+    tiles = [
+        _tile("Queued now", len(queued), "rows with a time on them",
+              "ok" if queued else ""),
+        # "Could" and "will" are different words, and the gap between them on
+        # this fleet is content -- see the note below.
+        _tile("Could post now", ready, "schedule allows it this minute"),
+        _tile("Waiting on the gap", waiting, f"posted within {gap_hours:g}h",
+              "warn" if waiting else ""),
+        _tile("Done for today", capped, "hit the daily cap", "warn" if capped else ""),
+    ]
+    body = f'<div class="grid">{"".join(tiles)}</div>'
+
+    if queued:
+        head = ("<tr><th>Queue row</th><th>Scheduled for</th><th>Goes out</th></tr>")
+        rows = []
+        for row in queued:
+            when = ("on the next posting tick" if row["due"]
+                    else f'in {_fmt_seconds(row["seconds"])}')
+            rows.append(f"<tr><td class='mono'>{_e(row['name'])}</td>"
+                        f"<td class='mono'>{_e(row['day'])} {_e(row['when'])}</td>"
+                        f"<td>{_e(when)}</td></tr>")
+        body += (f'<h3>Queued to post</h3><div class="scroll"><table>{head}'
+                 f'{"".join(rows)}</table></div>'
+                 '<p class="sub">A row exists and carries a real time. Anything already due '
+                 'goes out on the next posting tick; a future one is the retry pass holding a '
+                 'failed row back, which is the only thing here that schedules ahead.</p>')
+
+    # Only the profiles whose answer is a time. When most of the fleet is free to
+    # post -- which is the normal state here -- a table of forty rows all saying
+    # "now" buries the handful that are actually waiting for something.
+    held = [entry for entry in profiles if entry["state"] != "ready"]
+    if held:
+        head = ("<tr><th>Profile</th><th>Last post</th><th>Next possible</th>"
+                "<th class='num'>Today</th><th>Why</th></tr>")
+        rows = []
+        for entry in held[:15]:
+            why = {"waiting": f'{_fmt_seconds(entry["seconds"])} left of the {gap_hours:g}h gap',
+                   "capped": f'{entry["today"]} of {entry["cap"]} posted today'}[entry["state"]]
+            tone = "warn" if entry["state"] == "waiting" else ""
+            nxt = (f'<span class="pill {tone}">{_e(entry["next"])}</span>' if tone
+                   else _e(entry["next"]))
+            rows.append(f"<tr><td class='mono'>{_e(entry['profile'])}</td>"
+                        f"<td class='mono'>{_e(entry['last_day'])} {_e(entry['last'])}</td>"
+                        f"<td>{nxt}</td>"
+                        f"<td class='num'>{entry['today']}</td>"
+                        f"<td class='sub'>{_e(why)}</td></tr>")
+        body += (f'<h3>Waiting on the clock</h3><div class="scroll"><table>{head}'
+                 f'{"".join(rows)}</table></div>')
+        if len(held) > 15:
+            body += f'<p class="sub">Soonest 15 of {len(held)}.</p>'
+    else:
+        body += ('<h3>Waiting on the clock</h3><p class="empty">No profile is waiting on the '
+                 'gap or its daily cap.</p>')
+
+    if ready:
+        body += (f'<p class="sub"><strong>{ready}</strong> profile(s) could post the moment a '
+                 f'spoofed video is free for them — there is no time to wait for. The queue '
+                 f'loop writes the row on its next tick (see the timetable above) and the '
+                 f'posting loop takes it on the one after.</p>')
+
+    body += (f'<p class="sub">Times are {_e(zone)}. "Next possible" is the schedule only — a '
+             f'flexible profile may post again {gap_hours:g}h after its last one, up to its '
+             f'model\'s daily cap. Whether it actually does depends on a spoofed video no other '
+             f'row has claimed, and on this fleet that is usually what decides it, not the '
+             f'clock.</p>')
+    if not outlook.get("any_fixed"):
+        body += ('<p class="sub">Nothing here is posting to a fixed timetable: no model has '
+                 'picked <span class="mono">Reel Post Times</span>, so every row is written '
+                 'for the moment the queue loop finds a video free — which is why "Scheduled '
+                 'for" and "Last post" are times things happened, not times chosen in advance.</p>')
     return body
 
 
@@ -1079,6 +1169,9 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
 
       <h2>When each model posts</h2>
       {_section_schedules(data.get('schedules') or {})}
+
+      <h2>When the next posts go out</h2>
+      {_section_outlook(data.get('outlook') or {})}
     </section>
 
     <section class="panel" id="panel-profiles">

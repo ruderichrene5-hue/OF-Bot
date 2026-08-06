@@ -25,7 +25,7 @@ import subprocess
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from adb_bot.automation import schedule_spec
@@ -1809,6 +1809,113 @@ def _model_inputs(airtable) -> dict:
     return {"counts": counts, "schedules": schedules, "error": ""}
 
 
+def posting_outlook(queue_rows, schedules=None, now=None) -> dict:
+    """When the next posts actually happen, as timestamps rather than a policy.
+
+    "Any time, up to 7 a day" is what the *rule* is; it is not an answer to "when
+    does Laila 3 post next", and the schedule table could only ever give the
+    rule. The answer is arithmetic on the Posting Queue: a flexible target may
+    post again `DEFAULT_ANYTIME_GAP_MINUTES` after its last scheduled post, up
+    to its model's daily cap, so its next possible moment is a real time on the
+    clock.
+
+    Note what "eligible" does and does not mean. It is the *schedule* allowing a
+    post, not a promise of one: the queue loop still needs a spoofed video that
+    no other row has claimed, and on this fleet that -- not the clock -- is
+    usually what decides whether anything goes out.
+
+    Rows already Pending are the other half, and the more literal one: they
+    carry a real Scheduled DateTime and the posting loop takes them on its next
+    tick once it passes. A future-dated one is the retry pass holding a failed
+    row back, which is the only thing on this base that schedules ahead.
+    """
+    from adb_bot.automation import queue_runner
+    from adb_bot.clients import airtable as at
+
+    out = {"queued": [], "profiles": [], "gap_minutes": queue_runner.DEFAULT_ANYTIME_GAP_MINUTES,
+           "default_cap": queue_runner.DEFAULT_ANYTIME_MAX_PER_DAY, "timezone": "",
+           "eligible_now": 0, "waiting": 0, "capped": 0, "any_fixed": False}
+
+    tz = queue_runner._zone(queue_runner.DEFAULT_TIMEZONE)
+    out["timezone"] = queue_runner.DEFAULT_TIMEZONE
+    now = now or datetime.now(tz)
+    local_now = now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
+    gap = timedelta(minutes=out["gap_minutes"])
+
+    caps: dict = {}
+    for key, schedule in (schedules or {}).items():
+        caps[key] = schedule.per_day or out["default_cap"]
+        if schedule.times:
+            out["any_fixed"] = True
+
+    last: dict = {}
+    today_count: dict = {}
+    for record in queue_rows or []:
+        fields = record.get("fields", {}) or {}
+        name = str(fields.get(at.F_PQ_NAME) or "").strip()
+        stamp = _parse_airtable_dt(fields.get(at.F_PQ_SCHEDULED))
+        # The row's Name is "<profile> / <slot>" -- the only place a queue row
+        # says which target it belongs to without resolving its link.
+        if not stamp or "/" not in name:
+            continue
+        who = name.rsplit("/", 1)[0].strip()
+        when = stamp.astimezone(tz)
+        if who not in last or when > last[who]:
+            last[who] = when
+        if when.date() == local_now.date():
+            today_count[who] = today_count.get(who, 0) + 1
+        if str(fields.get(at.F_PQ_POST_STATUS) or "") == at.POST_STATUS_PENDING:
+            out["queued"].append({
+                "name": name, "profile": who,
+                "when": when.strftime("%H:%M"),
+                "day": when.strftime("%Y-%m-%d"),
+                "due": when <= local_now,
+                "seconds": max(0.0, (when - local_now).total_seconds()),
+            })
+    out["queued"].sort(key=lambda row: (row["day"], row["when"]))
+
+    for who, when in last.items():
+        model = who.split()[0].lower() if who.split() else ""
+        cap = caps.get(model, out["default_cap"])
+        posted = today_count.get(who, 0)
+        nxt = when + gap
+        if cap and posted >= cap:
+            state = "capped"
+        elif nxt <= local_now:
+            state = "ready"
+        else:
+            state = "waiting"
+        out[{"capped": "capped", "ready": "eligible_now", "waiting": "waiting"}[state]] += 1
+        out["profiles"].append({
+            "profile": who, "model": who.split()[0] if who.split() else who,
+            "last": when.strftime("%H:%M"), "last_day": when.strftime("%Y-%m-%d"),
+            "next": "now" if state == "ready" else nxt.strftime("%H:%M"),
+            "seconds": 0.0 if state == "ready" else max(0.0, (nxt - local_now).total_seconds()),
+            "today": posted, "cap": cap, "state": state,
+        })
+    # Soonest first, and a profile that could post this second before one that
+    # cannot: the top of this list is what the next posting tick will consider.
+    out["profiles"].sort(key=lambda row: (row["state"] == "capped", row["seconds"], row["profile"]))
+    return out
+
+
+def _schedules_for_outlook(airtable):
+    """The per-model schedules `posting_outlook` needs for each model's daily cap,
+    off the same cached read the schedule table uses."""
+    return _slow("model_inputs", lambda: _model_inputs(airtable))["schedules"]
+
+
+def _parse_airtable_dt(value):
+    """Airtable's ISO dateTime (UTC 'Z') as an aware datetime; None if unusable."""
+    if not value:
+        return None
+    try:
+        stamp = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
 def _aliased_folder(model_key: str) -> str:
     """The raw folder whose contents belong to `model_key`, when it is not named
     after that model. "" when the folder and the model agree."""
@@ -1942,6 +2049,9 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         "needs_human": {"rows": [], "retrying": [], "profiles": [], "error": ""},
         "schedules": {"models": [], "timezone": "", "fallback": [], "per_model": True,
                       "error": ""},
+        "outlook": {"queued": [], "profiles": [], "gap_minutes": 0, "default_cap": 0,
+                    "timezone": "", "eligible_now": 0, "waiting": 0, "capped": 0,
+                    "any_fixed": False},
         "airtable_error": "",
     }
 
@@ -1961,6 +2071,10 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             # After `content`: the schedule table reads its per-model stock from
             # it, and a schedule with no stock beside it is half the answer.
             data["schedules"] = model_schedules(airtable, content=data["content"], now=now)
+            # Reuses the listing above rather than asking again -- and the
+            # schedules it needs are the ones just read, not a second copy.
+            data["outlook"] = posting_outlook(
+                rows, schedules=_schedules_for_outlook(airtable), now=now)
             # Redo the per-video view with the queue in hand: a clip whose
             # profile never reached a phone leaves no trace on this box, and
             # only its queue row can say whether it is waiting or was written

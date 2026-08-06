@@ -2055,9 +2055,20 @@ class SchedulesRenderTest(RenderTest):
         page = report_html.render(self._schedules([
             self._model(times=[], flexible=True, per_day=7, posts_per_day=56, next="")]))
         self.assertIn("up to 56", page)
-        self.assertIn("any time", page)
+        self.assertIn("whenever a video is free", page)
+        self.assertIn("bot decides", page)
         self.assertIn("No model has picked posting times", page)
         self.assertIn("That is the default, not an outage", page)
+
+    def test_whether_a_model_is_scheduled_is_a_word_not_an_inference(self):
+        """An empty "Next" cell was the only clue, and blank reads as missing
+        data rather than "the bot picks the moment"."""
+        page = report_html.render(self._schedules([
+            self._model(),
+            self._model(model="Jil", times=[], flexible=True, per_day=7,
+                        posts_per_day=35, next="")]))
+        self.assertIn("fixed times", page)
+        self.assertIn("bot decides", page)
 
     def test_running_out_is_coloured(self):
         page = report_html.render(self._schedules([self._model(free=0)]))
@@ -2197,3 +2208,200 @@ class TimerRenderDetailTest(RenderTest):
             "timezone": "Europe/Berlin", "server_timezone": "CEST", "same_clock": True,
             "per_model": True, "fallback": [], "error": ""}))
         self.assertNotIn("are not the same times", page)
+
+
+class ParseAirtableDateTest(unittest.TestCase):
+    def test_a_utc_z_stamp_becomes_aware(self):
+        stamp = report._parse_airtable_dt("2026-08-06T16:09:52.000Z")
+        self.assertEqual(stamp.utcoffset(), timedelta(0))
+        self.assertEqual(stamp.hour, 16)
+
+    def test_a_naive_stamp_is_assumed_utc_rather_than_local(self):
+        """Airtable stores UTC; reading one as local would move every queue row
+        by the server's offset."""
+        self.assertEqual(report._parse_airtable_dt("2026-08-06T16:09:52").utcoffset(),
+                         timedelta(0))
+
+    def test_junk_is_none_rather_than_an_exception(self):
+        for value in ("", None, "soon", "2026-13-45"):
+            self.assertIsNone(report._parse_airtable_dt(value))
+
+
+class PostingOutlookTest(unittest.TestCase):
+    """"When does Laila 3 post next" is arithmetic on the queue, not a policy."""
+
+    ZONE = "Europe/Berlin"
+
+    def _now(self, hhmm="15:00"):
+        from zoneinfo import ZoneInfo
+        hour, minute = (int(x) for x in hhmm.split(":"))
+        return datetime(2026, 8, 6, hour, minute, tzinfo=ZoneInfo(self.ZONE))
+
+    def _row(self, name, when, status="Posted"):
+        return {"id": name, "fields": {"Name": name, "Scheduled DateTime": when,
+                                       "Post Status": status}}
+
+    def _run(self, rows, schedules=None, at="15:00"):
+        return report.posting_outlook(rows, schedules=schedules, now=self._now(at))
+
+    def test_the_next_post_is_the_last_one_plus_the_gap(self):
+        # 12:00 Berlin == 10:00 UTC; +2h gap -> 14:00 Berlin.
+        out = self._run([self._row("Laila 3 / 12:00", "2026-08-06T10:00:00.000Z")], at="13:00")
+        entry = out["profiles"][0]
+        self.assertEqual(entry["state"], "waiting")
+        self.assertEqual(entry["next"], "14:00")
+        self.assertEqual(entry["seconds"], 3600.0)
+
+    def test_once_the_gap_has_passed_the_answer_is_now(self):
+        out = self._run([self._row("Laila 3 / 09:00", "2026-08-06T07:00:00.000Z")])
+        self.assertEqual(out["profiles"][0]["state"], "ready")
+        self.assertEqual(out["profiles"][0]["next"], "now")
+        self.assertEqual(out["eligible_now"], 1)
+
+    def test_a_profile_at_its_daily_cap_is_done_whatever_the_gap_says(self):
+        rows = [self._row(f"Jil 1 / 0{n}:00", f"2026-08-06T0{n}:00:00.000Z")
+                for n in range(1, 8)]
+        out = self._run(rows)
+        self.assertEqual(out["profiles"][0]["state"], "capped")
+        self.assertEqual(out["capped"], 1)
+        self.assertEqual(out["profiles"][0]["today"], 7)
+
+    def test_a_models_own_cap_is_honoured(self):
+        from adb_bot.automation.queue_runner import ModelSchedule
+        rows = [self._row(f"Jil 1 / 0{n}:00", f"2026-08-06T0{n}:00:00.000Z")
+                for n in range(1, 4)]
+        out = self._run(rows, schedules={"jil": ModelSchedule(times=(), per_day=3)})
+        self.assertEqual(out["profiles"][0]["state"], "capped")
+        self.assertEqual(out["profiles"][0]["cap"], 3)
+
+    def test_only_todays_rows_count_towards_the_cap(self):
+        rows = [self._row(f"Jil 1 / 0{n}:00", f"2026-08-05T0{n}:00:00.000Z")
+                for n in range(1, 8)]
+        self.assertEqual(self._run(rows)["profiles"][0]["today"], 0)
+
+    def test_a_pending_row_is_listed_with_the_time_on_it(self):
+        out = self._run([self._row("Laila 3 / 20:00", "2026-08-06T16:09:52.000Z", "Pending")])
+        queued = out["queued"][0]
+        self.assertEqual(queued["when"], "18:09")        # 16:09 UTC in Berlin
+        self.assertFalse(queued["due"])
+        self.assertEqual(queued["seconds"], 3 * 3600 + 9 * 60 + 52)
+
+    def test_a_row_already_due_says_so(self):
+        out = self._run([self._row("Laila 3 / 09:00", "2026-08-06T07:00:00.000Z", "Pending")])
+        self.assertTrue(out["queued"][0]["due"])
+
+    def test_only_pending_rows_are_queued(self):
+        """Posted and Failed rows still set the last-post time; they are not
+        waiting to go out."""
+        out = self._run([self._row("Laila 3 / 09:00", "2026-08-06T07:00:00.000Z", "Posted"),
+                         self._row("Laila 4 / 09:00", "2026-08-06T07:00:00.000Z", "Failed")])
+        self.assertEqual(out["queued"], [])
+        self.assertEqual(len(out["profiles"]), 2)
+
+    def test_the_latest_row_is_the_one_the_gap_runs_from(self):
+        out = self._run([self._row("Jil 1 / 09:00", "2026-08-06T07:00:00.000Z"),
+                         self._row("Jil 1 / 14:00", "2026-08-06T12:00:00.000Z")], at="14:30")
+        self.assertEqual(out["profiles"][0]["last"], "14:00")
+        self.assertEqual(out["profiles"][0]["next"], "16:00")
+
+    def test_a_row_without_the_slot_suffix_is_skipped_not_guessed_at(self):
+        out = self._run([{"id": "x", "fields": {"Name": "hand made",
+                                                "Scheduled DateTime": "2026-08-06T07:00:00.000Z",
+                                                "Post Status": "Pending"}}])
+        self.assertEqual(out["profiles"], [])
+        self.assertEqual(out["queued"], [])
+
+    def test_soonest_first_with_the_capped_ones_last(self):
+        rows = [self._row("Jil 1 / 14:30", "2026-08-06T12:30:00.000Z"),
+                self._row("Jil 2 / 09:00", "2026-08-06T07:00:00.000Z")]
+        rows += [self._row(f"Jil 3 / 0{n}:00", f"2026-08-06T0{n}:00:00.000Z")
+                 for n in range(1, 8)]
+        order = [entry["profile"] for entry in self._run(rows)["profiles"]]
+        self.assertEqual(order[0], "Jil 2")      # ready now
+        self.assertEqual(order[-1], "Jil 3")     # capped
+
+    def test_a_fixed_schedule_is_noticed(self):
+        from adb_bot.automation.queue_runner import ModelSchedule
+        out = self._run([], schedules={"jil": ModelSchedule(times=("09:00",), per_day=None)})
+        self.assertTrue(out["any_fixed"])
+
+    def test_an_empty_queue_is_empty_not_an_error(self):
+        out = self._run([])
+        self.assertEqual(out["profiles"], [])
+        self.assertEqual(out["eligible_now"], 0)
+
+
+class OutlookRenderTest(RenderTest):
+    def _outlook(self, **kw):
+        data = {"queued": [], "profiles": [], "gap_minutes": 120, "default_cap": 7,
+                "timezone": "Europe/Berlin", "eligible_now": 0, "waiting": 0,
+                "capped": 0, "any_fixed": False}
+        data.update(kw)
+        return self._data(outlook=data)
+
+    def _profile(self, **kw):
+        entry = {"profile": "Laila 3", "model": "Laila", "last": "18:09",
+                 "last_day": "2026-08-06", "next": "20:09", "seconds": 9000.0,
+                 "today": 5, "cap": 7, "state": "waiting"}
+        entry.update(kw)
+        return entry
+
+    def test_the_section_is_on_the_schedules_tab(self):
+        page = report_html.render(self._outlook(profiles=[self._profile()], waiting=1))
+        panel = page.split('id="panel-schedules"')[1].split("</section>")[0]
+        self.assertIn("When the next posts go out", panel)
+
+    def test_a_queued_row_shows_its_timestamp_and_when_it_goes(self):
+        page = report_html.render(self._outlook(queued=[
+            {"name": "Laila 3 / 20:00", "profile": "Laila 3", "when": "18:09",
+             "day": "2026-08-06", "due": False, "seconds": 2374.0}]))
+        self.assertIn("Laila 3 / 20:00", page)
+        self.assertIn("2026-08-06 18:09", page)
+        self.assertIn("in 39m 34s", page)
+
+    def test_a_due_row_goes_out_on_the_next_tick(self):
+        page = report_html.render(self._outlook(queued=[
+            {"name": "Jil 1 / 09:00", "profile": "Jil 1", "when": "09:00",
+             "day": "2026-08-06", "due": True, "seconds": 0.0}]))
+        self.assertIn("on the next posting tick", page)
+
+    def test_profiles_waiting_on_the_clock_show_a_real_time(self):
+        page = report_html.render(self._outlook(profiles=[self._profile()], waiting=1))
+        self.assertIn("Waiting on the clock", page)
+        self.assertIn("20:09", page)
+        self.assertIn("left of the 2h gap", page)
+
+    def test_profiles_free_to_post_are_a_count_not_forty_rows_saying_now(self):
+        """When most of the fleet is free -- the normal state here -- a table of
+        "now" buries the few that are actually waiting."""
+        page = report_html.render(self._outlook(
+            profiles=[self._profile(profile="Zara 9", state="ready", next="now", seconds=0.0)],
+            eligible_now=59))
+        panel = page.split('id="panel-schedules"')[1].split("</section>")[0]
+        self.assertIn("59", panel)
+        self.assertIn("could post the moment a spoofed video is free", panel)
+        self.assertNotIn("Zara 9", panel)
+        self.assertIn("No profile is waiting on the gap", panel)
+
+    def test_eligible_is_not_promised_as_will_post(self):
+        """59 profiles "could post now" and 57 posts happened all day; the gap
+        between those two numbers is content, and the page has to say so."""
+        page = report_html.render(self._outlook(
+            profiles=[self._profile(state="ready", next="now", seconds=0.0)],
+            eligible_now=59))
+        self.assertIn("schedule allows it this minute", page)
+        self.assertIn("depends on a spoofed video no other row has claimed", page)
+
+    def test_a_fleet_with_no_fixed_times_is_told_what_that_means(self):
+        page = report_html.render(self._outlook(profiles=[self._profile()], any_fixed=False))
+        self.assertIn("Nothing here is posting to a fixed timetable", page)
+        self.assertIn("times things happened, not times chosen in advance", page)
+
+    def test_a_capped_profile_says_it_is_done_for_today(self):
+        page = report_html.render(self._outlook(
+            profiles=[self._profile(state="capped", today=7, next="20:09")], capped=1))
+        self.assertIn("7 of 7 posted today", page)
+
+    def test_nothing_to_report_is_said_rather_than_left_blank(self):
+        page = report_html.render(self._outlook())
+        self.assertIn("no profile has a posting history yet", page.lower())
