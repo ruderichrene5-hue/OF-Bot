@@ -1154,11 +1154,17 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     """
     refresh = (f'<meta http-equiv="refresh" content="{refresh_seconds}">' if live else "")
     triage = data.get("needs_human") or {}
-    waiting = len(triage.get("rows") or []) + len(triage.get("profiles") or [])
+    # Profiles only. The abandoned rows below them are a *consequence* of those
+    # profiles -- one flagged account leaves six dead slots behind it -- so
+    # adding the two counted the same problem twice and put a number on the
+    # banner (72) that nothing else on the page agreed with: the Profiles tab
+    # said 22, because 22 accounts is what a person actually has to work
+    # through. Fixing the account is the job; the rows are just its wreckage.
+    waiting = len(triage.get("profiles") or [])
     bad = data["health"]["bad"]
     banner = ""
     if waiting:
-        banner = (f'<p><span class="pill bad">{waiting} item(s) need a person</span> '
+        banner = (f'<p><span class="pill bad">{waiting} profile(s) need a person</span> '
                   f'— open the <strong>Profiles</strong> tab.</p>')
     stopped_timers = [t["loop"] for t in (data.get("timers") or []) if t.get("stopped")]
     if stopped_timers:

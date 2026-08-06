@@ -723,16 +723,29 @@ class NeedsHumanRenderTest(RenderTest):
         self.assertIn("Retries Exhausted", page)
         self.assertIn("Human Verification Required", page)
         self.assertIn("locked out", page)               # the profile's latest note
-        self.assertIn("2 item(s) need a person", page)  # one row + one profile
+        self.assertIn("1 profile(s) need a person", page)  # the profile, not its row
         # The profile view leads with plain-language guidance, not field names.
         self.assertIn("What to do", page)
 
-    def test_the_banner_counts_rows_and_profiles_together(self):
+    def test_the_banner_counts_profiles_only(self):
+        # Two profiles, five dead rows between them: the banner says 2. The rows
+        # are what those two accounts left behind, not five more things to do.
         data = self._data(needs_human=self._triage(
-            rows=[{"name": "a", "slot": "", "issue": "Banned / Blocked", "retries": 0, "notes": ""}],
+            rows=[{"name": f"a{i}", "slot": "", "issue": "Banned / Blocked",
+                   "retries": 0, "notes": ""} for i in range(5)],
             profiles=[{"name": "b", "reason": "Banned", "status": "Active",
+                       "flagged_at": "", "note": []},
+                      {"name": "c", "reason": "Banned", "status": "Active",
                        "flagged_at": "", "note": []}]))
-        self.assertIn("2 item(s) need a person", report_html.render(data))
+        self.assertIn("2 profile(s) need a person", report_html.render(data))
+
+    def test_abandoned_rows_alone_raise_no_banner(self):
+        # Rows with no flagged profile behind them are already explained in the
+        # Profiles tab ("fixing the account above is what matters, not these
+        # rows"). Shouting about them on every page is the noise this removed.
+        data = self._data(needs_human=self._triage(
+            rows=[{"name": "a", "slot": "", "issue": "Other", "retries": 0, "notes": ""}]))
+        self.assertNotIn("need a person</span>", report_html.render(data))
 
     def test_names_are_escaped(self):
         data = self._data(needs_human=self._triage(
