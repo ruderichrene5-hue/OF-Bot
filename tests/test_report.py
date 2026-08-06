@@ -396,6 +396,8 @@ class CollectTest(unittest.TestCase):
             "spoof_now": lambda *a, **k: {"running": False, "encoding": False, "pid": 0,
                                           "clip": "", "model": "", "run": "",
                                           "seconds": 0.0, "done": []},
+            "model_schedules": lambda *a, **k: {"models": [], "timezone": "Europe/Berlin",
+                                                "fallback": [], "per_model": True, "error": ""},
         }
         defaults.update(overrides)
         return [mock.patch.object(report, name, value) for name, value in defaults.items()]
@@ -1822,3 +1824,268 @@ class LoopHintTest(RenderTest):
 
     def test_the_hint_text_is_escaped(self):
         self.assertNotIn("<script>", report_html._hint('<script>alert(1)</script>'))
+
+
+class NextSlotTest(unittest.TestCase):
+    def _at(self, hhmm):
+        from zoneinfo import ZoneInfo
+        hour, minute = (int(x) for x in hhmm.split(":"))
+        return datetime(2026, 8, 6, hour, minute, tzinfo=ZoneInfo("Europe/Berlin"))
+
+    def test_the_next_time_today(self):
+        self.assertEqual(report._next_slot(["09:00", "17:00"], self._at("10:00")), "17:00")
+
+    def test_once_they_have_all_passed_it_is_tomorrow(self):
+        """Blank would read as "nothing more today", which is true but says
+        nothing about when the model posts next."""
+        self.assertEqual(report._next_slot(["09:00", "17:00"], self._at("18:00")),
+                         "09:00 tomorrow")
+
+    def test_a_model_on_no_fixed_times_has_no_next(self):
+        self.assertEqual(report._next_slot([], self._at("10:00")), "")
+
+
+class ModelSchedulesTest(unittest.TestCase):
+    """When each model posts, for how many profiles, and whether stock covers it."""
+
+    def setUp(self):
+        report.invalidate_cache()
+        self.addCleanup(report.invalidate_cache)
+
+    class FakeAirtable:
+        def __init__(self, accounts=None, profiles=None, schedules=None):
+            self._accounts, self._profiles = accounts or {}, profiles or {}
+            self._schedules = schedules
+
+        def active_accounts_by_model(self):
+            return self._accounts
+
+        def profile_targets_by_model(self):
+            return self._profiles
+
+        def reel_schedules_by_model(self):
+            return self._schedules
+
+    def _run(self, airtable, content=None, at="10:00"):
+        from zoneinfo import ZoneInfo
+        hour, minute = (int(x) for x in at.split(":"))
+        now = datetime(2026, 8, 6, hour, minute, tzinfo=ZoneInfo("Europe/Berlin"))
+        return report.model_schedules(airtable, content=content, now=now)
+
+    def _one(self, **kw):
+        airtable = self.FakeAirtable(
+            profiles={"laila": [{"profile_id": "p1", "handle": "Laila 1"},
+                                {"profile_id": "p2", "handle": "Laila 2"}]},
+            schedules={"laila": kw})
+        return self._run(airtable, content={"by_model": {"Laila": 9}})["models"][0]
+
+    def test_fixed_times_give_a_plan_and_a_next_slot(self):
+        entry = self._one(times=["09:00", "17:00"], per_day=None)
+        self.assertEqual(entry["times"], ["09:00", "17:00"])
+        self.assertFalse(entry["flexible"])
+        self.assertEqual(entry["profiles"], 2)
+        self.assertEqual(entry["posts_per_day"], 4)      # 2 profiles x 2 times
+        self.assertEqual(entry["next"], "17:00")
+
+    def test_no_times_is_flexible_not_switched_off(self):
+        """An empty Reel Post Times is the default state of every model row."""
+        entry = self._one(times=[], per_day=None)
+        self.assertTrue(entry["flexible"])
+        self.assertEqual(entry["per_day"], 7)            # the standing grid's count
+        self.assertEqual(entry["next"], "")
+
+    def test_a_models_own_daily_cap_wins(self):
+        entry = self._one(times=[], per_day=3)
+        self.assertEqual(entry["per_day"], 3)
+        self.assertEqual(entry["posts_per_day"], 6)
+
+    def test_accounts_and_profiles_both_count_as_targets(self):
+        """collect_targets draws from both, and a model with one of each posts
+        for both -- counting only profiles would understate the day."""
+        airtable = self.FakeAirtable(
+            accounts={"jil": [{"account_id": "a1", "handle": "jil_official"}]},
+            profiles={"jil": [{"profile_id": "p1", "handle": "Jil 1"}]},
+            schedules={"jil": {"times": ["09:00"], "per_day": None}})
+        self.assertEqual(self._run(airtable)["models"][0]["profiles"], 2)
+
+    def test_stock_is_read_fresh_and_keyed_the_way_content_stock_keys_it(self):
+        """content_stock capitalises the folder name; a mismatch here shows every
+        model as having no content at all."""
+        entry = self._one(times=["09:00"], per_day=None)
+        self.assertEqual(entry["free"], 9)
+
+    def test_a_base_with_no_reel_times_field_keeps_the_standing_grid(self):
+        """None means the field is absent, which is not "every model is flexible"
+        -- the queue loop keeps its global grid and so must this table."""
+        airtable = self.FakeAirtable(
+            profiles={"laila": [{"profile_id": "p1", "handle": "Laila 1"}]},
+            schedules=None)
+        data = self._run(airtable)
+        self.assertFalse(data["per_model"])
+        self.assertEqual(data["models"][0]["times"], list(data["fallback"]))
+        self.assertFalse(data["models"][0]["flexible"])
+
+    def test_a_target_whose_model_has_no_airtable_row_is_marked(self):
+        """The MLX inventory leaking into the posting plan is invisible anywhere
+        else -- a profile is matched to its model by the first word of its name."""
+        airtable = self.FakeAirtable(
+            profiles={"nikki": [{"profile_id": "p1", "handle": "Nikki 1"}]},
+            schedules={"laila": {"times": [], "per_day": None}})
+        rows = {m["model"]: m for m in self._run(airtable)["models"]}
+        self.assertFalse(rows["Nikki"]["known"])
+        self.assertTrue(rows["Laila"]["known"])
+
+    def test_a_renamed_model_points_at_the_folder_its_content_is_in(self):
+        """Airtable calls her Corina and the profiles call her Nikki. Saying only
+        "not a model" sends somebody to create a duplicate row."""
+        airtable = self.FakeAirtable(
+            profiles={"nikki": [{"profile_id": "p1", "handle": "Nikki 1"}]},
+            schedules={})
+        self.assertEqual(self._run(airtable)["models"][0]["raw_folder"], "Corina")
+
+    def test_a_model_with_no_profiles_is_kept_rather_than_dropped(self):
+        airtable = self.FakeAirtable(schedules={"annika": {"times": [], "per_day": None}})
+        entry = self._run(airtable)["models"][0]
+        self.assertEqual(entry["profiles"], 0)
+        self.assertEqual(entry["posts_per_day"], 0)
+
+    def test_no_airtable_client_says_so(self):
+        self.assertEqual(report.model_schedules(None)["error"], "no Airtable client")
+
+    def test_a_failure_is_reported_in_place_and_never_raised(self):
+        class Broken:
+            def active_accounts_by_model(self):
+                raise RuntimeError("429 rate limited")
+
+        data = report.model_schedules(Broken())
+        self.assertIn("429", data["error"])
+        self.assertEqual(data["models"], [])
+
+    def test_airtable_is_read_once_per_ttl_but_stock_stays_fresh(self):
+        """Caching the whole answer would let this table disagree with the
+        Content stock section printed directly below it."""
+        calls = []
+
+        class Counting(self.FakeAirtable):
+            def profile_targets_by_model(inner):
+                calls.append(1)
+                return {"laila": [{"profile_id": "p1", "handle": "Laila 1"}]}
+
+        airtable = Counting(schedules={"laila": {"times": ["09:00"], "per_day": None}})
+        first = self._run(airtable, content={"by_model": {"Laila": 4}})
+        second = self._run(airtable, content={"by_model": {"Laila": 1}})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first["models"][0]["free"], 4)
+        self.assertEqual(second["models"][0]["free"], 1)
+
+
+class CoverageTest(unittest.TestCase):
+    def test_nothing_left_is_called_that(self):
+        self.assertEqual(report_html._coverage(0, 10), ("none left", "bad"))
+
+    def test_less_than_a_days_worth_says_so_rather_than_zero_days(self):
+        """"0 days" reads as an outage when it means today is covered and
+        tomorrow is not."""
+        self.assertEqual(report_html._coverage(7, 10), ("under a day", "warn"))
+
+    def test_whole_days_only(self):
+        self.assertEqual(report_html._coverage(35, 10), ("3 day(s)", "ok"))
+
+    def test_a_model_that_posts_nothing_has_nothing_to_say(self):
+        self.assertEqual(report_html._coverage(4, 0), ("—", ""))
+
+
+class SchedulesRenderTest(RenderTest):
+    def _schedules(self, models, **kw):
+        data = {"models": models, "timezone": "Europe/Berlin", "per_model": True,
+                "fallback": ["09:00", "11:00"], "error": ""}
+        data.update(kw)
+        return self._data(schedules=data)
+
+    def _model(self, **kw):
+        entry = {"model": "Laila", "times": ["09:00", "17:00"], "flexible": False,
+                 "per_day": 2, "profiles": 8, "posts_per_day": 16, "free": 40,
+                 "known": True, "raw_folder": "", "next": "17:00"}
+        entry.update(kw)
+        return entry
+
+    def test_the_section_is_on_the_page(self):
+        page = report_html.render(self._schedules([self._model()]))
+        self.assertIn("<h2>Schedules</h2>", page)
+        self.assertIn("09:00, 17:00", page)
+        self.assertIn("Europe/Berlin", page)
+
+    def test_a_fixed_schedule_shows_the_plan_and_the_coverage(self):
+        page = report_html.render(self._schedules([self._model()]))
+        self.assertIn(">16<", page)          # 8 profiles x 2 times
+        self.assertIn("2 day(s)", page)      # 40 free / 16 a day
+        self.assertIn(">17:00<", page)
+
+    def test_a_flexible_cap_is_not_dressed_up_as_a_plan(self):
+        """"56 posts/day" and "up to 56 posts/day" are different promises."""
+        page = report_html.render(self._schedules([
+            self._model(times=[], flexible=True, per_day=7, posts_per_day=56, next="")]))
+        self.assertIn("up to 56", page)
+        self.assertIn("any time", page)
+        self.assertIn("No model has picked posting times", page)
+        self.assertIn("That is the default, not an outage", page)
+
+    def test_running_out_is_coloured(self):
+        page = report_html.render(self._schedules([self._model(free=0)]))
+        self.assertIn("none left", page)
+        self.assertIn("pill bad", page)
+
+    def test_a_model_with_no_airtable_row_is_flagged_and_explained(self):
+        page = report_html.render(self._schedules([
+            self._model(model="Nikki", known=False, raw_folder="Corina")]))
+        self.assertIn("not a model", page)
+        self.assertIn("no <span class=\"mono\">Nikki</span> row in Models", page)
+        self.assertIn("filed under", page)
+        self.assertIn("Corina", page)
+
+    def test_models_with_no_profiles_are_a_footnote_not_eight_rows_of_zeros(self):
+        page = report_html.render(self._schedules([
+            self._model(), self._model(model="Annika", profiles=0, posts_per_day=0, free=0)]))
+        self.assertIn("no Active profile", page)
+        self.assertNotIn("<td class='mono'>Annika", page)
+
+    def test_a_base_without_the_field_is_told_which_grid_it_is_on(self):
+        page = report_html.render(self._schedules([self._model()], per_model=False))
+        self.assertIn("no <span class=\"mono\">Reel Post Times</span> field", page)
+        self.assertIn("09:00, 11:00", page)
+
+    def test_an_airtable_failure_degrades_to_a_sentence(self):
+        page = report_html.render(self._schedules([], error="HttpError: 429"))
+        self.assertIn("could not be read", page)
+        self.assertIn("429", page)
+
+
+class CollectSchedulesTest(CollectTest):
+    def test_the_schedule_table_is_collected_with_the_stock_it_reports(self):
+        """It reads its per-model stock out of `content`, so it has to be built
+        after it -- otherwise every model shows zero videos free."""
+        seen = {}
+
+        def spy(airtable, content=None, now=None):
+            seen["content"] = content
+            return {"models": [], "timezone": "", "fallback": [], "per_model": True, "error": ""}
+
+        class FakeAirtable:
+            def list_queue_rows(self): return []
+            def list_ready_variants(self): return [
+                {"id": "v1", "file_path": "/opt/adbbot/spoofed/Laila/run1/a__Laila_1.mp4"}]
+            def variants_by_id(self): return {}
+            def rows_needing_human(self): return []
+            def profiles_needing_human(self): return []
+
+        data = self._collect(airtable=FakeAirtable(), model_schedules=spy)
+        self.assertEqual((seen["content"] or {}).get("by_model"), {"Laila": 1})
+        self.assertEqual(data["schedules"]["models"], [])
+
+    def test_a_client_that_cannot_answer_leaves_the_section_empty_not_missing(self):
+        class Broken:
+            def list_queue_rows(self):
+                raise RuntimeError("401")
+
+        data = self._collect(airtable=Broken())
+        self.assertEqual(data["schedules"]["models"], [])

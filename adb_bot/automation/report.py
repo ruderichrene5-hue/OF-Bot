@@ -35,11 +35,12 @@ from adb_bot.automation import schedule_spec
 # turn into an Airtable rate limit for the posting loop.
 CACHE_SECONDS = 20.0
 
-# The spoof queue is read from Google Drive, the one source outside this box and
-# Airtable, and it only changes when somebody uploads a clip. It gets a TTL of
-# its own so the 20-second page cache does not turn into a Drive call every 20
-# seconds.
-SPOOF_CACHE_SECONDS = 180.0
+# Reads that only move when a person moves them: a clip uploaded to Drive, a
+# posting time edited, a profile parked. They are the expensive calls on this
+# page -- one of them leaves the box entirely -- and the loopback dashboard
+# re-collects every 20 seconds, which would turn each of them into a request
+# every 20 seconds for a number that changes a few times a week.
+SLOW_CACHE_SECONDS = 180.0
 
 # Loop logs live here; the posting log carries the per-run summary lines this
 # module parses for wall-clock and launch health.
@@ -1248,6 +1249,21 @@ def spoof_now(spoof_dir=None) -> dict:
     return state
 
 
+def _slow(key: str, build):
+    """Memoise one slow read for `SLOW_CACHE_SECONDS`.
+
+    `build` must report its own failures in the value it returns rather than
+    raising, so a bad answer is cached too -- an outage retried on every render
+    is a slow page for the length of the outage and no new information.
+    """
+    entry = _slow_cache.get(key)
+    if entry and (time.time() - entry[0]) < SLOW_CACHE_SECONDS:
+        return entry[1]
+    data = build()
+    _slow_cache[key] = (time.time(), data)
+    return data
+
+
 def spoof_queue(airtable, spoof_dir=None) -> dict:
     """Raw clips waiting to be spoofed, and who each one is waiting for.
 
@@ -1261,16 +1277,14 @@ def spoof_queue(airtable, spoof_dir=None) -> dict:
     its model, serially, minutes each. So the count that matters for "when will
     this be finished" is the variant count, not the clip count.
     """
-    out = {"models": [], "clips": 0, "variants": 0, "unroutable": [], "error": ""}
     if airtable is None:
-        out["error"] = "no Airtable client"
-        return out
-    # Its own TTL, longer than the page's. This is the only part of the report
-    # that leaves the box for anything but Airtable, and the loopback dashboard
-    # re-collects every 20 seconds -- which would be a Drive listing every 20
-    # seconds for a number that changes when somebody uploads a video.
-    if _spoof_cache["data"] is not None and (time.time() - _spoof_cache["at"]) < SPOOF_CACHE_SECONDS:
-        return _spoof_cache["data"]
+        return {"models": [], "clips": 0, "variants": 0, "unroutable": [],
+                "error": "no Airtable client"}
+    return _slow("spoof_queue", lambda: _spoof_queue(airtable))
+
+
+def _spoof_queue(airtable) -> dict:
+    out = {"models": [], "clips": 0, "variants": 0, "unroutable": [], "error": ""}
     try:
         from adb_bot.automation import spoof_pipeline
         from adb_bot.config import settings
@@ -1294,10 +1308,10 @@ def spoof_queue(airtable, spoof_dir=None) -> dict:
             return out
         by_folder = source.list_by_model()
     except Exception as exc:
-        # Cached like a success: a Drive outage retried every 20 seconds is a
-        # slow page for as long as the outage lasts, for no new information.
+        # Returned, not raised, so `_slow` caches it: a Drive outage retried
+        # every 20 seconds is a slow page for as long as the outage lasts, and
+        # no new information.
         out["error"] = f"{type(exc).__name__}: {exc}"
-        _spoof_cache.update(at=time.time(), data=out)
         return out
 
     for folder, videos in sorted(by_folder.items()):
@@ -1319,7 +1333,6 @@ def spoof_queue(airtable, spoof_dir=None) -> dict:
         out["clips"] += len(waiting)
         out["variants"] += len(waiting) * len(handles)
     out["models"].sort(key=lambda m: m["variants"], reverse=True)
-    _spoof_cache.update(at=time.time(), data=out)
     return out
 
 
@@ -1665,6 +1678,134 @@ def content_stock(airtable, claimed=None) -> dict:
     }
 
 
+def model_schedules(airtable, content=None, now=None) -> dict:
+    """When each model posts, for how many profiles, and whether the stock lasts.
+
+    Three facts that are only useful together. "Laila posts at 09:00 and 17:00"
+    says nothing on its own; "Laila posts twice a day across 8 profiles, which is
+    16 posts, and there are 6 videos free" is a decision. The page had the last
+    of those (Content stock) and neither of the first two, so the question it
+    could not answer was the one worth asking before a posting day: does what we
+    have cover what is scheduled?
+
+    A model with no times picked is not switched off -- that is the flexible
+    mode, where the queue loop posts whenever a video is free, up to its daily
+    cap. Reporting an empty Reel Post Times as "not scheduled" would read as a
+    fault, and it is the default state of every model row.
+    """
+    from adb_bot.automation import queue_runner
+
+    out = {"models": [], "timezone": queue_runner.DEFAULT_TIMEZONE,
+           "fallback": list(queue_runner.DEFAULT_SLOT_TIMES), "per_model": True,
+           "error": ""}
+    if airtable is None:
+        out["error"] = "no Airtable client"
+        return out
+
+    # Only the Airtable half is cached. The stock column and the next slot are
+    # arithmetic over data the caller already has, and caching those would let
+    # this table disagree with the Content stock section below it -- and hold a
+    # "next: 17:00" for three minutes after 17:00.
+    inputs = _slow("model_inputs", lambda: _model_inputs(airtable))
+    if inputs["error"]:
+        out["error"] = inputs["error"]
+        return out
+    counts, schedules = inputs["counts"], inputs["schedules"]
+    stock = dict((content or {}).get("by_model") or {})
+
+    # None is the client saying this base has no Reel Post Times field at all,
+    # which is not the same as every model being flexible: the queue loop keeps
+    # its single global grid, and so must this table.
+    out["per_model"] = schedules is not None
+
+    tz = queue_runner._zone(out["timezone"])
+    now = now or datetime.now(tz)
+    local_now = now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
+
+    for key in sorted(set(counts) | set(schedules or {})):
+        schedule = (schedules or {}).get(key)
+        if schedules is None:
+            times, per_day, flexible = list(out["fallback"]), len(out["fallback"]), False
+        elif schedule is not None and schedule.times:
+            times, per_day, flexible = list(schedule.times), len(schedule.times), False
+        else:
+            times, flexible = [], True
+            per_day = (schedule.per_day if schedule and schedule.per_day
+                       else queue_runner.DEFAULT_ANYTIME_MAX_PER_DAY)
+
+        # `content_stock` keys its models off the spoofed folder name, which it
+        # capitalises to keep "jasmin" and "Jasmin" from reading as two models
+        # with half the stock each. Match that or every row shows zero.
+        name = key.capitalize()
+        profiles = counts.get(key, 0)
+        out["models"].append({
+            "model": name, "times": times, "flexible": flexible,
+            "per_day": per_day, "profiles": profiles,
+            # In flexible mode this is a ceiling, not a plan: the loop posts when
+            # a video is free, up to the cap. The renderer says "up to" for those,
+            # because reading it as a plan turns "we have enough" into its
+            # opposite.
+            "posts_per_day": profiles * per_day,
+            "free": stock.get(name, 0),
+            # Whether Airtable has a Models row for this name at all. A target
+            # whose model does not exist is the MLX inventory leaking into the
+            # posting plan -- the 45 "Blank (n)" staging profiles are exactly
+            # that -- and it is invisible everywhere else.
+            "known": schedules is None or key in (schedules or {}),
+            # For a model Airtable does not have a row for, the raw folder its
+            # content actually sits in -- the alias map already knows that
+            # `01_Raw_Videos/Corina` holds Nikki's clips, and without saying so
+            # "Nikki is not a model" looks like an inventory gap rather than two
+            # names for one person.
+            "raw_folder": _aliased_folder(key),
+            "next": _next_slot(times, local_now),
+        })
+    return out
+
+
+def _model_inputs(airtable) -> dict:
+    """The two Airtable reads behind the schedule table: how many targets each
+    model has, and the times it picked. Failures come back in `error` rather
+    than raised, so `_slow` caches a bad answer instead of retrying it per page."""
+    from adb_bot.automation import queue_runner
+
+    try:
+        targets = queue_runner.collect_targets(airtable)
+        schedules = queue_runner.schedules_from_airtable(airtable.reel_schedules_by_model())
+    except Exception as exc:
+        return {"counts": {}, "schedules": None, "error": f"{type(exc).__name__}: {exc}"}
+    counts: dict = {}
+    for target in targets:
+        counts[target.model_key] = counts.get(target.model_key, 0) + 1
+    return {"counts": counts, "schedules": schedules, "error": ""}
+
+
+def _aliased_folder(model_key: str) -> str:
+    """The raw folder whose contents belong to `model_key`, when it is not named
+    after that model. "" when the folder and the model agree."""
+    from adb_bot.automation.spoof_pipeline import RAW_FOLDER_MODEL_ALIASES
+
+    for folder, model in RAW_FOLDER_MODEL_ALIASES.items():
+        if str(model).strip().lower() == model_key:
+            return folder.capitalize()
+    return ""
+
+
+def _next_slot(times, local_now) -> str:
+    """The next time today one of `times` comes round, "tomorrow" once they have
+    all passed, and "" for a model on no fixed times at all."""
+    from adb_bot.automation.queue_runner import parse_slot_times
+
+    slots = parse_slot_times(times)
+    if not slots:
+        return ""
+    for slot in slots:
+        if local_now.replace(hour=slot.hour, minute=slot.minute,
+                             second=0, microsecond=0) > local_now:
+            return slot.strftime("%H:%M")
+    return f"{slots[0].strftime('%H:%M')} tomorrow"
+
+
 # --- health -------------------------------------------------------------------
 
 def health() -> dict:
@@ -1707,7 +1848,7 @@ def loop_alerts_file() -> str:
 # --- the whole picture --------------------------------------------------------
 
 _cache: dict = {"at": 0.0, "data": None}
-_spoof_cache: dict = {"at": 0.0, "data": None}
+_slow_cache: dict = {}
 
 
 def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
@@ -1770,6 +1911,8 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         "queue": {"total": 0, "by_status": {}, "by_slot": {}, "failures": []},
         "content": {"ready": 0, "drawable": 0, "held": 0, "by_model": {}, "held_by_model": {}},
         "needs_human": {"rows": [], "retrying": [], "profiles": [], "error": ""},
+        "schedules": {"models": [], "timezone": "", "fallback": [], "per_model": True,
+                      "error": ""},
         "airtable_error": "",
     }
 
@@ -1786,6 +1929,9 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             data["queue"] = queue_today(airtable, day, rows=rows)
             data["content"] = content_stock(airtable, claimed=claimed_variant_ids(rows))
             data["needs_human"] = needs_human(airtable)
+            # After `content`: the schedule table reads its per-model stock from
+            # it, and a schedule with no stock beside it is half the answer.
+            data["schedules"] = model_schedules(airtable, content=data["content"], now=now)
             # Redo the per-video view with the queue in hand: a clip whose
             # profile never reached a phone leaves no trace on this box, and
             # only its queue row can say whether it is waiting or was written
@@ -1804,4 +1950,4 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
 
 def invalidate_cache() -> None:
     _cache.update(at=0.0, data=None)
-    _spoof_cache.update(at=0.0, data=None)
+    _slow_cache.clear()

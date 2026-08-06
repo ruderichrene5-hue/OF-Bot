@@ -873,6 +873,101 @@ def _section_content(content: dict) -> str:
             f"<td class='num'><strong>{held}</strong></td></tr></table></div>")
 
 
+def _coverage(free: int, per_day: int) -> tuple:
+    """How long the stock lasts, as words rather than a fraction.
+
+    At this fleet's numbers the honest ratio is almost always between zero and
+    one, and "0 days" reads as an outage when it means "today is covered,
+    tomorrow is not". Days only once there is more than a day.
+    """
+    if not per_day:
+        return "—", ""
+    if not free:
+        return "none left", "bad"
+    if free < per_day:
+        return "under a day", "warn"
+    return f"{free // per_day} day(s)", "ok"
+
+
+def _section_schedules(schedules: dict) -> str:
+    """When each model posts, and whether there is content to feed it."""
+    if schedules.get("error"):
+        return (f'<p class="empty">The schedules could not be read '
+                f'({_e(schedules["error"])}).</p>')
+    models = schedules.get("models") or []
+    if not models:
+        return '<p class="empty">No models are set up to post.</p>'
+
+    active = [m for m in models if m["profiles"] and m["known"]]
+    idle = [m for m in models if not m["profiles"] and m["known"]]
+    stray = [m for m in models if m["profiles"] and not m["known"]]
+
+    fixed = [m for m in active if not m["flexible"]]
+    where = (f'Times are {_e(schedules.get("timezone") or "local")} wall clock, set per model '
+             f'in Airtable under <span class="mono">Reel Post Times</span>.')
+    if not active:
+        lead = ""
+    elif not fixed:
+        # The default state of every model row, so it is worth saying plainly
+        # rather than leaving somebody to read an empty column as "switched off".
+        lead = (f'<p class="sub">No model has picked posting times, so every one posts '
+                f'whenever a spoofed video is free, up to a daily cap per profile. That is '
+                f'the default, not an outage. {where}</p>')
+    else:
+        lead = (f'<p class="sub">{len(fixed)} of {len(active)} model(s) post at times somebody '
+                f'chose; the rest post whenever a spoofed video is free, up to a daily cap. '
+                f'{where}</p>')
+
+    head = ("<tr><th>Model</th><th>Posts at</th><th class='num'>Profiles</th>"
+            "<th class='num'>Posts/day</th><th>Next</th><th class='num'>Free videos</th>"
+            "<th>Stock covers</th></tr>")
+    rows = []
+    for entry in active + stray:
+        when = (f'any time <span class="sub">· up to {entry["per_day"]}/day each</span>'
+                if entry["flexible"] else _e(", ".join(entry["times"])))
+        # A ceiling and a plan are different numbers and must not look alike.
+        per_day = (f'up to {entry["posts_per_day"]}' if entry["flexible"]
+                   else str(entry["posts_per_day"]))
+        covers, tone = _coverage(entry["free"], entry["posts_per_day"])
+        pill = f'<span class="pill {tone}">{_e(covers)}</span>' if tone else _e(covers)
+        flag = (' <span class="pill bad">not a model</span>' if not entry["known"] else "")
+        rows.append(
+            f"<tr><td class='mono'>{_e(entry['model'])}{flag}</td>"
+            f"<td>{when}</td>"
+            f"<td class='num'>{entry['profiles']}</td>"
+            f"<td class='num'>{_e(per_day)}</td>"
+            f"<td class='mono'>{_e(entry['next'] or '—')}</td>"
+            f"<td class='num'>{entry['free']}</td>"
+            f"<td>{pill}</td></tr>")
+
+    body = f'{lead}<div class="scroll"><table>{head}{"".join(rows)}</table></div>'
+    body += ('<p class="sub">"Free videos" is that model\'s spoofed stock that no queue row '
+             'has claimed — the same number the Content stock section totals below. A model '
+             'posting at a cap it has no content for simply posts less; it does not fail.</p>')
+
+    for entry in stray:
+        # Two names for one person, not a missing model — say which, because the
+        # flag alone reads as an inventory gap and sends somebody to create a
+        # duplicate row.
+        alias = (f' Its raw footage is filed under <span class="mono">{_e(entry["raw_folder"])}'
+                 f'</span>, which is the same person under the other name — so the content '
+                 f'exists, only the two spellings do not meet.' if entry.get("raw_folder") else "")
+        body += (f'<p class="sub"><span class="pill bad">{entry["profiles"]} profile(s) named '
+                 f'"{_e(entry["model"])} …"</span> are Active in the MLX inventory, but Airtable '
+                 f'has no <span class="mono">{_e(entry["model"])}</span> row in Models. A profile '
+                 f'is matched to its model by the first word of its name, so this one can never '
+                 f'pick up per-model posting times and stays flexible.{alias}</p>')
+    if idle:
+        body += (f'<p class="sub">{_e(", ".join(m["model"] for m in idle))} — '
+                 f'{"a model" if len(idle) == 1 else "models"} in Airtable with no Active '
+                 f'profile, so nothing is scheduled for {"it" if len(idle) == 1 else "them"}.</p>')
+    if not schedules.get("per_model"):
+        body += (f'<p class="sub">This base has no <span class="mono">Reel Post Times</span> '
+                 f'field, so every model is on the standing grid: '
+                 f'{_e(", ".join(schedules.get("fallback") or []))}.</p>')
+    return body
+
+
 def _refresh_words(seconds: int) -> str:
     """`30s` / `5 min` -- the page says how often it moves, in the reader's units."""
     if seconds < 60:
@@ -985,6 +1080,9 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
 
       <h2>Loop health</h2>
       {_section_health(data['health'], data['alerts'])}
+
+      <h2>Schedules</h2>
+      {_section_schedules(data.get('schedules') or {})}
 
       <h2>Content stock</h2>
       {_section_content(data['content'])}
