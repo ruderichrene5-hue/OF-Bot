@@ -223,7 +223,7 @@ def _section_now(now: dict) -> str:
     return body
 
 
-def _section_server(server: dict) -> str:
+def _section_server(server: dict, procs=None) -> str:
     """The box itself. Memory leads because this machine has been OOM-killed."""
     mem_pct = server.get("mem_percent", 0.0)
     swap_total = server.get("swap_total_mb", 0)
@@ -231,12 +231,21 @@ def _section_server(server: dict) -> str:
     swap_pct = (100.0 * swap_used / swap_total) if swap_total else 0.0
     cores = server.get("cores", 0) or 1
     load = server.get("load1", 0.0)
+    cpu_pct = server.get("cpu_percent", 0.0)
+
+    # Name the process the number is about. "96%" invites the question; the
+    # answer is one line away and is nearly always a single process.
+    busiest = (procs or [None])[0]
+    cpu_note = (f'{busiest["role"] or busiest["name"]} — {busiest["cpu_percent"]:,.0f}%'
+                if busiest else f"load {load:.2f} over {cores} core(s)")
 
     tiles = [
         _tile("Processes", server.get("processes", 0), "running on the box"),
-        _tile("CPU", f'{server.get("cpu_percent", 0.0):.0f}%',
-              f"load {load:.2f} over {cores} core(s)",
-              "bad" if load > cores * 2 else "warn" if load > cores else "ok"),
+        # Judged on the CPU sample, not on load average: load counts processes
+        # *waiting*, and this box spends its day blocked on phones rather than
+        # computing, so it can sit under 1.0 while an encode holds every core.
+        _tile("CPU", f'{cpu_pct:.0f}%', cpu_note,
+              "bad" if cpu_pct >= 90 else "warn" if cpu_pct >= 70 else "ok"),
         _tile("Memory", f"{mem_pct:.0f}%",
               f'{server.get("mem_used_mb", 0):,} of {server.get("mem_total_mb", 0):,} MB used',
               "bad" if mem_pct >= 90 else "warn" if mem_pct >= 75 else "ok"),
@@ -270,6 +279,108 @@ def _section_top_processes(procs) -> str:
     return (f'<div class="scroll"><table>{head}{rows}</table></div>'
             '<p class="sub">Biggest memory consumers. A single process reaching several '
             'GB here is what precedes an out-of-memory kill.</p>')
+
+
+def _section_cpu_processes(procs, server: dict) -> str:
+    """What is actually burning the CPU, named in the operator's terms.
+
+    The box percentage alone raises the question rather than answering it, and
+    the honest answer is almost always one process: an encode holds every core
+    it can get, which looks identical to a runaway loop from the outside.
+    """
+    if not procs:
+        return '<p class="empty">Nothing is using measurable CPU right now.</p>'
+    cores = server.get("cores", 0) or 1
+    head = ("<tr><th>Process</th><th>What it is</th><th class='num'>PID</th>"
+            "<th class='num'>CPU</th></tr>")
+    rows = []
+    for proc in procs:
+        percent = proc["cpu_percent"]
+        # One process holding more than half the box is worth the eye going to
+        # it first, whether that is expected (an encode) or not.
+        tone = ("bad" if percent >= 100 * cores * 0.75
+                else "warn" if percent >= 100 * cores * 0.4 else "")
+        style = f' style="color:var(--{tone})"' if tone else ""
+        rows.append(
+            f"<tr><td class='mono'>{_e(proc['name'])}</td>"
+            f"<td>{_e(proc['role'])}</td>"
+            f"<td class='num mono'>{proc['pid']}</td>"
+            f"<td class='num'{style}>{percent:,.0f}%</td></tr>")
+    return (f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>'
+            f'<p class="sub">Per-core, the way <span class="mono">top</span> counts it: '
+            f'100% is one core busy, and this box has {cores}. A video encode takes every '
+            f'core it can and will sit near {cores * 100}% for the length of a clip — that '
+            f'is the spoofer working, not a fault.</p>')
+
+
+def _section_spoof(spoof: dict) -> str:
+    """Is the spoofer working, what on, and how much is behind it."""
+    now = spoof.get("now") or {}
+    models = spoof.get("models") or []
+    running, encoding = now.get("running"), now.get("encoding")
+
+    if running or encoding:
+        where = " · ".join(filter(None, [now.get("model"), now.get("run")]))
+        state, tone = (f"encoding — {where}" if where else "encoding"), "ok"
+    else:
+        state, tone = "idle", ""
+
+    tiles = [
+        _tile("Spoofer", state, _e(now.get("clip")) or "no clip on the encoder", tone),
+        _tile("Clips waiting", spoof.get("clips", 0), "raw videos not yet spoofed"),
+        # The number that predicts the wait: encodes are serial, one per profile.
+        _tile("Variants to encode", spoof.get("variants", 0),
+              "one per profile, one at a time",
+              "warn" if spoof.get("variants", 0) >= 40 else ""),
+    ]
+    if (running or encoding) and now.get("done") is not None and now.get("run"):
+        tiles.append(_tile("This clip", f'{len(now["done"])} done',
+                           "profiles finished in this run folder"))
+    if now.get("seconds"):
+        tiles.append(_tile("Encoding for", _fmt_seconds(now["seconds"]),
+                           "this clip, all profiles",
+                           "warn" if now["seconds"] > 3600 else ""))
+    body = f'<div class="grid">{"".join(tiles)}</div>'
+
+    if (running or encoding) and now.get("done"):
+        body += ('<p class="sub" style="margin-top:.7rem">Already built for: '
+                 + ", ".join(f'<span class="mono">{_e(h)}</span>' for h in now["done"])
+                 + '.</p>')
+
+    if spoof.get("error"):
+        body += (f'<p class="sub" style="margin-top:.7rem">The waiting list could not be '
+                 f'read ({_e(spoof["error"])}), so the two counts above are not to be '
+                 f'trusted. What is on the encoder is read from this box and still is.</p>')
+    elif not models and not spoof.get("unroutable"):
+        body += ('<p class="sub" style="margin-top:.7rem">Every raw clip in Drive has been '
+                 'through the pipeline. New content shows up here within five minutes of '
+                 'landing in its model folder.</p>')
+    elif models:
+        head = ("<tr><th>Model</th><th class='num'>Clips</th><th class='num'>Profiles</th>"
+                "<th class='num'>Variants</th><th>Waiting</th></tr>")
+        rows = []
+        for entry in models:
+            folder = (f' <span class="sub">(folder {_e(entry["folder"])})</span>'
+                      if entry["folder"] != entry["model"] else "")
+            clips = "<br>".join(_e(name) for name in entry["clips"])
+            rows.append(
+                f"<tr><td class='mono'>{_e(entry['model'])}{folder}</td>"
+                f"<td class='num'>{len(entry['clips'])}</td>"
+                f"<td class='num'>{len(entry['handles'])}</td>"
+                f"<td class='num'>{entry['variants']}</td>"
+                f"<td class='mono sub'>{clips}</td></tr>")
+        body += (f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>'
+                 '<p class="sub">"Profiles" is how many active profiles that model has, and '
+                 'each one needs its own encode — the same clip cannot be sent to two '
+                 'accounts. Parking a profile in Airtable removes it from this count.</p>')
+
+    for entry in spoof.get("unroutable") or []:
+        body += (f'<p class="sub" style="margin-top:.7rem">'
+                 f'{entry["clips"]} clip(s) under <span class="mono">{_e(entry["folder"])}</span> '
+                 f'have no active profile to be spoofed for, so nothing will pick them up. '
+                 f'Either the folder is named for a model that has no profiles, or every '
+                 f'profile under {_e(entry["model"])} is parked.</p>')
+    return body
 
 
 def _section_phones(phones) -> str:
@@ -793,9 +904,15 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
       {_section_now(data['now'])}
 
       <h2>Server</h2>
-      {_section_server(data.get('server') or {})}
+      {_section_server(data.get('server') or {}, data.get('cpu_processes') or [])}
 
       {_section_disks_and_uptime(data)}
+
+      <h2>Top CPU use</h2>
+      {_section_cpu_processes(data.get('cpu_processes') or [], data.get('server') or {})}
+
+      <h2>Spoofing</h2>
+      {_section_spoof(data.get('spoof') or {})}
 
       <h2>Scheduled loops</h2>
       {_section_timers(data.get('timers') or [])}

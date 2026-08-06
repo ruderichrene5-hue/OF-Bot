@@ -323,6 +323,8 @@ Equivalent from PowerShell: `.\deploy\scheduler\install_tasks.ps1 [-Apply]`.
 | Posting plan is empty | no Pending+due `Posting Queue` rows | Check Airtable's slot-creating automations |
 | Pipeline: "no active accounts under model X" | Account's Model link / Lifecycle Stage | Fix in Airtable — accounts must be **Active** and linked to that Model |
 | Pipeline plans but makes no files | spoofer not configured | Set Spoofer python/root (step 3); `doctor` verifies it |
+| CPU pinned at ~100%, nothing looks wrong | almost always a spoof encode holding every core | Dashboard → **Top CPU use** names the process and the clip, **Spoofing** says how much is left. An encode is not a fault |
+| Raw clips sit in Drive and never get spoofed | no *active* profile under that model | Dashboard → **Spoofing** flags these separately from the queue; check the folder name against the model, and Profiles → Status |
 | Flow fails right after launch | ADB didn't connect | Confirm the profile launched in MLX; `adb devices` |
 | Account stopped being picked up | flagged by ban/verification detection | Check `Ban & Flag History` + `Needs Human Verification`; unticking it resumes the account |
 | Timer never fires | unit not enabled, or service still active | `systemctl list-timers 'adbbot-*'`, `systemctl status adbbot-<loop>.service` |
@@ -345,7 +347,13 @@ headlessly.
 `127.0.0.1:8080`, per request, no password: reach it with
 `ssh -N -L 8080:localhost:8080 <box>`. `adbbot-site.service` is the same page on
 `0.0.0.0:8088` behind a password, rebuilt every five minutes and served from
-memory so a public port cannot spend the Airtable quota. Its password hash and
+memory so a public port cannot spend the Airtable quota. Both carry a **Top CPU
+use** table (which process is burning the box, and what it is doing) and a
+**Spoofing** section (what is on the encoder right now, and how many variants
+are queued behind it, per model) — the two questions a pinned box provokes.
+Note that the queue half costs a Drive listing plus two Airtable reads per
+rebuild; on the loopback dashboard, which renders per request, that is the
+slowest thing on the page. Its password hash and
 cookie secret live in `/etc/adbbot/env`
 (`ADBBOT_SITE_PASSWORD_HASH`, `ADBBOT_SITE_SECRET`); make new ones with
 `python -m adb_bot.automation.site --hash-password`, then

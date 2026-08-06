@@ -35,6 +35,12 @@ from adb_bot.automation import schedule_spec
 # turn into an Airtable rate limit for the posting loop.
 CACHE_SECONDS = 20.0
 
+# The spoof queue is read from Google Drive, the one source outside this box and
+# Airtable, and it only changes when somebody uploads a clip. It gets a TTL of
+# its own so the 20-second page cache does not turn into a Drive call every 20
+# seconds.
+SPOOF_CACHE_SECONDS = 180.0
+
 # Loop logs live here; the posting log carries the per-run summary lines this
 # module parses for wall-clock and launch health.
 LOG_DIR = "logs"
@@ -411,6 +417,124 @@ def top_processes(limit: int = 6) -> list:
                       "rss_mb": round(rss_pages * page_size / (1024 * 1024), 1)})
     procs.sort(key=lambda proc: proc["rss_mb"], reverse=True)
     return procs[:limit]
+
+
+def _cmdline(pid) -> list:
+    """A process's argv, or [] if it exited while we were reading it."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return [part.decode("utf-8", "replace")
+                    for part in fh.read().split(b"\0") if part]
+    except OSError:
+        return []
+
+
+def _process_role(name: str, argv) -> str:
+    """What a process is *for*, in the operator's words.
+
+    "ffmpeg at 480%" is not an answer to "why is the CPU pinned?" -- the answer
+    is "it is spoofing Viktoria's clip", and only the command line knows that.
+    Anything unrecognised gets no label rather than a guessed one.
+    """
+    line = " ".join(argv)
+    if name.startswith("ffmpeg"):
+        for flag, value in zip(argv, argv[1:]):
+            if flag == "-i":
+                return f"spoofing {_raw_clip_label(value)}"
+        return "encoding"
+    if "video_testing_framework.cli" in line:
+        return "spoofer (drives ffmpeg)"
+    if "phone_launcher" in name or "phone_launcher" in line:
+        # The launcher is named after the profile it is showing: `-n <Name>`.
+        for flag, value in zip(argv, argv[1:]):
+            if flag == "-n":
+                return f"phone: {value}"
+        return "phone"
+    if name.startswith("WebKit"):
+        return "phone screen (WebKit)"
+    if "adb_bot.automation.run_loop" in argv:
+        # Match the argv element, not the joined string: `python -c "from
+        # adb_bot.automation.run_loop import ..."` is not a loop, and reading
+        # the word after the match would label it "loop: import".
+        after = argv[argv.index("adb_bot.automation.run_loop") + 1:]
+        return f"loop: {after[0]}" if after else "loop"
+    if "adb_bot.automation.site" in argv:
+        return "this dashboard"
+    if name == "adb":
+        return "adb server"
+    return ""
+
+
+def _raw_clip_label(path: str) -> str:
+    """`/tmp/adbbot_raw/Viktoria/viktoria 3 I 6 aug.mp4` -> `Viktoria / viktoria 3 I 6 aug`."""
+    clip = Path(path)
+    stem = re.sub(r"\.(mp4|mov|m4v|webm|mkv)$", "", clip.name, flags=re.I)
+    folder = clip.parent.name
+    return f"{folder} / {stem}" if folder else stem
+
+
+def cpu_processes(limit: int = 6, interval: float = 0.15) -> list:
+    """The biggest CPU consumers, sampled the way `top` does it.
+
+    `top_processes` answers "what will get us OOM-killed"; this answers the
+    other question a pinned box provokes, and they are rarely the same process.
+    Percentages are per-core like `top`'s, so one saturated core reads 100% and
+    an encode spread over eight can read 500% -- capping it at 100 would hide
+    exactly the case worth seeing.
+
+    Two passes over /proc/<pid>/stat with a short sleep between: a process's
+    *total* CPU time since it started says nothing about now (adb has burned
+    minutes over five days while doing nothing today), only the delta does.
+    """
+    def sample() -> tuple:
+        with open("/proc/stat", encoding="utf-8") as fh:
+            total = sum(float(x) for x in fh.readline().split()[1:])
+        ticks: dict = {}
+        try:
+            pids = [name for name in os.listdir("/proc") if name.isdigit()]
+        except OSError:
+            return total, ticks
+        for pid in pids:
+            try:
+                with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+                    # The comm field is parenthesised and may itself contain
+                    # spaces, so split after the last ")" -- state is then [0]
+                    # and utime/stime are [11] and [12].
+                    fields = fh.read().rsplit(")", 1)[1].split()
+                ticks[pid] = float(fields[11]) + float(fields[12])
+            except (OSError, ValueError, IndexError):
+                continue                    # exited while we walked /proc
+        return total, ticks
+
+    cores = os.cpu_count() or 1
+    try:
+        total_a, before = sample()
+        time.sleep(interval)
+        total_b, after = sample()
+    except OSError:
+        return []
+    elapsed = total_b - total_a
+    if elapsed <= 0:
+        return []
+
+    busy = []
+    for pid, ticks in after.items():
+        used = ticks - before.get(pid, ticks)     # a pid unseen before is new: 0
+        if used > 0:
+            busy.append((100.0 * cores * used / elapsed, pid))
+    busy.sort(reverse=True)
+
+    out = []
+    for percent, pid in busy[:limit]:
+        # Only the survivors are worth a cmdline read; there are hundreds of pids.
+        try:
+            with open(f"/proc/{pid}/comm", encoding="utf-8") as fh:
+                name = fh.read().strip()
+        except OSError:
+            continue
+        out.append({"pid": int(pid), "name": name, "cpu_percent": round(percent, 1),
+                    "role": _process_role(name, _cmdline(pid))})
+    return out
 
 
 def phone_processes() -> list:
@@ -1060,6 +1184,145 @@ def scan_video_runs(spoof_dir=None) -> list:
     return out
 
 
+def spoof_now(spoof_dir=None) -> dict:
+    """The encode happening right now, if there is one.
+
+    Read from the process table rather than a log, because the pipeline says
+    nothing between "<clip> -> run4" and the summary twenty minutes later: for
+    the whole span in between, the log of a healthy run and a stuck one are the
+    same text. The command line always knows which clip is on the encoder.
+
+    `done` is counted from the run folder, where a finished variant has the
+    handle stamped into its name -- so a clip half way through its profiles
+    reads as "4 of 8" instead of "running".
+    """
+    from adb_bot.automation import phone_reaper
+    from adb_bot.automation.spoof_pipeline import resolve_model
+
+    state = {"running": False, "encoding": False, "pid": 0, "clip": "", "model": "",
+             "run": "", "seconds": 0.0, "done": []}
+    try:
+        pids = [name for name in os.listdir("/proc") if name.isdigit()]
+    except OSError:
+        return state
+
+    raw_path = dest = ""
+    for pid in pids:
+        argv = _cmdline(pid)
+        if not argv:
+            continue
+        line = " ".join(argv)
+        if "video_testing_framework.cli" in line and "run" in argv:
+            state["running"] = True
+            state["pid"] = int(pid)
+            # `vtf run <raw> --dest <dir>`: the first non-flag after "run".
+            rest = argv[argv.index("run") + 1:]
+            raw_path = next((a for a in rest if not a.startswith("-")), "")
+            for flag, value in zip(argv, argv[1:]):
+                if flag == "--dest":
+                    dest = value
+            state["seconds"] = phone_reaper._process_age(int(pid))
+        elif os.path.basename(argv[0]).startswith("ffmpeg"):
+            state["encoding"] = True
+            if not raw_path:
+                for flag, value in zip(argv, argv[1:]):
+                    if flag == "-i":
+                        raw_path = value
+
+    if not (state["running"] or state["encoding"]):
+        return state
+
+    if raw_path:
+        folder, _, clip = _raw_clip_label(raw_path).partition(" / ")
+        # The raw folder is a label, not always the model -- see the alias map.
+        state["model"], state["clip"] = resolve_model(folder), clip
+    if dest:
+        run_dir = Path(dest)
+        state["run"] = run_dir.name
+        try:
+            state["done"] = sorted(
+                filter(None, (name_from_media_path(str(p)) for p in run_dir.iterdir()
+                              if p.suffix.lower() in _VIDEO_EXTS)))
+        except OSError:
+            pass
+    return state
+
+
+def spoof_queue(airtable, spoof_dir=None) -> dict:
+    """Raw clips waiting to be spoofed, and who each one is waiting for.
+
+    The pipeline's own definition, read the same way it reads it: a clip is
+    pending when the raw source still has it and no Content Pipeline row names
+    it. Which means a clip already on the encoder counts as *done* here -- the
+    row is written before the first variant is -- and `spoof_now` is what covers
+    the gap.
+
+    One clip is not one unit of work: it is one encode per active profile under
+    its model, serially, minutes each. So the count that matters for "when will
+    this be finished" is the variant count, not the clip count.
+    """
+    out = {"models": [], "clips": 0, "variants": 0, "unroutable": [], "error": ""}
+    if airtable is None:
+        out["error"] = "no Airtable client"
+        return out
+    # Its own TTL, longer than the page's. This is the only part of the report
+    # that leaves the box for anything but Airtable, and the loopback dashboard
+    # re-collects every 20 seconds -- which would be a Drive listing every 20
+    # seconds for a number that changes when somebody uploads a video.
+    if _spoof_cache["data"] is not None and (time.time() - _spoof_cache["at"]) < SPOOF_CACHE_SECONDS:
+        return _spoof_cache["data"]
+    try:
+        from adb_bot.automation import spoof_pipeline
+        from adb_bot.config import settings
+
+        # Airtable first, deliberately. The raw source is Google Drive, and
+        # listing it is the expensive half; there is no point paying for it to
+        # then discover the client that says what has already been done is
+        # unusable. It also keeps a caller with no real Airtable -- a test, a
+        # dry run -- from reaching the network at all.
+        processed = airtable.content_pipeline_names()
+        # The live loop takes its targets from the profile inventory
+        # (`--targets profiles`), so a profile parked by Status disappears from
+        # this count the moment it is parked -- which is the point.
+        targets = airtable.profile_targets_by_model()
+        source = spoof_pipeline.build_source(
+            settings.get_saved_raw_videos_dir(),
+            settings.get_saved_drive_folder_id(),
+            settings.get_saved_google_service_account_json())
+        if source is None:
+            out["error"] = "no raw source configured"
+            return out
+        by_folder = source.list_by_model()
+    except Exception as exc:
+        # Cached like a success: a Drive outage retried every 20 seconds is a
+        # slow page for as long as the outage lasts, for no new information.
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        _spoof_cache.update(at=time.time(), data=out)
+        return out
+
+    for folder, videos in sorted(by_folder.items()):
+        model = spoof_pipeline.resolve_model(folder)
+        waiting = sorted(v.name for v in videos if v.name not in processed)
+        handles = [t["handle"] for t in targets.get(model.lower(), [])]
+        if not waiting:
+            continue
+        if not handles:
+            # Nothing will ever pick these up: no active profile to spoof for.
+            # Silent in the pipeline's own output, which only logs a skip line.
+            out["unroutable"].append({"folder": folder, "model": model,
+                                      "clips": len(waiting)})
+            continue
+        out["models"].append({
+            "folder": folder, "model": model, "clips": waiting,
+            "handles": handles, "variants": len(waiting) * len(handles),
+        })
+        out["clips"] += len(waiting)
+        out["variants"] += len(waiting) * len(handles)
+    out["models"].sort(key=lambda m: m["variants"], reverse=True)
+    _spoof_cache.update(at=time.time(), data=out)
+    return out
+
+
 def _ledger_by_path(ledger=None) -> dict:
     """Variant path -> the most recent share record for it."""
     from adb_bot.automation.post_ledger import PostLedger
@@ -1444,6 +1707,7 @@ def loop_alerts_file() -> str:
 # --- the whole picture --------------------------------------------------------
 
 _cache: dict = {"at": 0.0, "data": None}
+_spoof_cache: dict = {"at": 0.0, "data": None}
 
 
 def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
@@ -1482,6 +1746,9 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         "disks": disk_usage(),
         "uptime": uptime_seconds(),
         "top_processes": top_processes(),
+        "cpu_processes": cpu_processes(),
+        "spoof": {"now": spoof_now(), "models": [], "clips": 0, "variants": 0,
+                  "unroutable": [], "error": ""},
         "phones": phone_processes(),
         "timers": timer_states(),
         "runs": runs,
@@ -1507,6 +1774,11 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
     }
 
     if airtable is not None:
+        # Outside the block below on purpose: this one reports its own failures
+        # in place (`spoof.error`) and must not be skipped because an unrelated
+        # Airtable call above it raised. The local half -- what is on the
+        # encoder right now -- is already collected either way.
+        data["spoof"].update(spoof_queue(airtable))
         try:
             # One listing serves both: the day's rows, and which variants every
             # row (of any age) has already claimed.
@@ -1532,3 +1804,4 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
 
 def invalidate_cache() -> None:
     _cache.update(at=0.0, data=None)
+    _spoof_cache.update(at=0.0, data=None)

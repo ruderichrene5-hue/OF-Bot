@@ -6,14 +6,16 @@ still in flight, phones open that no slot accounts for.
 """
 
 import re
+import shutil
 import tempfile
 import time
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from adb_bot.automation import report, report_html
+from adb_bot.automation import report, report_html, spoof_pipeline
 
 
 SAMPLE_LOG = """\
@@ -387,6 +389,13 @@ class CollectTest(unittest.TestCase):
             "ledger_today": lambda **kw: {"total": 0, "by_status": {}, "verify_seconds": 0.0},
             "health": lambda: {"loops": [], "bad": []},
             "recent_alerts": lambda *a, **k: [],
+            # The raw source is Google Drive. A unit test must never reach it,
+            # and `collect` is the one caller that would.
+            "spoof_queue": lambda *a, **k: {"models": [], "clips": 0, "variants": 0,
+                                            "unroutable": [], "error": ""},
+            "spoof_now": lambda *a, **k: {"running": False, "encoding": False, "pid": 0,
+                                          "clip": "", "model": "", "run": "",
+                                          "seconds": 0.0, "done": []},
         }
         defaults.update(overrides)
         return [mock.patch.object(report, name, value) for name, value in defaults.items()]
@@ -1418,3 +1427,341 @@ class LockRenderTest(RenderTest):
         self.assertIn("being worked on right now", page)
         self.assertNotIn("held by a running loop", page)
         self.assertIn("owner died; see below", page)
+
+
+class CpuProcessesTest(unittest.TestCase):
+    """"Why is the CPU at 96%?" is the question this answers, so the process
+    that is doing it must be named, and named in words, not just a pid."""
+
+    def test_it_measures_real_processes(self):
+        # This interpreter is on the CPU, so something must come back non-zero.
+        procs = report.cpu_processes(limit=5, interval=0.05)
+        self.assertTrue(procs)
+        for proc in procs:
+            self.assertGreater(proc["cpu_percent"], 0.0)
+            self.assertGreater(proc["pid"], 0)
+            self.assertTrue(proc["name"])
+
+    def test_percentages_are_per_core_not_capped_at_one_hundred(self):
+        """An 8-core encode reads 500%, and flattening that to 100% would hide
+        the difference between "busy" and "holding the whole box"."""
+        # utime sits at index 11 counting from the field after "(comm)".
+        def pid_stat(utime):
+            return "1 (ffmpeg) " + " ".join(["S"] + ["0"] * 10 + [str(utime), "0"])
+
+        box = ["cpu 1000 0 0 0\n", "cpu 1800 0 0 0\n"]        # 800 ticks elapsed
+        pid = [pid_stat(400), pid_stat(1200)]                 # 800 of them were this pid
+        seen = {"/proc/stat": 0, "/proc/1/stat": 0}
+
+        def fake_open(path, *a, **kw):
+            path = str(path)
+            if path in seen:
+                text = (box if path == "/proc/stat" else pid)[min(seen[path], 1)]
+                seen[path] += 1
+            elif path == "/proc/1/comm":
+                text = "ffmpeg\n"
+            else:
+                raise OSError(f"unexpected open of {path}")
+            return mock.mock_open(read_data=text)()
+
+        with mock.patch("builtins.open", fake_open), \
+             mock.patch("os.listdir", return_value=["1"]), \
+             mock.patch("os.cpu_count", return_value=8), \
+             mock.patch.object(report, "_cmdline", return_value=["ffmpeg"]), \
+             mock.patch("time.sleep"):
+            procs = report.cpu_processes(limit=1)
+        # 800 pid ticks of 800 total, over 8 cores.
+        self.assertEqual(procs[0]["cpu_percent"], 800.0)
+
+    def test_an_unreadable_proc_is_empty_not_an_exception(self):
+        with mock.patch("builtins.open", side_effect=OSError("nope")):
+            self.assertEqual(report.cpu_processes(), [])
+
+
+class ProcessRoleTest(unittest.TestCase):
+    """A pid and a name do not tell an operator what is happening; "spoofing
+    Viktoria's clip" does. Anything unrecognised must stay blank rather than
+    invent a role."""
+
+    def test_ffmpeg_is_named_by_the_clip_it_is_encoding(self):
+        role = report._process_role("ffmpeg", [
+            "/usr/bin/ffmpeg", "-y", "-i",
+            "/tmp/adbbot_raw/Viktoria/viktoria 3 I 6 aug I agency.mp4", "-c:v", "libx264"])
+        self.assertEqual(role, "spoofing Viktoria / viktoria 3 I 6 aug I agency")
+
+    def test_the_phone_launcher_is_named_by_its_profile(self):
+        self.assertEqual(
+            report._process_role("Katja 1 | 17493",
+                                 ["/root/mlx/deps/phone_launcher/phone_launcher_linux_amd64",
+                                  "-t", "token", "-n", "Katja 1", "-s", "174931"]),
+            "phone: Katja 1")
+
+    def test_a_loop_is_named_by_its_subcommand(self):
+        self.assertEqual(
+            report._process_role("python", ["/root/adb_bot/.venv/bin/python", "-m",
+                                            "adb_bot.automation.run_loop", "pipeline",
+                                            "--apply", "--targets", "profiles"]),
+            "loop: pipeline")
+
+    def test_the_dashboard_recognises_itself(self):
+        self.assertEqual(
+            report._process_role("python", ["/root/adb_bot/.venv/bin/python", "-m",
+                                            "adb_bot.automation.site", "--refresh", "300"]),
+            "this dashboard")
+
+    def test_a_process_that_merely_mentions_a_loop_is_not_one(self):
+        """`python -c "from adb_bot.automation.run_loop import _airtable"` is a
+        one-off script, and reading the word after the match called it
+        "loop: import"."""
+        self.assertEqual(
+            report._process_role("python", ["/usr/bin/python", "-c",
+                                            "from adb_bot.automation.run_loop import _airtable"]),
+            "")
+
+    def test_something_unrecognised_gets_no_label(self):
+        self.assertEqual(report._process_role("sshd-session", ["sshd-session:", "root@pts/0"]), "")
+
+
+class SpoofNowTest(unittest.TestCase):
+    RAW = "/tmp/adbbot_raw/Corina/nikki 4 I 6 aug.mp4"
+
+    def _proc(self, argvs, run_dir=""):
+        """Run spoof_now against a made-up process table."""
+        table = {str(i): argv for i, argv in enumerate(argvs, start=100)}
+        with mock.patch("os.listdir", return_value=list(table)), \
+             mock.patch.object(report, "_cmdline", side_effect=lambda pid: table[str(pid)]), \
+             mock.patch("adb_bot.automation.phone_reaper._process_age", return_value=93.0):
+            return report.spoof_now(run_dir or None)
+
+    def test_an_idle_box_says_so(self):
+        state = self._proc([["/usr/lib/systemd/systemd", "--user"]])
+        self.assertFalse(state["running"])
+        self.assertFalse(state["encoding"])
+        self.assertEqual(state["clip"], "")
+
+    def test_the_cli_names_the_clip_the_run_and_how_long(self):
+        state = self._proc([[
+            "/root/spoofer/video_spoofer/.venv/bin/python", "-m",
+            "video_testing_framework.cli", "run", self.RAW,
+            "--dest", "/opt/adbbot/spoofed/Nikki/run7", "--preset", "normal"]])
+        self.assertTrue(state["running"])
+        self.assertEqual(state["clip"], "nikki 4 I 6 aug")
+        self.assertEqual(state["run"], "run7")
+        self.assertEqual(state["seconds"], 93.0)
+
+    def test_the_raw_folder_is_resolved_to_the_model_it_really_holds(self):
+        """01_Raw_Videos/Corina holds Nikki's content. Reporting the folder name
+        would send someone looking at the wrong model's profiles."""
+        state = self._proc([[
+            "/usr/bin/python", "-m", "video_testing_framework.cli", "run", self.RAW,
+            "--dest", "/opt/adbbot/spoofed/Nikki/run7"]])
+        self.assertEqual(state["model"], "Nikki")
+
+    def test_ffmpeg_alone_is_still_an_encode_in_flight(self):
+        """The CLI can be missed -- it exits between clips while ffmpeg runs on."""
+        state = self._proc([["/usr/bin/ffmpeg", "-y", "-i", self.RAW, "-c:v", "libx264"]])
+        self.assertTrue(state["encoding"])
+        self.assertFalse(state["running"])
+        self.assertEqual(state["clip"], "nikki 4 I 6 aug")
+
+    def test_finished_profiles_are_counted_from_the_run_folder(self):
+        run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, run_dir, True)
+        for handle in ("Nikki_2", "Nikki_11"):
+            (run_dir / f"nikki_4_I_6_aug__{handle}.mp4").write_bytes(b"")
+        # The one still being written has no handle stamped on it yet.
+        (run_dir / "nikki 4 I 6 aug_variant_001.mp4").write_bytes(b"")
+        state = self._proc([[
+            "/usr/bin/python", "-m", "video_testing_framework.cli", "run", self.RAW,
+            "--dest", str(run_dir)]])
+        self.assertEqual(state["done"], ["Nikki 11", "Nikki 2"])
+
+
+class SpoofQueueTest(unittest.TestCase):
+    """What is waiting to be spoofed, and for whom."""
+
+    def setUp(self):
+        report.invalidate_cache()
+        self.addCleanup(report.invalidate_cache)
+
+    class FakeAirtable:
+        def __init__(self, processed=(), targets=None):
+            self._processed, self._targets = set(processed), targets or {}
+
+        def content_pipeline_names(self):
+            return self._processed
+
+        def profile_targets_by_model(self):
+            return self._targets
+
+    def _source(self, by_folder):
+        source = mock.Mock()
+        source.list_by_model.return_value = {
+            folder: [SimpleNamespace(name=n) for n in names]
+            for folder, names in by_folder.items()}
+        return mock.patch.object(spoof_pipeline, "build_source", return_value=source)
+
+    def test_pending_clips_are_multiplied_by_the_profiles_waiting_for_them(self):
+        """One clip is not one encode: it is one per active profile, serially."""
+        airtable = self.FakeAirtable(
+            targets={"laila": [{"handle": "Laila 1"}, {"handle": "Laila 2"}]})
+        with self._source({"Laila": ["a.mp4", "b.mp4", "c.mp4"]}):
+            queue = report.spoof_queue(airtable)
+        self.assertEqual(queue["clips"], 3)
+        self.assertEqual(queue["variants"], 6)
+        self.assertEqual(queue["models"][0]["handles"], ["Laila 1", "Laila 2"])
+
+    def test_a_clip_already_recorded_is_not_pending(self):
+        """Including one on the encoder: its Content Pipeline row is written
+        before the first variant is, so `spoof_now` covers that gap, not this."""
+        airtable = self.FakeAirtable(processed=["a.mp4"],
+                                     targets={"laila": [{"handle": "Laila 1"}]})
+        with self._source({"Laila": ["a.mp4", "b.mp4"]}):
+            queue = report.spoof_queue(airtable)
+        self.assertEqual(queue["clips"], 1)
+        self.assertEqual(queue["models"][0]["clips"], ["b.mp4"])
+
+    def test_clips_with_no_active_profile_are_flagged_not_silently_counted(self):
+        """Nothing will ever pick these up; counting them as queued would say
+        the pipeline is behind when it is actually stuck."""
+        with self._source({"Mandy": ["a.mp4"]}):
+            queue = report.spoof_queue(self.FakeAirtable(targets={}))
+        self.assertEqual(queue["variants"], 0)
+        self.assertEqual(queue["unroutable"],
+                         [{"folder": "Mandy", "model": "Luisa", "clips": 1}])
+
+    def test_no_airtable_client_says_so_rather_than_reporting_zero(self):
+        self.assertEqual(report.spoof_queue(None)["error"], "no Airtable client")
+
+    def test_a_failure_is_reported_in_place_and_never_raised(self):
+        class Broken:
+            def content_pipeline_names(self):
+                raise RuntimeError("429 rate limited")
+
+        queue = report.spoof_queue(Broken())
+        self.assertIn("429", queue["error"])
+        self.assertEqual(queue["clips"], 0)
+
+    def test_drive_is_not_touched_when_airtable_cannot_answer(self):
+        """The Drive listing is the expensive half; there is no point paying for
+        it only to find the client that says what is done is unusable."""
+        class Broken:
+            def content_pipeline_names(self):
+                raise RuntimeError("401")
+
+        with mock.patch.object(spoof_pipeline, "build_source") as build:
+            report.spoof_queue(Broken())
+        build.assert_not_called()
+
+    def test_drive_is_listed_once_per_ttl_not_once_per_page_render(self):
+        """The loopback dashboard re-collects every 20 seconds. Without a TTL of
+        its own that is a Google Drive call every 20 seconds, for a number that
+        only moves when somebody uploads a clip."""
+        airtable = self.FakeAirtable(targets={"laila": [{"handle": "Laila 1"}]})
+        with self._source({"Laila": ["a.mp4"]}) as build:
+            first = report.spoof_queue(airtable)
+            again = report.spoof_queue(airtable)
+        self.assertEqual(build.call_count, 1)
+        self.assertIs(first, again)
+
+    def test_a_drive_outage_is_cached_too(self):
+        """Retrying a failing listing on every render is a slow page for the
+        length of the outage and no new information."""
+        class Broken:
+            def content_pipeline_names(self):
+                raise RuntimeError("503")
+
+        self.assertIn("503", report.spoof_queue(Broken())["error"])
+        with mock.patch.object(spoof_pipeline, "build_source") as build:
+            self.assertIn("503", report.spoof_queue(Broken())["error"])
+        build.assert_not_called()
+
+
+class CpuAndSpoofRenderTest(RenderTest):
+    PROCS = [{"pid": 866210, "name": "ffmpeg", "cpu_percent": 566.0,
+              "role": "spoofing Viktoria / viktoria 3 I 6 aug"},
+             {"pid": 865899, "name": "claude", "cpu_percent": 8.2, "role": ""}]
+
+    def test_the_cpu_tile_names_the_process_behind_the_number(self):
+        page = report_html.render(self._data(
+            server={"processes": 234, "cores": 8, "load1": 0.38, "cpu_percent": 96.0,
+                    "mem_total_mb": 15603, "mem_used_mb": 2158, "mem_percent": 14.0,
+                    "swap_total_mb": 8192, "swap_used_mb": 139},
+            cpu_processes=self.PROCS))
+        self.assertIn("96%", page)
+        self.assertIn("spoofing Viktoria / viktoria 3 I 6 aug — 566%", page)
+
+    def test_a_pinned_cpu_reads_bad_even_when_load_average_is_low(self):
+        """Load counts processes waiting, and this box waits on phones rather
+        than computing -- it sat at load 0.38 with the CPU at 96% (2026-08-06),
+        which the old load-based colour rendered green."""
+        page = report_html.render(self._data(
+            server={"processes": 234, "cores": 8, "load1": 0.38, "cpu_percent": 96.0,
+                    "mem_total_mb": 15603, "mem_used_mb": 2158, "mem_percent": 14.0,
+                    "swap_total_mb": 8192, "swap_used_mb": 139}))
+        cpu_tile = page.split("CPU", 1)[1][:200]
+        self.assertIn("var(--bad)", cpu_tile)
+
+    def test_the_cpu_table_explains_that_over_one_hundred_percent_is_normal(self):
+        page = report_html.render(self._data(cpu_processes=self.PROCS))
+        self.assertIn("Top CPU use", page)
+        self.assertIn("566%", page)
+        self.assertIn("100% is one core busy", page)
+        self.assertIn("that is the spoofer working, not a fault", page)
+
+    def test_an_idle_spoofer_with_a_queue_behind_it(self):
+        page = report_html.render(self._data(spoof={
+            "now": {"running": False, "encoding": False, "clip": "", "model": "",
+                    "run": "", "seconds": 0.0, "done": []},
+            "clips": 9, "variants": 54, "unroutable": [], "error": "",
+            "models": [{"folder": "Laila", "model": "Laila", "clips": ["a.mp4"],
+                        "handles": ["Laila 1", "Laila 2"], "variants": 2}]}))
+        self.assertIn("Spoofing", page)
+        self.assertIn("idle", page)
+        self.assertIn("54", page)
+        self.assertIn("a.mp4", page)
+
+    def test_an_encode_in_flight_says_what_and_for_whom(self):
+        page = report_html.render(self._data(spoof={
+            "now": {"running": True, "encoding": True, "clip": "viktoria 3 I 6 aug",
+                    "model": "Viktoria", "run": "run4", "seconds": 620.0,
+                    "done": ["Viktoria 10", "Viktoria 3"]},
+            "clips": 0, "variants": 0, "unroutable": [], "error": "", "models": []}))
+        self.assertIn("encoding — Viktoria · run4", page)
+        self.assertIn("viktoria 3 I 6 aug", page)
+        self.assertIn("2 done", page)
+        self.assertIn("Viktoria 10", page)
+        self.assertIn("10m 20s", page)
+
+    def test_an_aliased_folder_is_shown_next_to_the_model(self):
+        """"Mandy" on Drive is Luisa's content; showing only one of the two
+        names sends a person to the wrong folder."""
+        page = report_html.render(self._data(spoof={
+            "now": {"running": False, "encoding": False, "clip": "", "model": "",
+                    "run": "", "seconds": 0.0, "done": []},
+            "clips": 1, "variants": 8, "unroutable": [], "error": "",
+            "models": [{"folder": "Mandy", "model": "Luisa", "clips": ["x.mp4"],
+                        "handles": ["Luisa 1"], "variants": 1}]}))
+        self.assertIn("Luisa", page)
+        self.assertIn("folder Mandy", page)
+
+    def test_clips_nothing_will_pick_up_are_called_out(self):
+        page = report_html.render(self._data(spoof={
+            "now": {"running": False, "encoding": False, "clip": "", "model": "",
+                    "run": "", "seconds": 0.0, "done": []},
+            "clips": 0, "variants": 0, "error": "", "models": [],
+            "unroutable": [{"folder": "Mandy", "model": "Luisa", "clips": 3}]}))
+        self.assertIn("no active profile", page)
+        self.assertNotIn("Every raw clip in Drive has been through", page)
+
+    def test_a_broken_queue_still_reports_the_encoder(self):
+        """The encoder is read from this box; Drive being unreachable says
+        nothing about it, and blanking both would be a lie."""
+        page = report_html.render(self._data(spoof={
+            "now": {"running": True, "encoding": True, "clip": "jil 1", "model": "Jil",
+                    "run": "run2", "seconds": 30.0, "done": []},
+            "clips": 0, "variants": 0, "unroutable": [], "models": [],
+            "error": "HttpError: 403"}))
+        self.assertIn("encoding — Jil · run2", page)
+        self.assertIn("not to be trusted", page)
+        self.assertIn("403", page)
