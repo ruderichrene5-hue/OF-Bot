@@ -462,6 +462,33 @@ report code:
 git -C /root/adb_bot archive HEAD | tar -x -C /opt/adbbot-site && systemctl restart adbbot-site
 ```
 
+### The recovery loop runs from a pinned copy (2026-08-06)
+
+`adbbot-recovery` is the one loop whose unit does *not* point at `/root/adb_bot`.
+It runs from `/opt/adbbot-recovery`, pinned the same way the site is. The reason
+is drift, not design: the loop landed on `worktree-daily-run-report`, the live
+checkout was still behind that branch, and it had uncommitted work in flight, so
+it could not be fast-forwarded without overwriting someone mid-edit. A timer
+pointing at a checkout that has no `recovery_runner.py` would just fail every
+15 minutes, so the code went where the timer could reach it.
+
+This is a bridge, not a second home. Redeploy it the same way as the site:
+
+```
+git -C <checkout> archive HEAD | tar -x -C /opt/adbbot-recovery
+```
+
+and once `/root/adb_bot` carries the recovery loop, `install_units.sh --apply`
+rewrites the unit to point back at the checkout with no extra step. Nothing has
+to be undone first — the installer overwrites units in place, which is the end
+state to aim for. `/etc/systemd/system/adbbot-recovery.service` carries the same
+note at the top.
+
+Worth knowing why this mattered: between the loop being written and the timer
+existing, four profiles had their Needs Human Check cleared by a person and
+nothing picked them up. Clearing the box is only half a handoff; the loop is the
+other half, and until it is scheduled the box is a checkbox that does nothing.
+
 **Safety net:** any loop can be reverted to dry-run at any time — Scheduler
 window, tick dry-run, Apply (or re-run the installer without `--apply`). That
 stops all device and Airtable writes without uninstalling anything.
