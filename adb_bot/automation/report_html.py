@@ -123,15 +123,18 @@ footer { margin-top: 2.5rem; color: var(--muted); font-size: .78rem;
 .panel { display: none; }
 #tab-server:checked ~ #panel-server,
 #tab-schedules:checked ~ #panel-schedules,
+#tab-warmup:checked ~ #panel-warmup,
 #tab-profiles:checked ~ #panel-profiles,
 #tab-technical:checked ~ #panel-technical { display: block; }
 #tab-server:checked ~ .tabs label[for="tab-server"],
 #tab-schedules:checked ~ .tabs label[for="tab-schedules"],
+#tab-warmup:checked ~ .tabs label[for="tab-warmup"],
 #tab-profiles:checked ~ .tabs label[for="tab-profiles"],
 #tab-technical:checked ~ .tabs label[for="tab-technical"] {
   color: var(--fg); border-bottom-color: var(--accent); }
 #tab-server:focus-visible ~ .tabs label[for="tab-server"],
 #tab-schedules:focus-visible ~ .tabs label[for="tab-schedules"],
+#tab-warmup:focus-visible ~ .tabs label[for="tab-warmup"],
 #tab-profiles:focus-visible ~ .tabs label[for="tab-profiles"],
 #tab-technical:focus-visible ~ .tabs label[for="tab-technical"] {
   outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
@@ -1059,6 +1062,111 @@ def _section_schedules(schedules: dict) -> str:
     return body
 
 
+_WARMUP_STATE_PILL = {
+    "running": ("ok", "warming up"),
+    "blocked": ("bad", "will not run"),
+    "finished": ("warn", "warm-up done"),
+    "not_started": ("warn", "starts later"),
+}
+
+#: What to do about each blocker, in the words of somebody with Airtable open
+#: and no interest in the planner's source. Every string here is a *field edit*,
+#: because that is the only thing that unblocks any of them.
+WARMUP_FIXES = {
+    "lifecycle stage Paused": (
+        "Set Lifecycle Stage to Active on the account row. This is the only "
+        "switch; nothing else is stopping it."),
+    "lifecycle stage Banned": (
+        "Instagram banned this account. Nothing here starts it again — decide "
+        "whether to appeal or retire the account."),
+    "automation mode paused": (
+        "Set Automation Mode to Posting on the account row."),
+    "needs human verification": (
+        "Open the phone in MultiLogin and clear whatever Instagram is asking "
+        "for, then untick Needs Human Verification."),
+    "no MLX API ID on linked profile": (
+        "The linked profile has no MLX API ID, so there is no phone to open. "
+        "Re-run the mlx-sync loop, or link the account to the right profile."),
+    "no creation date": (
+        "Set Creation Date on the account row. It is the warm-up start date — "
+        "day 1 is that date, not the day you flip the switch."),
+}
+
+
+def _section_warmup(warmup: dict) -> str:
+    """Who is warming up, and for everyone else, the one edit that would start them."""
+    if warmup.get("error"):
+        return (f'<p class="empty">Could not read the warm-up tables: '
+                f'<span class="mono">{_e(warmup["error"])}</span></p>')
+    accounts = warmup.get("accounts") or []
+    plan = warmup.get("plan") or []
+    if not accounts:
+        return '<p class="empty">No accounts in the Accounts table to warm up.</p>'
+
+    counts = warmup.get("counts") or {}
+    days = warmup.get("plan_days") or 0
+    lead = (f'<p class="sub">{len(accounts)} account(s) · '
+            f'{counts.get("running", 0)} warming up · '
+            f'{counts.get("blocked", 0)} will not run · '
+            f'{counts.get("finished", 0)} past the plan · '
+            f'{counts.get("not_started", 0)} dated in the future. '
+            f'The plan is {days} day(s) long; day 1 is the account\'s '
+            f'<strong>Creation Date</strong>, so an account dated before '
+            f'{days} day(s) ago is already past warm-up and will do nothing.</p>')
+
+    head = ("<tr><th>Account</th><th>Profile</th><th class='num'>Day</th>"
+            "<th>State</th><th>Today</th><th>What to change</th></tr>")
+    rows = []
+    for acc in accounts:
+        tone, label = _WARMUP_STATE_PILL.get(acc.get("state"), ("warn", "unknown"))
+        day = acc.get("day")
+        # A day number past the plan is noise dressed as data -- "day 51" of a
+        # 4-day plan says nothing a person can use -- so say what it means.
+        day_cell = "-" if day is None else (f"{day}" if 1 <= day <= days else f"{day}")
+        todo = acc.get("blocker") or ""
+        if todo:
+            fix = WARMUP_FIXES.get(todo, "")
+            todo_cell = (f'<strong>{_e(todo)}</strong>'
+                         + (f'<br><span class="sub">{_e(fix)}</span>' if fix else ""))
+            if acc.get("stale_date"):
+                todo_cell += (
+                    f'<br><span class="pill warn">and set Creation Date</span> '
+                    f'<span class="sub">This account is on day {_e(day)} of a '
+                    f'{_e(days)}-day plan, so clearing the above on its own runs '
+                    f'<strong>nothing</strong>. Set Creation Date to the day warm-up '
+                    f'should start — that date becomes day 1.</span>')
+        elif acc.get("state") == "finished":
+            todo_cell = ('<span class="sub">Nothing. Warm-up is over for this account; '
+                         'it posts from the Posting Queue now.</span>')
+        elif acc.get("state") == "not_started":
+            todo_cell = ('<span class="sub">Nothing. Its Creation Date is in the future — '
+                         'warm-up begins on that date.</span>')
+        else:
+            todo_cell = '<span class="sub">Nothing — it is running.</span>'
+        actions = ", ".join(acc.get("actions") or []) or "-"
+        rows.append(
+            f"<tr><td class='mono'>{_e(acc.get('name'))}</td>"
+            f"<td class='mono'>{_e(acc.get('profile'))}</td>"
+            f"<td class='num'>{_e(day_cell)}</td>"
+            f"<td><span class='pill {tone}'>{_e(label)}</span></td>"
+            f"<td class='wrap-cell'>{_e(actions)}</td>"
+            f"<td class='wrap-cell'>{todo_cell}</td></tr>")
+    table = f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>'
+
+    plan_html = ""
+    if plan:
+        phead = "<tr><th class='num'>Day</th><th>What the bot does</th></tr>"
+        prows = "".join(
+            f"<tr><td class='num'>{_e(p['day'])}</td>"
+            f"<td class='wrap-cell'>{_e(', '.join(p['actions']) or 'nothing')}</td></tr>"
+            for p in plan)
+        plan_html = (f'<h2>The warm-up plan</h2><p class="sub">Read from the '
+                     f'<strong>Warmup Plan</strong> table — edit it there and the '
+                     f'next run follows it.</p>'
+                     f'<div class="scroll"><table>{phead}{prows}</table></div>')
+    return lead + table + plan_html
+
+
 def _section_outlook(outlook: dict) -> str:
     """The next posts as times on a clock, not as a policy."""
     profiles = outlook.get("profiles") or []
@@ -1253,6 +1361,11 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
             if live else "snapshot — not live")
     flagged = len((data.get("needs_human") or {}).get("profiles") or [])
     badge = f'<span class="count">{flagged}</span>' if flagged else ""
+    # Counts only what a person can fix by editing a field. "Finished" and
+    # "starts later" are correct states, and badging them would put a permanent
+    # red number on a tab where nothing is wrong.
+    stuck = ((data.get("warmup") or {}).get("counts") or {}).get("blocked", 0)
+    warmup_badge = f'<span class="count">{stuck}</span>' if stuck else ""
 
     body = f"""<div class="wrap">
   <h1>{_e(title)}</h1>
@@ -1262,11 +1375,13 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
   <div class="tabnav">
     <input type="radio" name="adbbot-tab" id="tab-server" checked>
     <input type="radio" name="adbbot-tab" id="tab-schedules">
+    <input type="radio" name="adbbot-tab" id="tab-warmup">
     <input type="radio" name="adbbot-tab" id="tab-profiles">
     <input type="radio" name="adbbot-tab" id="tab-technical">
     <div class="tabs">
       <label for="tab-server">Server</label>
       <label for="tab-schedules">Schedules</label>
+      <label for="tab-warmup">Warm-up{warmup_badge}</label>
       <label for="tab-profiles">Profiles{badge}</label>
       <label for="tab-technical">Technical</label>
     </div>
@@ -1302,6 +1417,11 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
 
       <h2>When the next posts go out</h2>
       {_section_outlook(data.get('outlook') or {})}
+    </section>
+
+    <section class="panel" id="panel-warmup">
+      <h2>Warm-up</h2>
+      {_section_warmup(data.get('warmup') or {})}
     </section>
 
     <section class="panel" id="panel-profiles">

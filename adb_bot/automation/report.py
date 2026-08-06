@@ -25,7 +25,7 @@ import subprocess
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from adb_bot.automation import schedule_spec
@@ -2163,6 +2163,128 @@ _cache: dict = {"at": 0.0, "data": None}
 _slow_cache: dict = {}
 
 
+#: Why an account is not warming up, worst first. The order matters: the page
+#: shows one reason per account and it must be the one a person acts on, which
+#: is the *first* gate the planner hits, not the last thing that happens to be
+#: wrong. Mirrors the guard order in `airtable_planner.plan_from_airtable`.
+WARMUP_BLOCKERS = ("needs human verification", "automation mode paused",
+                   "lifecycle stage Paused", "lifecycle stage Banned",
+                   "no MLX API ID on linked profile", "no creation date")
+
+
+def warmup_status(airtable, now=None) -> dict:
+    """Who is warming up, who cannot, and what the plan says for each day.
+
+    Deliberately re-derives the planner's decision rather than reading a result
+    the warm-up loop wrote: the loop only logs what it *skipped this tick*, so a
+    reason never reaches Airtable and nothing on the box remembers it an hour
+    later. Re-deriving keeps the page honest about a fleet that runs hourly.
+
+    The gate order below is `airtable_planner`'s, and must stay that way. An
+    account paused *and* undated is reported as paused, because un-pausing it is
+    the first thing a person would do and the date question only exists after.
+    """
+    # Imported here, like every other Airtable-touching collector in this file:
+    # the module is imported by the loops too, and the page is not worth making
+    # them pay for at import time.
+    from adb_bot.clients import airtable as at
+    from adb_bot.automation import lifecycle
+
+    def _parse_iso_date(value):
+        if not value:
+            return None
+        try:
+            return date.fromisoformat(str(value)[:10])
+        except Exception:
+            return None
+
+    now = now or datetime.now()
+    today = now.date()
+    out = {"plan": [], "accounts": [], "plan_days": 0, "error": "",
+           "counts": {"running": 0, "blocked": 0, "finished": 0, "not_started": 0}}
+    try:
+        plan_by_day = airtable.warmup_plan_by_day() or {}
+        accounts = airtable.list_accounts()
+        profiles = airtable.profile_launch_map()
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
+    for day in sorted(plan_by_day):
+        actions, _ = lifecycle.plan_actions_from_row(day, plan_by_day[day])
+        out["plan"].append({"day": day, "actions": [a.label for a in actions]})
+    out["plan_days"] = max(plan_by_day) if plan_by_day else 0
+
+    for record in accounts:
+        fields = record.get("fields", {}) or {}
+        name = str(fields.get(at.F_ACC_NAME) or "").strip()
+        if not name and not fields.get(at.F_ACC_PROFILE):
+            continue  # placeholder row, same as the planner
+        links = fields.get(at.F_ACC_PROFILE) or []
+        info = profiles.get(links[0]) if links else None
+        launch_id = (info or {}).get("launch_id")
+        start = _parse_iso_date(fields.get(at.F_ACC_CREATION_DATE))
+        stage = at._select_name(fields.get(at.F_ACC_LIFECYCLE_STAGE))
+        mode = at._select_name(fields.get(at.F_ACC_AUTOMATION_MODE))
+
+        blocker = ""
+        if bool(fields.get(at.F_ACC_NEEDS_VERIFICATION)):
+            blocker = "needs human verification"
+        elif mode == at.MODE_PAUSED:
+            blocker = "automation mode paused"
+        elif stage in (at.STAGE_PAUSED, at.STAGE_BANNED):
+            blocker = f"lifecycle stage {stage}"
+        elif not launch_id:
+            blocker = "no MLX API ID on linked profile"
+        elif start is None:
+            blocker = "no creation date"
+
+        day = lifecycle.day_number(start, today) if start else None
+        actions: list = []
+        if day is not None and plan_by_day:
+            planned, _ = lifecycle.plan_actions_from_table(day, plan_by_day)
+            actions = [a.label for a in planned]
+
+        # "Finished" and "not started" are not blockers -- nothing is wrong with
+        # them -- but they are the difference between "flip this switch and it
+        # runs" and "flip it and nothing happens", which is the whole question
+        # this tab exists to answer.
+        if blocker:
+            state = "blocked"
+        elif day is None:
+            state = "blocked"
+        elif day < 1:
+            state = "not_started"
+        elif day > out["plan_days"]:
+            state = "finished"
+        else:
+            state = "running"
+        out["counts"][state] = out["counts"].get(state, 0) + 1
+
+        # The trap this tab exists to catch. Clearing the blocker is necessary
+        # and not sufficient: day 1 is Creation Date, so an account paused since
+        # June is on day 50 of a 4-day plan, and un-pausing it runs *nothing*
+        # while looking exactly like success. Whoever flips the switch has to
+        # know the date needs moving too, before they flip it.
+        stale_date = bool(blocker) and day is not None and day > out["plan_days"]
+
+        out["accounts"].append({
+            "name": name or record.get("id"),
+            "profile": (info or {}).get("name") or "",
+            "stage": stage or "",
+            "mode": mode or "",
+            "created": str(fields.get(at.F_ACC_CREATION_DATE) or "")[:10],
+            "day": day,
+            "state": state,
+            "blocker": blocker,
+            "stale_date": stale_date,
+            "actions": actions,
+        })
+
+    out["accounts"].sort(key=lambda a: (a["state"] != "running", a["name"].lower()))
+    return out
+
+
 def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
     """Everything the page shows. Cached for `CACHE_SECONDS`."""
     if use_cache and _cache["data"] is not None and (time.time() - _cache["at"]) < CACHE_SECONDS:
@@ -2230,6 +2352,9 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         "outlook": {"queued": [], "profiles": [], "gap_minutes": 0, "default_cap": 0,
                     "timezone": "", "eligible_now": 0, "waiting": 0, "capped": 0,
                     "any_fixed": False},
+        "warmup": {"plan": [], "accounts": [], "plan_days": 0, "error": "",
+                   "counts": {"running": 0, "blocked": 0, "finished": 0,
+                              "not_started": 0}},
         "airtable_error": "",
     }
 
@@ -2239,6 +2364,10 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         # Airtable call above it raised. The local half -- what is on the
         # encoder right now -- is already collected either way.
         data["spoof"].update(spoof_queue(airtable))
+        # Its own try, outside the block below: the warm-up fleet is a different
+        # set of records from the posting queue, and a posting-side Airtable
+        # failure must not blank a tab that could still answer its question.
+        data["warmup"] = _slow("warmup", lambda: warmup_status(airtable, now))
         try:
             # One listing serves both: the day's rows, and which variants every
             # row (of any age) has already claimed.
