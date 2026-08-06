@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from adb_bot.automation import report, report_html, spoof_pipeline
+from adb_bot.automation import report, report_html, schedule_spec, spoof_pipeline
 
 
 SAMPLE_LOG = """\
@@ -1765,3 +1765,60 @@ class CpuAndSpoofRenderTest(RenderTest):
         self.assertIn("encoding — Jil · run2", page)
         self.assertIn("not to be trusted", page)
         self.assertIn("403", page)
+
+
+class LoopHintTest(RenderTest):
+    """Every loop carries a "?" that says what it does.
+
+    The table names a loop and its cadence, neither of which tells somebody
+    what `recheck` or `reap-phones` is for -- and this page is read by people
+    who did not write the loops.
+    """
+
+    def _timers(self, *loops):
+        return self._data(timers=[
+            {"loop": loop, "state": "active", "interval_min": 5,
+             "last": "2026-08-06 12:00:00", "next": "in 5 min", "stopped": False}
+            for loop in loops])
+
+    def test_every_scheduled_loop_has_something_to_say(self):
+        """A loop added to the schedule without a hint renders a bare name and
+        nobody notices until they go looking for the one that is missing."""
+        missing = [loop for loop in schedule_spec.RECOMMENDED_LOOPS
+                   if not schedule_spec.WHAT_IT_DOES.get(loop)]
+        self.assertEqual(missing, [])
+
+    def test_the_hint_is_rendered_next_to_the_loop(self):
+        page = report_html.render(self._timers("recheck"))
+        self.assertIn('class="hint"', page)
+        self.assertIn("the row moves from Verifying to Posted or Failed", page)
+        self.assertIn("Tap the", page)
+
+    def test_it_opens_on_tap_as_well_as_hover(self):
+        """Touch has no hover, and this page is mostly read on a phone -- :focus
+        with tabindex is the only thing a tap leaves behind without JavaScript."""
+        page = report_html.render(self._timers("posting"))
+        self.assertIn('tabindex="0"', page)
+        self.assertIn(".hint:hover + .hint-text, .hint:focus + .hint-text", page)
+
+    def test_the_text_reveals_inline_rather_than_floating(self):
+        """Every table here sits in an overflow-x box, which clips a floating
+        bubble on exactly the narrow screen it is needed on."""
+        style = report_html.render(self._timers("posting")).split("</style>")[0]
+        self.assertIn(".hint-text { display: none;", style)
+        self.assertNotIn(".hint-text { position: absolute", style)
+
+    def test_a_screen_reader_gets_the_sentence_without_opening_anything(self):
+        """The visible copy is display:none until asked for, and hidden text is
+        not announced -- so the label has to carry it."""
+        page = report_html.render(self._timers("cleanup"))
+        self.assertIn('aria-label="Deletes media the bot has finished with', page)
+        self.assertIn('aria-hidden="true"', page)
+
+    def test_a_loop_nobody_has_described_renders_no_icon(self):
+        page = report_html.render(self._timers("some-new-loop"))
+        self.assertIn("some-new-loop", page)
+        self.assertNotIn('class="hint"', page)
+
+    def test_the_hint_text_is_escaped(self):
+        self.assertNotIn("<script>", report_html._hint('<script>alert(1)</script>'))

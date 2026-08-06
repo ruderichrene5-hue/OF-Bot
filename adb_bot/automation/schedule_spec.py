@@ -121,17 +121,17 @@ WHAT_IT_DOES = {
                "of 40 posts is not 40 times one post.",
     "recheck": "Settles posts that could not be proven at the time. The phone is "
                "reopened ~15 minutes later and the row moves from Verifying to "
-               "Posted or Failed -- without this they sit in Verifying forever.",
+               "Posted or Failed — without this they sit in Verifying forever.",
     "queue": "Turns spoofed variants into Posting Queue rows at each model's "
              "scheduled times. Runs several times per slot so a slot never opens "
              "on an empty queue.",
     "retry": "Puts retryable Failed rows back to Pending. Most failures are "
-             "transient -- a device offline, an MLX hiccup -- so they are worth "
+             "transient — a device offline, an MLX hiccup — so they are worth "
              "one more go; after 3 attempts the row is left for a person.",
     "warmup": "Works a new account through its Day 1-4 lifecycle plan: the "
               "browsing and liking that make an account look used before it is "
               "asked to post anything.",
-    "pipeline": "Spoofs new raw clips from Drive -- one unique encode per active "
+    "pipeline": "Spoofs new raw clips from Drive — one unique encode per active "
                 "profile, because two accounts posting the same file is what gets "
                 "them flagged. The expensive loop: it is the one that pins the CPU.",
     "mlx-sync": "Sweeps the MultiLogin inventory into Airtable overnight so the "
@@ -142,8 +142,8 @@ WHAT_IT_DOES = {
     "doctor": "The preflight checks, on a timer instead of only when somebody asks: "
               "MLX agent listening, Airtable readable, Drive reachable, spoofer "
               "configured. It raises the alert rather than waiting to be noticed.",
-    "reap-phones": "Closes phones no loop owns any more. Nothing else does -- the "
-                   "run that would have closed them died -- and a leaked phone holds "
+    "reap-phones": "Closes phones no loop owns any more. Nothing else does — the "
+                   "run that would have closed them died — and a leaked phone holds "
                    "a MultiLogin session open on a real account for hours.",
 }
 

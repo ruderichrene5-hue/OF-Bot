@@ -16,6 +16,8 @@ import html
 from collections import Counter
 from datetime import datetime
 
+from adb_bot.automation import schedule_spec
+
 REFRESH_SECONDS = 30
 
 _CSS = """
@@ -73,6 +75,27 @@ th { color: var(--muted); font-weight: 600; font-size: .75rem; text-transform: u
      letter-spacing: .04em; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.wrap-cell { white-space: normal; max-width: 420px; color: var(--muted); }
+/* A hint that opens on hover and on tap, without a line of JavaScript. The
+   text reveals *inline*, below whatever it explains, rather than floating over
+   it: every table on this page sits in a horizontally scrolling box, and a
+   floating bubble would be clipped by that box on the narrow screen this page
+   is most often read on. tabindex is what makes a tap work -- touch has no
+   hover, and :focus is the only thing it leaves behind. */
+.hint { display: inline-block; width: 1.15em; height: 1.15em; line-height: 1.15em;
+        margin-left: .35rem; border-radius: 999px; border: 1px solid var(--line);
+        color: var(--muted); background: var(--card); font-size: .72rem;
+        font-weight: 700; text-align: center; cursor: help; vertical-align: middle;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+.hint:hover, .hint:focus { color: var(--accent); border-color: var(--accent);
+                           outline: none; }
+.hint-text { display: none; white-space: normal; max-width: 44ch; margin-top: .3rem;
+             color: var(--muted); font-size: .8rem; font-weight: 400;
+             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+.hint:hover + .hint-text, .hint:focus + .hint-text { display: block; }
+/* Keep the name at the top of its row while the hint pushes the row taller. */
+td.hint-cell { vertical-align: top; }
+/* Nothing to reveal on a printout, so show it all. */
+@media print { .hint { display: none; } .hint-text { display: block; } }
 code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
               font-size: .85em; }
 .empty { color: var(--muted); font-style: italic; }
@@ -405,6 +428,19 @@ def _section_phones(phones) -> str:
     return f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>{note}'
 
 
+def _hint(text: str) -> str:
+    """A "?" that opens `text` in place, on hover or on tap.
+
+    The label carries the whole sentence so a screen reader gets it without
+    revealing anything -- the visible copy is `display:none` until asked for,
+    and hidden text is not announced.
+    """
+    if not text:
+        return ""
+    return (f'<span class="hint" tabindex="0" role="note" aria-label="{_e(text)}">?</span>'
+            f'<span class="hint-text" aria-hidden="true">{_e(text)}</span>')
+
+
 def _section_timers(timers) -> str:
     if not timers:
         return '<p class="empty">No scheduled loops found.</p>'
@@ -415,19 +451,22 @@ def _section_timers(timers) -> str:
         tone = "bad" if timer["stopped"] else "ok"
         every = (f'{timer["interval_min"]} min' if timer["interval_min"] < 1440
                  else "daily") if timer["interval_min"] else "-"
+        hint = _hint(schedule_spec.WHAT_IT_DOES.get(timer["loop"], ""))
         rows.append(
-            f"<tr><td class='mono'>{_e(timer['loop'])}</td>"
+            f"<tr><td class='mono hint-cell'>{_e(timer['loop'])}{hint}</td>"
             f"<td><span class='pill {tone}'>{_e(timer['state'])}</span></td>"
             f"<td class='num'>{_e(every)}</td>"
             f"<td class='mono'>{_e(timer['last'] or '-')}</td>"
             f"<td class='mono'>{_e(timer['next'] or 'running now')}</td></tr>")
     stopped = [t["loop"] for t in timers if t["stopped"]]
-    note = (f'<p class="sub"><span class="pill bad">{len(stopped)} stopped</span> '
-            f'{_e(", ".join(stopped))} — a stopped loop produces nothing and raises no alert, '
-            f'because alerts are only recorded when a loop actually runs.</p>'
-            if stopped else
-            '<p class="sub">All loops are scheduled. An empty "next run" means that loop is '
-            'executing right now.</p>')
+    state_note = (f'<span class="pill bad">{len(stopped)} stopped</span> '
+                  f'{_e(", ".join(stopped))} — a stopped loop produces nothing and raises no '
+                  f'alert, because alerts are only recorded when a loop actually runs.'
+                  if stopped else
+                  'All loops are scheduled. An empty "next run" means that loop is '
+                  'executing right now.')
+    note = (f'<p class="sub">{state_note} Tap the <span class="mono">?</span> beside a loop '
+            f'to read what it does.</p>')
     return f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>{note}'
 
 
