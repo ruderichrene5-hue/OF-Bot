@@ -376,6 +376,11 @@ memory so a public port cannot spend the Airtable quota. Both carry a **Top CPU
 use** table (which process is burning the box, and what it is doing) and a
 **Spoofing** section (what is on the encoder right now, and how many variants
 are queued behind it, per model) — the two questions a pinned box provokes.
+A **Schedules** tab holds every time on the page: when each loop next runs
+(with the hour for the daily ones) and when each model posts, beside the stock
+each has to post *with*. Mind the two clocks — loop times are the server's
+(UTC here), posting slots are `Europe/Berlin`; the page says so when they
+differ.
 Note that the queue half costs a Drive listing plus two Airtable reads per
 rebuild; on the loopback dashboard, which renders per request, that is the
 slowest thing on the page. Its password hash and

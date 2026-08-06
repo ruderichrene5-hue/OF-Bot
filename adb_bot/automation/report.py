@@ -598,7 +598,25 @@ def timer_states(loops=None) -> list:
             [schedule_spec.unit_name(loop, "timer") for loop in loops], loops):
         if loop in rows:
             rows[loop].update(state=state, stopped=state != "active")
+
+    now = datetime.now()
+    for row in rows.values():
+        # "15:09:42" answers "when" only if you also know what time it is now.
+        row["seconds_until"] = _seconds_until(row["next"], now)
+        # A daily timer's cadence is the useless half of what it does: "daily"
+        # without the hour is the one row on this table nobody can act on.
+        row["at"] = (schedule_spec.DEFAULT_DAILY_START.get(row["loop"], "")
+                     if row["interval_min"] >= 1440 else "")
     return list(rows.values())
+
+
+def _seconds_until(stamp: str, now) -> float:
+    """Seconds from `now` to a "YYYY-MM-DD HH:MM:SS" timestamp; 0 when there is
+    none, or when it has already passed (the timer is firing, not overdue)."""
+    try:
+        return max(0.0, (datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S") - now).total_seconds())
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _unit_active_states(units, loops) -> list:
@@ -1697,6 +1715,11 @@ def model_schedules(airtable, content=None, now=None) -> dict:
 
     out = {"models": [], "timezone": queue_runner.DEFAULT_TIMEZONE,
            "fallback": list(queue_runner.DEFAULT_SLOT_TIMES), "per_model": True,
+           # Posting slots are wall clock for the audience; the loop timetable on
+           # the same tab is wall clock for the server, and this box runs UTC
+           # while the slots are Berlin. Two tables of times that are not in the
+           # same clock have to say so.
+           "server_timezone": "", "same_clock": True,
            "error": ""}
     if airtable is None:
         out["error"] = "no Airtable client"
@@ -1721,6 +1744,12 @@ def model_schedules(airtable, content=None, now=None) -> dict:
     tz = queue_runner._zone(out["timezone"])
     now = now or datetime.now(tz)
     local_now = now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
+
+    # Offsets, not names: "CEST" and "Europe/Berlin" are the same clock spelled
+    # two ways, and comparing the spellings would cry wolf every summer.
+    server = local_now.astimezone(datetime.now().astimezone().tzinfo)
+    out["server_timezone"] = server.tzname() or ""
+    out["same_clock"] = server.utcoffset() == local_now.utcoffset()
 
     for key in sorted(set(counts) | set(schedules or {})):
         schedule = (schedules or {}).get(key)

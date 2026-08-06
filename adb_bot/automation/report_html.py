@@ -106,7 +106,7 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monosp
 footer { margin-top: 2.5rem; color: var(--muted); font-size: .78rem;
          border-top: 1px solid var(--line); padding-top: .8rem; }
 
-/* Tabs without JavaScript: three radios drive which panel is displayed. The
+/* Tabs without JavaScript: one radio per panel drives which is displayed. The
    page has to work from a file:// URL and inside a strict-CSP host, and this
    survives both. Radios stay in the DOM (not display:none) so they keep
    keyboard focus and screen-reader semantics. */
@@ -119,13 +119,16 @@ footer { margin-top: 2.5rem; color: var(--muted); font-size: .78rem;
 .tabs label:hover { color: var(--fg); }
 .panel { display: none; }
 #tab-server:checked ~ #panel-server,
+#tab-schedules:checked ~ #panel-schedules,
 #tab-profiles:checked ~ #panel-profiles,
 #tab-technical:checked ~ #panel-technical { display: block; }
 #tab-server:checked ~ .tabs label[for="tab-server"],
+#tab-schedules:checked ~ .tabs label[for="tab-schedules"],
 #tab-profiles:checked ~ .tabs label[for="tab-profiles"],
 #tab-technical:checked ~ .tabs label[for="tab-technical"] {
   color: var(--fg); border-bottom-color: var(--accent); }
 #tab-server:focus-visible ~ .tabs label[for="tab-server"],
+#tab-schedules:focus-visible ~ .tabs label[for="tab-schedules"],
 #tab-profiles:focus-visible ~ .tabs label[for="tab-profiles"],
 #tab-technical:focus-visible ~ .tabs label[for="tab-technical"] {
   outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
@@ -444,20 +447,27 @@ def _hint(text: str) -> str:
 def _section_timers(timers) -> str:
     if not timers:
         return '<p class="empty">No scheduled loops found.</p>'
-    head = ("<tr><th>Loop</th><th>State</th><th class='num'>Every</th>"
-            "<th>Last run</th><th>Next run</th></tr>")
+    head = ("<tr><th>Loop</th><th>State</th><th>Runs</th>"
+            "<th>Last run</th><th>Next run</th><th class='num'>In</th></tr>")
     rows = []
     for timer in timers:
         tone = "bad" if timer["stopped"] else "ok"
-        every = (f'{timer["interval_min"]} min' if timer["interval_min"] < 1440
-                 else "daily") if timer["interval_min"] else "-"
+        if not timer["interval_min"]:
+            every = "—"
+        elif timer["interval_min"] < 1440:
+            every = f'every {timer["interval_min"]} min'
+        else:
+            # "daily" alone is the one cadence nobody can act on.
+            every = f'daily at {timer["at"]}' if timer.get("at") else "daily"
+        left = _fmt_seconds(timer.get("seconds_until") or 0)
         hint = _hint(schedule_spec.WHAT_IT_DOES.get(timer["loop"], ""))
         rows.append(
             f"<tr><td class='mono hint-cell'>{_e(timer['loop'])}{hint}</td>"
             f"<td><span class='pill {tone}'>{_e(timer['state'])}</span></td>"
-            f"<td class='num'>{_e(every)}</td>"
+            f"<td>{_e(every)}</td>"
             f"<td class='mono'>{_e(timer['last'] or '-')}</td>"
-            f"<td class='mono'>{_e(timer['next'] or 'running now')}</td></tr>")
+            f"<td class='mono'>{_e(timer['next'] or 'running now')}</td>"
+            f"<td class='num'>{_e(left if timer['next'] else '—')}</td></tr>")
     stopped = [t["loop"] for t in timers if t["stopped"]]
     state_note = (f'<span class="pill bad">{len(stopped)} stopped</span> '
                   f'{_e(", ".join(stopped))} — a stopped loop produces nothing and raises no '
@@ -466,7 +476,9 @@ def _section_timers(timers) -> str:
                   'All loops are scheduled. An empty "next run" means that loop is '
                   'executing right now.')
     note = (f'<p class="sub">{state_note} Tap the <span class="mono">?</span> beside a loop '
-            f'to read what it does.</p>')
+            f'to read what it does. These are the server\'s own clock — the same clock '
+            f'"Last run" and "Next run" are in, and not necessarily the one the posting '
+            f'times below use.</p>')
     return f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>{note}'
 
 
@@ -903,8 +915,12 @@ def _section_schedules(schedules: dict) -> str:
     stray = [m for m in models if m["profiles"] and not m["known"]]
 
     fixed = [m for m in active if not m["flexible"]]
-    where = (f'Times are {_e(schedules.get("timezone") or "local")} wall clock, set per model '
-             f'in Airtable under <span class="mono">Reel Post Times</span>.')
+    zone, server_zone = schedules.get("timezone") or "local", schedules.get("server_timezone")
+    clash = (f' The server\'s own clock is {_e(server_zone)}, so these are not the same times '
+             f'as the loop timetable above.'
+             if server_zone and not schedules.get("same_clock", True) else "")
+    where = (f'Times are {_e(zone)} wall clock, set per model in Airtable under '
+             f'<span class="mono">Reel Post Times</span>.{clash}')
     if not active:
         lead = ""
     elif not fixed:
@@ -1025,10 +1041,12 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
 
   <div class="tabnav">
     <input type="radio" name="adbbot-tab" id="tab-server" checked>
+    <input type="radio" name="adbbot-tab" id="tab-schedules">
     <input type="radio" name="adbbot-tab" id="tab-profiles">
     <input type="radio" name="adbbot-tab" id="tab-technical">
     <div class="tabs">
       <label for="tab-server">Server</label>
+      <label for="tab-schedules">Schedules</label>
       <label for="tab-profiles">Profiles{badge}</label>
       <label for="tab-technical">Technical</label>
     </div>
@@ -1048,14 +1066,19 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
       <h2>Spoofing</h2>
       {_section_spoof(data.get('spoof') or {})}
 
-      <h2>Scheduled loops</h2>
-      {_section_timers(data.get('timers') or [])}
-
       <h2>Open phones</h2>
       {_section_phones(data.get('phones') or [])}
 
       <h2>Top memory use</h2>
       {_section_top_processes(data.get('top_processes') or [])}
+    </section>
+
+    <section class="panel" id="panel-schedules">
+      <h2>When each loop runs</h2>
+      {_section_timers(data.get('timers') or [])}
+
+      <h2>When each model posts</h2>
+      {_section_schedules(data.get('schedules') or {})}
     </section>
 
     <section class="panel" id="panel-profiles">
@@ -1080,9 +1103,6 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
 
       <h2>Loop health</h2>
       {_section_health(data['health'], data['alerts'])}
-
-      <h2>Schedules</h2>
-      {_section_schedules(data.get('schedules') or {})}
 
       <h2>Content stock</h2>
       {_section_content(data['content'])}

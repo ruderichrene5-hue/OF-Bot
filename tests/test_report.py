@@ -10,7 +10,7 @@ import shutil
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -1224,27 +1224,26 @@ class RunByRunTest(RenderTest):
 
 
 class TabsTest(RenderTest):
-    """Three views on one page, switched without JavaScript.
+    """Four views on one page, switched without JavaScript.
 
     The page must work from a file:// URL and inside a strict-CSP host, so the
     tabs are radios and CSS. These pin the wiring: a typo in an id silently
     leaves a panel permanently hidden, which no other test would catch.
     """
 
-    def test_all_three_panels_exist(self):
+    TABS = ("server", "schedules", "profiles", "technical")
+
+    def test_all_panels_exist(self):
         page = report_html.render(self._data())
-        for panel in ("panel-server", "panel-profiles", "panel-technical"):
-            self.assertIn(f'id="{panel}"', page)
-        for tab in ("tab-server", "tab-profiles", "tab-technical"):
-            self.assertIn(f'id="{tab}"', page)
-            self.assertIn(f'for="{tab}"', page)
+        for name in self.TABS:
+            self.assertIn(f'id="panel-{name}"', page)
+            self.assertIn(f'id="tab-{name}"', page)
+            self.assertIn(f'for="tab-{name}"', page)
 
     def test_every_panel_has_a_rule_that_shows_it(self):
         page = report_html.render(self._data())
-        for tab, panel in (("tab-server", "panel-server"),
-                           ("tab-profiles", "panel-profiles"),
-                           ("tab-technical", "panel-technical")):
-            self.assertIn(f"#{tab}:checked ~ #{panel}", page)
+        for name in self.TABS:
+            self.assertIn(f"#tab-{name}:checked ~ #panel-{name}", page)
 
     def test_no_javascript_is_used(self):
         page = report_html.render(self._data())
@@ -1260,11 +1259,16 @@ class TabsTest(RenderTest):
                     "swap_total_mb": 0, "swap_used_mb": 0})
         page = report_html.render(data)
         server_panel = page.split('id="panel-server"')[1].split("</section>")[0]
+        schedules_panel = page.split('id="panel-schedules"')[1].split("</section>")[0]
         profiles_panel = page.split('id="panel-profiles"')[1].split("</section>")[0]
         technical_panel = page.split('id="panel-technical"')[1].split("</section>")[0]
 
-        self.assertIn("Scheduled loops", server_panel)
         self.assertIn("Top memory use", server_panel)
+        # The loop timetable is a schedule, not a machine reading -- it moved off
+        # the Server tab when Schedules got one of its own.
+        self.assertIn("When each loop runs", schedules_panel)
+        self.assertIn("When each model posts", schedules_panel)
+        self.assertNotIn("When each loop runs", server_panel)
         self.assertIn("What the words mean", profiles_panel)
         self.assertIn("Content stock", technical_panel)
         self.assertIn("Loop health", technical_panel)
@@ -1952,6 +1956,30 @@ class ModelSchedulesTest(unittest.TestCase):
     def test_no_airtable_client_says_so(self):
         self.assertEqual(report.model_schedules(None)["error"], "no Airtable client")
 
+    def _with_slot_zone(self, tz):
+        """Run against a slot timezone of our choosing, whatever the box is in."""
+        from adb_bot.automation import queue_runner
+        airtable = self.FakeAirtable(
+            profiles={"laila": [{"profile_id": "p1", "handle": "Laila 1"}]},
+            schedules={"laila": {"times": ["09:00"], "per_day": None}})
+        with mock.patch.object(queue_runner, "_zone", return_value=tz):
+            report.invalidate_cache()
+            return self._run(airtable)
+
+    def test_slots_in_the_servers_own_clock_are_not_flagged(self):
+        """"CEST" and "Europe/Berlin" name one clock, so the comparison is on
+        offsets -- on names it would cry wolf every summer."""
+        local = datetime.now().astimezone().tzinfo
+        self.assertTrue(self._with_slot_zone(local)["same_clock"])
+
+    def test_slots_in_another_clock_are_flagged(self):
+        """This box runs UTC while the slots are Berlin, and two tables of times
+        on one tab that are an hour apart have to say so."""
+        far = timezone(timedelta(hours=12))
+        data = self._with_slot_zone(far)
+        self.assertFalse(data["same_clock"])
+        self.assertTrue(data["server_timezone"])
+
     def test_a_failure_is_reported_in_place_and_never_raised(self):
         class Broken:
             def active_accounts_by_model(self):
@@ -2009,9 +2037,10 @@ class SchedulesRenderTest(RenderTest):
         entry.update(kw)
         return entry
 
-    def test_the_section_is_on_the_page(self):
+    def test_the_section_has_its_own_tab(self):
         page = report_html.render(self._schedules([self._model()]))
-        self.assertIn("<h2>Schedules</h2>", page)
+        self.assertIn('<label for="tab-schedules">Schedules</label>', page)
+        self.assertIn("<h2>When each model posts</h2>", page)
         self.assertIn("09:00, 17:00", page)
         self.assertIn("Europe/Berlin", page)
 
@@ -2089,3 +2118,82 @@ class CollectSchedulesTest(CollectTest):
 
         data = self._collect(airtable=Broken())
         self.assertEqual(data["schedules"]["models"], [])
+
+
+class TimerScheduleDetailTest(unittest.TestCase):
+    """"Every 30 min" and a bare timestamp do not answer "when does the pipeline
+    run next" without the reader doing arithmetic against the wall clock."""
+
+    def test_a_countdown_is_derived_from_the_next_run(self):
+        now = datetime(2026, 8, 6, 15, 0, 0)
+        self.assertEqual(report._seconds_until("2026-08-06 15:09:42", now), 582.0)
+
+    def test_a_time_already_passed_is_zero_not_negative(self):
+        """The timer is firing, not overdue -- systemd's NEXT can lag a second
+        behind the service it just started."""
+        now = datetime(2026, 8, 6, 15, 10, 0)
+        self.assertEqual(report._seconds_until("2026-08-06 15:09:42", now), 0.0)
+
+    def test_no_next_run_is_zero_rather_than_an_exception(self):
+        self.assertEqual(report._seconds_until("", datetime(2026, 8, 6, 15, 0, 0)), 0.0)
+        self.assertEqual(report._seconds_until("running now", datetime(2026, 8, 6, 15, 0)), 0.0)
+
+    def test_daily_loops_carry_the_hour_they_run_at(self):
+        """"daily" is the one cadence on the table nobody can act on."""
+        states = {row["loop"]: row for row in report.timer_states()}
+        self.assertEqual(states["cleanup"]["at"], "04:00")
+        self.assertEqual(states["mlx-sync"]["at"], "23:30")
+        self.assertEqual(states["posting"]["at"], "")
+
+
+class TimerRenderDetailTest(RenderTest):
+    def _timer(self, **kw):
+        row = {"loop": "pipeline", "state": "active", "interval_min": 30,
+               "last": "2026-08-06 14:39:42", "next": "2026-08-06 15:09:42",
+               "stopped": False, "seconds_until": 582.0, "at": ""}
+        row.update(kw)
+        return self._data(timers=[row])
+
+    def test_a_frequent_loop_shows_its_cadence_and_a_countdown(self):
+        page = report_html.render(self._timer())
+        self.assertIn("every 30 min", page)
+        self.assertIn("2026-08-06 15:09:42", page)
+        self.assertIn("9m 42s", page)
+
+    def test_a_daily_loop_says_what_time(self):
+        page = report_html.render(self._timer(
+            loop="cleanup", interval_min=1440, at="04:00", seconds_until=45000.0))
+        self.assertIn("daily at 04:00", page)
+        self.assertNotIn(">daily<", page)
+
+    def test_a_loop_mid_run_has_no_countdown_to_show(self):
+        """systemd blanks NEXT while the timer's own service is running."""
+        page = report_html.render(self._timer(next="", seconds_until=0.0))
+        self.assertIn("running now", page)
+
+    def test_the_two_tables_say_which_clock_they_are_in(self):
+        """The box runs UTC and the posting slots are Berlin; two tables of times
+        on one tab that are not in the same clock have to say so."""
+        page = report_html.render(self._data(
+            timers=[{"loop": "posting", "state": "active", "interval_min": 5,
+                     "last": "x", "next": "y", "stopped": False,
+                     "seconds_until": 60.0, "at": ""}],
+            schedules={"models": [{"model": "Laila", "times": ["09:00"], "flexible": False,
+                                   "per_day": 1, "profiles": 2, "posts_per_day": 2,
+                                   "free": 4, "known": True, "raw_folder": "", "next": "09:00"}],
+                       "timezone": "Europe/Berlin", "server_timezone": "UTC",
+                       "same_clock": False,
+                       "per_model": True, "fallback": [], "error": ""}))
+        self.assertIn("The server's own clock is UTC", page)
+        self.assertIn("not the same times as the loop timetable above", page)
+
+    def test_one_clock_is_not_announced_as_two(self):
+        """"CEST" and "Europe/Berlin" are the same clock spelled two ways, so the
+        collector compares offsets and the renderer trusts it."""
+        page = report_html.render(self._data(schedules={
+            "models": [{"model": "Laila", "times": ["09:00"], "flexible": False,
+                        "per_day": 1, "profiles": 2, "posts_per_day": 2, "free": 4,
+                        "known": True, "raw_folder": "", "next": "09:00"}],
+            "timezone": "Europe/Berlin", "server_timezone": "CEST", "same_clock": True,
+            "per_model": True, "fallback": [], "error": ""}))
+        self.assertNotIn("are not the same times", page)
