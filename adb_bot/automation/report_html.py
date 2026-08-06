@@ -723,18 +723,31 @@ def _section_content(content: dict) -> str:
             f"<td class='num'><strong>{held}</strong></td></tr></table></div>")
 
 
+def _refresh_words(seconds: int) -> str:
+    """`30s` / `5 min` -- the page says how often it moves, in the reader's units."""
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    return f"{minutes} min" if minutes > 1 else "1 min"
+
+
 def render(data: dict, *, live: bool = True, title: str = "ADB bot",
-           standalone: bool = True) -> str:
+           standalone: bool = True, refresh_seconds: int = REFRESH_SECONDS) -> str:
     """The whole page.
 
     `live` adds the meta-refresh; a snapshot must not have one -- a shared copy
     that reloads itself once it is off the box just goes blank.
 
+    `refresh_seconds` is both the meta-refresh and what the header claims, so a
+    host that rebuilds on a slower beat than the loopback server (the public
+    site rebuilds every five minutes) cannot promise a freshness it does not
+    deliver.
+
     `standalone=False` returns the style and body content *without* the document
     skeleton, for hosts that supply their own `<html>`/`<head>`/`<body>`. Same
     markup either way, so the shared copy and the local one cannot drift.
     """
-    refresh = (f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">' if live else "")
+    refresh = (f'<meta http-equiv="refresh" content="{refresh_seconds}">' if live else "")
     triage = data.get("needs_human") or {}
     waiting = len(triage.get("rows") or []) + len(triage.get("profiles") or [])
     bad = data["health"]["bad"]
@@ -755,7 +768,8 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
                    f'<span class="mono">{_e(data["airtable_error"])}</span> — '
                    f'the local sections below are still accurate.</p>')
 
-    mode = "live, refreshes every 30s" if live else "snapshot — not live"
+    mode = (f"live, refreshes every {_refresh_words(refresh_seconds)}"
+            if live else "snapshot — not live")
     flagged = len((data.get("needs_human") or {}).get("profiles") or [])
     badge = f'<span class="count">{flagged}</span>' if flagged else ""
 

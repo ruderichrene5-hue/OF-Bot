@@ -7,6 +7,7 @@ without importing each other.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -120,6 +121,13 @@ def unit_name(loop: str, kind: str = "service") -> str:
 
 
 def repo_root() -> Path:
+    # A checkout that is only *running* the code -- the public site serves from
+    # its own worktree so a session cleanup cannot take the website with it --
+    # still has to read the live box's logs. Without this it would report on its
+    # own empty `logs/` and swear the machine had done nothing all day.
+    override = os.environ.get("ADBBOT_REPO_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
     # adb_bot/automation/schedule_spec.py -> repo root is two parents up from adb_bot.
     return Path(__file__).resolve().parents[2]
 
