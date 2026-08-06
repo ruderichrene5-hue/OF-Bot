@@ -1,0 +1,24 @@
+[Unit]
+Description=ADB bot public dashboard (password-gated report on :8088)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Code from the pinned deploy copy; logs and state from the live checkout.
+WorkingDirectory=/opt/adbbot-site
+Environment=PYTHONPATH=/opt/adbbot-site
+Environment=PYTHONUNBUFFERED=1
+Environment=ADBBOT_REPO_ROOT=/root/adb_bot
+EnvironmentFile=/etc/adbbot/env
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.site --refresh 300
+Restart=always
+RestartSec=10
+# Read-only to everything it does not need. The dashboard reports; it never writes.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

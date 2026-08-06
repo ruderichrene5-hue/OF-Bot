@@ -341,6 +341,23 @@ Equivalent from PowerShell: `.\deploy\scheduler\install_tasks.ps1 [-Apply]`.
 `ssh -X`, or attach via VNC, then `./run_ui.sh`. Everything except the UI runs
 headlessly.
 
+**The dashboard, two ways** — `adbbot-report.service` renders the report on
+`127.0.0.1:8080`, per request, no password: reach it with
+`ssh -N -L 8080:localhost:8080 <box>`. `adbbot-site.service` is the same page on
+`0.0.0.0:8088` behind a password, rebuilt every five minutes and served from
+memory so a public port cannot spend the Airtable quota. Its password hash and
+cookie secret live in `/etc/adbbot/env`
+(`ADBBOT_SITE_PASSWORD_HASH`, `ADBBOT_SITE_SECRET`); make new ones with
+`python -m adb_bot.automation.site --hash-password`, then
+`systemctl restart adbbot-site`. It serves plain HTTP — put Caddy in front of it
+if the box ever gets a domain name. The site runs from a pinned copy at
+`/opt/adbbot-site` (see `DEPLOYED_FROM`), so redeploy it after changing the
+report code:
+
+```
+git -C /root/adb_bot archive HEAD | tar -x -C /opt/adbbot-site && systemctl restart adbbot-site
+```
+
 **Safety net:** any loop can be reverted to dry-run at any time — Scheduler
 window, tick dry-run, Apply (or re-run the installer without `--apply`). That
 stops all device and Airtable writes without uninstalling anything.
