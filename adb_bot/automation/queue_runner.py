@@ -200,6 +200,25 @@ def _slot_label_from_name(value) -> str | None:
         return None
 
 
+def _row_day(row: dict, fields: dict, tz) -> str | None:
+    """The local day a queue row belongs to, ``YYYY-MM-DD``.
+
+    Airtable's `createdTime` is preferred over Scheduled DateTime because the
+    retry pass moves the schedule and nothing moves the creation stamp. It is
+    what makes the label guard below per-day: keyed on the slot label alone, a
+    ``Jil 1 / 18:00`` row created today blocked the 18:00 slot on every future
+    day as well, because the queue reads the Posting Queue in full and nothing
+    deletes yesterday's rows -- so each target served each slot once, ever.
+    Rows made before this (and rows in tests) carry no createdTime, so the
+    scheduled day stands in.
+    """
+    moment = _parse_dt(row.get("createdTime")) or _parse_dt(fields.get(at.F_PQ_SCHEDULED))
+    if moment is None:
+        return None
+    moment = moment.replace(tzinfo=timezone.utc) if moment.tzinfo is None else moment
+    return moment.astimezone(tz).strftime("%Y-%m-%d")
+
+
 def _variant_target_key(variant: dict) -> tuple | None:
     """Which target a Spoof Variant belongs to. Profile link wins if both are
     set (same precedence as create_spoof_variant / the posting planner)."""
@@ -240,6 +259,11 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
     if not due:
         return report
 
+    # The local day being planned. The label guard below is scoped to it, so
+    # yesterday's rows guard yesterday and today starts with every slot open.
+    local_now = now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
+    today = local_now.strftime("%Y-%m-%d")
+
     # --- guard state from the existing queue -------------------------------
     held_variants: dict = {}
     filled: set = set()
@@ -266,9 +290,16 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
         # never caught it because the clips differ. The Name ("<target> / HH:MM")
         # is written once at creation and never rewritten, so it still says which
         # slot the row belongs to. Found live 2026-08-04: six such duplicates.
+        #
+        # Keyed with the row's DAY as well (see _row_day): the label alone is
+        # the same string every day, so yesterday's "Jil 1 / 18:00" made today's
+        # 18:00 slot look served -- permanently, since nothing deletes old rows.
+        # Found live 2026-08-06: the 18:00 slot had 0 of 52 accounts left.
         label = _slot_label_from_name(fields.get(at.F_PQ_NAME))
         if key and label:
-            filled_labels.add((key, label))
+            day = _row_day(row, fields, tz)
+            if day:
+                filled_labels.add((key, day, label))
 
     # --- the pool of variants each target may draw from --------------------
     # Oldest first: the queue works through the content backlog in the order it
@@ -312,7 +343,7 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
         pool = pools.get(target.key, [])
         for label, moment in due:
             slot_key = _slot_key(moment)
-            if (target.key, slot_key) in filled or (target.key, label) in filled_labels:
+            if (target.key, slot_key) in filled or (target.key, today, label) in filled_labels:
                 continue
             if not pool:
                 # One skip per target, not per slot: a target waiting on the
