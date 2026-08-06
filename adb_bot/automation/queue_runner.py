@@ -27,7 +27,7 @@ the runner: it fetches, plans, and (outside dry-run) writes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from adb_bot.automation.posting_planner import _first_link, _parse_dt
@@ -37,7 +37,23 @@ from adb_bot.clients import airtable as at
 # per-model spacing: two hours apart across the 09:00-21:00 posting day, seven
 # reels per model per day. (Was five slots three hours apart, mirroring the
 # Airtable automations this replaces.)
+#
+# This is the FALLBACK grid now: when Airtable carries per-model times
+# (Models.Reel Post Times), each model brings its own -- see ModelSchedule.
 DEFAULT_SLOT_TIMES = ("09:00", "11:00", "13:00", "15:00", "17:00", "19:00", "21:00")
+
+# A model with no times picked is not "off" -- it posts whenever a spoofed video
+# is available. Two bounds keep that from emptying the whole variant pool in an
+# afternoon, because the queue loop runs every 15 minutes and the posting loop
+# takes any row whose Scheduled DateTime has passed:
+#
+# - a minimum gap between one flexible post and the next, matching the two hours
+#   the standing grid puts between slots;
+# - a daily cap, defaulting to the number of slots that grid has, so a flexible
+#   model posts the same volume per day as a scheduled one, just at times the
+#   bot chooses. Models.Reels Per Day overrides it per model.
+DEFAULT_ANYTIME_GAP_MINUTES = 120
+DEFAULT_ANYTIME_MAX_PER_DAY = len(DEFAULT_SLOT_TIMES)
 
 # Slots are wall-clock times for the audience, not for the server: the same
 # 09:00 has to mean 09:00 in Berlin whether the box runs on UTC or local time.
@@ -66,12 +82,53 @@ VARIANT_HELD_BY = (at.POST_STATUS_PENDING, at.POST_STATUS_VERIFYING,
                    at.POST_STATUS_POSTED, at.POST_STATUS_FAILED)
 
 
+@dataclass(frozen=True)
+class ModelSchedule:
+    """When one model's reels go out, as chosen in Airtable.
+
+    `times` empty is the flexible mode ("anytime a video is available"), not an
+    off switch -- an empty Reel Post Times is the default state of every model
+    row, and a model nobody has scheduled yet should still post.
+    """
+    times: tuple = ()               # ('09:00', '13:00'), local wall clock
+    per_day: int | None = None      # flexible mode only; None = the caller's default
+
+    @property
+    def is_flexible(self) -> bool:
+        return not self.times
+
+
+def schedules_from_airtable(raw) -> dict | None:
+    """`AirtableClient.reel_schedules_by_model()` -> {model key: ModelSchedule}.
+
+    Passes None straight through: that is the client saying the base has no
+    per-model times at all, and the caller must keep its single global grid
+    rather than treat every model as flexible.
+    """
+    if raw is None:
+        return None
+    out: dict = {}
+    for model_key, entry in (raw or {}).items():
+        entry = entry or {}
+        # Through parse_slot_times so a hand-typed or malformed choice is dropped
+        # the same way `--slots` handles one, instead of crashing the loop.
+        times = tuple(t.strftime("%H:%M") for t in parse_slot_times(entry.get("times") or ()))
+        per_day = entry.get("per_day")
+        try:
+            per_day = int(per_day) if per_day is not None else None
+        except (TypeError, ValueError):
+            per_day = None
+        out[str(model_key).strip().lower()] = ModelSchedule(times=times, per_day=per_day)
+    return out
+
+
 @dataclass
 class SlotTarget:
     """One thing that gets posts scheduled for it: an Account or an MLX profile."""
     kind: str          # TARGET_ACCOUNT | TARGET_PROFILE
     record_id: str
     name: str          # handle / profile name -- for logs and the row's Name
+    model_key: str = ""  # lower-cased model name, to find this target's schedule
 
     @property
     def key(self) -> tuple:
@@ -98,13 +155,15 @@ class QueueReport:
     rows_created: int = 0                           # written (or would-be, on a dry run)
     targets: int = 0
     slots_due: int = 0
+    flexible_targets: int = 0                       # targets whose model picked no times
     skipped: list = field(default_factory=list)     # (target/variant name, reason)
     errors: list = field(default_factory=list)      # (name, message)
     dry_run: bool = True
 
     def summary(self) -> str:
         mode = "DRY-RUN" if self.dry_run else "APPLIED"
-        return (f"[{mode}] targets={self.targets} slots_due={self.slots_due} "
+        flexible = f" flexible={self.flexible_targets}" if self.flexible_targets else ""
+        return (f"[{mode}] targets={self.targets} slots_due={self.slots_due}{flexible} "
                 f"rows={self.rows_created} skipped={len(self.skipped)} errors={len(self.errors)}")
 
 
@@ -200,6 +259,32 @@ def _slot_label_from_name(value) -> str | None:
         return None
 
 
+def _as_utc(moment, tz):
+    """A datetime as an aware UTC instant; naive input is read as local `tz`."""
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=tz)
+    return moment.astimezone(timezone.utc)
+
+
+def _row_day(row: dict, fields: dict, tz) -> str | None:
+    """The local day a queue row belongs to, ``YYYY-MM-DD``.
+
+    Airtable's `createdTime` is preferred over Scheduled DateTime because the
+    retry pass moves the schedule and nothing moves the creation stamp. It is
+    what makes the guards below per-day: keyed on the slot label alone, a
+    ``Jil 1 / 09:00`` row created today blocked the 09:00 slot on every future
+    day as well, because the queue reads the Posting Queue in full and nothing
+    deletes yesterday's rows -- so each target would have posted each slot once,
+    ever. Rows made before this (and rows in tests) carry no createdTime, so the
+    scheduled day stands in.
+    """
+    moment = _parse_dt(row.get("createdTime")) or _parse_dt(fields.get(at.F_PQ_SCHEDULED))
+    moment = _as_utc(moment, tz)
+    return moment.astimezone(tz).strftime("%Y-%m-%d") if moment else None
+
+
 def _variant_target_key(variant: dict) -> tuple | None:
     """Which target a Spoof Variant belongs to. Profile link wins if both are
     set (same precedence as create_spoof_variant / the posting planner)."""
@@ -211,13 +296,29 @@ def _variant_target_key(variant: dict) -> tuple | None:
 
 
 def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
-                   slot_times=DEFAULT_SLOT_TIMES, tz=None) -> QueueReport:
+                   slot_times=DEFAULT_SLOT_TIMES, tz=None, schedules=None,
+                   anytime_gap_minutes: int = DEFAULT_ANYTIME_GAP_MINUTES,
+                   anytime_max_per_day: int = DEFAULT_ANYTIME_MAX_PER_DAY) -> QueueReport:
     """Decide which Posting Queue rows should exist right now. Pure: no writes.
 
     - `targets`: [SlotTarget] -- already filtered for eligibility by the caller
     - `variants`: [{'id', 'account_id', 'profile_id', 'status'}] -- Ready ones
     - `queue_rows`: existing Posting Queue rows ({'id', 'fields'}), **all
       statuses** -- see the two guards below
+    - `schedules`: {model key: ModelSchedule} from Airtable, or **None** when the
+      base has no per-model times and every target runs on `slot_times`
+
+    Each target's day comes from its model (`schedules`), so two models can post
+    at completely different times:
+
+    - **times picked** -> one row per picked time that has come round today.
+    - **no times picked** -> flexible: one row scheduled *now* whenever a Ready
+      variant is free, at most `anytime_max_per_day` a day (or the model's own
+      `per_day`) and never inside `anytime_gap_minutes` of that target's last
+      scheduled post. This is the "post it whenever there is a video" mode, and
+      those two bounds are the only thing pacing it -- the posting loop takes any
+      row whose Scheduled DateTime has passed, so an unbounded flexible target
+      would drain its whole variant pool within an hour.
 
     Two things must never happen, and both are decided here:
 
@@ -232,18 +333,34 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
     """
     tz = tz or _zone(DEFAULT_TIMEZONE)
     now = now or datetime.now(tz)
+    local_now = now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
+    now_utc = _as_utc(now, tz)
+    today = local_now.strftime("%Y-%m-%d")
     report = QueueReport(dry_run=True)
     report.targets = len(targets)
 
-    due = due_slots(now, slot_times, tz)
-    report.slots_due = len(due)
-    if not due:
-        return report
+    due_cache: dict = {}
+
+    def due_for(times) -> list:
+        """Today's due slots for one set of times, computed once per set."""
+        key = tuple(times)
+        if key not in due_cache:
+            due_cache[key] = due_slots(now, times, tz)
+        return due_cache[key]
+
+    if schedules is None:
+        # One grid for every target: what this loop did before per-model times,
+        # and what a base without the Reel Post Times field keeps doing.
+        report.slots_due = len(due_for(slot_times))
+        if not report.slots_due:
+            return report
 
     # --- guard state from the existing queue -------------------------------
     held_variants: dict = {}
     filled: set = set()
     filled_labels: set = set()
+    rows_on_day: dict = {}       # (target key, YYYY-MM-DD) -> rows -- the daily cap
+    last_scheduled: dict = {}    # target key -> latest scheduled instant -- the gap
     for row in queue_rows or []:
         fields = row.get("fields", {}) or {}
         status = at._select_name(fields.get(at.F_PQ_POST_STATUS))
@@ -257,6 +374,13 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
         slot_key = _slot_key(fields.get(at.F_PQ_SCHEDULED))
         if key and slot_key:
             filled.add((key, slot_key))
+        if key:
+            day = _row_day(row, fields, tz)
+            if day:
+                rows_on_day[(key, day)] = rows_on_day.get((key, day), 0) + 1
+            scheduled = _as_utc(_parse_dt(fields.get(at.F_PQ_SCHEDULED)), tz)
+            if scheduled and scheduled > last_scheduled.get(key, scheduled - timedelta(seconds=1)):
+                last_scheduled[key] = scheduled
         # ...and again by the slot LABEL the row was created for. Scheduled
         # DateTime is not stable: the retry pass re-queues a failed row at
         # now+backoff, which moves it off its slot's timestamp. Keyed only on
@@ -266,9 +390,15 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
         # never caught it because the clips differ. The Name ("<target> / HH:MM")
         # is written once at creation and never rewritten, so it still says which
         # slot the row belongs to. Found live 2026-08-04: six such duplicates.
+        #
+        # Keyed with the row's DAY as well (see _row_day): the label alone is the
+        # same string every day, so yesterday's "Jil 1 / 09:00" made today's
+        # 09:00 slot look served.
         label = _slot_label_from_name(fields.get(at.F_PQ_NAME))
         if key and label:
-            filled_labels.add((key, label))
+            day = _row_day(row, fields, tz)
+            if day:
+                filled_labels.add((key, day, label))
 
     # --- the pool of variants each target may draw from --------------------
     # Oldest first: the queue works through the content backlog in the order it
@@ -307,27 +437,61 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
             continue
         pools.setdefault(key, []).append(variant_id)
 
+    def no_content_reason(target, when: str) -> str:
+        """Why a target that is owed a row gets none. Two different problems:
+        nothing spoofed yet (the pipeline owes us one) versus media an existing
+        row still owns -- a Failed holder is the retry pass's to recover or to
+        give up on, and queueing a fresh row for the same clip would race it."""
+        holders = tied_up.get(target.key)
+        if holders:
+            return ("its Ready variant(s) belong to an existing "
+                    f"{'/'.join(sorted(holders))} row ({when})")
+        return f"no unused Ready Spoof Variant ({when})"
+
+    gap = timedelta(minutes=max(0, int(anytime_gap_minutes or 0)))
+
     # --- one row per unfilled due slot -------------------------------------
     for target in sorted(targets, key=lambda t: (t.name or "", t.record_id)):
         pool = pools.get(target.key, [])
-        for label, moment in due:
+        schedule = schedules.get(target.model_key or "") if schedules is not None else None
+
+        # A model with no row in `schedules` is treated exactly like one whose
+        # times are empty: a target nobody has scheduled still posts.
+        if schedules is not None and (schedule is None or schedule.is_flexible):
+            report.flexible_targets += 1
+            cap = schedule.per_day if (schedule and schedule.per_day) else anytime_max_per_day
+            if cap and rows_on_day.get((target.key, today), 0) >= cap:
+                report.skipped.append((target.name, f"no fixed post times, and today's {cap} post(s) are queued already"))
+                continue
+            last = last_scheduled.get(target.key)
+            if last is not None and now_utc - last < gap:
+                wait = int((gap - (now_utc - last)).total_seconds() // 60) + 1
+                report.skipped.append((target.name, "no fixed post times; the last post is too "
+                                                    f"recent (next one in ~{wait} min)"))
+                continue
+            if not pool:
+                report.skipped.append((target.name, no_content_reason(target, "no fixed post times, nothing ready to post now")))
+                continue
+            # Scheduled for now, so the posting loop takes it on its next tick --
+            # "whenever a video is available" is the whole point of this mode.
+            moment = local_now.replace(second=0, microsecond=0)
+            report.planned.append(PlannedRow(
+                target=target,
+                slot=moment.strftime("%H:%M"),
+                scheduled=moment.astimezone(timezone.utc).isoformat(),
+                variant_id=pool.pop(0),
+            ))
+            continue
+
+        for label, moment in due_for(schedule.times if schedule is not None else slot_times):
             slot_key = _slot_key(moment)
-            if (target.key, slot_key) in filled or (target.key, label) in filled_labels:
+            if (target.key, slot_key) in filled or (target.key, today, label) in filled_labels:
                 continue
             if not pool:
                 # One skip per target, not per slot: a target waiting on the
                 # spoof pipeline would otherwise add five identical lines to
                 # every run's log and bury the skips that mean something.
-                holders = tied_up.get(target.key)
-                if holders:
-                    # Not "no media" -- media that an existing row still owns.
-                    # A Failed holder is the retry pass's to recover or to give
-                    # up on; queueing a fresh row for the same clip would race it.
-                    reason = ("its Ready variant(s) belong to an existing "
-                              f"{'/'.join(sorted(holders))} row (from the {label} slot on)")
-                else:
-                    reason = f"no unused Ready Spoof Variant (from the {label} slot on)"
-                report.skipped.append((target.name, reason))
+                report.skipped.append((target.name, no_content_reason(target, f"from the {label} slot on")))
                 break
             report.planned.append(PlannedRow(
                 target=target,
@@ -337,6 +501,10 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
                 scheduled=moment.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
                 variant_id=pool.pop(0),
             ))
+
+    if schedules is not None:
+        # Every distinct time that came round today across the models' own grids.
+        report.slots_due = len({label for due in due_cache.values() for label, _ in due})
 
     return report
 
@@ -352,25 +520,38 @@ def collect_targets(airtable, include_profiles: bool = True) -> list:
     Profiles come from ``profile_targets_by_model()`` (MLX inventory, link
     profiles and profiles without an MLX API ID excluded). They carry no health
     guards: there is no Accounts row to hold that state.
+
+    Both are keyed by lower-cased model name, and that key is kept on the target:
+    it is how a row finds its model's Reel Post Times later.
     """
     targets: list = []
-    for entries in (airtable.active_accounts_by_model() or {}).values():
+    for model_key, entries in (airtable.active_accounts_by_model() or {}).items():
         for entry in entries:
-            targets.append(SlotTarget(TARGET_ACCOUNT, entry["account_id"], entry.get("handle") or entry["account_id"]))
+            targets.append(SlotTarget(TARGET_ACCOUNT, entry["account_id"],
+                                      entry.get("handle") or entry["account_id"], model_key))
     if include_profiles:
-        for entries in (airtable.profile_targets_by_model() or {}).values():
+        for model_key, entries in (airtable.profile_targets_by_model() or {}).items():
             for entry in entries:
-                targets.append(SlotTarget(TARGET_PROFILE, entry["profile_id"], entry.get("handle") or entry["profile_id"]))
+                targets.append(SlotTarget(TARGET_PROFILE, entry["profile_id"],
+                                          entry.get("handle") or entry["profile_id"], model_key))
     return targets
 
 
 def run_queue_slots(airtable, logger, slot_times=DEFAULT_SLOT_TIMES,
                     timezone_name: str = DEFAULT_TIMEZONE, now: datetime | None = None,
-                    dry_run: bool = True, include_profiles: bool = True) -> QueueReport:
+                    dry_run: bool = True, include_profiles: bool = True,
+                    use_model_times: bool = True,
+                    anytime_gap_minutes: int = DEFAULT_ANYTIME_GAP_MINUTES,
+                    anytime_max_per_day: int = DEFAULT_ANYTIME_MAX_PER_DAY) -> QueueReport:
     """Create the Posting Queue rows for today's slots that have come round.
 
     Entry point for the loop (`run_loop` wires the CLI). Dry-run is the default
     and writes nothing -- it reports exactly the rows an --apply run would make.
+
+    Times come from each model's `Reel Post Times` in Airtable, so the people
+    running the base decide when a model posts without touching a timer or a
+    command line. `slot_times` is the fallback for a base that has no such field,
+    and `use_model_times=False` forces that fallback for one run.
 
     Caption is deliberately left unset: the posting planner treats it as
     optional, and inventing a caption rotation here would put text on posts that
@@ -393,8 +574,25 @@ def run_queue_slots(airtable, logger, slot_times=DEFAULT_SLOT_TIMES,
         report.errors.append(("<airtable>", str(exc)))
         return report
 
+    schedules = None
+    if use_model_times:
+        reader = getattr(airtable, "reel_schedules_by_model", None)
+        schedules = schedules_from_airtable(reader() if reader else None)
+    if schedules is None:
+        logger.info("queue: no per-model reel times in this base; using the %s slot grid",
+                    ",".join(str(s) for s in slot_times))
+    else:
+        scheduled_models = sorted(k for k, s in schedules.items() if s.times)
+        logger.info("queue: per-model reel times for %d model(s)%s; the rest post whenever "
+                    "a video is ready (max %s/day, %s min apart)",
+                    len(scheduled_models),
+                    f" ({', '.join(scheduled_models)})" if scheduled_models else "",
+                    anytime_max_per_day, anytime_gap_minutes)
+
     report = plan_slot_rows(targets, variants, queue_rows, now=now,
-                            slot_times=slot_times, tz=tz)
+                            slot_times=slot_times, tz=tz, schedules=schedules,
+                            anytime_gap_minutes=anytime_gap_minutes,
+                            anytime_max_per_day=anytime_max_per_day)
     report.dry_run = dry_run
 
     for skip in report.skipped:

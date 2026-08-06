@@ -109,6 +109,44 @@ DESCRIPTIONS = {
     "reap-phones": "ADB bot orphan-phone reaper (closes abandoned phones)",
 }
 
+# The same loops in words, for a person rather than a unit file. DESCRIPTIONS
+# above is the systemd `Description=` line -- a label, written in the vocabulary
+# of the table names it moves rows between, which only helps someone who already
+# knows what those tables are. This is what the dashboard shows when you ask
+# what a loop does, so each one says what it acts on, what it produces, and the
+# thing that would be surprising if you assumed otherwise.
+WHAT_IT_DOES = {
+    "posting": "Takes the Posting Queue rows that are due, launches each profile's "
+               "phone and posts its reel. Runs up to 10 phones at once, so a slot "
+               "of 40 posts is not 40 times one post.",
+    "recheck": "Settles posts that could not be proven at the time. The phone is "
+               "reopened ~15 minutes later and the row moves from Verifying to "
+               "Posted or Failed -- without this they sit in Verifying forever.",
+    "queue": "Turns spoofed variants into Posting Queue rows at each model's "
+             "scheduled times. Runs several times per slot so a slot never opens "
+             "on an empty queue.",
+    "retry": "Puts retryable Failed rows back to Pending. Most failures are "
+             "transient -- a device offline, an MLX hiccup -- so they are worth "
+             "one more go; after 3 attempts the row is left for a person.",
+    "warmup": "Works a new account through its Day 1-4 lifecycle plan: the "
+              "browsing and liking that make an account look used before it is "
+              "asked to post anything.",
+    "pipeline": "Spoofs new raw clips from Drive -- one unique encode per active "
+                "profile, because two accounts posting the same file is what gets "
+                "them flagged. The expensive loop: it is the one that pins the CPU.",
+    "mlx-sync": "Sweeps the MultiLogin inventory into Airtable overnight so the "
+                "Profiles table matches the phones that actually exist.",
+    "cleanup": "Deletes media the bot has finished with (older than 2 days). It is "
+               "the only thing standing between the spoofed-video folder and a "
+               "full disk.",
+    "doctor": "The preflight checks, on a timer instead of only when somebody asks: "
+              "MLX agent listening, Airtable readable, Drive reachable, spoofer "
+              "configured. It raises the alert rather than waiting to be noticed.",
+    "reap-phones": "Closes phones no loop owns any more. Nothing else does -- the "
+                   "run that would have closed them died -- and a leaked phone holds "
+                   "a MultiLogin session open on a real account for hours.",
+}
+
 
 def task_name(loop: str) -> str:
     """Windows Task Scheduler name."""
@@ -159,6 +197,13 @@ def python_exe() -> str:
 # only 11 Accounts rows exist and none is Active -- so on the default the
 # pipeline builds no variants and the queue finds no targets, forever, quietly.
 #
+# `--slots` is now only a FALLBACK (2026-08-06). Posting times live in Airtable,
+# per model: `Models.Reel Post Times`. As soon as that field exists in the base,
+# every model's own pick decides its day and this grid is not consulted at all --
+# a model with nothing picked posts whenever it has a spoofed video instead. The
+# times below therefore only still apply to a base without the field.
+#
+# The original note, for why these three times were chosen:
 # `--slots`: TONIGHT'S GRID ONLY (2026-08-05). 140 fresh variants finish
 # spoofing at ~17:30 Berlin (the Nikki/Corina clips encode at ~29s each, far
 # slower than the ~6s of the other models), and `due_slots` only creates rows

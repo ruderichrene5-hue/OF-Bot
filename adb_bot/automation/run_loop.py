@@ -234,6 +234,13 @@ def _run_queue(args, logger) -> int:
         slot_times=queue_runner.parse_slot_times(args.slots) if args.slots else queue_runner.DEFAULT_SLOT_TIMES,
         dry_run=not args.apply,
         include_profiles=args.targets != "accounts",
+        # Each model's own Reel Post Times win over `--slots`; a model that has
+        # picked none posts whenever it has a spoofed video, inside these bounds.
+        use_model_times=args.model_times,
+        anytime_gap_minutes=(queue_runner.DEFAULT_ANYTIME_GAP_MINUTES
+                             if args.anytime_gap is None else args.anytime_gap),
+        anytime_max_per_day=(queue_runner.DEFAULT_ANYTIME_MAX_PER_DAY
+                             if args.anytime_max is None else args.anytime_max),
     )
     for name, reason in report.skipped:
         logger.info("queue: skipped %s: %s", name, reason)
@@ -467,7 +474,18 @@ def main(argv=None) -> int:
                         help="pipeline: restrict to these target handles (comma-separated, "
                              "e.g. 'Jil 1'). Use to try one profile end to end.")
     parser.add_argument("--slots", default=None,
-                        help="queue: comma-separated slot times (default 09:00,12:00,15:00,18:00,21:00).")
+                        help="queue: comma-separated fallback slot times, used only for a base "
+                             "with no per-model Reel Post Times (default 09:00,11:00,...,21:00).")
+    parser.add_argument("--model-times", action=argparse.BooleanOptionalAction, default=True,
+                        help="queue: take each model's posting times from Airtable "
+                             "(Models.Reel Post Times). --no-model-times puts every model back "
+                             "on the one --slots grid for this run.")
+    parser.add_argument("--anytime-gap", type=int, default=None,
+                        help="queue: minutes between posts for a model that picked no times "
+                             "(default 120).")
+    parser.add_argument("--anytime-max", type=int, default=None,
+                        help="queue: most posts per day for a model that picked no times "
+                             "(default 7; Models.Reels Per Day overrides it per model).")
     parser.add_argument("--max-retries", type=int, default=3,
                         help="retry: give up on a row once Retry Count reaches this (default 3).")
     parser.add_argument("--targets", choices=("accounts", "profiles"), default="accounts",

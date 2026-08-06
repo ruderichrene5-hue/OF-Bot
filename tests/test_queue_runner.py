@@ -25,7 +25,7 @@ def _variant(vid, account_id=None, profile_id=None, status=at.SV_STATUS_READY, c
 
 
 def _queue_row(rid, status, scheduled, variant_id=None, account_id=None, profile_id=None,
-               name=None):
+               name=None, created_time=None):
     fields = {at.F_PQ_POST_STATUS: status, at.F_PQ_SCHEDULED: scheduled}
     if name:
         fields[at.F_PQ_NAME] = name
@@ -35,7 +35,12 @@ def _queue_row(rid, status, scheduled, variant_id=None, account_id=None, profile
         fields[at.F_PQ_TARGET_ACCOUNT] = [account_id]
     if profile_id:
         fields[at.F_PQ_TARGET_PROFILE] = [profile_id]
-    return {"id": rid, "fields": fields}
+    row = {"id": rid, "fields": fields}
+    if created_time:
+        # Airtable stamps every record with this; it is what tells the day guards
+        # which day a row was made for, whatever the retry pass did to Scheduled.
+        row["createdTime"] = created_time
+    return row
 
 
 class FakeQueueClient:
@@ -390,3 +395,201 @@ class FailedRowOwnsItsVariantTest(TestCase):
         )
         self.assertTrue(report.planned)
         self.assertEqual({r.variant_id for r in report.planned}, {"recV2"})
+
+
+class ModelPostTimesTest(TestCase):
+    """`Models.Reel Post Times` decides a model's day: the picked times, or --
+    when nothing is picked -- "whenever there is a video", inside two bounds."""
+
+    def _targets(self):
+        return [SlotTarget(TARGET_ACCOUNT, "acc1", "nikki_1", "nikki"),
+                SlotTarget(TARGET_ACCOUNT, "acc2", "jil_1", "jil")]
+
+    def _variants(self):
+        return [_variant("v1", account_id="acc1"), _variant("v2", account_id="acc2")]
+
+    def _plan(self, schedules, queue_rows=(), now=None, **kwargs):
+        return plan_slot_rows(self._targets(), self._variants(), list(queue_rows),
+                              now=now or _now(13), tz=BERLIN, schedules=schedules, **kwargs)
+
+    def _plan_nikki(self, schedule, queue_rows=()):
+        """Only nikki is in play: jil is parked on a time that is still hours
+        away, so anything planned here is a decision about nikki."""
+        return self._plan({"nikki": schedule, "jil": queue_runner.ModelSchedule(times=("23:00",))},
+                          queue_rows=queue_rows)
+
+    def test_each_model_posts_at_its_own_times(self):
+        report = self._plan({"nikki": queue_runner.ModelSchedule(times=("10:00",)),
+                             "jil": queue_runner.ModelSchedule(times=("12:00",))})
+        self.assertEqual({(row.target.name, row.slot) for row in report.planned},
+                         {("nikki_1", "10:00"), ("jil_1", "12:00")})
+
+    def test_a_time_still_ahead_of_now_is_not_queued_early(self):
+        """Same rule as the global grid: a row written now is due now, so a
+        14:00 time must not be created at 13:00."""
+        report = self._plan({"nikki": queue_runner.ModelSchedule(times=("14:00",)),
+                             "jil": queue_runner.ModelSchedule(times=("14:00",))})
+        self.assertEqual(report.planned, [])
+
+    def test_a_model_with_no_times_posts_now(self):
+        """The ask: a model nobody scheduled posts whenever a video is ready."""
+        report = self._plan({"nikki": queue_runner.ModelSchedule(times=()),
+                             "jil": queue_runner.ModelSchedule(times=("12:00",))})
+        by_name = {row.target.name: row for row in report.planned}
+        # Scheduled for now, so the posting loop takes it on its next tick.
+        self.assertEqual(by_name["nikki_1"].scheduled, "2026-08-03T11:00:00+00:00")
+        self.assertEqual(by_name["nikki_1"].slot, "13:00")
+        self.assertEqual(report.flexible_targets, 1)
+
+    def test_a_model_absent_from_the_base_is_flexible_not_silent(self):
+        """No Models row for this key at all -- it must still post, or a model
+        added to MLX before Airtable would quietly never post again."""
+        report = self._plan({"jil": queue_runner.ModelSchedule(times=("12:00",))})
+        self.assertIn("nikki_1", {row.target.name for row in report.planned})
+
+    def test_a_flexible_model_waits_out_the_gap(self):
+        """Its last post was 30 min ago and the gap is 120, so not yet."""
+        rows = [_queue_row("pq1", at.POST_STATUS_POSTED, "2026-08-03T10:30:00+00:00",
+                           variant_id="v0", account_id="acc1", name="nikki_1 / 12:30",
+                           created_time="2026-08-03T10:30:00.000Z")]
+        report = self._plan_nikki(queue_runner.ModelSchedule(), queue_rows=rows)
+        self.assertEqual([r.target.name for r in report.planned], [])
+        self.assertIn("too recent", dict(report.skipped)["nikki_1"])
+
+    def test_a_flexible_model_posts_again_once_the_gap_has_passed(self):
+        rows = [_queue_row("pq1", at.POST_STATUS_POSTED, "2026-08-03T08:00:00+00:00",
+                           variant_id="v0", account_id="acc1", name="nikki_1 / 10:00",
+                           created_time="2026-08-03T08:00:00.000Z")]
+        report = self._plan_nikki(queue_runner.ModelSchedule(), queue_rows=rows)
+        self.assertEqual([r.target.name for r in report.planned], ["nikki_1"])
+
+    def test_a_flexible_model_stops_at_its_daily_cap(self):
+        """Two posts today and Reels Per Day = 2: done until tomorrow, even
+        though a Ready variant and the gap would both allow another."""
+        rows = [_queue_row(f"pq{i}", at.POST_STATUS_POSTED, f"2026-08-03T0{i}:00:00+00:00",
+                           variant_id=f"v0{i}", account_id="acc1", name=f"nikki_1 / 0{i + 2}:00",
+                           created_time=f"2026-08-03T0{i}:00:00.000Z")
+                for i in (1, 2)]
+        report = self._plan_nikki(queue_runner.ModelSchedule(per_day=2), queue_rows=rows)
+        self.assertEqual([r.target.name for r in report.planned], [])
+        self.assertIn("today's 2 post(s) are queued already", dict(report.skipped)["nikki_1"])
+
+    def test_yesterdays_posts_do_not_count_against_todays_cap(self):
+        rows = [_queue_row(f"pq{i}", at.POST_STATUS_POSTED, f"2026-08-02T0{i}:00:00+00:00",
+                           variant_id=f"v0{i}", account_id="acc1", name=f"nikki_1 / 0{i + 2}:00",
+                           created_time=f"2026-08-02T0{i}:00:00.000Z")
+                for i in (1, 2)]
+        report = self._plan_nikki(queue_runner.ModelSchedule(per_day=2), queue_rows=rows)
+        self.assertEqual([r.target.name for r in report.planned], ["nikki_1"])
+
+    def test_a_flexible_model_with_nothing_spoofed_is_skipped_not_queued(self):
+        report = plan_slot_rows(self._targets(), [], [], now=_now(13), tz=BERLIN,
+                                schedules={"nikki": queue_runner.ModelSchedule()})
+        self.assertEqual(report.planned, [])
+        self.assertIn("no unused Ready Spoof Variant", dict(report.skipped)["nikki_1"])
+
+    def test_only_one_flexible_row_per_run(self):
+        """Two Ready variants, one run: the second waits for the gap rather than
+        both going out at once."""
+        report = plan_slot_rows(
+            [SlotTarget(TARGET_ACCOUNT, "acc1", "nikki_1", "nikki")],
+            [_variant("v1", account_id="acc1"), _variant("v2", account_id="acc1")],
+            [], now=_now(13), tz=BERLIN, schedules={"nikki": queue_runner.ModelSchedule()})
+        self.assertEqual(len(report.planned), 1)
+
+    def test_no_schedules_at_all_keeps_the_global_grid(self):
+        """A base with no Reel Post Times field must behave exactly as before --
+        `schedules=None` is not "everyone is flexible"."""
+        report = plan_slot_rows(self._targets(), self._variants(), [], now=_now(13),
+                                tz=BERLIN, schedules=None, slot_times=("09:00",))
+        self.assertEqual({row.slot for row in report.planned}, {"09:00"})
+        self.assertEqual(report.flexible_targets, 0)
+
+
+class ScheduleParsingTest(TestCase):
+    def test_none_is_passed_through_as_none(self):
+        self.assertIsNone(queue_runner.schedules_from_airtable(None))
+
+    def test_times_and_cap_are_read_and_junk_dropped(self):
+        out = queue_runner.schedules_from_airtable(
+            {"Nikki": {"times": ["21:00", "nonsense", "09:00"], "per_day": "4"}})
+        self.assertEqual(out["nikki"].times, ("09:00", "21:00"))
+        self.assertEqual(out["nikki"].per_day, 4)
+
+    def test_an_empty_pick_is_flexible(self):
+        out = queue_runner.schedules_from_airtable({"jil": {"times": [], "per_day": None}})
+        self.assertTrue(out["jil"].is_flexible)
+
+
+class SlotGuardIsPerDayTest(TestCase):
+    """The Name-based duplicate guard has to be scoped to the row's day.
+
+    Nothing deletes yesterday's Posting Queue rows and the loop reads the table
+    in full, so a guard keyed on the label alone ("nikki_1 / 09:00") let each
+    target serve each slot exactly once, ever -- the day after a slot first
+    filled, it looked served forever.
+    """
+
+    def _run(self, rows, now=_now(13)):
+        client = _account_client(
+            variants=[_variant("v1", account_id="acc1"), _variant("v2", account_id="acc1")],
+            queue_rows=rows,
+        )
+        run_queue_slots(client, LOG, now=now, dry_run=False, slot_times=("09:00", "11:00"))
+        return [row["scheduled"] for row in client.created]
+
+    def test_yesterdays_row_does_not_block_todays_slot(self):
+        yesterday = _queue_row("pq1", at.POST_STATUS_POSTED, "2026-08-02T07:00:00+00:00",
+                               variant_id="v0", account_id="acc1", name="nikki_1 / 09:00",
+                               created_time="2026-08-02T07:01:00.000Z")
+        self.assertIn("2026-08-03T07:00:00+00:00", self._run([yesterday]))
+
+    def test_todays_retried_row_still_owns_its_slot(self):
+        """The 2026-08-04 duplicate guard, still holding within the day: the
+        retry pass moved this row's Scheduled DateTime off its slot."""
+        retried = _queue_row("pq1", at.POST_STATUS_PENDING, "2026-08-03T11:20:00+00:00",
+                             variant_id="v0", account_id="acc1", name="nikki_1 / 09:00",
+                             created_time="2026-08-03T07:01:00.000Z")
+        self.assertEqual(self._run([retried]), ["2026-08-03T09:00:00+00:00"])
+
+
+class AirtableTimesReachTheRunnerTest(TestCase):
+    """`run_queue_slots` must actually read the per-model times, not just accept
+    them as an argument -- the wiring is the part that silently rots."""
+
+    class _Client(FakeQueueClient):
+        def __init__(self, schedules, **kwargs):
+            super().__init__(**kwargs)
+            self._schedules = schedules
+
+        def reel_schedules_by_model(self):
+            return self._schedules
+
+    def _client(self, schedules):
+        return self._Client(
+            schedules,
+            accounts={"nikki": [{"account_id": "acc1", "handle": "nikki_1"}]},
+            variants=[_variant("v1", account_id="acc1")],
+        )
+
+    def test_the_models_own_times_are_used(self):
+        client = self._client({"nikki": {"times": ["10:00"], "per_day": None}})
+        run_queue_slots(client, LOG, now=_now(13), dry_run=False, slot_times=("09:00",))
+        self.assertEqual([row["name"] for row in client.created], ["nikki_1 / 10:00"])
+
+    def test_an_empty_pick_posts_now(self):
+        client = self._client({"nikki": {"times": [], "per_day": None}})
+        run_queue_slots(client, LOG, now=_now(13), dry_run=False, slot_times=("09:00",))
+        self.assertEqual([row["scheduled"] for row in client.created],
+                         ["2026-08-03T11:00:00+00:00"])
+
+    def test_no_field_in_the_base_falls_back_to_the_grid(self):
+        client = self._client(None)
+        run_queue_slots(client, LOG, now=_now(13), dry_run=False, slot_times=("09:00",))
+        self.assertEqual([row["name"] for row in client.created], ["nikki_1 / 09:00"])
+
+    def test_model_times_can_be_turned_off_for_one_run(self):
+        client = self._client({"nikki": {"times": ["10:00"], "per_day": None}})
+        run_queue_slots(client, LOG, now=_now(13), dry_run=False, slot_times=("09:00",),
+                        use_model_times=False)
+        self.assertEqual([row["name"] for row in client.created], ["nikki_1 / 09:00"])

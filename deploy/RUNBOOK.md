@@ -262,6 +262,31 @@ Only once that round-trips should you schedule anything.
 
 ## 7. Schedule
 
+Two different schedules, and they are easy to confuse:
+
+* **When the loops run** — systemd timers / Task Scheduler, below. This is how
+  often the bot *looks* for work.
+* **When a model's reels go out** — Airtable, `Models` → **Reel Post Times**.
+  This is the posting schedule itself, and it is edited in the base, not here.
+
+### Reel post times, per model (Airtable)
+
+Pick the wall-clock times (Europe/Berlin) a model posts at. Each picked time
+becomes one Posting Queue row per account/profile of that model, filled with an
+unused Ready spoof variant — so **the number of times picked is that model's
+reels per day**.
+
+**Leave it empty and the model posts whenever a video is ready.** That is the
+flexible mode, not an off switch: the queue loop gives it a row as soon as it
+has an unused variant, at most 7 a day and no closer than 2 hours apart.
+`Models` → **Reels Per Day** overrides the 7 for one model;
+`--anytime-gap` / `--anytime-max` override both defaults for one run.
+
+The `--slots` grid is only the fallback for a base whose `Models` table has no
+`Reel Post Times` field at all. Once the field exists, every model's own pick
+wins, and `--no-model-times` is the escape hatch that puts everything back on
+one grid for a single run.
+
 The app's **Scheduler** window works on both platforms and drives whichever
 backend is present. Enable the loops, set intervals, tick **dry-run**, press
 **Apply**. Let it fire once, read the logs, then untick dry-run and Apply again.

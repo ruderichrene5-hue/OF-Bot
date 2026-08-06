@@ -193,6 +193,13 @@ F_PROX_ASSIGNED_DEVICE = "Assigned Device"  # link -> Devices
 
 # Models
 F_MODEL_NAME = "Model Name"
+# multipleSelects of "HH:MM" labels: when this model's reels go out. Empty means
+# no fixed schedule -- the queue loop then posts for it whenever a spoofed video
+# is available (see queue_runner.ModelSchedule).
+F_MODEL_REEL_TIMES = "Reel Post Times"
+# number: the daily cap for that flexible mode. Ignored when Reel Post Times is
+# filled, where the count of selected times IS the daily number.
+F_MODEL_REELS_PER_DAY = "Reels Per Day"
 
 # singleSelect status labels shared across the three synced tables
 STATUS_SELECT_ACTIVE = "Active"
@@ -844,6 +851,48 @@ class AirtableClient:
             name = str((record.get("fields", {}) or {}).get(F_MODEL_NAME) or "").strip()
             if name:
                 out[record.get("id")] = name
+        return out
+
+    def reel_schedules_by_model(self) -> dict | None:
+        """Lower-cased model name -> ``{'times': ['09:00', ...], 'per_day': int|None}``.
+
+        This is where a person says *when* a model's reels go out: the Models
+        row's `Reel Post Times`. A model with times posts at those times; a model
+        with none is flexible -- the queue loop posts for it whenever a spoofed
+        video is available, bounded by `Reels Per Day`.
+
+        Returns **None**, not ``{}``, when the base has no `Reel Post Times`
+        field: Airtable answers 422 UNKNOWN_FIELD_NAME for a field that isn't
+        there, and the two answers must not be confused. ``{}`` would mean "every
+        model is flexible" and would take a base that never opted in off its
+        fixed grid; None means "this base doesn't do per-model times", and the
+        caller keeps the single global grid it used before.
+        """
+        try:
+            rows = self._list_table(
+                TABLE_MODELS,
+                fields=[F_MODEL_NAME, F_MODEL_REEL_TIMES, F_MODEL_REELS_PER_DAY],
+            )
+        except Exception as exc:  # pragma: no cover - network/schema path
+            print(f"[-] Airtable: no per-model reel times ({exc}); using the global slot grid")
+            return None
+        out: dict = {}
+        for record in rows:
+            fields = record.get("fields", {}) or {}
+            name = str(fields.get(F_MODEL_NAME) or "").strip()
+            if not name:
+                continue
+            raw = fields.get(F_MODEL_REEL_TIMES) or []
+            if not isinstance(raw, list):
+                raw = [raw]
+            # REST returns choice *names* ('09:00'); the MCP layer returns choice
+            # objects. _select_name copes with both.
+            times = [t for t in (_select_name(value) for value in raw) if t]
+            try:
+                per_day = int(fields.get(F_MODEL_REELS_PER_DAY))
+            except (TypeError, ValueError):
+                per_day = None
+            out[name.lower()] = {"times": times, "per_day": per_day}
         return out
 
     def active_accounts_by_model(self) -> dict:
