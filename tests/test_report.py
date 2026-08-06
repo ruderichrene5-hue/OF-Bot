@@ -2254,7 +2254,9 @@ class SchedulesRenderTest(RenderTest):
     def test_a_model_with_no_airtable_row_is_flagged_and_explained(self):
         page = report_html.render(self._schedules([
             self._model(model="Nikki", known=False, raw_folder="Corina")]))
-        self.assertIn("not a model", page)
+        # "not a model" overstated it: the row is missing, the model is not.
+        # Nikki has 14 Active profiles posting daily; see StrayAndIdleRenderTest.
+        self.assertIn("no Models row", page)
         self.assertIn("no <span class=\"mono\">Nikki</span> row in Models", page)
         self.assertIn("filed under", page)
         self.assertIn("Corina", page)

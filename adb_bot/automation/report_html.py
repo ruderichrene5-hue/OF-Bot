@@ -1023,7 +1023,14 @@ def _section_schedules(schedules: dict) -> str:
                    else str(entry["posts_per_day"]))
         covers, tone = _coverage(entry["free"], entry["posts_per_day"])
         pill = f'<span class="pill {tone}">{_e(covers)}</span>' if tone else _e(covers)
-        flag = (' <span class="pill bad">not a model</span>' if not entry["known"] else "")
+        # On a grid-only loop the Models row buys nothing: slots come from the
+        # unit and per-model times are ignored for everybody, so a model without
+        # one posts identically to one with it. Red here sent somebody looking
+        # for a fault in Nikki, which was posting 3x a day across 14 profiles.
+        flag = ""
+        if not entry["known"]:
+            tone = "warn" if not schedules.get("per_model") else "bad"
+            flag = f' <span class="pill {tone}">no Models row</span>'
         rows.append(
             f"<tr><td class='mono'>{_e(entry['model'])}{flag}</td>"
             f"<td>{kind}</td>"
@@ -1046,15 +1053,46 @@ def _section_schedules(schedules: dict) -> str:
         alias = (f' Its raw footage is filed under <span class="mono">{_e(entry["raw_folder"])}'
                  f'</span>, which is the same person under the other name — so the content '
                  f'exists, only the two spellings do not meet.' if entry.get("raw_folder") else "")
-        body += (f'<p class="sub"><span class="pill bad">{entry["profiles"]} profile(s) named '
+        # What the missing row actually costs depends on the loop that is
+        # running, and on this box it costs nothing: the grid comes from the
+        # unit. Saying "can never pick up per-model times and stays flexible"
+        # describes the other runner, and reads as "these profiles are not
+        # posting" about profiles that posted all day.
+        if not schedules.get("per_model"):
+            consequence = (f'That costs nothing while the queue loop fills a fixed grid — '
+                           f'slots come from the unit and per-model times are ignored for '
+                           f'every model, so these post on the same grid as everyone else. '
+                           f'It would only matter if per-model posting times were switched on.')
+            tone = "warn"
+        else:
+            consequence = ('A profile is matched to its model by the first word of its name, '
+                           'so this one can never pick up per-model posting times and stays '
+                           'flexible.')
+            tone = "bad"
+        body += (f'<p class="sub"><span class="pill {tone}">{entry["profiles"]} profile(s) named '
                  f'"{_e(entry["model"])} …"</span> are Active in the MLX inventory, but Airtable '
-                 f'has no <span class="mono">{_e(entry["model"])}</span> row in Models. A profile '
-                 f'is matched to its model by the first word of its name, so this one can never '
-                 f'pick up per-model posting times and stays flexible.{alias}</p>')
-    if idle:
-        body += (f'<p class="sub">{_e(", ".join(m["model"] for m in idle))} — '
-                 f'{"a model" if len(idle) == 1 else "models"} in Airtable with no Active '
-                 f'profile, so nothing is scheduled for {"it" if len(idle) == 1 else "them"}.</p>')
+                 f'has no <span class="mono">{_e(entry["model"])}</span> row in Models. '
+                 f'{consequence}{alias}</p>')
+    # A model is only idle if nobody is posting as it. One whose footage feeds a
+    # differently-named set of profiles is the same person twice, not an idle
+    # model -- Corina reads as "nothing scheduled" while the 14 Nikki profiles
+    # drawing from its Drive folder post three times a day. Listing it with the
+    # genuinely empty models is how somebody concludes those posts are not going out.
+    aliased = {str(s.get("raw_folder") or "").strip().lower(): s["model"]
+               for s in stray if s.get("raw_folder")}
+    twins = [m for m in idle if m["model"].strip().lower() in aliased]
+    truly_idle = [m for m in idle if m["model"].strip().lower() not in aliased]
+    for entry in twins:
+        other = aliased[entry["model"].strip().lower()]
+        body += (f'<p class="sub"><span class="mono">{_e(entry["model"])}</span> has no Active '
+                 f'profile of its own, but it is not idle — its raw footage is what the '
+                 f'<span class="mono">{_e(other)}</span> profiles post. Same person, two '
+                 f'spellings: the Models row uses one and the MLX profiles the other.</p>')
+    if truly_idle:
+        body += (f'<p class="sub">{_e(", ".join(m["model"] for m in truly_idle))} — '
+                 f'{"a model" if len(truly_idle) == 1 else "models"} in Airtable with no Active '
+                 f'profile, so nothing is scheduled for '
+                 f'{"it" if len(truly_idle) == 1 else "them"}.</p>')
     if not schedules.get("per_model"):
         body += (f'<p class="sub">This base has no <span class="mono">Reel Post Times</span> '
                  f'field, so every model is on the standing grid: '

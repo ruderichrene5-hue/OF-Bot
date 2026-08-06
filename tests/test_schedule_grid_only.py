@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from unittest import mock
 from zoneinfo import ZoneInfo
 
-from adb_bot.automation import report
+from adb_bot.automation import report, report_html
 
 INPUTS = {
     "counts": {"nikki": 14, "laila": 1},
@@ -72,6 +72,59 @@ class GridOnlyScheduleTest(unittest.TestCase):
         out = self._run(GRID_ONLY)
         self.assertIn("Nikki", {m["model"] for m in out["models"]})
         self.assertEqual(self._model(out, "Nikki")["profiles"], 14)
+
+
+def _model(name, profiles, known=True, raw_folder=None):
+    return {"model": name, "profiles": profiles, "known": known, "flexible": False,
+            "times": ["15:00", "18:00", "21:00"], "posts_per_day": profiles * 3,
+            "per_day": 3, "free": 0, "next": "15:00", "raw_folder": raw_folder}
+
+
+class StrayAndIdleRenderTest(unittest.TestCase):
+    """A model posting three times a day must not be flagged as a fault.
+
+    Nikki has 14 Active profiles and no Models row, because the Airtable row for
+    the same person is spelled "Corina". That combination produced two alarming
+    and untrue lines: a red "not a model" pill saying Nikki "stays flexible" --
+    a runner mode this box does not have -- and Corina listed among models with
+    "nothing scheduled", while the profiles drawing on its footage posted all day.
+    """
+
+    def _render(self, per_model=False):
+        return report_html._section_schedules({
+            "models": [_model("Nikki", 14, known=False, raw_folder="Corina"),
+                       _model("Corina", 0), _model("Lou", 0), _model("Laila", 7)],
+            "timezone": "Europe/Berlin", "server_timezone": "UTC", "same_clock": False,
+            "fallback": ["15:00", "18:00", "21:00"], "per_model": per_model, "error": "",
+        })
+
+    def test_a_grid_loop_does_not_flag_the_missing_row_as_bad(self):
+        page = self._render()
+        self.assertNotIn("not a model", page)
+        self.assertIn("no Models row", page)
+
+    def test_it_stops_claiming_the_model_stays_flexible(self):
+        page = self._render()
+        self.assertNotIn("stays flexible", page)
+        self.assertIn("costs nothing while the queue loop fills a fixed grid", page)
+
+    def test_a_per_model_runner_still_calls_the_missing_row_a_problem(self):
+        page = self._render(per_model=True)
+        self.assertIn("stays flexible", page)
+
+    def test_the_alias_model_is_not_listed_as_having_nothing_scheduled(self):
+        page = self._render()
+        self.assertIn("has no Active profile of its own, but it is not idle", page)
+        self.assertIn("its raw footage is what the", page)
+
+    def test_a_genuinely_empty_model_is_still_listed(self):
+        self.assertIn("Lou", self._render())
+
+    def test_the_alias_is_excluded_from_the_idle_sentence(self):
+        page = self._render()
+        tail = page[page.index("nothing is scheduled") - 200:]
+        self.assertIn("Lou", tail)
+        self.assertNotIn("Corina,", tail)
 
 
 if __name__ == "__main__":
