@@ -1773,7 +1773,7 @@ def content_stock(airtable, claimed=None) -> dict:
     }
 
 
-def model_schedules(airtable, content=None, now=None) -> dict:
+def model_schedules(airtable, content=None, now=None, grid=None) -> dict:
     """When each model posts, for how many profiles, and whether the stock lasts.
 
     Three facts that are only useful together. "Laila posts at 09:00 and 17:00"
@@ -1790,8 +1790,22 @@ def model_schedules(airtable, content=None, now=None) -> dict:
     """
     from adb_bot.automation import queue_runner
 
+    # The grid the queue loop is *started with*, not the one this module ships
+    # as a default. They have not matched since 2026-08-05: the unit runs three
+    # evening slots while `DEFAULT_SLOT_TIMES` is seven from 09:00, so every
+    # model on this table claimed "7/day" against a fleet doing 3, and a model
+    # with no times of its own read as scheduled for a grid nobody runs.
+    # `queue_grid` already reads the unit for the outlook section below; using
+    # it here is what stops the two tables from disagreeing on the same page.
+    # Injectable so a test can state which runner it is describing instead of
+    # inheriting whatever unit happens to be installed on the machine running
+    # the suite -- the same reason `posting_outlook` takes one.
+    grid = _slow("queue_grid", queue_grid) if grid is None else grid
+    fallback = list(grid.get("slots") or ()) or list(queue_runner.DEFAULT_SLOT_TIMES)
+
     out = {"models": [], "timezone": queue_runner.DEFAULT_TIMEZONE,
-           "fallback": list(queue_runner.DEFAULT_SLOT_TIMES), "per_model": True,
+           "fallback": fallback, "fallback_from_unit": bool(grid.get("slots")),
+           "per_model": True,
            # Posting slots are wall clock for the audience; the loop timetable on
            # the same tab is wall clock for the server, and this box runs UTC
            # while the slots are Berlin. Two tables of times that are not in the
@@ -1832,9 +1846,19 @@ def model_schedules(airtable, content=None, now=None) -> dict:
     out["server_timezone"] = server.tzname() or ""
     out["same_clock"] = server.utcoffset() == local_now.utcoffset()
 
+    # The running loop decides what this table means, not the Airtable field.
+    # `queue_runner` on this box fills a fixed grid and has no per-model-times
+    # code in it at all, so a model whose Reel Post Times are blank is NOT
+    # "flexible, up to 7 a day" -- it posts on the unit's grid like every other
+    # model. Reporting the flexible mode against a grid-only loop is the same
+    # mistake `queue_grid` exists to prevent, one table further down the page.
+    grid_only = bool(grid.get("slots")) and not grid.get("per_model")
+    if grid_only:
+        out["per_model"] = False
+
     for key in sorted(set(counts) | set(schedules or {})):
         schedule = (schedules or {}).get(key)
-        if schedules is None:
+        if grid_only or schedules is None:
             times, per_day, flexible = list(out["fallback"]), len(out["fallback"]), False
         elif schedule is not None and schedule.times:
             times, per_day, flexible = list(schedule.times), len(schedule.times), False

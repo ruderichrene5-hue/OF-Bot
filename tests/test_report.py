@@ -2039,11 +2039,18 @@ class ModelSchedulesTest(unittest.TestCase):
         def reel_schedules_by_model(self):
             return self._schedules
 
-    def _run(self, airtable, content=None, at="10:00"):
+    # A runner that honours per-model times, stated rather than inherited from
+    # whatever queue unit is installed on the machine running the suite. These
+    # tests are about what the Airtable field means; `GridOnlyScheduleTest`
+    # below covers the box overriding it.
+    PER_MODEL_GRID = {"slots": [], "per_model": True, "known": True}
+
+    def _run(self, airtable, content=None, at="10:00", grid=None):
         from zoneinfo import ZoneInfo
         hour, minute = (int(x) for x in at.split(":"))
         now = datetime(2026, 8, 6, hour, minute, tzinfo=ZoneInfo("Europe/Berlin"))
-        return report.model_schedules(airtable, content=content, now=now)
+        return report.model_schedules(airtable, content=content, now=now,
+                                      grid=grid or self.PER_MODEL_GRID)
 
     def _one(self, **kw):
         airtable = self.FakeAirtable(
