@@ -567,7 +567,11 @@ class AirtableClient:
                 TABLE_PROFILES,
                 fields=[F_PROF_NAME, F_PROF_NEEDS_HUMAN, F_PROF_ISSUE_REASON,
                         F_PROF_FLAGGED_AT, F_PROF_STATUS, F_PROF_MLX_API_ID],
-                filter_formula=f"AND(NOT({{{F_PROF_NEEDS_HUMAN}}}=1), {{{F_PROF_FLAGGED_AT}}}!='')",
+                # BLANK() rather than !='': on a dateTime field the empty-string
+                # comparison is not reliable, and a filter that silently matches
+                # nothing would make this loop a permanent no-op.
+                filter_formula=(f"AND(NOT({{{F_PROF_NEEDS_HUMAN}}}=1), "
+                                f"NOT({{{F_PROF_FLAGGED_AT}}}=BLANK()))"),
             )
         except Exception as exc:  # pragma: no cover - network path
             print(f"[-] Airtable profiles_awaiting_recovery failed: {exc}")

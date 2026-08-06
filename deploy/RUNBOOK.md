@@ -249,6 +249,39 @@ every account is past Day 4 (they're in the posting phase).
 row. Empty means the `Posting Queue` has no Pending rows due yet — check that
 Airtable's own 5×/day automations are actually creating them.
 
+```bash
+.venv/bin/python -m adb_bot.automation.run_loop recovery
+```
+**Expect:** usually nothing. It lists profiles whose `Needs Human Check` you have
+cleared and whose dead posts it would hand back to the retry loop.
+
+### Resuming a profile you have fixed
+
+Clearing **`Profiles (Cloning).Needs Human Check`** is how you tell the bot you
+looked at a profile and fixed it. The `recovery` loop (every 15 min) is what acts
+on it — before it existed, clearing the box changed nothing at all.
+
+What it does: finds the profile's `Failed` queue rows that the retry pass will
+never touch again (`Retries Exhausted`, or the retry count at the limit, or an
+Issue Type only a person can clear), sets them back to `Failed - Needs Retry`
+with the count at 0, and closes out the profile's `Flagged At` / `Issue Reason`,
+leaving a line in Issue Notes. The retry loop then picks them up on its next tick
+and applies its own **ledger check**, so a reel that may already be live still
+never goes out twice. Recovery makes a row eligible to be *considered*; it never
+decides that a post may go out.
+
+Freeing those rows matters for a second reason: a `Failed` row **owns its clip**
+(`VARIANT_HELD_BY`). Leave the dead rows in place and the variants stay locked to
+a row nobody will ever act on, so the profile only ever posts newly spoofed
+media.
+
+Two things it deliberately leaves to you:
+
+* **Status.** A profile that is un-flagged but `Inactive` is reported with a
+  warning and stays out of every loop. Status is your park switch — the bot will
+  not un-park a profile because a different checkbox changed.
+* **The checkbox itself.** You cleared it; the bot does not write it back.
+
 ### Warming up new profiles (the `Created` tag)
 
 New accounts exist as MultiLogin profiles long before anyone writes an Accounts
