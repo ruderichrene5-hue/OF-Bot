@@ -2327,10 +2327,11 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         # the outcomes themselves are already parsed. Losing the annotation must
         # not cost the page the runs.
         pass
-    try:
-        videos = video_runs(day=day, tick_runs=runs, events=retries)
-    except Exception:
-        videos = []
+    # `videos` is no longer collected: the "Run by run" section that displayed it
+    # was taken off the page, and it was the only reader. Building it cost a log
+    # scan here and a full Spoof Variants read below on every render.
+    # `video_runs` and `_section_videos` are left intact and tested, so putting
+    # the section back is this call and the two lines in `render`.
     posts_today = sum(r.posts for r in runs)
     run_seconds = sum(r.seconds for r in runs if r.seconds)
     attempts = sum(r.attempts for r in runs)
@@ -2351,7 +2352,9 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         "phones": phone_processes(),
         "timers": timer_states(),
         "runs": runs,
-        "videos": videos,
+        # Kept as an empty list rather than dropped: hosts and tests that read
+        # `data["videos"]` should see "nothing to show", not a KeyError.
+        "videos": [],
         "totals": {
             "runs": len(runs),
             "posts": posts_today,
@@ -2410,13 +2413,6 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             data["outlook"] = posting_outlook(
                 rows, schedules=_schedules_for_outlook(airtable), now=now,
                 grid=_slow("queue_grid", queue_grid))
-            # Redo the per-video view with the queue in hand: a clip whose
-            # profile never reached a phone leaves no trace on this box, and
-            # only its queue row can say whether it is waiting or was written
-            # off. Local sources still win where they disagree.
-            data["videos"] = video_runs(day=day, tick_runs=runs, events=retries,
-                                        queue_rows=rows,
-                                        variants=airtable.variants_by_id())
         except Exception as exc:
             # A dashboard that 500s because Airtable is having a moment is worse
             # than one that says so and still shows everything local.

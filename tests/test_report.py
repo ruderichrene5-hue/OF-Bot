@@ -1282,7 +1282,16 @@ class VideoRunTest(unittest.TestCase):
 
 
 class VideoSectionRenderTest(RenderTest):
-    """The section a person opens to ask "who got today's clip?"."""
+    """The section a person opens to ask "who got today's clip?".
+
+    Taken off the Technical tab on request, so these render the section directly
+    instead of digging it out of the page. The builder and the renderer are both
+    still here and still covered, which is what keeps putting the section back a
+    two-line change rather than an archaeology exercise.
+    """
+
+    def _render(self, videos, day=""):
+        return report_html._section_videos(videos, day)
 
     def _videos(self):
         video = report.VideoRun(model="Nikki", run="run4", number=4, day_number=1,
@@ -1302,9 +1311,7 @@ class VideoSectionRenderTest(RenderTest):
         return [clean, video]
 
     def test_each_clip_is_a_card_naming_its_video_and_its_profiles(self):
-        page = report_html.render(self._data(videos=self._videos()))
-        panel = page.split('id="panel-technical"')[1].split("</section>")[0]
-        self.assertIn("Run by run — one video at a time", panel)
+        panel = self._render(self._videos())
         self.assertIn("Nikki · run 1", panel)          # the day's first Nikki clip
         self.assertIn("run4", panel)                   # ...which lives in run4
         self.assertIn("nikki_3_I_5_aug", panel)
@@ -1312,26 +1319,29 @@ class VideoSectionRenderTest(RenderTest):
             self.assertIn(name, panel)
 
     def test_a_copy_nobody_tried_is_visible_as_not_sent(self):
-        page = report_html.render(self._data(videos=self._videos()))
-        self.assertIn("1 not sent yet", page)
-        self.assertIn("no post scheduled for it yet", page)
+        panel = self._render(self._videos())
+        self.assertIn("1 not sent yet", panel)
+        self.assertIn("no post scheduled for it yet", panel)
 
     def test_a_clip_that_reached_everybody_folds_away(self):
-        page = report_html.render(self._data(videos=self._videos()))
+        panel = self._render(self._videos())
         cards = {summary.split("<span")[0].strip(): tag for tag, summary in
-                 re.findall(r'<details class="run"( open)?><summary>(.*?)</summary>', page)}
+                 re.findall(r'<details class="run"( open)?><summary>(.*?)</summary>', panel)}
         self.assertEqual(cards["Katja · run 1"], "")        # nothing missing: closed
         self.assertEqual(cards["Nikki · run 1"], " open")   # something missing: open
 
     def test_a_video_name_cannot_inject_markup(self):
         videos = self._videos()
         videos[0].source = "<script>x</script>"
-        page = report_html.render(self._data(videos=videos))
-        self.assertNotIn("<script>x", page)
+        self.assertNotIn("<script>x", self._render(videos))
 
     def test_no_clip_says_so_rather_than_rendering_nothing(self):
-        page = report_html.render(self._data(videos=[]))
-        self.assertIn("No spoofed clip has been built for today yet", page)
+        self.assertIn("No spoofed clip has been built for today yet", self._render([]))
+
+    def test_the_section_is_no_longer_on_the_technical_tab(self):
+        page = report_html.render(self._data(videos=self._videos()))
+        self.assertNotIn("Run by run — one video at a time", page)
+        self.assertNotIn("nikki_3_I_5_aug", page)
 
 
 class RunByRunTest(RenderTest):

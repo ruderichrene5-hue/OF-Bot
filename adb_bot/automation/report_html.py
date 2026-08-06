@@ -1470,9 +1470,6 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
       <h2>Today</h2>
       {_section_today(data)}
 
-      <h2>Run by run — one video at a time</h2>
-      {_section_videos(data.get('videos') or [], data.get('day') or '')}
-
       <h2>Runs</h2>
       {_section_runs(data['runs'])}
 
