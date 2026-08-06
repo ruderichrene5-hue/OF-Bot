@@ -1169,7 +1169,16 @@ def video_runs(spoof_dir=None, day: str = "", ledger=None, tick_runs=None,
         # happened to go out this morning belongs to the run it came from, and
         # letting those in turned a daily page into a growing pile -- yesterday's
         # runs reappear every time one of their leftovers is retried.
-        videos = [v for v in videos if v.built.startswith(day)]
+        todays = [v for v in videos if v.built.startswith(day)]
+        if not todays and videos:
+            # The day turns over at midnight; the pipeline builds in the
+            # afternoon. Between those, "today" is honestly empty -- and a
+            # blank section at 9am reads as a broken machine rather than an
+            # early one. Show the last day that did build clips instead; the
+            # page says which day it is showing.
+            last = max(v.built[:10] for v in videos)
+            todays = [v for v in videos if v.built.startswith(last)]
+        videos = todays
 
     for video in videos:
         for entry in video.profiles:

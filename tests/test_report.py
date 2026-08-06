@@ -1027,21 +1027,45 @@ class VideoRunTest(unittest.TestCase):
         entry = [p for p in video.profiles if p.name == "Nikki 1"][0]
         self.assertEqual(entry.outcome, "posted")
 
+    def _age(self, folder, day):
+        import os
+        stamp = time.mktime(time.strptime(day, "%Y-%m-%d"))
+        for path in folder.iterdir():
+            os.utime(path, (stamp, stamp))
+
     def test_the_day_means_the_clips_made_that_day(self):
         """Even a leftover posted this morning belongs to yesterday's run."""
         root, folder = self._tree()
-        import os
-        old = time.mktime(time.strptime("2026-08-01", "%Y-%m-%d"))
-        for path in folder.iterdir():
-            os.utime(path, (old, old))
+        self._age(folder, "2026-08-01")
+        today = root / "Nikki" / "run5"
+        today.mkdir(parents=True)
+        (today / "nikki_4_I_5_aug__Nikki_1.mp4").write_bytes(b"x")
 
         media = str(folder / "nikki_3_I_5_aug__Nikki_1.mp4")
         shared = datetime(2026, 8, 5, 18, 0).timestamp()
         ledger = self._ledger([self._record(media, "confirmed", shared_at=shared)])
-        self.assertEqual(report.video_runs(spoof_dir=root, day="2026-08-05",
-                                           ledger=ledger), [])
+        videos = report.video_runs(spoof_dir=root, day="2026-08-05", ledger=ledger)
+        self.assertEqual([v.source for v in videos], ["nikki_4_I_5_aug"])
         self.assertEqual(len(report.video_runs(spoof_dir=root, day="2026-08-01",
                                                ledger=ledger)), 1)
+
+    def test_before_todays_first_clip_the_last_built_day_is_shown(self):
+        """Midnight to mid-afternoon, "today" is empty -- show the last real day."""
+        root, folder = self._tree()
+        self._age(folder, "2026-08-05")
+        videos = report.video_runs(spoof_dir=root, day="2026-08-06")
+        self.assertEqual([v.built[:10] for v in videos], ["2026-08-05"])
+
+    def test_the_fallback_day_is_named_on_the_page(self):
+        video = report.VideoRun(model="Nikki", run="run4", number=4, day_number=1,
+                                source="clip", built="2026-08-05 15:02:00")
+        video.profiles.append(report.ProfileRun(launch_id="1", name="Nikki 1",
+                                                outcome="posted"))
+        page = report_html._section_videos([video], day="2026-08-06")
+        self.assertIn("Nothing has been built yet today", page)
+        self.assertIn("2026-08-05", page)
+        self.assertNotIn("Nothing has been built",
+                         report_html._section_videos([video], day="2026-08-05"))
 
     def test_a_missing_spoof_folder_is_empty_not_an_error(self):
         self.assertEqual(report.video_runs(spoof_dir="/nonexistent/spoofed"), [])

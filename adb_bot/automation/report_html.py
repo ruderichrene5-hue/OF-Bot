@@ -441,7 +441,7 @@ def _video_card(video) -> str:
     return f'<details class="run"{" open" if unresolved else ""}>{summary}{body}</details>'
 
 
-def _section_videos(videos) -> str:
+def _section_videos(videos, day: str = "") -> str:
     if not videos:
         return ('<p class="empty">No spoofed clip has been built for today yet — '
                 'the pipeline makes one folder per video.</p>')
@@ -449,7 +449,13 @@ def _section_videos(videos) -> str:
     for video in videos:
         totals.update(video.counts())
     planned = sum(totals[key] for key in _PILL_ORDER)
-    lead = (f'<p class="sub">{len(videos)} clip(s), {planned} profile-copies in all · '
+    # Before today's first clip exists the collector hands back the last day
+    # that has any. Say so, or the counts read as this morning's.
+    shown = videos[0].built[:10]
+    stale = (f'<p class="sub">Nothing has been built yet today. Showing '
+             f'<strong>{_e(shown)}</strong>, the last day the pipeline built '
+             f'clips.</p>') if day and shown != day else ""
+    lead = (f'{stale}<p class="sub">{len(videos)} clip(s), {planned} profile-copies in all · '
             f'{totals["posted"]} posted · {totals["verifying"]} verifying · '
             f'{totals["failed"]} did not post · {totals["pending"]} not sent yet. '
             'One card per video: the pipeline spoofs a clip once per profile of '
@@ -796,7 +802,7 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
       {_section_today(data)}
 
       <h2>Run by run — one video at a time</h2>
-      {_section_videos(data.get('videos') or [])}
+      {_section_videos(data.get('videos') or [], data.get('day') or '')}
 
       <h2>Runs</h2>
       {_section_runs(data['runs'])}
