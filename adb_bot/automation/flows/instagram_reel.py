@@ -19,6 +19,17 @@ _emit = instagram_module._emit
 _u2_describe = instagram_module._u2_describe
 _u2_find = instagram_module._u2_find
 _u2_click = instagram_module._u2_click
+
+
+def _u2_resource_id(sel) -> str:
+    """Bare resource-id of a matched element ("cam_dest_clips"), without the
+    package prefix -- or "" if it has none or cannot be read. Used to tell two
+    elements carrying the same *text* apart."""
+    try:
+        info = sel.info or {}
+    except Exception:
+        return ""
+    return str(info.get("resourceName") or "").rsplit("/", 1)[-1]
 _sleep_after_instagram_launch = instagram_module._sleep_after_instagram_launch
 _adb_resolve_story_media_path = instagram_module._adb_resolve_story_media_path
 _adb_push_media_to_device = instagram_module._adb_push_media_to_device
@@ -643,8 +654,11 @@ class InstagramReelUploadU2Flow:
         {"resourceIdMatches": r"(?i)com\.instagram\.android:id/.*post.*count.*"},
     )
 
-    # The composer/gallery is open once any of these is on screen.
+    # The composer/gallery is open once any of these is on screen. The
+    # composer's own destination tab is listed first so it wins when present:
+    # it is the only one of these that *only* exists in the composer.
     _GALLERY_SELECTORS = (
+        {"resourceId": "com.instagram.android:id/cam_dest_clips"},
         {"textMatches": "(?i)^reels?$"},
         {"descriptionMatches": "(?i)^reels?$"},
         {"textMatches": "(?i)^next$"},
@@ -652,6 +666,29 @@ class InstagramReelUploadU2Flow:
         {"descriptionStartsWith": "Photo"},
         {"textContains": "Recents"},
     )
+
+    # Elements that say "Reel"/"Reels" but are NOT the composer. The bare
+    # `^reels?$` text match above cannot tell them apart, and matching one of
+    # them is worse than matching nothing: the flow concludes the composer is
+    # open, walks into the Reels *viewer*, finds no Next and no Share, and
+    # blind-taps their usual coordinates into a scrolling video feed. Nothing
+    # posts, but Share "was tapped", so the ledger records a share and blocks a
+    # re-post until the deferred recheck disproves it ~45 min later.
+    #
+    # Measured on 2026-08-06: of 57 composer checks that day only 7 matched the
+    # real composer; 50 matched one of these and every one of those runs failed.
+    # The three ids are what the logs actually caught it on --
+    #   clips_viewer_action_bar_title  the Reels viewer's "Reels" title
+    #   clips_tab                      the Reels tab in the bottom nav bar
+    #   profile_tab_icon_view          the profile tab, when its desc is a handle
+    # -- so the check is a denylist of known impostors rather than a guess at
+    # every id a composer might have: an unrecognised id still passes, exactly
+    # as before, and only the three proven liars are rejected.
+    _NOT_THE_COMPOSER_IDS = frozenset({
+        "clips_viewer_action_bar_title",
+        "clips_tab",
+        "profile_tab_icon_view",
+    })
     _NEXT_SELECTORS = ({"text": "Next"}, {"description": "Next"},
                        {"textMatches": "(?i)^next$"}, {"descriptionMatches": "(?i)^next$"})
     _SHARE_SELECTORS = ({"text": "Share"}, {"textMatches": "(?i)^share$"}, {"description": "Share"})
@@ -1212,6 +1249,23 @@ class InstagramReelUploadU2Flow:
             cls = (attrs.get("class") or "").lower()
             clickable = attrs.get("clickable") == "true"
 
+            # A layout is not a button. The scoring below hands +3 to anything
+            # with "camera" in its id, and on this build two *full-screen*
+            # wrappers carry that word:
+            #   com.instagram.android:id/activity_and_camera_shared_views_main_container
+            #   com.instagram.android:id/bottom_sheet_camera_container
+            # Nothing else scored higher, so one of them won every run on
+            # 2026-08-06 (98 of them) and the flow tapped its centre -- the
+            # middle of the feed, which opens whatever post is sitting there.
+            # That is how a run ended up in the Reels *viewer* believing it had
+            # opened the composer.
+            #
+            # The + is a small control: on a 1080x2400 screen it is roughly
+            # 100x100. Anything covering more than a third of either axis is
+            # scenery, whatever it is called.
+            if width and height and (x2 - x1) > width * 0.34 and (y2 - y1) > height * 0.34:
+                continue
+
             # Never score non-Instagram chrome as the create button. If a stray
             # nav dropped us onto the Android launcher/search, its buttons
             # (com.android.launcher3:id/home, com.android.quicksearchbox search,
@@ -1366,13 +1420,18 @@ class InstagramReelUploadU2Flow:
         else:
             _emit(logger, "info", "u2: no draft dialog present for %s; continuing", target)
 
-        # Composer/gallery is open once any of these are present.
+        # Composer/gallery is open once any of these are present -- and is *not*
+        # open just because something on screen says "Reels". Getting this wrong
+        # does not cost one post, it costs the slot: the run walks on, blind-taps
+        # Share into whatever is showing, and the ledger then blocks a re-post
+        # until the recheck disproves it.
         gallery_ready = self._first_present(
             d,
             list(self._GALLERY_SELECTORS),
             timeout=self.SELECTOR_WAIT_SECONDS,
             logger=logger,
             purpose="reel composer / gallery",
+            reject_ids=self._NOT_THE_COMPOSER_IDS,
         )
         if gallery_ready is None:
             _emit(logger, "warning", "Reel composer/gallery did not appear for %s", target)
@@ -2039,7 +2098,18 @@ class InstagramReelUploadU2Flow:
         _emit(logger, "warning", "u2: no reel-posted confirmation text detected within %ss for %s", timeout, target)
         return False
 
-    def _first_present(self, d, selectors, timeout=None, logger=None, purpose="element"):
+    def _first_present(self, d, selectors, timeout=None, logger=None, purpose="element",
+                       reject_ids=frozenset()):
+        """First selector in `selectors` that is on screen, or None.
+
+        `reject_ids` is a set of bare resource-id names (no package prefix) that
+        a match is not allowed to have. A rejected match is treated as "not this
+        one" and the scan continues, so a later selector -- or a later poll --
+        can still find the real thing. It is not the same as absence: a screen
+        showing only rejected elements is a screen we positively know is the
+        wrong one, and saying so in the log is the difference between debugging
+        this in a minute and in an afternoon.
+        """
         wait_seconds = self.SELECTOR_WAIT_SECONDS if timeout is None else timeout
         _emit(logger, "info", "u2: waiting up to %.0fs for %s ...", wait_seconds, purpose)
         deadline = time.time() + wait_seconds
@@ -2051,9 +2121,14 @@ class InstagramReelUploadU2Flow:
                 except Exception as exc:
                     _emit(logger, "warning", "u2:   selector %s errored while waiting for %s: %s", kwargs, purpose, exc)
                     continue
-                if present:
-                    _emit(logger, "info", "u2: %s appeared via %s -> %s", purpose, kwargs, _u2_describe(sel))
-                    return sel
+                if not present:
+                    continue
+                if reject_ids and _u2_resource_id(sel) in reject_ids:
+                    _emit(logger, "info", "u2:   IGNORING %s match on %s -- that element is not %s",
+                          kwargs, _u2_describe(sel), purpose)
+                    continue
+                _emit(logger, "info", "u2: %s appeared via %s -> %s", purpose, kwargs, _u2_describe(sel))
+                return sel
             if time.time() >= deadline:
                 _emit(logger, "info", "u2: %s did not appear within %.0fs", purpose, wait_seconds)
                 return None
