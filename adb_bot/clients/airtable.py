@@ -154,6 +154,10 @@ F_PROF_TIME_ZONE = "Time Zone"            # equipment_info.time_zone, e.g. Europ
 F_PROF_STATUS = "Status"                  # singleSelect: Active / Inactive
 F_PROF_APP_PACKAGE = "App Package Name"   # constant com.instagram.android for these
 F_PROF_DEVICE = "Device"                  # link -> Devices
+# Day 1 of this profile's warm-up, written by the bot on the first warm-up run
+# and never moved afterwards. The campaign day counts from it. Empty = the
+# warm-up has not started; clearing it starts the profile over at day 1.
+F_PROF_WARMUP_STARTED = "Warm-up Started"  # date
 
 # Where a profile the bot has given up on is surfaced to a person. The Accounts
 # table has had `Needs Human Verification` all along, but posting is
@@ -382,6 +386,80 @@ class AirtableClient:
                 "serial": fields.get(F_PROF_MLX_SERIAL),
             }
         return out
+
+    def warmup_profiles_by_serial(self) -> dict | None:
+        """MLX serial_no -> the Profiles (Cloning) row the warm-up needs.
+
+        ``{'record_id', 'name', 'api_id', 'status', 'warmup_started'}``. The
+        serial is the match key because MLX profile *names* are not unique --
+        this workspace has three different profiles called "Blank (1)", created
+        on different days -- so matching on the name would warm up the wrong
+        phone.
+
+        Returns None (not {}) when the base has no `Warm-up Started` field:
+        Airtable answers 422 for an unknown field name, and a caller must be
+        able to tell "this base isn't set up for profile warm-up" from "no
+        profile has started yet".
+        """
+        try:
+            rows = self._list_table(
+                TABLE_PROFILES,
+                fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_MLX_SERIAL,
+                        F_PROF_STATUS, F_PROF_WARMUP_STARTED],
+            )
+        except Exception as exc:  # pragma: no cover - network/schema path
+            print(f"[-] Airtable: no {F_PROF_WARMUP_STARTED} field ({exc})")
+            return None
+        out: dict = {}
+        for record in rows:
+            fields = record.get("fields", {}) or {}
+            serial = str(fields.get(F_PROF_MLX_SERIAL) or "").strip()
+            if not serial:
+                continue
+            out[serial] = {
+                "record_id": record.get("id"),
+                "name": fields.get(F_PROF_NAME),
+                "api_id": (str(fields.get(F_PROF_MLX_API_ID) or "").strip() or None),
+                "status": _select_name(fields.get(F_PROF_STATUS)),
+                "warmup_started": (str(fields.get(F_PROF_WARMUP_STARTED) or "").strip() or None),
+            }
+        return out
+
+    def set_warmup_started(self, record_id: str, day_iso: str) -> bool:
+        """Stamp day 1 on a profile. Written once, on the first warm-up run."""
+        return self._patch_in(TABLE_PROFILES, record_id, {F_PROF_WARMUP_STARTED: day_iso})
+
+    def todays_completed_profile_runs(self) -> set:
+        """``{(profile name, flow)}`` already run to Done/Running today, for runs
+        that have no Accounts row to link.
+
+        `todays_completed_runs` keys on the linked account, which a
+        profile-driven run does not have -- so without this every warm-up would
+        run again on every tick of the hourly timer. The profile name comes off
+        the Run Log's Name, which `create_run_log` writes as
+        ``"<name> / <flow> / <when>"``.
+        """
+        # Same server-side "today" as todays_completed_runs, so the two agree on
+        # the day boundary rather than each deciding it from a different clock.
+        formula = f"IS_SAME({{{F_RUN_AT}}}, TODAY(), 'day')"
+        done: set = set()
+        try:
+            rows = self._list_table(TABLE_RUN_LOG,
+                                    fields=[F_RUN_NAME, F_RUN_FLOW, F_RUN_RESULT, F_RUN_AT],
+                                    filter_formula=formula)
+        except Exception as exc:  # pragma: no cover - network path
+            print(f"[-] Airtable todays_completed_profile_runs failed: {exc}")
+            return done
+        for record in rows:
+            fields = record.get("fields", {}) or {}
+            if _select_name(fields.get(F_RUN_RESULT)) not in (RESULT_DONE, RESULT_RUNNING):
+                continue
+            flow = _select_name(fields.get(F_RUN_FLOW))
+            name = str(fields.get(F_RUN_NAME) or "")
+            profile_name = name.split(" / ")[0].strip()
+            if profile_name and flow:
+                done.add((profile_name, flow))
+        return done
 
     # ------------------------------------------------------------------
     # MultiLogin -> Airtable sync (Devices / Proxies / Profiles (Cloning)).

@@ -125,23 +125,80 @@ def _run_posting(args, logger) -> int:
     return 0
 
 
+def _profile_warmup_plan(args, airtable, logger):
+    """The warm-up plan for MLX profiles tagged `Created` (--targets profiles).
+
+    New accounts live in MultiLogin long before anyone writes an Accounts row,
+    so the account-driven planner cannot see them. This reads the tag straight
+    off the MLX inventory and matches it to Airtable by serial.
+    """
+    from adb_bot.automation import warmup_targets
+    from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
+
+    token = _mlx_token(args.mlx_token)
+    if not token:
+        raise SystemExit("[fatal] No MultiLogin token (MULTILOGIN_TOKEN / dev settings / --mlx-token).")
+    mlx_items = MultiloginMobileListClient(token).list_mobile_profiles()
+
+    profiles = airtable.warmup_profiles_by_serial()
+    if profiles is None:
+        raise SystemExit(
+            f"[fatal] Profiles (Cloning) has no '{at.F_PROF_WARMUP_STARTED}' date field. "
+            "Add it (the profile warm-up counts its days from there) and re-run.")
+
+    warmup_plan = {}
+    try:
+        warmup_plan = airtable.warmup_plan_by_day() or {}
+    except Exception as exc:
+        logger.warning("Could not read the Warmup Plan table (%s); using the built-in schedule", exc)
+
+    tag = args.warmup_tag or warmup_targets.WARMUP_TAG
+    plan = warmup_targets.plan_profile_warmup(
+        mlx_items, profiles,
+        tag=tag,
+        warmup_plan=warmup_plan,
+        completed=airtable.todays_completed_profile_runs(),
+    )
+    logger.info("warmup: %d MLX profile(s), %d tagged '%s', %d due today",
+                len(mlx_items), len(plan.plans) + len(plan.skipped), tag, len(plan.plans))
+    return plan
+
+
 def _run_warmup(args, logger) -> int:
     from adb_bot.automation.airtable_planner import plan_airtable_runs
     airtable = _airtable(args.base_id, args.airtable_token)
 
+    on_profiles = args.targets == "profiles"
+    plan = None
+    if on_profiles:
+        plan = _profile_warmup_plan(args, airtable, logger)
+
     if not args.apply:
-        plan = plan_airtable_runs(airtable, logger=logger, run_reels=args.reels)
+        if plan is None:
+            plan = plan_airtable_runs(airtable, logger=logger, run_reels=args.reels)
         total = sum(len(p.runs) for p in plan.plans)
-        logger.info("[DRY-RUN] warmup plan: %s account(s), %s flow-run(s), %s skipped",
-                    len(plan.plans), total, len(plan.skipped))
+        logger.info("[DRY-RUN] warmup plan: %s %s, %s flow-run(s), %s skipped",
+                    len(plan.plans), "profile(s)" if on_profiles else "account(s)",
+                    total, len(plan.skipped))
         for p in plan.plans:
-            logger.info("  %s -> %s", p.account_name, [r.flow for r in p.runs])
+            day = getattr(getattr(p, "warmup_target", None), "day", None)
+            logger.info("  %s%s -> %s", p.account_name,
+                        f" (day {day})" if day else "", [r.flow for r in p.runs])
+        for skip in plan.skipped:
+            logger.info("  skip %s: %s", skip.account_name, skip.reason)
         return 0
 
     from adb_bot.automation.bootstrap import build_automation, build_mlx_clients
     from adb_bot.automation.airtable_runner import run_airtable_queue
     token = _mlx_token(args.mlx_token)
     clients = build_mlx_clients(token)
+    if on_profiles:
+        # Stamp day 1 before launching: the campaign day counts calendar days
+        # from the day the warm-up began, and a run that starts and then fails
+        # still began. Doing it here (not at plan time) keeps a dry-run from
+        # silently consuming a profile's day 1.
+        from adb_bot.automation import warmup_targets
+        warmup_targets.stamp_started(airtable, plan, logger=logger)
     result = run_airtable_queue(
         airtable, clients.launcher, clients.shutdown, clients.adb_enable, clients.api,
         build_automation(), logger, run_reels=args.reels,
@@ -149,6 +206,7 @@ def _run_warmup(args, logger) -> int:
         readiness_wait_seconds=settings.get_saved_readiness_wait(),
         readiness_max_attempts=settings.get_saved_readiness_attempts(),
         batch_launch_delay_seconds=settings.get_saved_batch_launch_delay(),
+        plan=plan,
     )
     logger.info("warmup result: %s", result)
     return 0
@@ -489,9 +547,13 @@ def main(argv=None) -> int:
     parser.add_argument("--max-retries", type=int, default=3,
                         help="retry: give up on a row once Retry Count reaches this (default 3).")
     parser.add_argument("--targets", choices=("accounts", "profiles"), default="accounts",
-                        help="pipeline: what to spoof for -- Airtable Accounts at Lifecycle "
-                             "Stage Active (default), or the MLX profile inventory, for models "
-                             "that have phones but no Accounts rows yet.")
+                        help="pipeline/queue/warmup: what to work on -- Airtable Accounts at "
+                             "Lifecycle Stage Active (default), or the MLX profile inventory, "
+                             "for models that have phones but no Accounts rows yet. For warmup, "
+                             "'profiles' warms up the MLX profiles carrying --warmup-tag.")
+    parser.add_argument("--warmup-tag", default=None,
+                        help="warmup --targets profiles: the MultiLogin tag that marks a profile "
+                             "as ready to warm up (default 'Created').")
     parser.add_argument("--skip-staging", action="store_true",
                         help="mlx-sync: skip staging profiles that belong to no model.")
     parser.add_argument("--out", default=None,

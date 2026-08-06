@@ -160,6 +160,7 @@ def run_airtable_queue(
     override_picture=None,
     media_path_resolver=None,
     max_concurrent_profiles=None,
+    plan=None,
 ) -> dict:
     """Lifecycle-driven Airtable run: read Accounts, decide each account's due
     flow(s) via the lifecycle planner, launch its Multilogin profile (by MLX API
@@ -190,13 +191,18 @@ def run_airtable_queue(
         return payload
 
     # 1) Plan -----------------------------------------------------------------
+    # A caller may hand in a ready-made plan (the profile-driven warm-up builds
+    # one from the MLX `Created` tag instead of the Accounts table). Everything
+    # after this point -- launching, locks, the concurrency ceiling, the Run Log
+    # -- is identical either way, so it is shared rather than duplicated.
     try:
-        plan = plan_airtable_runs(
-            airtable, today=today, logger=logger, run_reels=run_reels,
-            selected_launch_ids=selected_launch_ids,
-            override_flow=override_flow, override_bio=override_bio,
-            override_caption=override_caption, override_picture=override_picture,
-        )
+        if plan is None:
+            plan = plan_airtable_runs(
+                airtable, today=today, logger=logger, run_reels=run_reels,
+                selected_launch_ids=selected_launch_ids,
+                override_flow=override_flow, override_bio=override_bio,
+                override_caption=override_caption, override_picture=override_picture,
+            )
     except Exception as exc:
         logger.error("Failed to build the Airtable run plan: %s", exc)
         return result({"processed": 0, "error": str(exc)})

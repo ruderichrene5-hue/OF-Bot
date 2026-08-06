@@ -249,6 +249,39 @@ every account is past Day 4 (they're in the posting phase).
 row. Empty means the `Posting Queue` has no Pending rows due yet — check that
 Airtable's own 5×/day automations are actually creating them.
 
+### Warming up new profiles (the `Created` tag)
+
+New accounts exist as MultiLogin profiles long before anyone writes an Accounts
+row, so the account-driven warm-up above cannot see them. `--targets profiles`
+warms up **the MLX profiles tagged `Created`** instead:
+
+```bash
+.venv/bin/python -m adb_bot.automation.run_loop warmup --targets profiles
+.venv/bin/python -m adb_bot.automation.run_loop warmup --targets profiles --apply
+```
+
+The tag is the whole selection — set it in MultiLogin, and the profile joins the
+warm-up on the next run; change it (to `Active / Posting`) and it drops out.
+`--warmup-tag` picks a different one.
+
+**Day 1 is the first run, not the MLX creation date.** The bot stamps
+`Profiles (Cloning).Warm-up Started` the first time it warms a profile up and
+counts from there, so a profile created a fortnight ago still starts at day 1.
+Clear that date to run a profile through the warm-up again.
+
+Two things it will tell you rather than guess about:
+
+* *"has no Profiles (Cloning) row yet — run the mlx-sync loop"* — MLX has the
+  profile, Airtable doesn't. `mlx-sync` runs nightly; run it by hand to pull a
+  batch created today.
+* *"Airtable Status is Inactive"* — the profile is parked. Set it to Active if
+  it should be warming up.
+
+Reels are never scheduled by the profile warm-up, even on a Warmup Plan day that
+asks for one: a reel needs a spoofed variant, a variant needs a model, and a
+`Created` profile has neither yet. Posting is the Posting Queue's job once the
+profile has been named and assigned to a model.
+
 ## 6. First real run — one account
 
 Don't start the scheduler yet. Pick a single test account and run it by hand:
