@@ -13,6 +13,7 @@
 #   posting   every  5 min   (slots are fixed; just catch each one)
 #   recheck   every 15 min   (matches RECHECK_DELAY_SECONDS)
 #   retry     every 30 min   (retryable Failed -> Pending)
+#   recovery  every 15 min   (un-flagged profiles -> retryable again)
 #   warmup    hourly
 #   mlx-sync  daily (23:30 local)
 #   cleanup   daily (04:00 local)
@@ -36,7 +37,7 @@ SERVICE_USER="${SERVICE_USER:-}"
 # Every loop that may have a unit on disk, including ones not wired yet -- used
 # by --remove, which must clean up whatever a previous run installed. The set we
 # *install* is asked of Python below, so there is one definition of it.
-LOOPS=(pipeline queue posting recheck retry warmup mlx-sync cleanup doctor reap-phones)
+LOOPS=(pipeline queue posting recheck retry recovery warmup mlx-sync cleanup doctor reap-phones)
 
 APPLY=0
 ACTION=install

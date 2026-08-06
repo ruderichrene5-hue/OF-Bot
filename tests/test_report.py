@@ -2462,3 +2462,126 @@ class OutlookClockTest(unittest.TestCase):
         self.assertIn("a row is queued for 18:09; the gap runs from there", page)
         self.assertNotIn("left of the 2h gap", page)
         self.assertIn("Last scheduled", page)
+
+
+class QueueGridTest(unittest.TestCase):
+    """What the loop on this box does, not what this module can do.
+
+    This package ships a `queue_runner` that posts whenever a video is free; the
+    loop running may be an older one that only fills a fixed grid. On 2026-08-06
+    the page reported 59 profiles "could post now" against a two-hour gap the
+    running loop does not implement, when the real answer was "at 18:00".
+    """
+
+    def _log(self, text=""):
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False)
+        tmp.write(text)
+        tmp.close()
+        self.addCleanup(lambda: Path(tmp.name).unlink(missing_ok=True))
+        return tmp.name
+
+    def _grid(self, exec_start="", log=""):
+        with mock.patch("subprocess.run", return_value=mock.Mock(stdout=exec_start)):
+            return report.queue_grid(self._log(log))
+
+    def test_the_slots_come_from_the_units_command_line(self):
+        grid = self._grid("ExecStart={ ... argv[]=/usr/bin/python -m x queue --apply "
+                          "--targets profiles --slots 18:00,20:00,22:00 ; ... }")
+        self.assertEqual(grid["slots"], ["18:00", "20:00", "22:00"])
+        self.assertTrue(grid["known"])
+
+    def test_a_loop_that_never_mentions_per_model_times_predates_them(self):
+        """Neither sentence in the log means the running loop is older than the
+        feature, whatever version of this module is reading it."""
+        grid = self._grid("--slots 18:00", log="queue: [APPLIED] targets=97 rows=0\n")
+        self.assertFalse(grid["per_model"])
+
+    def test_a_loop_using_per_model_times_says_so_in_its_log(self):
+        grid = self._grid("--slots 18:00",
+                          log="queue: per-model reel times for 3 model(s) (jil); the rest\n")
+        self.assertTrue(grid["per_model"])
+
+    def test_the_newer_loop_on_the_global_grid_is_still_known(self):
+        grid = self._grid("--slots 18:00",
+                          log="queue: no per-model reel times in this base; using the grid\n")
+        self.assertFalse(grid["per_model"])
+        self.assertTrue(grid["known"])
+
+    def test_no_unit_and_no_log_admits_it_does_not_know(self):
+        with mock.patch("subprocess.run", side_effect=OSError("no systemctl")):
+            grid = report.queue_grid("/nonexistent/loop_queue.log")
+        self.assertEqual(grid["slots"], [])
+        self.assertFalse(grid["known"])
+
+
+class GridOutlookTest(unittest.TestCase):
+    GRID = {"slots": ["18:00", "20:00", "22:00"], "unit": "adbbot-queue.service",
+            "per_model": False, "known": True}
+
+    def _now(self, hhmm):
+        from zoneinfo import ZoneInfo
+        hour, minute = (int(x) for x in hhmm.split(":"))
+        return datetime(2026, 8, 6, hour, minute, tzinfo=ZoneInfo("Europe/Berlin"))
+
+    def test_the_answer_is_the_next_slot(self):
+        out = report.posting_outlook([], now=self._now("17:48"), grid=self.GRID)
+        self.assertEqual(out["mode"], "grid")
+        self.assertEqual(out["next_slot"], "18:00")
+        self.assertEqual(out["next_slot_seconds"], 12 * 60)
+
+    def test_after_the_last_slot_it_wraps_to_tomorrow(self):
+        out = report.posting_outlook([], now=self._now("23:00"), grid=self.GRID)
+        self.assertEqual(out["next_slot"], "18:00 tomorrow")
+        self.assertEqual(out["next_slot_seconds"], 19 * 3600)
+
+    def test_a_flexible_loop_is_not_described_as_a_grid(self):
+        out = report.posting_outlook([], now=self._now("17:48"),
+                                     grid={"slots": [], "unit": "", "per_model": True,
+                                           "known": True})
+        self.assertEqual(out["mode"], "flexible")
+
+
+class GridOutlookRenderTest(RenderTest):
+    def _grid_outlook(self, **kw):
+        data = {"queued": [], "profiles": [], "gap_minutes": 120, "default_cap": 7,
+                "timezone": "Europe/Berlin", "eligible_now": 0, "waiting": 0, "capped": 0,
+                "any_fixed": False, "mode": "grid", "slots": ["18:00", "20:00", "22:00"],
+                "next_slot": "18:00", "next_slot_seconds": 720.0,
+                "unit": "adbbot-queue.service"}
+        data.update(kw)
+        return self._data(outlook=data)
+
+    def test_the_next_slot_leads(self):
+        page = report_html.render(self._grid_outlook())
+        self.assertIn("Next slot", page)
+        self.assertIn(">18:00<", page)
+        self.assertIn("in 12m 00s", page)
+        self.assertIn("18:00, 20:00, 22:00", page)
+
+    def test_an_empty_queue_between_slots_is_explained_not_alarming(self):
+        """"Nothing scheduled" at 15:00 is the loop working; the page said so
+        only after somebody asked why 59 profiles were idle."""
+        page = report_html.render(self._grid_outlook())
+        self.assertIn("between slots it writes nothing", page)
+        self.assertIn("the loop working, not the loop stuck", page)
+        self.assertIn("adbbot-queue.service", page)
+
+    def test_the_gap_and_cap_rules_are_not_claimed_on_a_grid(self):
+        """They belong to the flexible runner. Showing them for a loop that does
+        not implement them is what made this section wrong."""
+        page = report_html.render(self._grid_outlook(profiles=[
+            {"profile": "Laila 3", "model": "Laila", "last": "18:09",
+             "last_day": "2026-08-06", "next": "20:09", "seconds": 9000.0,
+             "today": 5, "cap": 7, "state": "waiting", "ahead": False}], waiting=1))
+        self.assertNotIn("Waiting on the clock", page)
+        self.assertNotIn("left of the 2h gap", page)
+        self.assertNotIn("Could post now", page)
+
+    def test_content_is_still_named_as_the_real_gate(self):
+        page = report_html.render(self._grid_outlook())
+        self.assertIn("depends on a spoofed video no other row has claimed", page)
+
+    def test_a_grid_with_no_history_still_shows_the_next_slot(self):
+        page = report_html.render(self._grid_outlook(profiles=[], queued=[]))
+        self.assertNotIn("no posting history yet", page.lower())
+        self.assertIn("Next slot", page)

@@ -1813,7 +1813,49 @@ def _model_inputs(airtable) -> dict:
     return {"counts": counts, "schedules": schedules, "error": ""}
 
 
-def posting_outlook(queue_rows, schedules=None, now=None) -> dict:
+def queue_grid(log_path=None) -> dict:
+    """What the queue loop is *actually* configured to do, read off the box.
+
+    This module ships alongside a `queue_runner` that can post whenever a video
+    is free; the loop on this machine may be running an older one that only
+    fills a fixed grid, and the dashboard has no business describing the code it
+    was built with instead of the code that is running. Two readings settle it:
+
+    * the loop's own unit, for the ``--slots`` it is started with;
+    * the loop's own log, for whether it has ever mentioned per-model times --
+      a line only the newer runner can write.
+
+    Getting this wrong is not cosmetic. On 2026-08-06 the page reported 59
+    profiles "could post now" against a two-hour gap the running loop does not
+    implement, while the real answer was "at 18:00, like every day".
+    """
+    out = {"slots": [], "unit": schedule_spec.unit_name("queue", "service"),
+           "per_model": False, "known": False}
+    try:
+        shown = subprocess.run(["systemctl", "show", out["unit"], "--property=ExecStart"],
+                               capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        shown = ""
+    match = re.search(r"--slots[= ]([0-9:,]+)", shown)
+    if match:
+        out["slots"] = [s for s in match.group(1).split(",") if s.strip()]
+        out["known"] = True
+
+    path = Path(log_path) if log_path else (_repo_root() / LOG_DIR / "loop_queue.log")
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    # Only the newer runner writes either sentence; neither means the loop
+    # predates per-model times entirely, whatever this module can do.
+    if "per-model reel times for" in text:
+        out["per_model"], out["known"] = True, True
+    elif "no per-model reel times" in text:
+        out["known"] = True
+    return out
+
+
+def posting_outlook(queue_rows, schedules=None, now=None, grid=None) -> dict:
     """When the next posts actually happen, as timestamps rather than a policy.
 
     "Any time, up to 7 a day" is what the *rule* is; it is not an answer to "when
@@ -1838,7 +1880,9 @@ def posting_outlook(queue_rows, schedules=None, now=None) -> dict:
 
     out = {"queued": [], "profiles": [], "gap_minutes": queue_runner.DEFAULT_ANYTIME_GAP_MINUTES,
            "default_cap": queue_runner.DEFAULT_ANYTIME_MAX_PER_DAY, "timezone": "",
-           "eligible_now": 0, "waiting": 0, "capped": 0, "any_fixed": False}
+           "eligible_now": 0, "waiting": 0, "capped": 0, "any_fixed": False,
+           "mode": "flexible", "slots": [], "next_slot": "", "next_slot_seconds": 0.0,
+           "unit": ""}
 
     tz = queue_runner._zone(queue_runner.DEFAULT_TIMEZONE)
     out["timezone"] = queue_runner.DEFAULT_TIMEZONE
@@ -1849,6 +1893,15 @@ def posting_outlook(queue_rows, schedules=None, now=None) -> dict:
     # astimezone reads a naive value as system-local and converts it properly.
     local_now = now.astimezone(tz)
     gap = timedelta(minutes=out["gap_minutes"])
+
+    # What the loop on this box actually does, not what this module can do.
+    grid = queue_grid() if grid is None else grid
+    out["unit"] = grid.get("unit", "")
+    out["slots"] = list(grid.get("slots") or [])
+    if out["slots"] and not grid.get("per_model"):
+        out["mode"] = "grid"
+        out["next_slot"] = _next_slot(out["slots"], local_now)
+        out["next_slot_seconds"] = _seconds_to_slot(out["slots"], local_now)
 
     caps: dict = {}
     for key, schedule in (schedules or {}).items():
@@ -1916,6 +1969,23 @@ def _schedules_for_outlook(airtable):
     """The per-model schedules `posting_outlook` needs for each model's daily cap,
     off the same cached read the schedule table uses."""
     return _slow("model_inputs", lambda: _model_inputs(airtable))["schedules"]
+
+
+def _seconds_to_slot(times, local_now) -> float:
+    """Seconds until the next of `times`, wrapping to tomorrow once all have gone."""
+    from adb_bot.automation.queue_runner import parse_slot_times
+
+    slots = parse_slot_times(times)
+    if not slots:
+        return 0.0
+    for slot in slots:
+        moment = local_now.replace(hour=slot.hour, minute=slot.minute,
+                                   second=0, microsecond=0)
+        if moment > local_now:
+            return (moment - local_now).total_seconds()
+    first = local_now.replace(hour=slots[0].hour, minute=slots[0].minute,
+                              second=0, microsecond=0) + timedelta(days=1)
+    return (first - local_now).total_seconds()
 
 
 def _parse_airtable_dt(value):
@@ -2087,7 +2157,8 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             # Reuses the listing above rather than asking again -- and the
             # schedules it needs are the ones just read, not a second copy.
             data["outlook"] = posting_outlook(
-                rows, schedules=_schedules_for_outlook(airtable), now=now)
+                rows, schedules=_schedules_for_outlook(airtable), now=now,
+                grid=_slow("queue_grid", queue_grid))
             # Redo the per-video view with the queue in hand: a clip whose
             # profile never reached a phone leaves no trace on this box, and
             # only its queue row can say whether it is waiting or was written

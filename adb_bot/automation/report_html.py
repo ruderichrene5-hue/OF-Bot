@@ -993,7 +993,7 @@ def _section_outlook(outlook: dict) -> str:
     """The next posts as times on a clock, not as a policy."""
     profiles = outlook.get("profiles") or []
     queued = outlook.get("queued") or []
-    if not profiles and not queued:
+    if not profiles and not queued and outlook.get("mode") != "grid":
         return ('<p class="empty">No profile has a posting history yet, so there is nothing '
                 'to work a next time out from.</p>')
 
@@ -1001,17 +1001,42 @@ def _section_outlook(outlook: dict) -> str:
     gap_hours = (outlook.get("gap_minutes") or 0) / 60.0
     ready, waiting, capped = (outlook.get("eligible_now", 0), outlook.get("waiting", 0),
                               outlook.get("capped", 0))
-    tiles = [
-        _tile("Queued now", len(queued), "rows with a time on them",
-              "ok" if queued else ""),
-        # "Could" and "will" are different words, and the gap between them on
-        # this fleet is content -- see the note below.
-        _tile("Could post now", ready, "schedule allows it this minute"),
-        _tile("Waiting on the gap", waiting, f"posted within {gap_hours:g}h",
-              "warn" if waiting else ""),
-        _tile("Done for today", capped, "hit the daily cap", "warn" if capped else ""),
-    ]
+    # The loop on this box decides one of two ways, and the numbers that answer
+    # "when" differ for each. Describing the wrong one is how this page came to
+    # report 59 profiles free to post against a gap rule the running loop does
+    # not implement, when the true answer was "at 18:00, like every day".
+    grid_mode = outlook.get("mode") == "grid"
+    slots = ", ".join(outlook.get("slots") or [])
+
+    if grid_mode:
+        tiles = [
+            _tile("Next slot", outlook.get("next_slot") or "—",
+                  f'in {_fmt_seconds(outlook.get("next_slot_seconds") or 0)}', "ok"),
+            _tile("Slots a day", len(outlook.get("slots") or []), slots or "none configured"),
+            _tile("Queued now", len(queued), "rows with a time on them",
+                  "ok" if queued else ""),
+            _tile("Targets", len(profiles), "profiles with a posting history"),
+        ]
+    else:
+        tiles = [
+            _tile("Queued now", len(queued), "rows with a time on them",
+                  "ok" if queued else ""),
+            # "Could" and "will" are different words, and the gap between them on
+            # this fleet is content -- see the note below.
+            _tile("Could post now", ready, "schedule allows it this minute"),
+            _tile("Waiting on the gap", waiting, f"posted within {gap_hours:g}h",
+                  "warn" if waiting else ""),
+            _tile("Done for today", capped, "hit the daily cap", "warn" if capped else ""),
+        ]
     body = f'<div class="grid">{"".join(tiles)}</div>'
+    if grid_mode:
+        body += (f'<p class="sub" style="margin-top:.7rem">The queue loop fills a fixed grid: at '
+                 f'each of <span class="mono">{_e(slots)}</span> it writes one row for every '
+                 f'target that has a spoofed video free, and between slots it writes nothing — '
+                 f'so an empty queue in the middle of the afternoon is the loop working, not the '
+                 f'loop stuck. The grid comes from <span class="mono">--slots</span> on '
+                 f'<span class="mono">{_e(outlook.get("unit") or "the queue unit")}</span>, not '
+                 f'from Airtable.</p>')
 
     if queued:
         head = ("<tr><th>Queue row</th><th>Scheduled for</th><th>Goes out</th></tr>")
@@ -1031,7 +1056,9 @@ def _section_outlook(outlook: dict) -> str:
     # Only the profiles whose answer is a time. When most of the fleet is free to
     # post -- which is the normal state here -- a table of forty rows all saying
     # "now" buries the handful that are actually waiting for something.
-    held = [entry for entry in profiles if entry["state"] != "ready"]
+    # The gap and the daily cap are the flexible runner's rules; on a grid they
+    # are not what anybody is waiting for.
+    held = [] if grid_mode else [entry for entry in profiles if entry["state"] != "ready"]
     if held:
         head = ("<tr><th>Profile</th><th>Last scheduled</th><th>Next possible</th>"
                 "<th class='num'>Today</th><th>Why</th></tr>")
@@ -1057,15 +1084,22 @@ def _section_outlook(outlook: dict) -> str:
                  f'{"".join(rows)}</table></div>')
         if len(held) > 15:
             body += f'<p class="sub">Soonest 15 of {len(held)}.</p>'
-    else:
+    elif not grid_mode:
         body += ('<h3>Waiting on the clock</h3><p class="empty">No profile is waiting on the '
                  'gap or its daily cap.</p>')
 
-    if ready:
+    if ready and not grid_mode:
         body += (f'<p class="sub"><strong>{ready}</strong> profile(s) could post the moment a '
                  f'spoofed video is free for them — there is no time to wait for. The queue '
                  f'loop writes the row on its next tick (see the timetable above) and the '
                  f'posting loop takes it on the one after.</p>')
+
+    if grid_mode:
+        return body + (
+            f'<p class="sub">Times are {_e(zone)}. Every target posts on the same grid, so there '
+            f'is no per-profile time to look up. Whether a profile actually gets a row at the '
+            f'next slot depends on a spoofed video no other row has claimed, and on this fleet '
+            f'that is what usually decides it.</p>')
 
     body += (f'<p class="sub">Times are {_e(zone)}. "Next possible" is the schedule only — a '
              f'flexible profile may post again {gap_hours:g}h after its last one, up to its '

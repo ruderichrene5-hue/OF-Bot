@@ -34,7 +34,8 @@ from adb_bot.config import settings
 from adb_bot.core import locks, shutdown
 from adb_bot.core.logger import get_logger
 
-LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "warmup", "mlx-sync", "cleanup")
+LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery", "warmup",
+         "mlx-sync", "cleanup")
 # `doctor` isn't a loop -- it's the preflight check, runnable the same way.
 # `report` renders the operational page; like `doctor` it is a command rather
 # than a loop, and unlike `doctor` it is not in the recommended set, so it never
@@ -327,6 +328,26 @@ def _run_retry(args, logger) -> int:
     return 1 if tally.get("errors") else 0
 
 
+def _run_recovery(args, logger) -> int:
+    """Resume the profiles a person has un-flagged.
+
+    Clearing `Needs Human Check` used to tell the bot nothing -- no loop read it
+    -- so a profile somebody had fixed stayed dead, because what stopped it is on
+    its queue rows (Retries Exhausted, count at the limit) and those rows also
+    hold its clips. This hands them back to the retry pass, which still applies
+    the ledger check before anything is posted again.
+    """
+    from adb_bot.automation import recovery_runner
+    airtable = _airtable(args.base_id, args.airtable_token)
+    report = recovery_runner.run_recovery(
+        airtable, logger=logger,
+        dry_run=not args.apply,
+        max_retries=args.max_retries,
+    )
+    logger.info("recovery result: %s", report.summary())
+    return 1 if report.errors else 0
+
+
 def _run_recheck(args, logger) -> int:
     """Resolve posts that were sent but could not be confirmed in-run.
 
@@ -504,6 +525,7 @@ _DISPATCH = {
     "pipeline": _run_pipeline,
     "queue": _run_queue,
     "retry": _run_retry,
+    "recovery": _run_recovery,
     "mlx-sync": _run_mlx_sync,
     "cleanup": _run_cleanup,
     "doctor": _run_doctor,

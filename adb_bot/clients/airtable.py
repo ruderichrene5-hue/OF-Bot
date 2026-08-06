@@ -551,6 +551,79 @@ class AirtableClient:
             F_PROF_FLAGGED_AT: stamp,
         })
 
+    def profiles_awaiting_recovery(self) -> list:
+        """Profiles a person has un-flagged but the bot has not yet acted on.
+
+        The signal is the *pair* of fields, because the checkbox alone cannot
+        say it: once `Needs Human Check` is cleared there is nothing left to
+        distinguish "somebody fixed this" from "never had a problem". `Flagged
+        At` is written only by `flag_profile_for_human` and cleared only by the
+        recovery pass, so **unchecked + still stamped** means exactly "was
+        flagged, a person has looked, nobody has resumed it yet".
+        """
+        out: list = []
+        try:
+            rows = self._list_table(
+                TABLE_PROFILES,
+                fields=[F_PROF_NAME, F_PROF_NEEDS_HUMAN, F_PROF_ISSUE_REASON,
+                        F_PROF_FLAGGED_AT, F_PROF_STATUS, F_PROF_MLX_API_ID],
+                filter_formula=f"AND(NOT({{{F_PROF_NEEDS_HUMAN}}}=1), {{{F_PROF_FLAGGED_AT}}}!='')",
+            )
+        except Exception as exc:  # pragma: no cover - network path
+            print(f"[-] Airtable profiles_awaiting_recovery failed: {exc}")
+            return out
+        for record in rows:
+            fields = record.get("fields", {}) or {}
+            out.append({
+                "record_id": record.get("id"),
+                "name": str(fields.get(F_PROF_NAME) or "").strip() or record.get("id"),
+                "status": _select_name(fields.get(F_PROF_STATUS)),
+                "reason": _select_name(fields.get(F_PROF_ISSUE_REASON)),
+                "flagged_at": str(fields.get(F_PROF_FLAGGED_AT) or "").strip() or None,
+            })
+        return out
+
+    def reset_row_for_retry(self, queue_record_id: str) -> bool:
+        """Hand one dead queue row back to the retry pass.
+
+        Issue Type and Retry Count are what `retry_runner._row_verdict` rules
+        on, so putting them back to "retryable, no attempts yet" is the whole
+        handover -- the retry pass then applies its own ledger check and does the
+        actual re-queueing. Post Status is deliberately left at Failed: this pass
+        does not decide that a post may go out again, it only makes the row
+        eligible to be *considered*.
+        """
+        return self._patch_in(TABLE_POSTING_QUEUE, queue_record_id, {
+            F_PQ_ISSUE_TYPE: ISSUE_NEEDS_RETRY,
+            F_PQ_RETRY_COUNT: 0,
+        })
+
+    def clear_profile_issue(self, record_id: str, note: str,
+                            when_iso: str | None = None,
+                            max_notes_chars: int = 4000) -> bool:
+        """Close out a profile's issue once the recovery pass has resumed it.
+
+        Clears `Flagged At` and `Issue Reason` -- which is what stops this
+        profile being picked up again on the next tick -- while keeping Issue
+        Notes as the history, with a line recording what was resumed. The
+        checkbox is not touched: the person already cleared it, and writing it
+        again would be the bot arguing with them.
+        """
+        stamp = when_iso or _now_iso()
+        entry = f"[{stamp}] Recovered: {note}".strip()
+        try:
+            existing = str(self._get_field(TABLE_PROFILES, record_id, F_PROF_ISSUE_NOTES) or "")
+        except Exception:
+            existing = ""
+        combined = f"{entry}\n{existing}".strip() if existing else entry
+        if len(combined) > max_notes_chars:
+            combined = combined[:max_notes_chars].rsplit("\n", 1)[0] + "\n[older entries trimmed]"
+        return self._patch_in(TABLE_PROFILES, record_id, {
+            F_PROF_ISSUE_REASON: None,
+            F_PROF_FLAGGED_AT: None,
+            F_PROF_ISSUE_NOTES: combined,
+        })
+
     def todays_completed_runs(self) -> set:
         """Set of (account_record_id, flow_name) that already ran to Done/Running
         today -- makes a repeated button press idempotent."""

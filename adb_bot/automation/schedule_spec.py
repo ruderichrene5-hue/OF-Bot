@@ -28,8 +28,8 @@ LOOPS = ("posting", "recheck", "warmup", "pipeline", "mlx-sync", "cleanup")
 PLANNED_LOOPS = ("queue", "retry")
 
 # Everything an unattended server should have scheduled.
-RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "warmup",
-                     "mlx-sync", "cleanup", "doctor", "reap-phones")
+RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery",
+                     "warmup", "mlx-sync", "cleanup", "doctor", "reap-phones")
 
 # Recommended cadence in minutes. The UI can override per loop; these are what
 # `install_units.sh` installs. Ordered by the flow a reel goes through, because
@@ -57,6 +57,13 @@ RECOMMENDED_INTERVALS = {
     # posting day while still spacing out retries against a genuinely broken
     # account instead of hammering it.
     "retry": 30,
+    # Resumes a profile a person has un-flagged: hands its dead queue rows back
+    # to the retry pass above. Paced to the person, not the machine -- somebody
+    # clearing a checkbox expects the bot to notice within minutes, and the run
+    # is one filtered Airtable read that almost always returns nothing. Runs
+    # ahead of `retry` in the flow, so a row it revives is picked up on retry's
+    # next tick rather than waiting a whole cycle.
+    "recovery": 15,
     # Lifecycle day plan (Day 1-4) spreads actions across the day; hourly gives
     # the plan enough ticks to place them and to pick up a profile that only
     # became due mid-day.
@@ -101,6 +108,7 @@ DESCRIPTIONS = {
     "recheck": "ADB bot recheck loop (Verifying -> Posted/Failed)",
     "queue": "ADB bot queue loop (variants -> Posting Queue rows)",
     "retry": "ADB bot retry loop (retryable Failed -> Pending)",
+    "recovery": "ADB bot recovery loop (un-flagged profiles -> retryable again)",
     "warmup": "ADB bot warmup loop (lifecycle Day 1-4)",
     "pipeline": "ADB bot spoofing pipeline (Drive/raw -> Spoof Variants)",
     "mlx-sync": "ADB bot MultiLogin->Airtable profile sync",
@@ -125,6 +133,9 @@ WHAT_IT_DOES = {
     "queue": "Turns spoofed variants into Posting Queue rows at each model's "
              "scheduled times. Runs several times per slot so a slot never opens "
              "on an empty queue.",
+    "recovery": "Resumes a profile after you clear its Needs Human Check. Its "
+                "dead posts are handed back to the retry loop and their clips "
+                "freed -- without it, clearing the box changes nothing.",
     "retry": "Puts retryable Failed rows back to Pending. Most failures are "
              "transient — a device offline, an MLX hiccup — so they are worth "
              "one more go; after 3 attempts the row is left for a person.",
