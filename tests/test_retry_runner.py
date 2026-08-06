@@ -432,6 +432,9 @@ class FlagIsIdempotentTest(TestCase):
     def setUp(self):
         self.patch_calls = []
         self.notes = ""
+        # Flagging parks the profile, so the fake has to carry Status as well:
+        # a repeat is only a no-op once the phone is actually Inactive.
+        self.status = "Active"
 
         class Client(AirtableClient):
             def __init__(inner):
@@ -439,12 +442,14 @@ class FlagIsIdempotentTest(TestCase):
                 inner._base_id = "app1"
                 inner._table = "Accounts"
 
-            def _get_field(inner, table, rec, field):
-                return self.notes
+            def _get_record_fields(inner, table, rec):
+                return {at.F_PROF_ISSUE_NOTES: self.notes,
+                        at.F_PROF_STATUS: self.status}
 
             def _patch_in(inner, table, rec, fields, typecast=True):
                 self.patch_calls.append(fields)
                 self.notes = fields.get(at.F_PROF_ISSUE_NOTES, self.notes)
+                self.status = fields.get(at.F_PROF_STATUS, self.status)
                 return True
 
         self.client = Client()

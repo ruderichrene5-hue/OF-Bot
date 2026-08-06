@@ -329,18 +329,24 @@ class AirtableClient:
             print(f"[-] Airtable create failed on {table}: {exc}")
             return None
 
-    def _get_field(self, table: str, record_id: str, field: str):
-        """One field off one record. Returns None if the read fails -- callers
-        use this to append to a field, and losing the history is better than
-        losing the write that was the point of the call."""
+    def _get_record_fields(self, table: str, record_id: str) -> dict:
+        """Every field on one record, or {} if the read fails. The GET costs the
+        same as asking for one field, so a caller that needs two should take
+        this rather than paying for the round trip twice."""
         url = f"{self._url_for_table(table)}/{record_id}"
         try:
             response = requests.get(url, headers=self._headers, timeout=30)
             response.raise_for_status()
-            return (response.json().get("fields") or {}).get(field)
+            return response.json().get("fields") or {}
         except Exception as exc:  # pragma: no cover - network/diagnostic path
             print(f"[-] Airtable read failed on {table}/{record_id}: {exc}")
-            return None
+            return {}
+
+    def _get_field(self, table: str, record_id: str, field: str):
+        """One field off one record. Returns None if the read fails -- callers
+        use this to append to a field, and losing the history is better than
+        losing the write that was the point of the call."""
+        return self._get_record_fields(table, record_id).get(field)
 
     def _patch_in(self, table: str, record_id: str, fields: dict, typecast: bool = True) -> bool:
         url = f"{self._url_for_table(table)}/{record_id}"
@@ -364,15 +370,29 @@ class AirtableClient:
         )
 
     def profile_launch_map(self) -> dict:
-        """record_id -> {'name', 'launch_id', 'serial'} for Profiles (Cloning).
-        `launch_id` is the 18-digit MLX API ID the launcher/ADB actually need."""
+        """record_id -> {'name', 'launch_id', 'serial', 'needs_human', 'status'}
+        for Profiles (Cloning). `launch_id` is the 18-digit MLX API ID the
+        launcher/ADB actually need.
+
+        The flag and Status ride along because the posting planner has to re-check
+        them: a row that went Pending before its phone was parked is already in
+        the queue, and the target filter that creates rows cannot reach back to
+        it. Without the second check a freshly flagged phone still burns its
+        outstanding slots -- a launch, a two-minute boot and an upload each.
+        """
         out: dict = {}
-        for record in self._list_table(TABLE_PROFILES, fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_MLX_SERIAL]):
+        for record in self._list_table(
+            TABLE_PROFILES,
+            fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_MLX_SERIAL,
+                    F_PROF_NEEDS_HUMAN, F_PROF_STATUS],
+        ):
             fields = record.get("fields", {}) or {}
             out[record.get("id")] = {
                 "name": fields.get(F_PROF_NAME),
                 "launch_id": (str(fields.get(F_PROF_MLX_API_ID) or "").strip() or None),
                 "serial": fields.get(F_PROF_MLX_SERIAL),
+                "needs_human": bool(fields.get(F_PROF_NEEDS_HUMAN)),
+                "status": _select_name(fields.get(F_PROF_STATUS)),
             }
         return out
 
@@ -437,13 +457,29 @@ class AirtableClient:
         Older entries are dropped once the field would exceed `max_notes_chars`
         rather than letting it grow without bound (Airtable's long-text limit is
         generous but not infinite, and a 100 KB cell is unreadable anyway).
+
+        Flagging also parks the profile by setting Status to Inactive. The
+        checkbox alone stops nothing here: `profile_targets_by_model()` filters
+        on Status and never reads `Needs Human Check`, so before this a flagged
+        phone kept drawing a fresh queue row every slot and failing it. On
+        2026-08-06 that cost ~40 launches against four phones that posted
+        nothing all day, and had the spoofer encoding variants for them too.
+        Writing both fields is what makes the flag bite on this deployment.
+
+        Status is still the human's switch: un-ticking the box is not enough to
+        resume a profile, they must set Status back to Active. That is
+        deliberate -- a person who clears the flag should have to say the phone
+        is fit to post, not merely that they looked at it.
         """
         stamp = when_iso or _now_iso()
         body = f"{reason}: {note}".strip()
         entry = f"[{stamp}] {body}"
         existing = ""
+        current_status = None
         try:
-            existing = str(self._get_field(TABLE_PROFILES, record_id, F_PROF_ISSUE_NOTES) or "")
+            current = self._get_record_fields(TABLE_PROFILES, record_id)
+            existing = str(current.get(F_PROF_ISSUE_NOTES) or "")
+            current_status = _select_name(current.get(F_PROF_STATUS))
         except Exception:
             # A failed read must not cost the flag -- the checkbox is the part
             # that actually surfaces the profile to a person.
@@ -455,12 +491,22 @@ class AirtableClient:
         # says what is wrong and burns a write each time. A repeat of a problem
         # already recorded is not news; a *different* problem still appends.
         if body and body in existing:
+            # ...but a repeat still has to park the phone. A profile someone put
+            # back to Active without clearing the notes would otherwise fail the
+            # same way forever: the note matches, we return early, and nothing
+            # ever sets Status again. Same for the profiles flagged before
+            # parking-on-flag existed. Only the one field is written, so the
+            # steady state (already Inactive) is still no write at all.
+            if current_status is not None and current_status != STATUS_SELECT_INACTIVE:
+                return self._patch_in(TABLE_PROFILES, record_id,
+                                      {F_PROF_STATUS: STATUS_SELECT_INACTIVE})
             return True
         combined = f"{entry}\n{existing}".strip() if existing else entry
         if len(combined) > max_notes_chars:
             combined = combined[:max_notes_chars].rsplit("\n", 1)[0] + "\n[older entries trimmed]"
         return self._patch_in(TABLE_PROFILES, record_id, {
             F_PROF_NEEDS_HUMAN: True,
+            F_PROF_STATUS: STATUS_SELECT_INACTIVE,
             F_PROF_ISSUE_REASON: reason,
             F_PROF_ISSUE_NOTES: combined,
             F_PROF_FLAGGED_AT: stamp,

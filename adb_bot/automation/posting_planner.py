@@ -142,10 +142,25 @@ def plan_posting_queue(
             plan.skipped.append(SkippedPost(name, "no linked Target Account or Target Profile"))
             continue
 
-        launch_id = None
-        if profile_id:
-            info = profiles_by_recid.get(profile_id) or {}
-            launch_id = info.get("launch_id")
+        # --- profile health guards ---
+        # These are re-checked here, not just where rows are created, because a
+        # phone can be parked *after* its row went Pending. The queue filter
+        # cannot reach a row that already exists, so without this the phone keeps
+        # its outstanding slots and spends a launch and a boot on each one.
+        #
+        # This is a property of the phone, not of one account on it: an Instagram
+        # challenge is against the device, so dropping the profile here drops
+        # every account that posts from it.
+        info = profiles_by_recid.get(profile_id) or {} if profile_id else {}
+        if info.get("needs_human"):
+            plan.skipped.append(SkippedPost(account_name, "profile needs a human check"))
+            continue
+        profile_status = info.get("status")
+        if profile_status is not None and profile_status != at.STATUS_SELECT_ACTIVE:
+            plan.skipped.append(SkippedPost(account_name, f"profile status {profile_status}"))
+            continue
+
+        launch_id = info.get("launch_id")
         if not launch_id:
             plan.skipped.append(SkippedPost(account_name, "no MLX API ID on linked profile"))
             continue

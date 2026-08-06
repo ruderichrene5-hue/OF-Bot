@@ -176,6 +176,41 @@ class PlanPostingByProfileTest(TestCase):
         self.assertEqual(plan.to_post, [])
         self.assertIn("no MLX API ID", plan.skipped[0].reason)
 
+    def _profile(self, **over):
+        base = {"launch_id": "624354174112432228", "name": "Nikki 1",
+                "needs_human": False, "status": "Active"}
+        base.update(over)
+        return {"recProf1": base}
+
+    def test_a_flagged_profile_does_not_post(self):
+        # The row was already Pending when the phone was parked, so the queue
+        # filter that creates rows never saw it. Checking again here is the only
+        # thing standing between a flagged phone and a wasted launch.
+        plan = self._plan([self._row()], profiles=self._profile(needs_human=True))
+        self.assertEqual(plan.to_post, [])
+        self.assertIn("needs a human check", plan.skipped[0].reason)
+
+    def test_an_inactive_profile_does_not_post(self):
+        plan = self._plan([self._row()], profiles=self._profile(status="Inactive"))
+        self.assertEqual(plan.to_post, [])
+        self.assertIn("Inactive", plan.skipped[0].reason)
+
+    def test_an_unset_status_still_posts(self):
+        # Rows created before the field was filled in must not silently drop out,
+        # exactly as profile_targets_by_model() treats an empty Status.
+        plan = self._plan([self._row()], profiles=self._profile(status=None))
+        self.assertEqual(len(plan.to_post), 1)
+
+    def test_a_flagged_profile_does_not_post_via_its_account_either(self):
+        # An Instagram challenge is against the device, so a healthy-looking
+        # account riding a parked phone must not slip through the account path.
+        accounts = {"recAcc1": {at.F_ACC_NAME: "nikki_1", at.F_ACC_PROFILE: ["recProf1"],
+                                at.F_ACC_LIFECYCLE_STAGE: "Active"}}
+        plan = self._plan([self._row(account="recAcc1")], accounts=accounts,
+                          profiles=self._profile(needs_human=True))
+        self.assertEqual(plan.to_post, [])
+        self.assertIn("needs a human check", plan.skipped[0].reason)
+
 
 class ApplyPostResultTest(TestCase):
     def test_posted_marks_and_uses_variant(self):

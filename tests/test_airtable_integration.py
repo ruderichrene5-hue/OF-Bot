@@ -63,6 +63,73 @@ class AirtableClientTest(TestCase):
             self.assertFalse(client.update_record("rec1", {"Status": "Done"}))
 
 
+class FlagProfileForHumanTest(TestCase):
+    """Flagging has to park the phone, not just tick a box.
+
+    `profile_targets_by_model()` filters on Status and never reads `Needs Human
+    Check`, so a flag that leaves Status alone stops nothing: the profile draws
+    a fresh queue row every slot and fails it again.
+    """
+
+    def _client(self, existing_fields: dict):
+        client = AirtableClient("tok", "app123", "Profiles")
+        get_resp = Mock()
+        get_resp.raise_for_status.return_value = None
+        get_resp.json.return_value = {"fields": existing_fields}
+        patch_resp = Mock()
+        patch_resp.raise_for_status.return_value = None
+        return client, get_resp, patch_resp
+
+    def _flag(self, existing_fields: dict):
+        client, get_resp, patch_resp = self._client(existing_fields)
+        with patch("adb_bot.clients.airtable.requests.get", return_value=get_resp), \
+             patch("adb_bot.clients.airtable.requests.patch", return_value=patch_resp) as mock_patch:
+            ok = client.flag_profile_for_human("recProf1", "Retries Exhausted",
+                                               "nikki_1 gave up after 3 tries")
+        return ok, mock_patch
+
+    def test_flagging_sets_status_inactive_alongside_the_checkbox(self):
+        ok, mock_patch = self._flag({"Status": "Active"})
+        self.assertTrue(ok)
+        fields = mock_patch.call_args.kwargs["json"]["fields"]
+        self.assertIs(fields["Needs Human Check"], True)
+        self.assertEqual(fields["Status"], "Inactive")
+        self.assertEqual(fields["Issue Reason"], "Retries Exhausted")
+
+    def test_a_repeat_of_the_same_problem_writes_nothing(self):
+        # The retry pass reconsiders every Failed row every 30 min; an unchanged
+        # problem on an already-parked phone must not burn a write each tick.
+        ok, mock_patch = self._flag({
+            "Status": "Inactive",
+            "Issue Notes": "[2026-08-06] Retries Exhausted: nikki_1 gave up after 3 tries",
+        })
+        self.assertTrue(ok)
+        mock_patch.assert_not_called()
+
+    def test_a_repeat_still_re_parks_a_profile_someone_reactivated(self):
+        # Un-ticking the box is the human's "I looked at it"; putting Status back
+        # to Active is their "it is fit to post". If they do the second without
+        # the first and it fails the same way, the note matches and the early
+        # return used to leave it Active -- failing the same way forever.
+        ok, mock_patch = self._flag({
+            "Status": "Active",
+            "Issue Notes": "[2026-08-06] Retries Exhausted: nikki_1 gave up after 3 tries",
+        })
+        self.assertTrue(ok)
+        self.assertEqual(mock_patch.call_args.kwargs["json"]["fields"],
+                         {"Status": "Inactive"})
+
+    def test_a_different_problem_still_appends_a_note(self):
+        ok, mock_patch = self._flag({
+            "Status": "Inactive",
+            "Issue Notes": "[2026-08-05] Banned / Blocked: something else",
+        })
+        self.assertTrue(ok)
+        notes = mock_patch.call_args.kwargs["json"]["fields"]["Issue Notes"]
+        self.assertIn("nikki_1 gave up after 3 tries", notes)
+        self.assertIn("something else", notes)  # history survives
+
+
 class ProfileTargetsByModelTest(TestCase):
     """Grouping the MLX profile inventory by model, for targets='profiles'."""
 
