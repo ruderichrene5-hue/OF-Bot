@@ -290,7 +290,11 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
     - ``'accounts'`` (default): Airtable Accounts at Lifecycle Stage Active.
     - ``'profiles'``: the MLX profile inventory, via Profiles (Cloning). Use this
       for models that have phones but no Accounts rows yet -- the variant links
-      to the profile instead of an account.
+      to the profile instead of an account. A phone carrying two Instagram
+      accounts arrives as two targets with different handles, so it gets two
+      encodes of every raw video -- one per account. That is the point: posting
+      one file on both accounts of the same phone is duplicate content of the
+      most detectable kind.
 
     Either way a target is ``{'handle': str}`` plus an id, so everything below
     this point is the same for both.
@@ -443,6 +447,13 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
                         str(variant_path),
                         method=SPOOF_METHOD,
                         target_profile_id=acct["profile_id"] if by_profile else None,
+                        # A two-account phone appears here as two targets on one
+                        # profile. Stamping the slot is what stops the queue
+                        # pooling their variants together -- unstamped, both
+                        # accounts would draw from one pile and each raw video
+                        # would reach only one of them.
+                        target_handle=acct.get("ig_handle"),
+                        account_slot=acct.get("slot"),
                     )
                     report.variants_created += 1
             finally:

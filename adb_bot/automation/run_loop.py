@@ -449,6 +449,10 @@ def _run_recheck(args, logger) -> int:
                 readiness_max_attempts=settings.get_saved_readiness_attempts(),
                 flow_name="reel_post_count_probe", result_callback=capture,
                 shutdown_on_success=True, launcher_client=clients.launcher,
+                # Which account to count the posts of. The row knows; the phone
+                # does not -- it is showing whichever account the last run left
+                # in front, which on a two-account phone is a coin flip.
+                target_handle=at._handle(fields.get(at.F_PQ_TARGET_HANDLE)),
             )
         return captured.get("count")
 

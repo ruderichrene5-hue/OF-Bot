@@ -210,7 +210,7 @@ class FakePipelineClient:
         return f"recCP-{name}"
 
     def create_spoof_variant(self, cp, acct, path, method=None, variant_id=None,
-                             target_profile_id=None):
+                             target_profile_id=None, target_handle=None, account_slot=None):
         self.variant_rows.append((cp, acct or target_profile_id, path))
         return "recSV"
 

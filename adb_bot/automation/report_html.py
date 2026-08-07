@@ -967,6 +967,94 @@ def _section_profiles(data: dict) -> str:
     return "".join(parts)
 
 
+def _counts_cell(counts: dict) -> str:
+    """A row's per-status tally as pills, or a dash when it has none."""
+    if not counts:
+        return "<span class='empty'>—</span>"
+    order = ["Posted", "Verifying", "Pending", "Failed"]
+    parts = [f"{_status_pill(status)} {counts[status]}"
+             for status in order if counts.get(status)]
+    parts += [f"{_e(status)} {value}" for status, value in sorted(counts.items())
+              if status not in order and value]
+    return " ".join(parts)
+
+
+def _section_second_accounts(data: dict) -> str:
+    """Phones running two Instagram accounts, and today's posts for each.
+
+    Every other table on this page counts a phone once, because a phone IS one
+    Profiles row -- so a second account that has quietly stopped being scheduled
+    is invisible: the phone still posts, still reports Active, still shows a
+    healthy row. Splitting the day's rows by account is the only view that shows
+    it.
+    """
+    if not data.get("supported", True):
+        return ('<p class="empty">This base has no <span class="mono">Has Second '
+                'Account</span> field, so nothing here can be shown.</p>')
+    if data.get("error"):
+        return (f'<p class="sub"><span class="pill warn">could not read Airtable</span> '
+                f'<span class="mono">{_e(data["error"])}</span></p>')
+
+    profiles = data.get("profiles") or []
+    if not profiles:
+        return ('<p class="empty">No phone is marked as carrying a second account. '
+                'Tick <span class="mono">Has Second Account</span> on a profile in '
+                'Airtable and fill in both handles to give it one.</p>')
+
+    counts = data.get("counts") or {}
+    tiles = [
+        _tile("Phones with two accounts", counts.get("phones", 0),
+              "one device, two Instagram accounts", "ok"),
+        _tile("Ready to post", counts.get("usable", 0),
+              "both handles known", "ok"),
+        _tile("Not usable yet", counts.get("incomplete", 0),
+              "a handle is missing — no posts planned",
+              "bad" if counts.get("incomplete") else "ok"),
+        _tile("Second-account posts today", counts.get("expected_today", 0),
+              "rows scheduled for the second account", ""),
+    ]
+
+    body = []
+    for profile in profiles:
+        if not profile["usable"]:
+            state = "<span class='pill bad'>handle missing</span>"
+        elif profile["second_queued"]:
+            state = "<span class='pill ok'>posting</span>"
+        else:
+            state = "<span class='pill warn'>nothing queued today</span>"
+        body.append(
+            f"<tr><td class='mono'>{_e(profile['name'])}</td>"
+            f"<td>{_e(profile['status'] or '-')}</td>"
+            f"<td class='mono'>{_e(profile['primary'] or '—')}</td>"
+            f"<td>{_counts_cell(profile['primary_today'])}</td>"
+            f"<td class='mono'>{_e(profile['second'] or '—')}</td>"
+            f"<td>{_counts_cell(profile['second_today'])}</td>"
+            f"<td>{state}</td>"
+            f"<td class='mono'>{_e((profile['checked_at'] or '-')[:16].replace('T', ' '))}</td></tr>")
+
+    return (
+        '<p class="sub">Both accounts live in one cloned Instagram app on one phone. '
+        'The bot posts to each of them separately — its own spoofed video, its own '
+        'scheduled times, its own check that the post landed — switching accounts on '
+        'the phone in between.</p>'
+        '<div class="grid">' + "".join(tiles) + '</div>'
+        '<div class="scroll"><table>'
+        '<tr><th>Phone</th><th>Status</th><th>First account</th><th>Its posts today</th>'
+        '<th>Second account</th><th>Its posts today</th><th>State</th>'
+        '<th>Accounts last read</th></tr>' + "".join(body) + '</table></div>'
+        '<div class="howto"><dl>'
+        '<dt>Nothing queued today</dt>'
+        '<dd>The second account is set up but has no posts scheduled today. Usually it '
+        'is waiting on spoofed video: each account needs its <em>own</em> encode of every '
+        'clip, so a second account cannot borrow the first one’s.</dd>'
+        '<dt>Handle missing</dt>'
+        '<dd>Both handles have to be filled in — the bot needs to name the account it '
+        'switches <em>to</em> and the one it switches <em>back to</em>. With one of them '
+        'blank the phone is treated as a normal single-account phone, and only the '
+        'account it is signed in as posts.</dd>'
+        '</dl></div>')
+
+
 def _section_health(health_data: dict, alerts) -> str:
     rows = health_data["loops"]
     if not rows:
@@ -1642,6 +1730,9 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
 
     <section class="panel" id="panel-profiles">
       {_section_profiles(data)}
+
+      <h2>Phones with two accounts</h2>
+      {_section_second_accounts(data.get('second_accounts') or {})}
     </section>
 
     <section class="panel" id="panel-technical">

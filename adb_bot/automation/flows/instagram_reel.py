@@ -844,6 +844,23 @@ class InstagramReelUploadU2Flow:
         if check_abort():
             return {"profile_id": profile.id, "target": target, "aborted": True}
 
+        # --- Step 0: be on the account this post is for -----------------------
+        # Before the baseline count, not after: the count only proves anything
+        # if it was read on the same account the reel goes to. And before the
+        # composer, because the composer posts as whoever is in front.
+        #
+        # No handle means a single-account phone, and this does nothing at all.
+        want_handle = getattr(profile, "target_handle", None)
+        if want_handle and not self._ensure_account_u2(d, target, want_handle, emit, logger=log):
+            flagged = self._account_flag_result_u2(d, profile, target, emit, "switching accounts")
+            if flagged:
+                return flagged
+            emit("warning", "Not posting on %s: could not prove it is signed in as @%s. "
+                            "The clip stays queued -- posting it on the wrong account is the "
+                            "one outcome that cannot be undone.", target, want_handle)
+            return {"profile_id": profile.id, "target": target, "aborted": False,
+                    "success": False, "failed": True}
+
         # Baseline for post-verification: read the account's post count BEFORE
         # uploading, so afterwards a +1 proves the reel landed even if Instagram
         # never shows its confirmation banner. Best-effort -- if it can't be
@@ -933,7 +950,8 @@ class InstagramReelUploadU2Flow:
                                 caption=getattr(profile, "caption", "") or "",
                                 queue_id=getattr(profile, "queue_id", "") or "",
                                 media_hash=media_hash,
-                                baseline_count=baseline_count)
+                                baseline_count=baseline_count,
+                                target_handle=want_handle or "")
             # Share registered once the composer is gone (we're back on a feed
             # tab). Verification below does the real confirmation work.
             waits.settle(8, ready=waits.u2_ready(d, {"resourceId": "com.instagram.android:id/feed_tab"}),
@@ -1972,6 +1990,131 @@ class InstagramReelUploadU2Flow:
         _emit(logger, "info", "u2: profile tab not found for %s", target)
         return False
 
+    # The profile header's own title -- the account's handle, and the control
+    # that opens Instagram's account switcher. Resource ids move between builds,
+    # so the exact ids are tried first and a pattern catches the rest.
+    _ACCOUNT_TITLE_SELECTORS = (
+        {"resourceId": "com.instagram.android:id/action_bar_large_title_auto_size"},
+        {"resourceId": "com.instagram.android:id/action_bar_textview_title"},
+        {"resourceIdMatches": r"com\.instagram\.android:id/action_bar_(large_)?title.*"},
+    )
+
+    @staticmethod
+    def _normalize_handle(value) -> str:
+        """A handle as it compares: bare, lower-cased, no '@' and no padding."""
+        return str(value or "").strip().lstrip("@").strip().lower()
+
+    def _read_current_handle_u2(self, d, target, logger=None) -> str | None:
+        """The handle the profile header is showing, or None if it can't be read.
+
+        Only ever called with the Profile tab open -- everywhere else the action
+        bar holds a screen name ("Reels", "Explore"), not an account.
+        """
+        for kwargs in self._ACCOUNT_TITLE_SELECTORS:
+            try:
+                node = d(**kwargs)
+                if not node.exists:
+                    continue
+                info = node.info or {}
+                # Text first, then the content description: on some builds the
+                # title is an auto-sizing view whose text arrives empty and only
+                # the description carries the handle. An empty read is reported
+                # as unreadable rather than guessed at, because the caller's
+                # answer to "unreadable" is to not post.
+                handle = (self._normalize_handle(info.get("text"))
+                          or self._normalize_handle(info.get("contentDescription")))
+                if handle:
+                    return handle
+            except Exception:
+                continue
+        _emit(logger, "info", "u2: could not read the signed-in handle for %s", target)
+        return None
+
+    def _open_account_switcher_u2(self, d, target, logger=None) -> bool:
+        """Tap the profile header's title to open the account switcher sheet."""
+        for kwargs in self._ACCOUNT_TITLE_SELECTORS:
+            try:
+                node = d(**kwargs)
+                if node.exists:
+                    node.click()
+                    waits.settle(2, logger=logger, what="account switcher")
+                    return True
+            except Exception:
+                continue
+        _emit(logger, "info", "u2: no account-switcher control on the profile header for %s", target)
+        return False
+
+    def _ensure_account_u2(self, d, target, want_handle, emit, logger=None,
+                           max_attempts: int = 2) -> bool:
+        """Make sure the phone is signed in as `want_handle` before anything else.
+
+        Phones carrying two Instagram accounts in one cloned app reach the
+        second through Instagram's own account switcher, and which account is in
+        front is *sticky*: it is whatever the last run left there. So this is not
+        a nicety -- without it, a phone whose previous post went to the second
+        account posts the next one there too, and the primary account silently
+        stops receiving content while its queue rows all say Posted.
+
+        Returns True only when the handle is **proven** to be the one asked for.
+        An unreadable header is False, deliberately: the caller's response to
+        False is to not post at all, and posting a model's reel on the wrong
+        account is far more expensive than a retry.
+
+        `want_handle` empty/None is True immediately -- that is every
+        single-account phone, which has nothing to switch to and never opens a
+        switcher.
+        """
+        want = self._normalize_handle(want_handle)
+        if not want:
+            return True
+
+        for attempt in range(1, max_attempts + 1):
+            if not self._open_profile_tab_u2(d, target, logger=logger):
+                emit("warning", "Could not open the profile tab on %s to check which account "
+                                "is signed in", target)
+                return False
+            waits.settle(3, ready=waits.u2_ready(d, *self._ACCOUNT_TITLE_SELECTORS),
+                         logger=logger, what="profile header")
+
+            current = self._read_current_handle_u2(d, target, logger=logger)
+            if current == want:
+                if attempt > 1:
+                    emit("info", "Switched %s to @%s", target, want)
+                return True
+            emit("info", "%s is signed in as %s; switching to @%s",
+                 target, f"@{current}" if current else "an unreadable account", want)
+
+            if not self._open_account_switcher_u2(d, target, logger=logger):
+                return False
+            # Match the row by its text rather than by a resource id: the sheet's
+            # ids differ across builds, but the row for an account always carries
+            # that account's handle, with or without a leading '@'.
+            pattern = rf"(?i)^\s*@?{re.escape(want)}\s*$"
+            try:
+                row = d(textMatches=pattern)
+                if not row.exists:
+                    emit("warning", "The account switcher on %s does not list @%s -- Airtable "
+                                    "says this phone has it, the phone disagrees", target, want)
+                    return False
+                row.click()
+            except Exception as exc:
+                emit("warning", "Could not tap @%s in the account switcher on %s: %s",
+                     want, target, exc)
+                return False
+
+            # Switching accounts reloads the whole app; give it the same settle
+            # the launch path gets before reading anything back.
+            waits.settle(6, ready=waits.u2_ready(d, *self._ACCOUNT_TITLE_SELECTORS),
+                         logger=logger, what="profile header after the switch")
+
+        current = self._read_current_handle_u2(d, target, logger=logger)
+        if current == want:
+            emit("info", "Switched %s to @%s", target, want)
+            return True
+        emit("warning", "Gave up switching %s to @%s after %s attempt(s); it is showing %s",
+             target, want, max_attempts, f"@{current}" if current else "no readable handle")
+        return False
+
     def _screen_text_probe_u2(self, d, target, logger=None):
         """All visible text + any transient toast, lowercased, for the screen
         classifier (banner / error dialog / draft prompt / composer)."""
@@ -2146,6 +2289,19 @@ class ReelPostCountProbeFlow(InstagramReelUploadU2Flow):
             logger=log, what="Instagram UI loaded",
         )
         mark_step()
+
+        # A two-account phone answers "how many posts?" with whichever account
+        # is in front, and after fifteen minutes that is simply whatever the
+        # last run left there. Reading the wrong account's counter is worse than
+        # reading none: it is a confident number that disproves a live post and
+        # re-queues the reel. So an unswitchable phone reports no count and the
+        # row stays in Verifying for the next pass.
+        want_handle = getattr(profile, "target_handle", None)
+        if want_handle and not self._ensure_account_u2(d, target, want_handle, emit, logger=log):
+            emit("warning", "Post-count probe for %s: could not switch to @%s; not reporting a "
+                            "count read off another account", target, want_handle)
+            return {"profile_id": profile.id, "target": target, "aborted": False,
+                    "success": False, "post_count": None}
 
         # Same browse-and-refresh as the in-run probe: leaving for the feed and
         # coming back is what actually re-fetches the counter. Cheap here, since

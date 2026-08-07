@@ -317,6 +317,10 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
             shutdown_on_success=True,
             caption=item.caption,
             media_path=item.video_path,
+            # Which Instagram account to post as. The flow switches to it before
+            # reading the baseline post count, so the count it compares against
+            # belongs to the account being posted to.
+            target_handle=item.target_handle,
             # Stamps the local post ledger, which is how the deferred recheck
             # matches a ledger entry back to its Verifying row. Without it every
             # entry is written with an empty queue_id and the recheck can never
@@ -348,6 +352,15 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
         `run_profile_workflow` shuts the profile down when it succeeds -- so
         running two of them at once would have the first one's shutdown pull the
         device out from under the second.
+
+        A phone with two Instagram accounts therefore gets **one visit per
+        account, not one visit for both**: two due rows, run one after the
+        other, each launching the phone, switching the account switcher to its
+        own handle, posting, and closing again. Sharing a single launch was
+        tried and rejected -- `run_profile_workflow` closes the profile in a
+        `finally` no caller can opt out of, and that guarantee (a phone is never
+        left open by a loop nobody is watching) is worth more than the launch it
+        would save.
         """
         # The cross-loop ceiling. `concurrency` above only bounds *this* loop;
         # warmup and recheck apply their own, so the three of them could have 21

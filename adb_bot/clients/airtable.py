@@ -88,6 +88,20 @@ F_PQ_SPOOF_VARIANT = "Spoof Variant"     # link -> Spoof Variants
 F_PQ_TARGET_ACCOUNT = "Target Account"   # link -> Accounts
 F_PQ_TARGET_PROFILE = "Target Profile"   # link -> Profiles (Cloning); see below
 
+# Which Instagram account on the target phone a row posts as. Some phones carry
+# two accounts in one cloned app, reachable through Instagram's own account
+# switcher, and each of them is a full posting target: its own slots, its own
+# spoofed variants, its own verification. The handle is what the flow checks the
+# switcher against; the slot is the human-readable label for it.
+#
+# Empty handle = post as whoever is signed in. That is every single-account
+# phone, and it is why these are additive: a base (or a row) written before this
+# existed behaves exactly as it did.
+F_PQ_TARGET_HANDLE = "Target IG Handle"  # singleLineText, no '@'
+F_PQ_ACCOUNT_SLOT = "Account Slot"       # singleSelect: Primary | Second
+SLOT_PRIMARY = "Primary"
+SLOT_SECOND = "Second"
+
 # Posting Queue Issue Type / Post Status values
 ISSUE_NONE = "None"
 ISSUE_NEEDS_RETRY = "Failed - Needs Retry"
@@ -125,6 +139,12 @@ F_SV_CREATED_DATE = "Created Date"
 F_SV_SOURCE_CONTENT = "Source Content"   # link -> Content Pipeline
 F_SV_TARGET_ACCOUNT = "Target Account"   # link -> Accounts
 F_SV_TARGET_PROFILE = "Target Profile"   # link -> Profiles (Cloning); see below
+# A two-account phone needs TWO variants of every raw video, not one used twice:
+# the same file on both accounts is the duplicate-content problem the per-target
+# variants exist to avoid. The slot is what keeps the two pools apart -- without
+# it both accounts draw from one pool and one of them starves.
+F_SV_ACCOUNT_SLOT = "Account Slot"       # singleSelect: Primary | Second
+F_SV_TARGET_HANDLE = "Target IG Handle"  # singleLineText, no '@'
 SV_STATUS_PENDING = "Pending"
 SV_STATUS_READY = "Ready"
 SV_STATUS_USED = "Used"
@@ -167,6 +187,20 @@ F_PROF_NEEDS_HUMAN = "Needs Human Check"  # checkbox
 F_PROF_ISSUE_REASON = "Issue Reason"      # singleSelect, see PROFILE_ISSUE_*
 F_PROF_ISSUE_NOTES = "Issue Notes"        # multilineText, newest entry first
 F_PROF_FLAGGED_AT = "Flagged At"          # dateTime
+
+# Two Instagram accounts logged into one cloned app, switched between with
+# Instagram's own account switcher. The second account is a posting target in
+# its own right -- it gets its own queue rows, its own spoofed variants and its
+# own post verification -- so these three fields are what the whole second
+# account path is built on.
+#
+# `Has Second Account` is the switch a person controls; a profile with the box
+# ticked but no `Second IG Handle` is deliberately NOT treated as two accounts,
+# because the flow cannot switch to an account it cannot name.
+F_PROF_HAS_SECOND = "Has Second Account"    # checkbox
+F_PROF_PRIMARY_HANDLE = "Primary IG Handle"  # the account the phone signs in as
+F_PROF_SECOND_HANDLE = "Second IG Handle"    # the account behind the switcher
+F_PROF_ACCOUNTS_CHECKED = "Accounts Checked At"   # dateTime the switcher was read
 
 PROFILE_ISSUE_EXHAUSTED = "Retries Exhausted"
 PROFILE_ISSUE_VERIFICATION = "Human Verification Required"
@@ -804,14 +838,32 @@ class AirtableClient:
     # Posting Queue loop (checklist #1). The bot consumes Pending rows that
     # are due; Airtable fills the queue on its own 5x/day schedule.
     # ------------------------------------------------------------------
+    def _list_queue_with_slot(self, fields: list, filter_formula: str | None = None) -> list:
+        """Posting Queue rows, asking for the two second-account fields as well.
+
+        Every caller wants them -- which account a row is for decides where the
+        post goes, whether a slot is free, and which account a recheck must look
+        at -- but a base that predates them answers 422 for the whole request,
+        not just the unknown column. One retry without them keeps such a base on
+        the single-account behaviour instead of failing the loop.
+        """
+        try:
+            return self._list_table(
+                TABLE_POSTING_QUEUE,
+                fields=fields + [F_PQ_TARGET_HANDLE, F_PQ_ACCOUNT_SLOT],
+                filter_formula=filter_formula,
+            )
+        except Exception:
+            return self._list_table(TABLE_POSTING_QUEUE, fields=fields,
+                                    filter_formula=filter_formula)
+
     def list_pending_posts(self) -> list:
         """Posting Queue rows still Pending, with the fields the planner needs.
         The due-time filter (Scheduled DateTime <= now) is applied in the planner
         so it stays testable."""
         formula = f"{{{F_PQ_POST_STATUS}}}='{POST_STATUS_PENDING}'"
-        return self._list_table(
-            TABLE_POSTING_QUEUE,
-            fields=[
+        return self._list_queue_with_slot(
+            [
                 F_PQ_NAME, F_PQ_SCHEDULED, F_PQ_POST_STATUS, F_PQ_RETRY_COUNT,
                 F_PQ_CAPTION, F_PQ_SPOOF_VARIANT, F_PQ_TARGET_ACCOUNT,
                 F_PQ_TARGET_PROFILE,
@@ -940,9 +992,8 @@ class AirtableClient:
             f"{{{F_PQ_RECHECK_AFTER}}}!='',"
             f"IS_BEFORE({{{F_PQ_RECHECK_AFTER}}}, NOW()))"
         )
-        return self._list_table(
-            TABLE_POSTING_QUEUE,
-            fields=[
+        return self._list_queue_with_slot(
+            [
                 F_PQ_NAME, F_PQ_SCHEDULED, F_PQ_POST_STATUS, F_PQ_RETRY_COUNT,
                 F_PQ_CAPTION, F_PQ_SPOOF_VARIANT, F_PQ_TARGET_ACCOUNT,
                 F_PQ_TARGET_PROFILE, F_PQ_RECHECK_AFTER,
@@ -962,14 +1013,21 @@ class AirtableClient:
 
         Exactly one of `account_id` / `profile_id` is set (a profile-driven
         variant has no Accounts row). `created` orders the pool so the queue
-        works through the backlog oldest-first."""
+        works through the backlog oldest-first.
+
+        `slot` is which of a two-account phone's accounts the variant was made
+        for; an unset slot reads as Primary, which is what every variant spoofed
+        before two-account phones existed is."""
         formula = f"{{{F_SV_STATUS}}}='{SV_STATUS_READY}'"
-        rows = self._list_table(
-            TABLE_SPOOF_VARIANTS,
-            fields=[F_SV_FILE_PATH, F_SV_STATUS, F_SV_CREATED_DATE,
-                    F_SV_TARGET_ACCOUNT, F_SV_TARGET_PROFILE],
-            filter_formula=formula,
-        )
+        base_fields = [F_SV_FILE_PATH, F_SV_STATUS, F_SV_CREATED_DATE,
+                       F_SV_TARGET_ACCOUNT, F_SV_TARGET_PROFILE]
+        try:
+            rows = self._list_table(TABLE_SPOOF_VARIANTS,
+                                    fields=base_fields + [F_SV_ACCOUNT_SLOT],
+                                    filter_formula=formula)
+        except Exception:
+            rows = self._list_table(TABLE_SPOOF_VARIANTS, fields=base_fields,
+                                    filter_formula=formula)
         out: list = []
         for record in rows:
             fields = record.get("fields", {}) or {}
@@ -981,6 +1039,7 @@ class AirtableClient:
                 "status": _select_name(fields.get(F_SV_STATUS)),
                 "account_id": accounts[0] if accounts else None,
                 "profile_id": profiles[0] if profiles else None,
+                "slot": _select_name(fields.get(F_SV_ACCOUNT_SLOT)) or SLOT_PRIMARY,
                 "created": fields.get(F_SV_CREATED_DATE),
             })
         return out
@@ -996,9 +1055,8 @@ class AirtableClient:
         if statuses:
             clauses = ",".join(f"{{{F_PQ_POST_STATUS}}}='{s}'" for s in statuses)
             formula = f"OR({clauses})"
-        return self._list_table(
-            TABLE_POSTING_QUEUE,
-            fields=[
+        return self._list_queue_with_slot(
+            [
                 F_PQ_NAME, F_PQ_SCHEDULED, F_PQ_POST_STATUS, F_PQ_SPOOF_VARIANT,
                 F_PQ_TARGET_ACCOUNT, F_PQ_TARGET_PROFILE,
             ],
@@ -1009,7 +1067,9 @@ class AirtableClient:
                              target_account_id: str | None = None,
                              target_profile_id: str | None = None,
                              name: str | None = None,
-                             caption_id: str | None = None) -> str | None:
+                             caption_id: str | None = None,
+                             target_handle: str | None = None,
+                             account_slot: str | None = None) -> str | None:
         """One scheduled post: Pending, at `scheduled_iso`, for `variant_id`.
 
         The Spoof Variant link is not optional -- a row without it is rejected by
@@ -1019,7 +1079,14 @@ class AirtableClient:
         Exactly one target link is written, matching whichever one the variant
         carries; writing both would make the row ambiguous for the planner, which
         reads the account first and would post a profile's video on someone
-        else's account."""
+        else's account.
+
+        `target_handle` / `account_slot` say WHICH Instagram account on the
+        target phone the row is for. Both are left off entirely when no handle
+        was given, so a single-account row is byte-for-byte what it was before
+        two-account phones existed -- and a base whose Posting Queue has no such
+        fields keeps working, since the fields are only sent when they are
+        needed."""
         fields: dict = {
             F_PQ_POST_STATUS: POST_STATUS_PENDING,
             F_PQ_SCHEDULED: scheduled_iso,
@@ -1033,6 +1100,10 @@ class AirtableClient:
             fields[F_PQ_TARGET_ACCOUNT] = [target_account_id]
         if caption_id:
             fields[F_PQ_CAPTION] = [caption_id]
+        handle = _handle(target_handle)
+        if handle:
+            fields[F_PQ_TARGET_HANDLE] = handle
+            fields[F_PQ_ACCOUNT_SLOT] = account_slot or SLOT_PRIMARY
         return self._create_in(TABLE_POSTING_QUEUE, fields)
 
     def mark_variant_used(self, variant_record_id: str) -> bool:
@@ -1125,8 +1196,9 @@ class AirtableClient:
         return out
 
     def profile_targets_by_model(self, include_link_profiles: bool = False) -> dict:
-        """Lower-cased model name -> [{'profile_id', 'handle', 'launch_id'}] built
-        from the MLX profile inventory instead of the Accounts table.
+        """Lower-cased model name -> [{'profile_id', 'handle', 'launch_id', 'slot',
+        'ig_handle'}] built from the MLX profile inventory instead of the
+        Accounts table.
 
         Used when the pipeline is told to take its targets from the profiles
         (`targets='profiles'`), which is how models with real phones but no
@@ -1151,10 +1223,38 @@ class AirtableClient:
         of the run short of deleting its row. Setting Status to Inactive in
         Airtable is now how a person parks a profile: it stops both the spoof
         pipeline making variants for it and the queue creating slots for it.
+
+        **Two-account phones yield two targets.** A profile with `Has Second
+        Account` ticked and BOTH handles filled in returns a Primary entry and a
+        Second entry -- same phone, same launch key, different Instagram account
+        -- so everything downstream (spoofing, slot creation, posting,
+        verification) treats the second account as a first-class target without
+        knowing it shares a device with the first.
+
+        Both handles are required, not just the second one. The flow has to be
+        able to name the account it is switching *back* to; with only the second
+        handle known, one Second post would leave the phone signed in as the
+        second account and every later Primary post would go out on the wrong
+        one. Half-filled rows are therefore left as single-account phones.
+
+        The `handle` of the Second entry is the IG handle itself rather than the
+        profile name, because `handle` is what names variant files, queue rows
+        and log lines -- two targets sharing "Jil 5" would be indistinguishable
+        in all three, and `finalize_variant` would have them overwrite each
+        other's video.
         """
         out: dict = {}
-        for record in self._list_table(TABLE_PROFILES,
-                                       fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_STATUS]):
+        # The second-account fields are recent; a base without them must still
+        # return its single-account targets rather than raise. Airtable answers
+        # 422 for an unknown field name, so ask once and fall back.
+        wanted = [F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_STATUS,
+                  F_PROF_HAS_SECOND, F_PROF_PRIMARY_HANDLE, F_PROF_SECOND_HANDLE]
+        try:
+            records = self._list_table(TABLE_PROFILES, fields=wanted)
+        except Exception:
+            records = self._list_table(
+                TABLE_PROFILES, fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_STATUS])
+        for record in records:
             fields = record.get("fields", {}) or {}
             name = str(fields.get(F_PROF_NAME) or "").strip()
             if not name:
@@ -1170,13 +1270,78 @@ class AirtableClient:
             if not launch_id:
                 continue
             model_key = name.split()[0].lower()
+            primary_handle = _handle(fields.get(F_PROF_PRIMARY_HANDLE))
+            second_handle = _handle(fields.get(F_PROF_SECOND_HANDLE))
+            two_accounts = (bool(fields.get(F_PROF_HAS_SECOND))
+                            and bool(primary_handle) and bool(second_handle))
             out.setdefault(model_key, []).append({
                 "profile_id": record.get("id"),
                 "handle": name,
+                "profile_name": name,
                 "launch_id": launch_id,
+                "slot": SLOT_PRIMARY,
+                # Named only on a two-account phone. On every other phone an
+                # empty handle means "post as whoever is signed in", which is
+                # what the flow has always done -- and asking a single-account
+                # phone to prove its handle would turn one stale Airtable value
+                # into a failed post.
+                "ig_handle": primary_handle if two_accounts else None,
             })
+            if two_accounts:
+                out[model_key].append({
+                    "profile_id": record.get("id"),
+                    "handle": second_handle,
+                    # Kept alongside the handle so a row for this target can
+                    # still say which phone it is on. The report works out a
+                    # model from the target's name by taking its first word, and
+                    # a bare handle ("jiji.ll12") has no model in it.
+                    "profile_name": name,
+                    "launch_id": launch_id,
+                    "slot": SLOT_SECOND,
+                    "ig_handle": second_handle,
+                })
         for targets in out.values():
             targets.sort(key=lambda t: t["handle"])
+        return out
+
+    def second_account_profiles(self) -> list | None:
+        """Every profile that carries two Instagram accounts, for the report.
+
+        ``[{'record_id', 'name', 'status', 'primary', 'second', 'checked_at',
+        'usable'}]``. `usable` is the same rule `profile_targets_by_model`
+        applies -- both handles known -- so the page can show a ticked box that
+        is NOT yet producing posts as exactly that, rather than as a phone which
+        is quietly doing nothing.
+
+        Returns None when the base has no `Has Second Account` field at all, so
+        the report can leave the section out instead of claiming no phone has a
+        second account.
+        """
+        try:
+            records = self._list_table(
+                TABLE_PROFILES,
+                fields=[F_PROF_NAME, F_PROF_STATUS, F_PROF_HAS_SECOND,
+                        F_PROF_PRIMARY_HANDLE, F_PROF_SECOND_HANDLE, F_PROF_ACCOUNTS_CHECKED],
+            )
+        except Exception:
+            return None
+        out: list = []
+        for record in records:
+            fields = record.get("fields", {}) or {}
+            if not bool(fields.get(F_PROF_HAS_SECOND)):
+                continue
+            primary = _handle(fields.get(F_PROF_PRIMARY_HANDLE))
+            second = _handle(fields.get(F_PROF_SECOND_HANDLE))
+            out.append({
+                "record_id": record.get("id"),
+                "name": str(fields.get(F_PROF_NAME) or "").strip(),
+                "status": _select_name(fields.get(F_PROF_STATUS)),
+                "primary": primary,
+                "second": second,
+                "checked_at": str(fields.get(F_PROF_ACCOUNTS_CHECKED) or "").strip() or None,
+                "usable": bool(primary and second),
+            })
+        out.sort(key=lambda p: p["name"].lower())
         return out
 
     def content_pipeline_names(self) -> set:
@@ -1207,13 +1372,21 @@ class AirtableClient:
     def create_spoof_variant(self, source_content_id: str, target_account_id: str | None,
                              file_path: str, method: str | None = None,
                              variant_id: str | None = None,
-                             target_profile_id: str | None = None) -> str | None:
+                             target_profile_id: str | None = None,
+                             target_handle: str | None = None,
+                             account_slot: str | None = None) -> str | None:
         """One spoofed video, linked to what it was made for.
 
         The target is an Account normally, or a Profiles (Cloning) row when the
         pipeline is driven by the MLX profile inventory (`targets='profiles'`).
         Exactly one of the two links is written -- writing both would make the
         row ambiguous for the posting planner, which reads whichever is set.
+
+        On a two-account phone the profile link alone is ambiguous in a second
+        way: both accounts live on the same Profiles row. `account_slot` is what
+        separates their pools, so the queue can tell "a video for the primary
+        account" from "a video for the second one" and never hand one account's
+        clip to the other.
         """
         fields: dict = {
             F_SV_FILE_PATH: file_path,
@@ -1229,7 +1402,22 @@ class AirtableClient:
             fields[F_SV_VARIANT_ID] = variant_id
         if method:
             fields[F_SV_METHOD] = method
+        handle = _handle(target_handle)
+        if handle:
+            fields[F_SV_TARGET_HANDLE] = handle
+            fields[F_SV_ACCOUNT_SLOT] = account_slot or SLOT_PRIMARY
         return self._create_in(TABLE_SPOOF_VARIANTS, fields)
+
+
+def _handle(value):
+    """An Instagram handle as the flow wants it: bare, no '@', or None.
+
+    People type the handle into Airtable with the '@' about half the time, and
+    the account switcher shows it without one -- so normalising here is what
+    stops a leading '@' from making every switch fail to match.
+    """
+    text = str(value or "").strip().lstrip("@").strip()
+    return text or None
 
 
 def _select_name(value):

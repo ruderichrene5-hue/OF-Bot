@@ -124,15 +124,39 @@ def schedules_from_airtable(raw) -> dict | None:
 
 @dataclass
 class SlotTarget:
-    """One thing that gets posts scheduled for it: an Account or an MLX profile."""
+    """One thing that gets posts scheduled for it: an Account, an MLX profile,
+    or -- on a phone carrying two Instagram accounts -- one account on a profile.
+
+    The last case is why `key` is not just (kind, record_id). Both accounts of a
+    two-account phone share a Profiles row, so keyed on the record alone they
+    would be one target: the second account would find every slot already
+    "filled" by the first and never post at all. The slot is what makes them two.
+    """
     kind: str          # TARGET_ACCOUNT | TARGET_PROFILE
     record_id: str
     name: str          # handle / profile name -- for logs and the row's Name
     model_key: str = ""  # lower-cased model name, to find this target's schedule
+    slot: str = at.SLOT_PRIMARY   # which account on the phone
+    ig_handle: str | None = None  # the account to switch to; None = whoever is signed in
+    profile_name: str = ""        # the phone this target sits on, when they differ
 
     @property
     def key(self) -> tuple:
-        return (self.kind, self.record_id)
+        return (self.kind, self.record_id, self.slot or at.SLOT_PRIMARY)
+
+    @property
+    def label(self) -> str:
+        """What a queue row calls this target.
+
+        For a second account it is ``"Jil 5 (jiji.ll12)"`` rather than the bare
+        handle: the row Name is the only place a queue row says which target it
+        belongs to without resolving a link, and the report reads the model off
+        its first word. A row called "jiji.ll12 / 09:00" would file itself under
+        a model of that name.
+        """
+        if self.profile_name and self.profile_name != self.name:
+            return f"{self.profile_name} ({self.name})"
+        return self.name
 
 
 @dataclass
@@ -146,7 +170,7 @@ class PlannedRow:
 
     @property
     def name(self) -> str:
-        return f"{self.target.name} / {self.slot}"
+        return f"{self.target.label} / {self.slot}"
 
 
 @dataclass
@@ -285,13 +309,30 @@ def _row_day(row: dict, fields: dict, tz) -> str | None:
     return moment.astimezone(tz).strftime("%Y-%m-%d") if moment else None
 
 
+def _slot_name(value) -> str:
+    """An Account Slot as a key: anything unset reads as Primary.
+
+    Every queue row and every variant made before two-account phones existed
+    has no slot, and all of them belong to the account the phone signs in as.
+    Defaulting here (rather than at each call site) is what lets those rows keep
+    matching the targets they have always matched.
+    """
+    return at._select_name(value) or at.SLOT_PRIMARY
+
+
 def _variant_target_key(variant: dict) -> tuple | None:
     """Which target a Spoof Variant belongs to. Profile link wins if both are
-    set (same precedence as create_spoof_variant / the posting planner)."""
+    set (same precedence as create_spoof_variant / the posting planner).
+
+    The slot is part of the key for profile-linked variants: on a two-account
+    phone both accounts link the same Profiles row, and without it the primary
+    account would drain the pool the second account's clips are sitting in --
+    then post them, on the wrong account."""
     if variant.get("profile_id"):
-        return (TARGET_PROFILE, variant["profile_id"])
+        return (TARGET_PROFILE, variant["profile_id"], _slot_name(variant.get("slot")))
     if variant.get("account_id"):
-        return (TARGET_ACCOUNT, variant["account_id"])
+        # An Accounts row IS one Instagram account, so it has no second slot.
+        return (TARGET_ACCOUNT, variant["account_id"], at.SLOT_PRIMARY)
     return None
 
 
@@ -369,8 +410,9 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
             held_variants[variant_id] = status
         account_id = _first_link(fields, at.F_PQ_TARGET_ACCOUNT)
         profile_id = _first_link(fields, at.F_PQ_TARGET_PROFILE)
-        key = ((TARGET_PROFILE, profile_id) if profile_id
-               else (TARGET_ACCOUNT, account_id) if account_id else None)
+        row_slot = _slot_name(fields.get(at.F_PQ_ACCOUNT_SLOT))
+        key = ((TARGET_PROFILE, profile_id, row_slot) if profile_id
+               else (TARGET_ACCOUNT, account_id, at.SLOT_PRIMARY) if account_id else None)
         slot_key = _slot_key(fields.get(at.F_PQ_SCHEDULED))
         if key and slot_key:
             filled.add((key, slot_key))
@@ -521,6 +563,11 @@ def collect_targets(airtable, include_profiles: bool = True) -> list:
     profiles and profiles without an MLX API ID excluded). They carry no health
     guards: there is no Accounts row to hold that state.
 
+    A phone with two Instagram accounts yields **two** profile targets on one
+    record id, distinguished by their slot -- so the second account gets its own
+    slots at the same times as the first, and the posting loop (which runs a
+    phone's items one after another) posts them back to back on one launch.
+
     Both are keyed by lower-cased model name, and that key is kept on the target:
     it is how a row finds its model's Reel Post Times later.
     """
@@ -532,8 +579,15 @@ def collect_targets(airtable, include_profiles: bool = True) -> list:
     if include_profiles:
         for model_key, entries in (airtable.profile_targets_by_model() or {}).items():
             for entry in entries:
-                targets.append(SlotTarget(TARGET_PROFILE, entry["profile_id"],
-                                          entry.get("handle") or entry["profile_id"], model_key))
+                targets.append(SlotTarget(
+                    TARGET_PROFILE, entry["profile_id"],
+                    entry.get("handle") or entry["profile_id"], model_key,
+                    # A two-account phone arrives here as two entries sharing a
+                    # profile_id; the slot is what keeps them apart from here on.
+                    slot=entry.get("slot") or at.SLOT_PRIMARY,
+                    ig_handle=entry.get("ig_handle"),
+                    profile_name=entry.get("profile_name") or "",
+                ))
     return targets
 
 
@@ -610,6 +664,10 @@ def run_queue_slots(airtable, logger, slot_times=DEFAULT_SLOT_TIMES,
             target_account_id=row.target.record_id if row.target.kind == TARGET_ACCOUNT else None,
             target_profile_id=row.target.record_id if row.target.kind == TARGET_PROFILE else None,
             name=row.name,
+            # Which Instagram account on the phone this row posts as. Empty for
+            # every single-account phone, which is what the flow already assumes.
+            target_handle=row.target.ig_handle,
+            account_slot=row.target.slot,
         )
         if not record_id:
             report.errors.append((row.name, "failed to create the Posting Queue row"))

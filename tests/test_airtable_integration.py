@@ -96,7 +96,9 @@ class ProfileTargetsByModelTest(TestCase):
         self.assertEqual(sorted(targets), ["jil", "katja"])
         # Sorted by name, so a run's fan-out order is stable.
         self.assertEqual([t["handle"] for t in targets["jil"]], ["Jil 1", "Jil 2"])
-        self.assertEqual(targets["jil"][0], {"profile_id": "p2", "handle": "Jil 1", "launch_id": "111"})
+        self.assertEqual(targets["jil"][0], {"profile_id": "p2", "handle": "Jil 1",
+                                             "profile_name": "Jil 1", "launch_id": "111",
+                                             "slot": "Primary", "ig_handle": None})
 
     def test_link_profiles_and_keyless_profiles_are_dropped(self):
         handles = [t["handle"] for t in self._targets()["jil"]]

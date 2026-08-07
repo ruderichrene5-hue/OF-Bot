@@ -19,6 +19,7 @@ class FakePipelineClient:
         self.content_rows = []
         self.variant_rows = []
         self.variant_profile_rows = []
+        self.variant_slots = []
         self.spoofed_marks = []
 
     def content_pipeline_names(self):
@@ -39,9 +40,11 @@ class FakePipelineClient:
         return rec
 
     def create_spoof_variant(self, source_content_id, target_account_id, file_path, method=None,
-                             variant_id=None, target_profile_id=None):
+                             variant_id=None, target_profile_id=None,
+                             target_handle=None, account_slot=None):
         self.variant_rows.append((source_content_id, target_account_id, file_path))
         self.variant_profile_rows.append((source_content_id, target_profile_id, file_path))
+        self.variant_slots.append((target_profile_id, target_handle, account_slot, file_path))
         return f"recSV{len(self.variant_rows)}"
 
     def set_content_pipeline_spoofed(self, record_id, failed=False):

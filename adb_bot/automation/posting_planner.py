@@ -30,6 +30,11 @@ class PostingItem:
     variant_id: str | None
     scheduled: str | None
     retry_count: int = 0
+    # Which Instagram account on the phone to post as. None = whoever is signed
+    # in, which is every single-account phone. When set, the flow proves the
+    # account switcher is on this handle before it touches the composer.
+    target_handle: str | None = None
+    account_slot: str | None = None
 
 
 @dataclass
@@ -170,6 +175,13 @@ def plan_posting_queue(
         except (TypeError, ValueError):
             retry = 0
 
+        # A two-account phone posts as whichever account the row names, and the
+        # name follows suit: two rows for one profile would otherwise be
+        # indistinguishable in the log and in the Run Log.
+        target_handle = at._handle(fields.get(at.F_PQ_TARGET_HANDLE))
+        if target_handle and direct_profile_id and not account_id:
+            account_name = target_handle
+
         plan.to_post.append(PostingItem(
             queue_id=queue_id,
             account_id=account_id,
@@ -180,6 +192,8 @@ def plan_posting_queue(
             variant_id=variant_id,
             scheduled=fields.get(at.F_PQ_SCHEDULED),
             retry_count=retry,
+            target_handle=target_handle,
+            account_slot=at._select_name(fields.get(at.F_PQ_ACCOUNT_SLOT)),
         ))
 
     return plan

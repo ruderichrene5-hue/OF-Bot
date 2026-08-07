@@ -1864,6 +1864,76 @@ RETRYABLE_ISSUE = "Failed - Needs Retry"
 DEFAULT_MAX_RETRIES = 3
 
 
+def second_accounts(airtable, rows=None, day: str = "") -> dict:
+    """Phones carrying two Instagram accounts, and what each account did today.
+
+    Two accounts on one phone are invisible everywhere else on this page: they
+    share a Profiles row, a device and a launch key, so every other table counts
+    them as one phone doing one phone's work. This is the one place that says
+    otherwise -- and, more usefully, the place that shows a second account which
+    is configured but *not posting*, which looks identical to a working one
+    until you count its rows.
+
+    `supported` False means the base has no `Has Second Account` field at all,
+    which is a different thing from no phone having one.
+    """
+    from adb_bot.clients import airtable as at
+
+    out = {"profiles": [], "supported": True, "error": "",
+           "counts": {"phones": 0, "usable": 0, "incomplete": 0,
+                      "posted_today": 0, "expected_today": 0}}
+    try:
+        profiles = airtable.second_account_profiles()
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+    if profiles is None:
+        out["supported"] = False
+        return out
+    if not profiles:
+        return out
+
+    rows = rows if rows is not None else []
+    fields = lambda r: (r.get("fields") or {})            # noqa: E731
+
+    # Today's rows only, keyed the same way `queue_today` keys them: the day a
+    # post was due, not the day a phone happened to run it.
+    by_profile: dict = {}
+    for row in rows:
+        f = fields(row)
+        if day and not str(f.get(at.F_PQ_SCHEDULED, "")).startswith(day):
+            continue
+        links = f.get(at.F_PQ_TARGET_PROFILE) or []
+        if not links:
+            continue
+        slot = at._select_name(f.get(at.F_PQ_ACCOUNT_SLOT)) or at.SLOT_PRIMARY
+        status = f.get(at.F_PQ_POST_STATUS) or "(empty)"
+        by_profile.setdefault(links[0], {}).setdefault(slot, Counter())[status] += 1
+
+    for profile in profiles:
+        slots = by_profile.get(profile["record_id"], {})
+        primary = dict(slots.get(at.SLOT_PRIMARY, Counter()))
+        second = dict(slots.get(at.SLOT_SECOND, Counter()))
+        entry = dict(profile)
+        entry["primary_today"] = primary
+        entry["second_today"] = second
+        entry["posted_today"] = (primary.get("Posted", 0) + second.get("Posted", 0))
+        # The question the page exists to answer: is the second account actually
+        # being scheduled? A phone whose second account has no rows at all is
+        # either newly configured or quietly doing nothing.
+        entry["second_queued"] = sum(second.values())
+        out["profiles"].append(entry)
+
+    out["counts"] = {
+        "phones": len(out["profiles"]),
+        "usable": sum(1 for p in out["profiles"] if p["usable"]),
+        "incomplete": sum(1 for p in out["profiles"] if not p["usable"]),
+        "posted_today": sum(p["posted_today"] for p in out["profiles"]),
+        "expected_today": sum(sum(p["second_today"].values()) for p in out["profiles"]),
+    }
+    return out
+
+
 def needs_human(airtable, max_retries: int = DEFAULT_MAX_RETRIES) -> dict:
     """Everything waiting on a person, from both places it can be recorded.
 
@@ -2768,6 +2838,9 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
                                          "rate": None}, "omitted": 0, "undated": 0},
         "content": {"ready": 0, "drawable": 0, "held": 0, "by_model": {}, "held_by_model": {}},
         "needs_human": {"rows": [], "retrying": [], "profiles": [], "error": ""},
+        "second_accounts": {"profiles": [], "supported": True, "error": "",
+                            "counts": {"phones": 0, "usable": 0, "incomplete": 0,
+                                       "posted_today": 0, "expected_today": 0}},
         "schedules": {"models": [], "timezone": "", "fallback": [], "per_model": True,
                       "error": ""},
         "outlook": {"queued": [], "profiles": [], "gap_minutes": 0, "default_cap": 0,
@@ -2833,6 +2906,9 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             data["daily"] = daily_success(rows)
             data["content"] = content_stock(airtable, claimed=claimed_variant_ids(rows))
             data["needs_human"] = needs_human(airtable)
+            # Reuses the same listing: which of a two-account phone's accounts
+            # got rows today is already in it.
+            data["second_accounts"] = second_accounts(airtable, rows=rows, day=day)
             # After `content`: the schedule table reads its per-model stock from
             # it, and a schedule with no stock beside it is half the answer.
             data["schedules"] = model_schedules(airtable, content=data["content"], now=now)
