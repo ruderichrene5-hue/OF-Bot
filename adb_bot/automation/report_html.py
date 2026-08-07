@@ -477,9 +477,16 @@ def _section_live_work(rows, refresh_seconds: int = REFRESH_SECONDS) -> str:
         # to a person, but the run folder is what they need to go and find it.
         reel = (f'<span class="mono" title="{_e(row["reel_path"])}">{_e(row["reel"])}</span>'
                 if row["reel"] else '<span class="sub">—</span>')
+        # Marked, not silently blended in: this row's loop was worked out from
+        # the slot it holds rather than read off a lock naming the profile.
+        doing = _e(row["doing"]) + (_hint(
+            "Attributed by the slot this loop holds, not by a profile lock — the recheck "
+            "probe drives one phone and takes no lock. It is the right loop; on a box "
+            "running several lockless loops at once it need not be the right phone."
+        ) if row.get("by_slot") else "")
         body.append(
             f"<tr><td class='mono'>{_e(row['name'])}</td>"
-            f"<td>{_e(row['doing'])}</td><td>{reel}</td>"
+            f"<td>{doing}</td><td>{reel}</td>"
             f"<td class='num mono'>{_e(row['started'])}</td>"
             f"<td class='num'>{_e(_fmt_seconds(row['for_seconds']))}</td>"
             f"<td class='num'>{state}</td></tr>")

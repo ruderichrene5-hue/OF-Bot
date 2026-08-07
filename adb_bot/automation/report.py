@@ -564,6 +564,37 @@ _LOOP_WORK = {
 }
 
 
+def slot_holders() -> list:
+    """Which loop holds each live-phone slot, and since when.
+
+    The slot is the only ownership mark some loops leave. The recheck probe
+    opens a phone under a slot and takes **no profile lock at all** -- it drives
+    one profile, so it has nothing to exclude anyone else from -- and without
+    reading slots its phone shows up owned by nobody, which is this page's word
+    for an orphan and the exact opposite of the truth.
+    """
+    from adb_bot.core import locks
+
+    try:
+        paths = sorted(locks.slot_dir().glob(f"*{locks._SLOT_SUFFIX}"))
+    except Exception:
+        return []
+
+    now, out = time.time(), []
+    for path in paths:
+        try:
+            if locks._slot_is_reclaimable(path, locks.SLOT_TTL_SECONDS):
+                continue                       # owner is gone; not a live phone
+            payload = path.read_text(encoding="utf-8", errors="replace")
+            age = max(0.0, now - path.stat().st_mtime)
+        except Exception:
+            continue
+        fields = dict(token.partition("=")[::2] for token in payload.split())
+        out.append({"slot": path.stem, "owner": fields.get("owner") or "unknown",
+                    "pid": fields.get("pid") or "", "age_seconds": age})
+    return out
+
+
 def live_work(now=None) -> list:
     """One row per profile being worked on right now: which loop has it, what
     that loop does, and when its phone came up.
@@ -579,6 +610,10 @@ def live_work(now=None) -> list:
       would report a profile as "running for 12 minutes" while it sat in the
       queue waiting for a slot. The phone's start is the honest clock.
 
+    A phone with no lock is not automatically unowned: `slot_holders` covers
+    the loops that take a slot and no profile lock (recheck), and only what is
+    left after that is reported as belonging to nobody.
+
     Rows appear for a lock with no phone yet (launching) and for a phone with
     no lock (an orphan, or a run that died) -- both are things worth seeing,
     and dropping either would make this table agree with neither tab above it.
@@ -586,6 +621,7 @@ def live_work(now=None) -> list:
     now = now or datetime.now()
     held, _stale = profile_locks()
     phones = phone_processes()
+    slots = slot_holders()
 
     rows: dict = {}
 
@@ -594,7 +630,7 @@ def live_work(now=None) -> list:
             "profile_id": "", "name": "", "loop": "", "doing": "", "pid": "",
             "started": "", "for_seconds": 0.0, "held_for_seconds": 0.0,
             "has_phone": False, "has_lock": False, "orphan": False,
-            "reel": "", "reel_path": "", "reel_row": "",
+            "by_slot": False, "reel": "", "reel_path": "", "reel_row": "",
         })
 
     for entry in held:
@@ -614,6 +650,45 @@ def live_work(now=None) -> list:
                    for_seconds=phone["age_seconds"])
         if not row["name"] or row["name"] == "(unknown)":
             row["name"] = phone["name"]
+
+    # A loop holding more slots than it holds profile locks is driving phones
+    # without one. Subtracting rather than just listing slot owners matters:
+    # posting takes a slot *and* a lock per profile, so its slots are already
+    # spoken for and attributing an unlocked phone to it would be wrong.
+    spare = Counter(slot["owner"] for slot in slots)
+    spare.subtract(Counter(entry["owner"] for entry in held))
+    unattributed = sorted(owner for owner, count in spare.items() if count > 0)
+
+    claimed = Counter()
+    for row in rows.values():
+        if not row["has_lock"] and not row["orphan"] and unattributed:
+            # One candidate is an answer; several is a narrowing, and saying so
+            # beats picking one of them and sounding certain.
+            if len(unattributed) == 1:
+                row.update(loop=unattributed[0], by_slot=True)
+                row["doing"] = _LOOP_WORK.get(unattributed[0], "")
+                claimed[unattributed[0]] += 1
+            else:
+                row["by_slot"] = True
+                row["doing"] = "one of: " + ", ".join(unattributed)
+
+    # A spare slot with no phone under it is a loop working on a profile whose
+    # phone has not come up -- a recheck probe grinding through its fifteen
+    # readiness attempts against a profile that never starts, which is a real
+    # thing this fleet does and the reason a slot can sit occupied for minutes.
+    # Without a row for it the panel reads "nothing is running" while a slot of
+    # the ceiling is spoken for. There is no profile id in a slot file, so the
+    # row can say which loop and for how long, and honestly not which account.
+    ages: dict = defaultdict(list)
+    for slot in slots:
+        ages[slot["owner"]].append(slot["age_seconds"])
+    for owner in unattributed:
+        spare_ages = sorted(ages[owner], reverse=True)[claimed[owner]:spare[owner]]
+        for index, age in enumerate(spare_ages):
+            row = blank(f"slot:{owner}:{index}")
+            row.update(loop=owner, by_slot=True, held_for_seconds=age,
+                       name="(phone not up yet)")
+            row["doing"] = _LOOP_WORK.get(owner, "")
 
     for row in rows.values():
         # No phone yet means the lock was taken and the launch has not landed;

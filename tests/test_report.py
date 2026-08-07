@@ -2840,9 +2840,10 @@ class LiveWorkTest(unittest.TestCase):
 
     NOW = datetime(2026, 8, 7, 13, 30, 0)
 
-    def _work(self, held=(), phones=(), now=None):
+    def _work(self, held=(), phones=(), slots=(), now=None):
         with mock.patch.object(report, "profile_locks", return_value=(list(held), [])), \
-             mock.patch.object(report, "phone_processes", return_value=list(phones)):
+             mock.patch.object(report, "phone_processes", return_value=list(phones)), \
+             mock.patch.object(report, "slot_holders", return_value=list(slots)):
             return report.live_work(now=now or self.NOW)
 
     def _lock(self, profile_id, owner="posting", name="", age=600.0):
@@ -3009,3 +3010,137 @@ class LiveWorkRenderTest(RenderTest):
             self._data(live_work=self._rows(reel="<script>x</script>.mp4")))
         self.assertNotIn("<script>x</script>", page)
         self.assertIn("&lt;script&gt;", page)
+
+
+class SlotOwnershipTest(LiveWorkTest):
+    """A phone with no profile lock is not automatically a phone nobody owns.
+
+    The recheck probe drives one profile, so it takes a slot and no lock at
+    all. Read from locks alone its phone renders as "open, no loop holds it" --
+    which is this page's phrasing for an orphan, and the exact inverse of what
+    is happening. Seen live 2026-08-07.
+    """
+
+    def _slot(self, owner, slot="slot_000"):
+        return {"slot": slot, "owner": owner, "pid": "9", "age_seconds": 30.0}
+
+    def test_a_lockless_loops_phone_is_attributed_to_it(self):
+        row = self._work(phones=[self._phone("111")], slots=[self._slot("recheck")])[0]
+        self.assertEqual(row["loop"], "recheck")
+        self.assertEqual(row["doing"], "checking a post landed")
+        self.assertTrue(row["by_slot"])
+
+    def test_a_slot_its_loop_already_holds_a_lock_for_is_not_spare(self):
+        """Posting takes a slot *and* a lock per profile. Attributing a second,
+        unlocked phone to it would name the wrong loop."""
+        rows = self._work(held=[self._lock("111", owner="posting")],
+                          phones=[self._phone("111"), self._phone("222", pid=43)],
+                          slots=[self._slot("posting")])
+        unlocked = [r for r in rows if r["profile_id"] == "222"][0]
+        self.assertEqual(unlocked["loop"], "")
+        self.assertFalse(unlocked["by_slot"])
+
+    def test_several_candidates_narrow_rather_than_guess(self):
+        row = self._work(phones=[self._phone("111")],
+                         slots=[self._slot("recheck"), self._slot("warmup", "slot_001")])[0]
+        self.assertEqual(row["loop"], "")
+        self.assertEqual(row["doing"], "one of: recheck, warmup")
+        self.assertTrue(row["by_slot"])
+
+    def test_an_orphan_is_still_an_orphan(self):
+        """Old enough that the reaper will close it: a live slot elsewhere must
+        not launder it into looking owned."""
+        row = self._work(phones=[self._phone("111", orphan=True)],
+                         slots=[self._slot("recheck")])[0]
+        self.assertTrue(row["orphan"])
+        self.assertEqual(row["doing"], "phone open, no loop holds it")
+
+    def test_no_slots_at_all_reads_as_unowned(self):
+        row = self._work(phones=[self._phone("111")])[0]
+        self.assertEqual(row["doing"], "phone open, no loop holds it")
+        self.assertFalse(row["by_slot"])
+
+
+class SlotHoldersTest(unittest.TestCase):
+    def test_it_reads_the_owner_out_of_the_slot_file(self):
+        from adb_bot.core import locks
+
+        path = locks.slot_dir() / "slot_000.slot"
+        path.write_text("pid=1 token=1.2.3 owner=recheck at=2026-08-07 13:43:56\n")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        with mock.patch.object(locks, "_slot_is_reclaimable", return_value=False):
+            holders = report.slot_holders()
+        self.assertEqual([h["owner"] for h in holders], ["recheck"])
+
+    def test_a_slot_whose_owner_died_is_not_a_live_phone(self):
+        from adb_bot.core import locks
+
+        path = locks.slot_dir() / "slot_001.slot"
+        path.write_text("pid=999999 token=1.2.3 owner=posting at=2026-08-07 13:43:56\n")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        with mock.patch.object(locks, "_slot_is_reclaimable", return_value=True):
+            self.assertEqual(report.slot_holders(), [])
+
+    def test_an_unreadable_slot_directory_is_empty_not_an_error(self):
+        from adb_bot.core import locks
+
+        with mock.patch.object(locks, "slot_dir", side_effect=OSError("gone")):
+            self.assertEqual(report.slot_holders(), [])
+
+
+class SlotAttributionRenderTest(LiveWorkRenderTest):
+    def test_a_slot_attributed_row_says_so_rather_than_implying_a_lock(self):
+        page = report_html.render(self._data(live_work=self._rows(
+            loop="recheck", doing="checking a post landed", by_slot=True,
+            reel="", reel_path="")))
+        self.assertIn("checking a post landed", page)
+        self.assertIn("Attributed by the slot this loop holds", page)
+
+    def test_a_lock_backed_row_carries_no_such_caveat(self):
+        page = report_html.render(self._data(live_work=self._rows()))
+        self.assertNotIn("Attributed by the slot", page)
+
+
+class SpareSlotRowTest(SlotOwnershipTest):
+    """A slot with no phone under it is still a loop occupying the ceiling.
+
+    A recheck probe grinding through fifteen readiness attempts against a
+    profile that never starts holds its slot for minutes with no phone process
+    to show for it. With no row the panel reads "nothing is running" while a
+    slot is spoken for -- seen live 2026-08-07.
+    """
+
+    def test_a_held_slot_with_no_phone_still_gets_a_row(self):
+        rows = self._work(slots=[self._slot("recheck")])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["loop"], "recheck")
+        self.assertEqual(rows[0]["doing"], "checking a post landed")
+        self.assertFalse(rows[0]["has_phone"])
+        self.assertTrue(rows[0]["by_slot"])
+
+    def test_it_says_which_loop_and_not_which_account(self):
+        """A slot file carries no profile id. Naming one would be an invention."""
+        row = self._work(slots=[self._slot("recheck")])[0]
+        self.assertEqual(row["profile_id"], "")
+        self.assertEqual(row["name"], "(phone not up yet)")
+
+    def test_a_slot_already_matched_to_a_phone_is_not_counted_twice(self):
+        rows = self._work(phones=[self._phone("111")], slots=[self._slot("recheck")])
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["has_phone"])
+
+    def test_only_the_unmatched_remainder_becomes_a_row(self):
+        rows = self._work(phones=[self._phone("111")],
+                          slots=[self._slot("recheck"), self._slot("recheck", "slot_001")])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(sum(1 for r in rows if not r["has_phone"]), 1)
+
+    def test_a_slot_a_lock_already_explains_adds_nothing(self):
+        rows = self._work(held=[self._lock("111", owner="posting")],
+                          phones=[self._phone("111")], slots=[self._slot("posting")])
+        self.assertEqual(len(rows), 1)
+
+    def test_the_slots_own_age_is_how_long_it_has_been_held(self):
+        row = self._work(slots=[dict(self._slot("recheck"), age_seconds=300.0)])[0]
+        self.assertEqual(row["for_seconds"], 300.0)
+        self.assertEqual(row["started"], "13:25:00")
