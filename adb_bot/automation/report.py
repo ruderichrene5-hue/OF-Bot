@@ -554,6 +554,132 @@ def phone_processes() -> list:
     return rows
 
 
+#: What each loop does to a profile it holds, in the words someone reading the
+#: page would use. The key is the `owner=` a loop writes into its lock file.
+_LOOP_WORK = {
+    "posting": "posting a reel",
+    "warmup": "warm-up actions",
+    "recheck": "checking a post landed",
+    "ui": "driven by hand from the desktop app",
+}
+
+
+def live_work(now=None) -> list:
+    """One row per profile being worked on right now: which loop has it, what
+    that loop does, and when its phone came up.
+
+    Two sources, joined on the profile id, because neither alone is the answer:
+
+    * The **lock** says which loop owns the profile. It is the only thing that
+      knows *why* a phone is open -- posting, warm-up and recheck all open the
+      same phones the same way.
+    * The **phone process** says when work on that profile actually started.
+      Locks are taken for a whole batch up front (`ProfileLocks.acquire_all`),
+      so a lock's age can be ten minutes older than the phone under it and
+      would report a profile as "running for 12 minutes" while it sat in the
+      queue waiting for a slot. The phone's start is the honest clock.
+
+    Rows appear for a lock with no phone yet (launching) and for a phone with
+    no lock (an orphan, or a run that died) -- both are things worth seeing,
+    and dropping either would make this table agree with neither tab above it.
+    """
+    now = now or datetime.now()
+    held, _stale = profile_locks()
+    phones = phone_processes()
+
+    rows: dict = {}
+
+    def blank(key):
+        return rows.setdefault(key, {
+            "profile_id": "", "name": "", "loop": "", "doing": "", "pid": "",
+            "started": "", "for_seconds": 0.0, "held_for_seconds": 0.0,
+            "has_phone": False, "has_lock": False, "orphan": False,
+            "reel": "", "reel_path": "", "reel_row": "",
+        })
+
+    for entry in held:
+        row = blank(entry["profile_id"])
+        row.update(profile_id=entry["profile_id"], name=entry["name"] or "",
+                   loop=entry["owner"], has_lock=True,
+                   held_for_seconds=entry["age_seconds"])
+        row["doing"] = _LOOP_WORK.get(entry["owner"], "")
+
+    for phone in phones:
+        # A phone whose profile could not be read from argv still belongs on the
+        # page -- it is holding memory and a slot -- so it is keyed by its pid
+        # rather than dropped for having no id to join on.
+        row = blank(phone["profile_id"] or f"pid:{phone['pid']}")
+        row.update(profile_id=phone["profile_id"] or row["profile_id"],
+                   pid=phone["pid"], has_phone=True, orphan=phone["orphan"],
+                   for_seconds=phone["age_seconds"])
+        if not row["name"] or row["name"] == "(unknown)":
+            row["name"] = phone["name"]
+
+    for row in rows.values():
+        # No phone yet means the lock was taken and the launch has not landed;
+        # the lock's own age is then the only clock there is.
+        seconds = row["for_seconds"] if row["has_phone"] else row["held_for_seconds"]
+        row["for_seconds"] = seconds
+        row["started"] = (now - timedelta(seconds=seconds)).strftime("%H:%M:%S")
+        if not row["doing"]:
+            # A loop this module has no phrase for is still a loop that holds
+            # the profile -- name it rather than reporting the profile as
+            # unowned, which is what an operator acts on.
+            row["doing"] = (f"held by the {row['loop']} loop" if row["loop"]
+                            else "phone open, no loop holds it" if row["has_phone"]
+                            else "waiting on its phone")
+        if not row["name"]:
+            row["name"] = row["profile_id"] or "(unknown)"
+
+    return sorted(rows.values(), key=lambda r: r["for_seconds"], reverse=True)
+
+
+def annotate_live_reels(rows, queue_rows, profiles=None, variants=None) -> None:
+    """Fill in which reel each posting profile is sending, in place.
+
+    Nothing writes the in-flight clip anywhere a reader can see it: the posting
+    runner holds it in memory and the local ledger only learns of it once Share
+    has been tapped, which is the *end* of a post. So it is derived instead --
+    a Posting Queue row stays `Pending` until its result is written, so the
+    oldest still-Pending row for a profile the posting loop is holding is the
+    one in flight on it.
+
+    Deliberately only for `posting`. A profile held by warm-up or recheck has
+    queue rows too, and captioning them with a reel it is not sending would be
+    an invention dressed as a reading.
+    """
+    from adb_bot.clients import airtable as at
+
+    profiles, variants = profiles or {}, variants or {}
+    by_launch: dict = {}
+    for record in queue_rows or []:
+        fields = record.get("fields", {}) or {}
+        if at._select_name(fields.get(at.F_PQ_POST_STATUS)) != at.POST_STATUS_PENDING:
+            continue
+        links = fields.get(at.F_PQ_TARGET_PROFILE) or []
+        launch_id = (profiles.get(links[0]) or {}).get("launch_id") if links else None
+        if not launch_id:
+            continue
+        variant_links = fields.get(at.F_PQ_SPOOF_VARIANT) or []
+        path = (variants.get(variant_links[0]) or {}).get("file_path") if variant_links else None
+        by_launch.setdefault(str(launch_id), []).append({
+            "scheduled": str(fields.get(at.F_PQ_SCHEDULED) or ""),
+            "name": str(fields.get(at.F_PQ_NAME) or ""),
+            "path": str(path or ""),
+        })
+
+    for row in rows or []:
+        if row.get("loop") != "posting":
+            continue
+        due = sorted(by_launch.get(str(row.get("profile_id")), []),
+                     key=lambda r: r["scheduled"] or "9999")
+        if not due:
+            continue
+        row["reel_path"] = due[0]["path"]
+        row["reel"] = due[0]["path"].rsplit("/", 1)[-1]
+        row["reel_row"] = due[0]["name"]
+
+
 def timer_states(loops=None) -> list:
     """Each loop's timer: whether it is active, when it last fired, when next.
 
@@ -2341,6 +2467,10 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
         "day": day,
         "now": running_now(),
+        # Local half only: which profiles are live, which loop has each and
+        # when its phone came up. The reel each posting profile is sending is
+        # filled in below, once the queue rows have been read.
+        "live_work": live_work(now=now),
         "server": server_stats(),
         "phone": phone_durations(day=day),
         "disks": disk_usage(),
@@ -2399,6 +2529,22 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             # One listing serves both: the day's rows, and which variants every
             # row (of any age) has already claimed.
             rows = airtable.list_queue_rows()
+            # Its own try, inside this one. Naming the in-flight reels is the
+            # only thing on the page that needs Profiles and Spoof Variants, so
+            # it is two table reads that nothing else depends on -- and out here
+            # a failure in them would blank the queue, the day history, the
+            # worklist and the schedules for the sake of one column. It fails
+            # alone instead; `_section_live_work` says why the column is empty.
+            # And only when something is actually posting: the two reads are
+            # ~700 records on this base, and the answer for an idle fleet is
+            # "nothing", which needs no reading at all. Most renders are idle.
+            try:
+                if any(r["loop"] == "posting" for r in data["live_work"]):
+                    annotate_live_reels(data["live_work"], rows,
+                                        profiles=airtable.profile_launch_map(),
+                                        variants=airtable.variants_by_id())
+            except Exception:
+                pass
             data["queue"] = queue_today(airtable, day, rows=rows)
             # Same listing again: the history is every row Airtable still holds,
             # which is exactly what was just fetched for today.

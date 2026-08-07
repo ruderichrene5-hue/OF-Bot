@@ -450,6 +450,58 @@ def _hint(text: str) -> str:
             f'<span class="hint-text" aria-hidden="true">{_e(text)}</span>')
 
 
+def _section_live_work(rows, refresh_seconds: int = REFRESH_SECONDS) -> str:
+    """Every profile being worked on: which loop has it, what it is sending,
+    and since when.
+
+    The "Reel" column is only ever filled for a profile the *posting* loop
+    holds, and the note below says so -- see `report.annotate_live_reels` for
+    why a warm-up profile's queue row is not its reel.
+    """
+    if not rows:
+        return ('<p class="empty">No profile is being worked on right now — '
+                'no loop holds a lock and no phone is open.</p>')
+
+    head = ("<tr><th>Profile</th><th>Doing</th><th>Reel</th>"
+            "<th class='num'>Started</th><th class='num'>Running for</th>"
+            "<th class='num'>Phone</th></tr>")
+    body = []
+    for row in rows:
+        if row["orphan"]:
+            state = '<span class="pill bad">orphan</span>'
+        elif not row["has_phone"]:
+            state = '<span class="pill warn">launching</span>'
+        else:
+            state = f'<span class="mono">{_e(row["pid"])}</span>'
+        # The full path in the title: the basename is what identifies the clip
+        # to a person, but the run folder is what they need to go and find it.
+        reel = (f'<span class="mono" title="{_e(row["reel_path"])}">{_e(row["reel"])}</span>'
+                if row["reel"] else '<span class="sub">—</span>')
+        body.append(
+            f"<tr><td class='mono'>{_e(row['name'])}</td>"
+            f"<td>{_e(row['doing'])}</td><td>{reel}</td>"
+            f"<td class='num mono'>{_e(row['started'])}</td>"
+            f"<td class='num'>{_e(_fmt_seconds(row['for_seconds']))}</td>"
+            f"<td class='num'>{state}</td></tr>")
+
+    posting = sum(1 for r in rows if r["loop"] == "posting")
+    named = sum(1 for r in rows if r["reel"])
+    notes = (f'<p class="sub">Started and "running for" are the phone process\'s own clock, '
+             f'not the lock\'s — locks are taken for a whole batch before any phone comes up. '
+             f'This is a snapshot, rebuilt every {_refresh_words(refresh_seconds)}; a post takes '
+             f'minutes, so a profile listed here may have finished since.</p>')
+    if posting and named < posting:
+        notes += (f'<p class="sub">{posting - named} posting profile(s) have no reel named. '
+                  f'The clip is read from the oldest still-Pending queue row for that profile, '
+                  f'so a blank means Airtable was unreachable, or the row\'s result was written '
+                  f'between the post finishing and this snapshot.</p>')
+    if any(r["loop"] and r["loop"] != "posting" for r in rows):
+        notes += ('<p class="sub">Only the posting loop names a reel. Warm-up and recheck open '
+                  'the same phones for other work, and their profiles\' queue rows are not what '
+                  'they are sending.</p>')
+    return f'<div class="scroll"><table>{head}{"".join(body)}</table></div>{notes}'
+
+
 def _section_timers(timers) -> str:
     if not timers:
         return '<p class="empty">No scheduled loops found.</p>'
@@ -1467,6 +1519,9 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     </section>
 
     <section class="panel" id="panel-technical">
+      <h2>Live right now</h2>
+      {_section_live_work(data.get('live_work') or [], refresh_seconds)}
+
       <h2>Today</h2>
       {_section_today(data)}
 

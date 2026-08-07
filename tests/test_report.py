@@ -2828,3 +2828,184 @@ class NextSlotClockLabelTest(RenderTest):
         # The server here runs UTC, so Berlin leads it by 2h in CEST and 1h in CET.
         self.assertEqual(summer["clock_gap_hours"], 2.0)
         self.assertEqual(winter["clock_gap_hours"], 1.0)
+
+
+class LiveWorkTest(unittest.TestCase):
+    """What is being worked on right now, and on which clock.
+
+    The Technical tab's live panel is the one section that is worthless if it
+    is merely plausible: it exists to be read mid-run, against a fleet someone
+    can go and look at.
+    """
+
+    NOW = datetime(2026, 8, 7, 13, 30, 0)
+
+    def _work(self, held=(), phones=(), now=None):
+        with mock.patch.object(report, "profile_locks", return_value=(list(held), [])), \
+             mock.patch.object(report, "phone_processes", return_value=list(phones)):
+            return report.live_work(now=now or self.NOW)
+
+    def _lock(self, profile_id, owner="posting", name="", age=600.0):
+        return {"profile_id": profile_id, "name": name, "owner": owner,
+                "pid": "9", "age_seconds": age}
+
+    def _phone(self, profile_id, name="Jil 1", age=120.0, orphan=False, pid=42):
+        return {"pid": pid, "name": name, "profile_id": profile_id,
+                "age_seconds": age, "rss_mb": 800.0, "orphan": orphan}
+
+    def test_a_locked_profile_says_which_loop_has_it_and_what_that_means(self):
+        row = self._work(held=[self._lock("111", owner="warmup")],
+                         phones=[self._phone("111")])[0]
+        self.assertEqual(row["loop"], "warmup")
+        self.assertEqual(row["doing"], "warm-up actions")
+
+    def test_the_clock_is_the_phones_not_the_locks(self):
+        """Locks are taken for a whole batch up front.
+
+        Reading `started` off the lock would report a profile as running for
+        ten minutes while it was still queued behind the phone ceiling.
+        """
+        row = self._work(held=[self._lock("111", age=900.0)],
+                         phones=[self._phone("111", age=120.0)])[0]
+        self.assertEqual(row["for_seconds"], 120.0)
+        self.assertEqual(row["started"], "13:28:00")
+        self.assertEqual(row["held_for_seconds"], 900.0)
+
+    def test_a_lock_whose_phone_is_not_up_yet_falls_back_to_the_lock(self):
+        row = self._work(held=[self._lock("111", age=45.0)])[0]
+        self.assertFalse(row["has_phone"])
+        self.assertEqual(row["for_seconds"], 45.0)
+        # Still the loop's own work: it has the profile, the phone is coming.
+        self.assertEqual(row["doing"], "posting a reel")
+
+    def test_a_loop_this_page_has_no_words_for_still_gets_a_row(self):
+        """A new loop must not render as a blank line; the lock is the truth
+        about what is live, and the phrasing table is only a convenience."""
+        row = self._work(held=[self._lock("111", owner="repost")],
+                         phones=[self._phone("111")])[0]
+        self.assertEqual(row["loop"], "repost")
+        self.assertEqual(row["doing"], "held by the repost loop")
+
+    def test_a_phone_no_loop_holds_is_still_listed(self):
+        row = self._work(phones=[self._phone("111", orphan=True)])[0]
+        self.assertTrue(row["orphan"])
+        self.assertEqual(row["loop"], "")
+        self.assertEqual(row["doing"], "phone open, no loop holds it")
+
+    def test_a_phone_with_no_readable_profile_is_kept_not_dropped(self):
+        """It is holding memory and a slot; a blank argv is exactly what a
+        broken launch leaves behind, so it is the case most worth seeing."""
+        rows = self._work(phones=[self._phone("", name="", pid=77)])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["pid"], 77)
+
+    def test_the_longest_running_profile_is_first(self):
+        rows = self._work(phones=[self._phone("111", age=30.0),
+                                  self._phone("222", age=900.0)])
+        self.assertEqual([r["profile_id"] for r in rows], ["222", "111"])
+
+
+class LiveReelTest(unittest.TestCase):
+    """Which reel a live profile is sending, derived from the queue."""
+
+    PROFILES = {"recP1": {"name": "Jil 1", "launch_id": "111"},
+                "recP2": {"name": "Nikki 3", "launch_id": "222"}}
+    VARIANTS = {"recV1": {"file_path": "/opt/adbbot/spoofed/Jil/run8/first__Jil_5.mp4"},
+                "recV2": {"file_path": "/opt/adbbot/spoofed/Jil/run9/second__Jil_6.mp4"},
+                "recV3": {"file_path": "/opt/adbbot/spoofed/Nikki/run2/n__Nikki_1.mp4"}}
+
+    def _row(self, rec, profile, variant, status="Pending", scheduled="2026-08-07T11:00:00.000Z"):
+        return {"id": rec, "fields": {"Name": f"{rec} / 13:00", "Post Status": status,
+                                      "Scheduled DateTime": scheduled,
+                                      "Target Profile": [profile], "Spoof Variant": [variant]}}
+
+    def _live(self, profile_id="111", loop="posting"):
+        return {"profile_id": profile_id, "loop": loop, "reel": "", "reel_path": "",
+                "reel_row": ""}
+
+    def _annotate(self, rows, queue_rows):
+        report.annotate_live_reels(rows, queue_rows, profiles=self.PROFILES,
+                                   variants=self.VARIANTS)
+        return rows
+
+    def test_the_reel_is_named_from_the_profiles_pending_row(self):
+        row = self._annotate([self._live()], [self._row("q1", "recP1", "recV1")])[0]
+        self.assertEqual(row["reel"], "first__Jil_5.mp4")
+        self.assertEqual(row["reel_path"], "/opt/adbbot/spoofed/Jil/run8/first__Jil_5.mp4")
+
+    def test_with_several_due_the_oldest_is_the_one_in_flight(self):
+        """The runner works a profile's rows in order and writes each result as
+        it finishes, so the oldest row still Pending is the live one."""
+        rows = [self._row("q2", "recP1", "recV2", scheduled="2026-08-07T12:00:00.000Z"),
+                self._row("q1", "recP1", "recV1", scheduled="2026-08-07T09:00:00.000Z")]
+        self.assertEqual(self._annotate([self._live()], rows)[0]["reel"], "first__Jil_5.mp4")
+
+    def test_a_finished_row_is_not_read_as_in_flight(self):
+        row = self._annotate([self._live()],
+                             [self._row("q1", "recP1", "recV1", status="Posted")])[0]
+        self.assertEqual(row["reel"], "")
+
+    def test_only_the_posting_loop_names_a_reel(self):
+        """A warm-up profile has queue rows too; captioning it with one would
+        be an invention dressed as a reading."""
+        row = self._annotate([self._live(loop="warmup")],
+                             [self._row("q1", "recP1", "recV1")])[0]
+        self.assertEqual(row["reel"], "")
+
+    def test_another_profiles_row_is_not_borrowed(self):
+        row = self._annotate([self._live(profile_id="222")],
+                             [self._row("q1", "recP1", "recV1")])[0]
+        self.assertEqual(row["reel"], "")
+
+    def test_a_row_with_no_variant_yet_leaves_the_reel_blank_not_broken(self):
+        rows = [{"id": "q1", "fields": {"Name": "q1", "Post Status": "Pending",
+                                        "Scheduled DateTime": "2026-08-07T11:00:00.000Z",
+                                        "Target Profile": ["recP1"]}}]
+        self.assertEqual(self._annotate([self._live()], rows)[0]["reel"], "")
+
+    def test_no_queue_rows_at_all_is_survivable(self):
+        self.assertEqual(self._annotate([self._live()], [])[0]["reel"], "")
+
+
+class LiveWorkRenderTest(RenderTest):
+    def _rows(self, **overrides):
+        row = {"profile_id": "111", "name": "Jil 1", "loop": "posting",
+               "doing": "posting a reel", "pid": 42, "started": "13:26:41",
+               "for_seconds": 199.0, "held_for_seconds": 600.0, "has_phone": True,
+               "has_lock": True, "orphan": False,
+               "reel": "clip__Jil_5.mp4",
+               "reel_path": "/opt/adbbot/spoofed/Jil/run8/clip__Jil_5.mp4",
+               "reel_row": "Jil 1 / 13:00"}
+        row.update(overrides)
+        return [row]
+
+    def test_the_panel_is_on_the_technical_tab(self):
+        page = report_html.render(self._data(live_work=self._rows()))
+        self.assertIn("Live right now", page)
+        panel = page.split('id="panel-technical"')[1]
+        self.assertIn("clip__Jil_5.mp4", panel)
+        self.assertIn("13:26:41", panel)
+        self.assertIn("posting a reel", panel)
+
+    def test_the_full_path_is_carried_for_finding_the_clip(self):
+        page = report_html.render(self._data(live_work=self._rows()))
+        self.assertIn("/opt/adbbot/spoofed/Jil/run8/clip__Jil_5.mp4", page)
+
+    def test_nothing_running_says_so_rather_than_an_empty_table(self):
+        page = report_html.render(self._data(live_work=[]))
+        self.assertIn("No profile is being worked on right now", page)
+
+    def test_a_posting_profile_with_no_reel_named_explains_itself(self):
+        page = report_html.render(self._data(live_work=self._rows(reel="", reel_path="")))
+        self.assertIn("1 posting profile(s) have no reel named", page)
+
+    def test_a_profile_still_launching_is_not_reported_as_a_dead_phone(self):
+        page = report_html.render(
+            self._data(live_work=self._rows(has_phone=False, pid="")))
+        self.assertIn("launching", page)
+
+    def test_a_reel_name_is_escaped(self):
+        page = report_html.render(
+            self._data(live_work=self._rows(reel="<script>x</script>.mp4")))
+        self.assertNotIn("<script>x</script>", page)
+        self.assertIn("&lt;script&gt;", page)
