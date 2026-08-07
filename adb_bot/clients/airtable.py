@@ -429,6 +429,23 @@ class AirtableClient:
         """Stamp day 1 on a profile. Written once, on the first warm-up run."""
         return self._patch_in(TABLE_PROFILES, record_id, {F_PROF_WARMUP_STARTED: day_iso})
 
+    def warmup_run_log(self, flow: str = "warm_up_process") -> list:
+        """Every Run Log row for the warm-up flow, newest first.
+
+        The whole history, not just today's: the dashboard reports which run of
+        the plan each profile is on and whether the last one worked, and both
+        are counts over the past, not a snapshot. One flow only -- the Run Log
+        also carries posting and bio runs, which are nobody's warm-up.
+        """
+        formula = f"{{{F_RUN_FLOW}}}='{flow}'"
+        rows = self._list_table(
+            TABLE_RUN_LOG,
+            fields=[F_RUN_NAME, F_RUN_FLOW, F_RUN_RESULT, F_RUN_AT, F_RUN_NOTES],
+            filter_formula=formula,
+        )
+        rows.sort(key=lambda r: str((r.get("fields") or {}).get(F_RUN_AT) or ""), reverse=True)
+        return rows
+
     def todays_completed_profile_runs(self) -> set:
         """``{(profile name, flow)}`` already run to Done/Running today, for runs
         that have no Accounts row to link.

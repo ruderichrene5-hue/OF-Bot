@@ -154,14 +154,21 @@ def _profile_warmup_plan(args, airtable, logger):
         logger.warning("Could not read the Warmup Plan table (%s); using the built-in schedule", exc)
 
     tag = args.warmup_tag or warmup_targets.WARMUP_TAG
+    # `Warm-up Started` is stamped before the launch and never moves, so a bad
+    # batch burns day 1 for every profile in it at once. `--only` is how a new
+    # plan, a new flow or a new phone budget gets tried on three profiles
+    # instead of forty-five.
+    only = [p.strip() for p in (args.only or "").split(",") if p.strip()] or None
     plan = warmup_targets.plan_profile_warmup(
         mlx_items, profiles,
         tag=tag,
         warmup_plan=warmup_plan,
         completed=airtable.todays_completed_profile_runs(),
+        selected_launch_ids=only,
     )
-    logger.info("warmup: %d MLX profile(s), %d tagged '%s', %d due today",
-                len(mlx_items), len(plan.plans) + len(plan.skipped), tag, len(plan.plans))
+    logger.info("warmup: %d MLX profile(s), %d tagged '%s', %d due today%s",
+                len(mlx_items), len(plan.plans) + len(plan.skipped), tag, len(plan.plans),
+                f" (restricted to {len(only)} by --only)" if only else "")
     return plan
 
 
@@ -573,6 +580,10 @@ def main(argv=None) -> int:
                              "Lifecycle Stage Active (default), or the MLX profile inventory, "
                              "for models that have phones but no Accounts rows yet. For warmup, "
                              "'profiles' warms up the MLX profiles carrying --warmup-tag.")
+    parser.add_argument("--only", default=None,
+                        help="warmup --targets profiles: restrict the run to these MLX API IDs "
+                             "(comma-separated). Day 1 is stamped before the launch and never "
+                             "moves, so pilot a few before releasing the whole tagged set.")
     parser.add_argument("--warmup-tag", default=None,
                         help="warmup --targets profiles: the MultiLogin tag that marks a profile "
                              "as ready to warm up (default 'Created').")

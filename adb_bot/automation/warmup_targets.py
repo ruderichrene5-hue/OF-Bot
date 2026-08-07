@@ -55,6 +55,31 @@ class WarmupTarget:
         return not self.started
 
 
+def _run_key(target) -> str:
+    """How a profile identifies itself in the Run Log: name *and* serial.
+
+    The name alone is not an identity in this workspace -- see the collision
+    note in `plan_profile_warmup`. `warmup_progress` parses this back out, so
+    the two must keep agreeing about the shape.
+    """
+    return f"{target.name} [{target.serial_no}]"
+
+
+def split_run_key(value) -> tuple:
+    """``"Blank (5) [262894]"`` -> ``("Blank (5)", "262894")``.
+
+    A legacy row carrying only the name yields an empty serial rather than a
+    guess, which is what lets the reader show it as history it cannot pin to
+    one twin.
+    """
+    text = str(value or "").strip()
+    if text.endswith("]") and " [" in text:
+        name, _, serial = text[:-1].rpartition(" [")
+        if serial.isdigit():
+            return name.strip(), serial
+    return text, ""
+
+
 def has_tag(tags, tag: str = WARMUP_TAG) -> bool:
     wanted = str(tag).strip().lower()
     return any(str(t).strip().lower() == wanted for t in (tags or ()))
@@ -184,13 +209,27 @@ def plan_profile_warmup(mlx_items, profiles_by_serial, today: date | None = None
                     f"day {target.day}: warm-up finished -- retag it in MultiLogin"))
             continue
 
+        # MLX names are not unique -- this workspace has three profiles called
+        # "Blank (5)", two called "Blank (1)", and 17 profiles sit in a
+        # collision group. Both the Run Log's Name and the "already run today"
+        # key are built from that name, so on the bare name the first twin to
+        # run marks all of them done for the day; and since the order is stable,
+        # the same twin wins every day and the others never run at all. The
+        # serial is what `warmup_profiles_by_serial` already matches on, so it
+        # is what identifies a run here too.
+        run_key = _run_key(target)
+        # Rows written before this change carry the bare name, and treating one
+        # of those as covering its twins is the conservative reading: it costs a
+        # twin one day, where the alternative is warming the same profile twice.
+        # Self-healing -- every row written from now on is serial-qualified.
+        done = {run_key, target.name}
         runs = [FlowRun(a.flow, f"{a.label} [{target.name}]") for a in actions
-                if (target.name, a.flow) not in completed]
+                if not any((key, a.flow) in completed for key in done)]
         if not runs:
             plan.skipped.append(SkippedAccount(target.name, f"day {target.day}: already run today"))
             continue
 
-        entry = AccountPlan(None, target.name, target.launch_id, target.name, runs)
+        entry = AccountPlan(None, run_key, target.launch_id, target.name, runs)
         # Carried so the caller can stamp day 1 without re-resolving anything.
         entry.warmup_target = target
         plan.plans.append(entry)

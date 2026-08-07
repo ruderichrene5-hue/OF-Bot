@@ -2397,6 +2397,179 @@ WARMUP_BLOCKERS = ("needs human verification", "automation mode paused",
                    "no MLX API ID on linked profile", "no creation date")
 
 
+def _warmup_targets_profiles() -> bool:
+    """Whether the scheduled warm-up actually targets the tagged profiles.
+
+    `run_loop warmup` defaults to `--targets accounts`, and on this fleet the
+    Accounts table is 11 paused rows. Without the flag the loop fires hourly,
+    plans nothing, and exits 0 -- so every watchdog and every timer reads as
+    healthy while 45 profiles are never touched. That is the failure this page
+    exists to catch, and it is invisible in every other section.
+    """
+    try:
+        out = subprocess.run(
+            ["systemctl", "show", schedule_spec.unit_name("warmup", "service"),
+             "--property=ExecStart"],
+            capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return True                    # unreadable: do not cry wolf
+    return "--targets" in out and "profiles" in out
+
+
+def mlx_inventory() -> list:
+    """The MultiLogin mobile-profile list, or [] if it cannot be read.
+
+    The only source for the `Created` tag the warm-up population is defined by.
+    Two paged HTTP calls and a token, so it is memoised by the caller rather
+    than made on every render, and a failure is an empty list -- the warm-up
+    table then says it could not read MultiLogin, and the rest of the page is
+    untouched.
+    """
+    import contextlib
+    import io
+
+    try:
+        from adb_bot.automation.run_loop import _mlx_token
+        from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
+
+        token = _mlx_token(None)
+        if not token:
+            return []
+        # The client narrates its HTTP calls to stdout; on the report server
+        # that is the journal, once every three minutes, saying nothing anyone
+        # reads it for.
+        with contextlib.redirect_stdout(io.StringIO()):
+            return MultiloginMobileListClient(token).list_mobile_profiles() or []
+    except Exception:
+        return []
+
+
+def warmup_progress(airtable, mlx_items=None, timers=None, now=None) -> dict:
+    """Every profile on warm-up: which day, how its last run went, when next.
+
+    A different question from `warmup_status`, which asks whether a profile
+    *could* run. This one is the campaign: 45 profiles moving through a
+    multi-day plan an hour at a time, where the thing you need to see is a
+    profile that has stopped moving.
+
+    The population is the MLX `Created` tag, which is why this reaches
+    MultiLogin -- the tag exists nowhere else, and an Airtable-only reading
+    would show the handful of profiles already started and none of the ones
+    waiting. That call is memoised: the tag changes when a person edits it, not
+    every five minutes.
+
+    Progress comes from the Run Log, one row per flow run. `Warm-up Started`
+    gives the day; the Run Log gives whether each day's run actually landed,
+    which are different facts -- a profile advances a day at midnight whether
+    or not last night's run worked, so day number alone will happily report a
+    profile as "day 4" having never completed a single run.
+    """
+    from adb_bot.automation import lifecycle, warmup_targets
+    from adb_bot.clients import airtable as at
+
+    now = now or datetime.now()
+    out = {"profiles": [], "plan_days": 0, "next_run": "", "last_run": "",
+           "timer_stopped": True, "account_driven": False, "error": "",
+           "counts": {"ok": 0, "failed": 0, "running": 0, "never": 0, "finished": 0}}
+
+    # The scheduled loop's own clock, not a recomputation of it: "when does this
+    # next run" is a systemd question, and the timer table already answered it.
+    for row in timers or []:
+        if row.get("loop") == "warmup":
+            out.update(next_run=row.get("next") or "", last_run=row.get("last") or "",
+                       timer_stopped=bool(row.get("stopped")))
+
+    try:
+        rows = airtable.warmup_profiles_by_serial()
+        if rows is None:
+            out["error"] = ("Profiles (Cloning) has no 'Warm-up Started' field — "
+                            "the profile warm-up counts its days from there.")
+            return out
+        plan_by_day = airtable.warmup_plan_by_day() or {}
+        log = airtable.warmup_run_log()
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
+    out["plan_days"] = max(plan_by_day) if plan_by_day else lifecycle.WARMUP_DAYS
+    targets, _skipped = warmup_targets.collect_warmup_targets(
+        mlx_items or [], rows, today=now.date())
+
+    # Run Log history, keyed the way the runner writes it. A legacy row carries
+    # only the name and cannot be pinned to one twin, so it is kept under the
+    # bare name and used only when the serial-qualified history is empty --
+    # showing it against every twin would invent runs none of them made.
+    by_serial: dict = defaultdict(list)
+    by_name: dict = defaultdict(list)
+    for record in log or []:
+        fields = record.get("fields", {}) or {}
+        # `create_run_log` writes "<key> / <flow> / <when>"; the key is the
+        # first segment, exactly as `todays_completed_profile_runs` reads it.
+        head = str(fields.get(at.F_RUN_NAME) or "").split(" / ")[0]
+        name, serial = warmup_targets.split_run_key(head)
+        entry = {"at": str(fields.get(at.F_RUN_AT) or ""),
+                 "result": at._select_name(fields.get(at.F_RUN_RESULT)) or "",
+                 "notes": str(fields.get(at.F_RUN_NOTES) or "")}
+        (by_serial[serial] if serial else by_name[name]).append(entry)
+
+    for target in targets:
+        history = by_serial.get(target.serial_no) or []
+        ambiguous = not history and bool(by_name.get(target.name))
+        if ambiguous:
+            history = by_name[target.name]
+
+        last = history[0] if history else None
+        done = sum(1 for h in history if h["result"] == at.RESULT_DONE)
+        finished = target.day > out["plan_days"]
+
+        if finished:
+            state = "finished"
+        elif last is None:
+            state = "never"
+        elif last["result"] == at.RESULT_RUNNING:
+            state = "running"
+        elif last["result"] == at.RESULT_DONE:
+            state = "ok"
+        else:
+            state = "failed"
+        out["counts"][state] = out["counts"].get(state, 0) + 1
+
+        out["profiles"].append({
+            "name": target.name,
+            "serial": target.serial_no,
+            "launch_id": target.launch_id,
+            "day": target.day,
+            "started": target.started or "",
+            "runs_done": done,
+            "runs_logged": len(history),
+            "last_at": _local_stamp(last["at"]) if last else "",
+            "last_result": last["result"] if last else "",
+            "last_notes": (last["notes"] if last else "")[:200],
+            "state": state,
+            "ambiguous": ambiguous,
+        })
+
+    # Problems first, then the ones furthest through the plan: a page read at a
+    # glance should open on the profile that has stopped moving.
+    order = {"failed": 0, "never": 1, "running": 2, "ok": 3, "finished": 4}
+    out["profiles"].sort(key=lambda p: (order.get(p["state"], 9), -p["day"],
+                                        p["name"].lower(), p["serial"]))
+    return out
+
+
+def _local_stamp(value) -> str:
+    """An Airtable UTC ISO stamp as the server's own wall clock, to the minute.
+
+    Every other time on this page is the server's, and a UTC stamp sitting in a
+    column next to them reads as a clock that is two hours out rather than as a
+    different timezone.
+    """
+    stamp = _parse_airtable_dt(value)
+    if stamp is None:
+        return str(value or "")[:16].replace("T", " ")
+    return stamp.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
 def warmup_status(airtable, now=None) -> dict:
     """Who is warming up, who cannot, and what the plan says for each day.
 
@@ -2587,6 +2760,11 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         "warmup": {"plan": [], "accounts": [], "plan_days": 0, "error": "",
                    "counts": {"running": 0, "blocked": 0, "finished": 0,
                               "not_started": 0}},
+        "warmup_progress": {"profiles": [], "plan_days": 0, "next_run": "",
+                            "last_run": "", "timer_stopped": True,
+                            "account_driven": False, "error": "",
+                            "counts": {"ok": 0, "failed": 0, "running": 0,
+                                       "never": 0, "finished": 0}},
         "airtable_error": "",
     }
 
@@ -2600,6 +2778,19 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         # set of records from the posting queue, and a posting-side Airtable
         # failure must not blank a tab that could still answer its question.
         data["warmup"] = _slow("warmup", lambda: warmup_status(airtable, now))
+        # Its own try for the same reason as `warmup`: the campaign table reads
+        # a table and a service the rest of the page does not touch, and a
+        # posting-side failure must not blank the one tab that answers a
+        # different question. `data["timers"]` is already collected above, so
+        # "when does it next run" costs nothing extra.
+        data["warmup_progress"] = _slow("warmup_progress", lambda: warmup_progress(
+            airtable, mlx_items=_slow("mlx_inventory", mlx_inventory),
+            timers=data["timers"], now=now))
+        # The loop can only see the tagged profiles when it is told to target
+        # them. Read from the unit rather than assumed, because the failure it
+        # catches is silent: the account-driven planner finds nothing, exits 0,
+        # and the watchdog sees a loop that ran.
+        data["warmup_progress"]["account_driven"] = not _warmup_targets_profiles()
         try:
             # One listing serves both: the day's rows, and which variants every
             # row (of any age) has already claimed.

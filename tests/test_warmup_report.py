@@ -148,3 +148,193 @@ class WarmupRenderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WarmupProgressTest(unittest.TestCase):
+    """The campaign table: 45 profiles moving through a plan an hour at a time,
+    and which of them have stopped moving."""
+
+    NOW = datetime(2026, 8, 9, 15, 0, 0)
+    PLAN = {1: {"Day": 1, "Scroll": True}, 2: {"Day": 2, "Scroll": True},
+            3: {"Day": 3, "Scroll": True}}
+
+    def _mlx(self, *names):
+        return [{"serial_no": s, "serial_name": n, "id": f"L{s}",
+                 "tags": ["Created"], "created_at": "2026-08-01T00:00:00Z"}
+                for n, s in names]
+
+    def _rows(self, *specs):
+        return {s: {"record_id": f"rec{s}", "name": n, "api_id": f"L{s}",
+                    "status": "Active", "warmup_started": started}
+                for n, s, started in specs}
+
+    def _log(self, *entries):
+        return [{"id": f"r{i}", "fields": {"Name": f"{key} / warm_up_process / x",
+                                           "Flow": "warm_up_process", "Result": result,
+                                           "Run At": at, "Notes": notes}}
+                for i, (key, result, at, notes) in enumerate(entries)]
+
+    def _progress(self, mlx, rows, log, timers=None, plan=None):
+        class Fake:
+            def warmup_profiles_by_serial(inner): return rows
+            def warmup_plan_by_day(inner): return self.PLAN if plan is None else plan
+            def warmup_run_log(inner): return log
+        return report.warmup_progress(Fake(), mlx_items=mlx, timers=timers, now=self.NOW)
+
+    def test_a_profile_that_has_never_run_is_called_out(self):
+        out = self._progress(self._mlx(("Blank (1)", "100")),
+                             self._rows(("Blank (1)", "100", None)), [])
+        row = out["profiles"][0]
+        self.assertEqual(row["state"], "never")
+        self.assertEqual(row["runs_done"], 0)
+        self.assertEqual(row["day"], 1)
+
+    def test_the_day_comes_from_warm_up_started_not_the_run_log(self):
+        out = self._progress(self._mlx(("Blank (1)", "100")),
+                             self._rows(("Blank (1)", "100", "2026-08-07")), [])
+        self.assertEqual(out["profiles"][0]["day"], 3)
+
+    def test_a_profile_can_reach_the_end_of_the_plan_having_completed_none_of_it(self):
+        """The day advances on the calendar whether or not the run worked, so
+        day number alone is not progress. `runs_done` is what says so."""
+        out = self._progress(
+            self._mlx(("Blank (1)", "100")),
+            self._rows(("Blank (1)", "100", "2026-08-07")),
+            self._log(("Blank (1) [100]", "Failed", "2026-08-08T10:00:00.000Z", "device offline")))
+        row = out["profiles"][0]
+        self.assertEqual((row["day"], row["runs_done"], row["state"]), (3, 0, "failed"))
+
+    def test_the_last_run_result_and_note_are_carried(self):
+        out = self._progress(
+            self._mlx(("Blank (1)", "100")),
+            self._rows(("Blank (1)", "100", "2026-08-08")),
+            self._log(("Blank (1) [100]", "Done", "2026-08-09T09:00:00.000Z", ""),
+                      ("Blank (1) [100]", "Failed", "2026-08-08T09:00:00.000Z", "went wrong")))
+        row = out["profiles"][0]
+        self.assertEqual(row["state"], "ok")
+        self.assertEqual(row["last_result"], "Done")
+        self.assertEqual(row["runs_done"], 1)
+        self.assertEqual(row["runs_logged"], 2)
+
+    def test_history_is_kept_per_profile_not_per_name(self):
+        """Three profiles are called "Blank (5)" in this workspace. One twin's
+        run must not show up as every twin's."""
+        out = self._progress(
+            self._mlx(("Blank (5)", "100"), ("Blank (5)", "200")),
+            self._rows(("Blank (5)", "100", "2026-08-08"), ("Blank (5)", "200", "2026-08-08")),
+            self._log(("Blank (5) [100]", "Done", "2026-08-09T09:00:00.000Z", "")))
+        by_serial = {p["serial"]: p for p in out["profiles"]}
+        self.assertEqual(by_serial["100"]["runs_done"], 1)
+        self.assertEqual(by_serial["200"]["runs_done"], 0)
+        self.assertEqual(by_serial["200"]["state"], "never")
+
+    def test_a_legacy_row_is_shown_but_flagged_as_unpinnable(self):
+        """Rows written before runs carried a serial cannot be attributed to one
+        twin. Hiding them loses real history; splitting them invents it."""
+        out = self._progress(
+            self._mlx(("Blank (5)", "100")),
+            self._rows(("Blank (5)", "100", "2026-08-08")),
+            self._log(("Blank (5)", "Done", "2026-08-09T09:00:00.000Z", "")))
+        row = out["profiles"][0]
+        self.assertTrue(row["ambiguous"])
+        self.assertEqual(row["runs_done"], 1)
+
+    def test_a_serial_qualified_row_beats_the_legacy_one(self):
+        out = self._progress(
+            self._mlx(("Blank (5)", "100")),
+            self._rows(("Blank (5)", "100", "2026-08-08")),
+            self._log(("Blank (5) [100]", "Done", "2026-08-09T09:00:00.000Z", ""),
+                      ("Blank (5)", "Failed", "2026-08-08T09:00:00.000Z", "")))
+        self.assertFalse(out["profiles"][0]["ambiguous"])
+
+    def test_problems_sort_above_healthy_profiles(self):
+        out = self._progress(
+            self._mlx(("Good", "100"), ("Bad", "200")),
+            self._rows(("Good", "100", "2026-08-08"), ("Bad", "200", "2026-08-08")),
+            self._log(("Good [100]", "Done", "2026-08-09T09:00:00.000Z", ""),
+                      ("Bad [200]", "Failed", "2026-08-09T09:00:00.000Z", "")))
+        self.assertEqual([p["name"] for p in out["profiles"]], ["Bad", "Good"])
+
+    def test_the_next_run_comes_from_the_loops_own_timer(self):
+        out = self._progress(
+            self._mlx(("Blank (1)", "100")), self._rows(("Blank (1)", "100", None)), [],
+            timers=[{"loop": "warmup", "next": "2026-08-09 16:00", "last": "2026-08-09 15:00",
+                     "stopped": False}])
+        self.assertEqual(out["next_run"], "2026-08-09 16:00")
+        self.assertEqual(out["last_run"], "2026-08-09 15:00")
+        self.assertFalse(out["timer_stopped"])
+
+    def test_an_untagged_profile_is_not_on_warm_up(self):
+        mlx = self._mlx(("Blank (1)", "100"))
+        mlx[0]["tags"] = ["Active / Posting"]
+        out = self._progress(mlx, self._rows(("Blank (1)", "100", None)), [])
+        self.assertEqual(out["profiles"], [])
+
+    def test_a_missing_warm_up_started_field_says_which_field(self):
+        class Fake:
+            def warmup_profiles_by_serial(inner): return None
+            def warmup_plan_by_day(inner): return {}
+            def warmup_run_log(inner): return []
+        self.assertIn("Warm-up Started", report.warmup_progress(Fake())["error"])
+
+    def test_an_airtable_failure_degrades_rather_than_raising(self):
+        class Broken:
+            def warmup_profiles_by_serial(inner): raise RuntimeError("429 slow down")
+        out = report.warmup_progress(Broken())
+        self.assertIn("429", out["error"])
+        self.assertEqual(out["profiles"], [])
+
+
+class WarmupProgressRenderTest(unittest.TestCase):
+    def _render(self, **overrides):
+        data = {"profiles": [], "plan_days": 3, "next_run": "2026-08-09 16:00",
+                "last_run": "2026-08-09 15:00", "timer_stopped": False,
+                "account_driven": False, "error": "",
+                "counts": {"ok": 0, "failed": 0, "running": 0, "never": 0, "finished": 0}}
+        data.update(overrides)
+        return report_html._section_warmup_progress(data)
+
+    def _row(self, **overrides):
+        row = {"name": "Blank (5)", "serial": "262894", "launch_id": "L1", "day": 2,
+               "started": "2026-08-08", "runs_done": 1, "runs_logged": 1,
+               "last_at": "2026-08-09 09:00", "last_result": "Done", "last_notes": "",
+               "state": "ok", "ambiguous": False}
+        row.update(overrides)
+        return row
+
+    def test_it_shows_day_run_count_and_when_it_next_runs(self):
+        page = self._render(profiles=[self._row()], counts={"ok": 1})
+        self.assertIn("2 of 3", page)
+        self.assertIn("262894", page)
+        self.assertIn("2026-08-09 09:00", page)
+        self.assertIn("2026-08-09 16:00", page)
+
+    def test_an_unscheduled_fleet_is_the_loudest_thing_on_the_section(self):
+        """The failure that looks like success: the loop runs hourly, plans
+        nothing against the Accounts table and exits 0."""
+        page = self._render(profiles=[self._row()], account_driven=True)
+        self.assertIn("these profiles are not scheduled", page)
+        self.assertIn("--targets", page)
+
+    def test_a_stopped_timer_is_called_out(self):
+        self.assertIn("timer not active",
+                      self._render(profiles=[self._row()], timer_stopped=True))
+
+    def test_a_failure_note_is_carried_to_the_reader(self):
+        page = self._render(profiles=[self._row(state="failed", last_result="Failed",
+                                                last_notes="profile lost mid-run")],
+                            counts={"failed": 1})
+        self.assertIn("profile lost mid-run", page)
+        self.assertIn("last run failed", page)
+
+    def test_unpinnable_history_says_so(self):
+        page = self._render(profiles=[self._row(ambiguous=True)])
+        self.assertIn("shares its MultiLogin name", page)
+
+    def test_nothing_tagged_explains_the_tag_rather_than_showing_a_blank(self):
+        self.assertIn("Created", self._render(profiles=[]))
+
+    def test_a_profile_name_is_escaped(self):
+        page = self._render(profiles=[self._row(name="<script>x</script>")])
+        self.assertNotIn("<script>x</script>", page)
+        self.assertIn("&lt;script&gt;", page)

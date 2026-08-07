@@ -1190,6 +1190,95 @@ WARMUP_FIXES = {
 }
 
 
+_PROGRESS_PILL = {
+    "ok": ("ok", "on track"),
+    "failed": ("bad", "last run failed"),
+    "running": ("warn", "running now"),
+    "never": ("warn", "never run"),
+    "finished": ("", "plan complete"),
+}
+
+
+def _section_warmup_progress(progress: dict) -> str:
+    """The warm-up campaign: 45 profiles moving through a plan an hour at a
+    time, and which of them have stopped moving."""
+    if progress.get("error"):
+        return (f'<p class="empty">Could not read the warm-up campaign: '
+                f'<span class="mono">{_e(progress["error"])}</span></p>')
+    profiles = progress.get("profiles") or []
+    counts = progress.get("counts") or {}
+    days = progress.get("plan_days") or 0
+
+    banner = ""
+    # Loudest thing on the section, because it is the failure that looks like
+    # success: the loop runs hourly, plans nothing and exits 0.
+    if progress.get("account_driven"):
+        banner += ('<p><span class="pill bad">these profiles are not scheduled</span> '
+                   'The warm-up service runs without <span class="mono">--targets '
+                   'profiles</span>, so it plans against the Accounts table and finds '
+                   'nothing. It exits 0 every hour and no watchdog can see it.</p>')
+    if progress.get("timer_stopped"):
+        banner += ('<p><span class="pill bad">timer not active</span> '
+                   'Nothing is firing the warm-up loop at all.</p>')
+    if not profiles:
+        return banner + ('<p class="empty">No MultiLogin profile carries the '
+                         '<span class="mono">Created</span> tag — that tag is what puts '
+                         'a profile on warm-up.</p>')
+
+    lead = (f'<p class="sub">{len(profiles)} profile(s) on warm-up · '
+            f'{counts.get("ok", 0)} on track · '
+            f'{counts.get("failed", 0)} last run failed · '
+            f'{counts.get("running", 0)} running now · '
+            f'{counts.get("never", 0)} never run · '
+            f'{counts.get("finished", 0)} finished. '
+            f'The plan is {days} day(s) long. Day 1 is <strong>Warm-up Started</strong>, '
+            f'stamped on the first run and never moved.</p>')
+    when = (f'<p class="sub">Next run <strong>{_e(progress.get("next_run") or "—")}</strong>'
+            f' · last fired {_e(progress.get("last_run") or "—")}. '
+            f'That is the loop\'s timer: it takes every profile due that tick, so it is '
+            f'when <em>all</em> of these run, not one at a time.</p>')
+
+    head = ("<tr><th>Profile</th><th class='num'>Serial</th><th class='num'>Day</th>"
+            "<th class='num'>Runs done</th><th>Last run</th><th>Result</th>"
+            "<th>State</th></tr>")
+    rows = []
+    for p in profiles:
+        tone, label = _PROGRESS_PILL.get(p["state"], ("warn", "unknown"))
+        day = (f'{p["day"]} of {days}' if p["day"] <= days else f'{p["day"]} (past {days})')
+        result = _e(p["last_result"] or "—")
+        if p["last_notes"]:
+            result += _hint(p["last_notes"])
+        # Marked, not silently merged: history under a bare name cannot be
+        # pinned to one twin, and showing it against each of them would invent
+        # runs none of them made.
+        name = _e(p["name"]) + (_hint(
+            "This profile shares its MultiLogin name with another, and these runs were "
+            "logged before runs carried a serial — so this history may belong to its "
+            "twin. Runs from now on are recorded per profile."
+        ) if p["ambiguous"] else "")
+        rows.append(
+            f"<tr><td class='mono'>{name}</td>"
+            f"<td class='num mono'>{_e(p['serial'])}</td>"
+            f"<td class='num'>{_e(day)}</td>"
+            f"<td class='num'>{p['runs_done']}</td>"
+            f"<td class='num mono'>{_e(p['last_at'] or '—')}</td>"
+            f"<td>{result}</td>"
+            f"<td><span class='pill {tone}'>{_e(label)}</span></td></tr>")
+
+    note = ""
+    if counts.get("never"):
+        note = (f'<p class="sub">"Never run" is not the same as broken: a profile tagged '
+                f'today has simply not had its first tick yet. It becomes a problem when '
+                f'it is still there after the next run above.</p>')
+    if counts.get("failed"):
+        note += ('<p class="sub">A failed run does not stall the plan — the day advances on '
+                 'the calendar either way, so a profile can reach the end of its plan having '
+                 'completed none of it. That is what "runs done" is for: compare it against '
+                 'the day.</p>')
+    return (banner + lead + when + f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>'
+            + note)
+
+
 def _section_warmup(warmup: dict) -> str:
     """Who is warming up, and for everyone else, the one edit that would start them."""
     if warmup.get("error"):
@@ -1462,6 +1551,15 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     # "starts later" are correct states, and badging them would put a permanent
     # red number on a tab where nothing is wrong.
     stuck = ((data.get("warmup") or {}).get("counts") or {}).get("blocked", 0)
+    # A failed warm-up run is the thing on this tab someone has to act on, and
+    # it outranks the account-side blockers the badge used to carry: those are
+    # about a population the profile-driven loop no longer runs from.
+    progress = data.get("warmup_progress") or {}
+    stuck = (progress.get("counts") or {}).get("failed", 0) or stuck
+    if progress.get("account_driven") and progress.get("profiles"):
+        # Not "a number of profiles need a person" -- one switch does, and every
+        # profile is stalled behind it.
+        stuck = len(progress["profiles"])
     warmup_badge = f'<span class="count">{stuck}</span>' if stuck else ""
 
     body = f"""<div class="wrap">
@@ -1517,7 +1615,10 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     </section>
 
     <section class="panel" id="panel-warmup">
-      <h2>Warm-up</h2>
+      <h2>Warm-up progress</h2>
+      {_section_warmup_progress(data.get('warmup_progress') or {})}
+
+      <h2>Can each account run?</h2>
       {_section_warmup(data.get('warmup') or {})}
     </section>
 
