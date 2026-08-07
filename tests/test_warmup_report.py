@@ -232,12 +232,23 @@ class WarmupProgressTest(unittest.TestCase):
         """Rows written before runs carried a serial cannot be attributed to one
         twin. Hiding them loses real history; splitting them invents it."""
         out = self._progress(
-            self._mlx(("Blank (5)", "100")),
-            self._rows(("Blank (5)", "100", "2026-08-08")),
+            self._mlx(("Blank (5)", "100"), ("Blank (5)", "200")),
+            self._rows(("Blank (5)", "100", "2026-08-08"), ("Blank (5)", "200", "2026-08-08")),
             self._log(("Blank (5)", "Done", "2026-08-09T09:00:00.000Z", "")))
+        self.assertTrue(all(p["ambiguous"] for p in out["profiles"]))
+        self.assertTrue(all(p["runs_done"] == 1 for p in out["profiles"]))
+
+    def test_legacy_history_under_a_unique_name_is_not_flagged(self):
+        """Only a name two profiles share is ambiguous. Warning about a twin
+        that does not exist is noise, and it is the common case: every run
+        logged before the serial change has a bare name."""
+        out = self._progress(
+            self._mlx(("Blank (13)", "100")),
+            self._rows(("Blank (13)", "100", "2026-08-08")),
+            self._log(("Blank (13)", "Done", "2026-08-09T09:00:00.000Z", "")))
         row = out["profiles"][0]
-        self.assertTrue(row["ambiguous"])
-        self.assertEqual(row["runs_done"], 1)
+        self.assertFalse(row["ambiguous"])
+        self.assertEqual((row["runs_done"], row["state"]), (1, "ok"))
 
     def test_a_serial_qualified_row_beats_the_legacy_one(self):
         out = self._progress(

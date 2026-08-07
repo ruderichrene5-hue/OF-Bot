@@ -2512,11 +2512,19 @@ def warmup_progress(airtable, mlx_items=None, timers=None, now=None) -> dict:
                  "notes": str(fields.get(at.F_RUN_NOTES) or "")}
         (by_serial[serial] if serial else by_name[name]).append(entry)
 
+    # Only a name two profiles share is ambiguous. Legacy history under a name
+    # that is unique in the tagged set belongs to exactly one profile, and
+    # captioning it "this may be your twin's" would be a warning about a twin
+    # that does not exist.
+    shared = {name for name, count in
+              Counter(t.name for t in targets).items() if count > 1}
+
     for target in targets:
         history = by_serial.get(target.serial_no) or []
-        ambiguous = not history and bool(by_name.get(target.name))
-        if ambiguous:
-            history = by_name[target.name]
+        legacy = by_name.get(target.name) or []
+        ambiguous = not history and bool(legacy) and target.name in shared
+        if not history:
+            history = legacy
 
         last = history[0] if history else None
         done = sum(1 for h in history if h["result"] == at.RESULT_DONE)
