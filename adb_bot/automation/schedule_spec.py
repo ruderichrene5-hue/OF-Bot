@@ -123,6 +123,7 @@ DESCRIPTIONS = {
     "cleanup": "ADB bot cleanup loop (old used media)",
     "doctor": "ADB bot preflight checks (alerts on failures)",
     "reap-phones": "ADB bot orphan-phone reaper (closes abandoned phones)",
+    "second-accounts": "ADB bot two-account watch (both accounts of a phone posting?)",
 }
 
 # The same loops in words, for a person rather than a unit file. DESCRIPTIONS
