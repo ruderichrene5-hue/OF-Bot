@@ -37,7 +37,7 @@ SERVICE_USER="${SERVICE_USER:-}"
 # Every loop that may have a unit on disk, including ones not wired yet -- used
 # by --remove, which must clean up whatever a previous run installed. The set we
 # *install* is asked of Python below, so there is one definition of it.
-LOOPS=(pipeline queue posting recheck retry recovery warmup mlx-sync cleanup doctor reap-phones)
+LOOPS=(pipeline queue posting recheck retry recovery warmup mlx-sync cleanup doctor reap-phones second-accounts)
 
 APPLY=0
 ACTION=install

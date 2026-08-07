@@ -859,6 +859,14 @@ ISSUE_GUIDE = {
         "consistently wrong rather than unlucky.",
         "Open the phone and post one reel by hand. Whatever stops you is what stops "
         "the bot."),
+    "No Recent Success": (
+        "Nothing has actually landed on this account for over a day, while the bot kept "
+        "trying. Each attempt failed or could not be confirmed, so no single run looks "
+        "broken — it is only visible across a day of them.",
+        "Post one reel from this phone by hand and watch it through: if it appears on the "
+        "profile, clear Needs Human Check and the bot picks the account back up. If it "
+        "does not, whatever stopped you is what has been stopping the bot, and no amount "
+        "of retrying will get past it."),
     "Device Unreachable": (
         "The phone itself did not answer. Instagram may be perfectly fine — the "
         "device never came up.",
@@ -908,8 +916,12 @@ def _section_profiles(data: dict) -> str:
         parts.append('<h2>Accounts to fix</h2>')
         parts.append('<p class="sub">Grouped by what is wrong. Work top to bottom — the '
                      'first group is the most serious.</p>')
-        order = ["Banned / Blocked", "Human Verification Required", "Device Unreachable",
-                 "Repeated Failures", "Retries Exhausted"]
+        # "No Recent Success" sits third because it is the undiagnosed one: the
+        # others name what is wrong, this one only says the account has gone
+        # quiet and somebody has to find out why. An account silently posting
+        # nothing for a day outranks one whose problem is already understood.
+        order = ["Banned / Blocked", "Human Verification Required", "No Recent Success",
+                 "Device Unreachable", "Repeated Failures", "Retries Exhausted"]
         for reason in sorted(reasons, key=lambda r: order.index(r) if r in order else 99):
             group = reasons[reason]
             what, todo = ISSUE_GUIDE.get(reason, DEFAULT_GUIDE)

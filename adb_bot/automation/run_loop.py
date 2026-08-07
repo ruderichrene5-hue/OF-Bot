@@ -35,7 +35,7 @@ from adb_bot.core import locks, shutdown
 from adb_bot.core.logger import get_logger
 
 LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery", "warmup",
-         "mlx-sync", "cleanup")
+         "mlx-sync", "cleanup", "second-accounts")
 # `doctor` isn't a loop -- it's the preflight check, runnable the same way.
 # `report` renders the operational page; like `doctor` it is a command rather
 # than a loop, and unlike `doctor` it is not in the recommended set, so it never
@@ -328,7 +328,7 @@ def _run_retry(args, logger) -> int:
     -- a row whose clip may already be live is left alone, so a transient device
     failure retries and a post that actually landed never goes out twice.
     """
-    from adb_bot.automation import retry_runner
+    from adb_bot.automation import retry_runner, stale_profiles
     airtable = _airtable(args.base_id, args.airtable_token)
     tally = retry_runner.retry_failed_posts(
         airtable, logger=logger,
@@ -336,6 +336,20 @@ def _run_retry(args, logger) -> int:
         dry_run=not args.apply,
     )
     logger.info("retry result: %s", tally)
+
+    # After the row-level pass, and on the same tick, because the two answer
+    # different halves of one question. The pass above decides a *row* is
+    # beyond retrying; this decides a *profile* is -- the case where every row
+    # still looks retryable, the loop keeps handing them back, and the account
+    # has not actually landed a post in a day. Its own try: a profile-level
+    # sweep failing must not make the retry pass, which has already done its
+    # work, report an error it did not have.
+    try:
+        stale = stale_profiles.flag_stale_profiles(
+            airtable, logger=logger, dry_run=not args.apply)
+        logger.info("stale-profile check: %s", stale)
+    except Exception as exc:
+        logger.warning("stale-profile check failed: %s", exc)
     return 1 if tally.get("errors") else 0
 
 
@@ -462,6 +476,33 @@ def _run_recheck(args, logger) -> int:
     return 0
 
 
+def _run_second_accounts(args, logger) -> int:
+    """Watch the phones carrying two Instagram accounts.
+
+    Read-only, so it runs the same with or without `--apply` -- there is nothing
+    for a dry run to hold back. It notices when a second account first posts and,
+    from then on, checks that both accounts of a phone keep posting, that neither
+    is handed the other's clip, and that the account switch is not quietly
+    refusing. Those failures do not raise anywhere else: every one of them leaves
+    a queue row saying Posted.
+    """
+    from adb_bot.automation import second_account_watch
+    airtable = _airtable(args.base_id, args.airtable_token)
+    watchdog = None
+    try:
+        watchdog = loop_watchdog.build_watchdog(logger=logger, airtable=airtable)
+    except Exception as exc:
+        # The checks are worth running even when the alert sink is not there;
+        # they are printed either way.
+        logger.warning("second-accounts: no watchdog this run (%s); checks still run", exc)
+    report = second_account_watch.run_watch(airtable, logger, watchdog=watchdog)
+    logger.info("second-accounts result: %s", report.summary())
+    # Non-zero only for a real failure: a fleet that has not started posting yet
+    # is not an error, and a timer that reports failure every tick during a
+    # rollout is a timer people stop reading.
+    return 1 if report.failures else 0
+
+
 def _run_doctor(args, logger) -> int:
     from adb_bot.automation import doctor
     results = doctor.run_checks()
@@ -544,6 +585,7 @@ _DISPATCH = {
     "mlx-sync": _run_mlx_sync,
     "cleanup": _run_cleanup,
     "doctor": _run_doctor,
+    "second-accounts": _run_second_accounts,
     "report": _run_report,
     "reap-phones": _run_reap_phones,
 }

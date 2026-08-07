@@ -29,7 +29,8 @@ PLANNED_LOOPS = ("queue", "retry")
 
 # Everything an unattended server should have scheduled.
 RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery",
-                     "warmup", "mlx-sync", "cleanup", "doctor", "reap-phones")
+                     "warmup", "mlx-sync", "cleanup", "doctor", "reap-phones",
+                     "second-accounts")
 
 # Recommended cadence in minutes. The UI can override per loop; these are what
 # `install_units.sh` installs. Ordered by the flow a reel goes through, because
@@ -86,6 +87,13 @@ RECOMMENDED_INTERVALS = {
     # on phones older than the 45-minute lock TTL, so a 20-minute cadence never
     # races a live run and still catches a leak within the hour.
     "reap-phones": 20,
+    # Watches the phones carrying two Instagram accounts. Every failure it looks
+    # for is silent -- a second account never scheduled, one clip on both
+    # accounts, a phone stuck on the wrong account -- and all of them leave a
+    # queue row saying Posted, so nothing else will ever raise them. Hourly:
+    # the state it reads changes at posting speed, the run is three Airtable
+    # reads and a log grep, and its alerts are about a trend rather than a tick.
+    "second-accounts": 60,
 }
 
 # Historical name -- the UI, both backends and install_units.sh read this.
@@ -153,6 +161,11 @@ WHAT_IT_DOES = {
     "doctor": "The preflight checks, on a timer instead of only when somebody asks: "
               "MLX agent listening, Airtable readable, Drive reachable, spoofer "
               "configured. It raises the alert rather than waiting to be noticed.",
+    "second-accounts": "Watches the phones that carry two Instagram accounts. Every way "
+                       "that can go wrong is silent — a second account never scheduled, "
+                       "one clip posted on both accounts, a phone stuck on the wrong "
+                       "one — and each leaves a queue row saying Posted. This is what "
+                       "raises them.",
     "reap-phones": "Closes phones no loop owns any more. Nothing else does — the "
                    "run that would have closed them died — and a leaked phone holds "
                    "a MultiLogin session open on a real account for hours.",

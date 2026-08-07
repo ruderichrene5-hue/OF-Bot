@@ -207,6 +207,13 @@ PROFILE_ISSUE_VERIFICATION = "Human Verification Required"
 PROFILE_ISSUE_BANNED = "Banned / Blocked"
 PROFILE_ISSUE_REPEATED = "Repeated Failures"
 PROFILE_ISSUE_UNREACHABLE = "Device Unreachable"
+# A profile that is still trying and no longer landing. Deliberately its own
+# reason rather than folded into "Repeated Failures": those come from a row the
+# retry pass gave up on and are fixed by looking at the row, while this one is
+# fixed by posting from the phone by hand and watching what Instagram does. The
+# remedies differ, so the label has to. Written with typecast on, so Airtable
+# adds the option to the select the first time it is used.
+PROFILE_ISSUE_NO_SUCCESS = "No Recent Success"
 
 # Written to a queue row whose Retry Count hit the limit. Distinct from
 # `Failed - Needs Retry`, which is the only value the retry pass re-queues: an
@@ -563,6 +570,34 @@ class AirtableClient:
                 "api_id": (str(fields.get(F_PROF_MLX_API_ID) or "").strip() or None),
                 "time_zone": (str(fields.get(F_PROF_TIME_ZONE) or "").strip() or None),
             }
+        return out
+
+    def posting_profiles(self) -> list:
+        """Every Profiles (Cloning) row a post could go out on, with the two
+        switches that decide whether one will: Status and Needs Human Check.
+
+        `profile_launch_map` carries neither, and `profile_targets_by_model`
+        applies its own filters and reshapes the result by model -- so a caller
+        asking "which profiles are live, and which are already flagged" had
+        nothing to read. Filtering is left to the caller for the same reason
+        the planner keeps its gate order explicit: a profile skipped for being
+        Inactive and one skipped for being flagged are different answers.
+        """
+        out: list = []
+        for record in self._list_table(
+                TABLE_PROFILES,
+                fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_STATUS,
+                        F_PROF_NEEDS_HUMAN, F_PROF_FLAGGED_AT]):
+            fields = record.get("fields", {}) or {}
+            out.append({
+                "record_id": record.get("id"),
+                "name": str(fields.get(F_PROF_NAME) or "").strip(),
+                "launch_id": (str(fields.get(F_PROF_MLX_API_ID) or "").strip() or None),
+                # Empty Status counts as Active, exactly as the planners read it.
+                "status": _select_name(fields.get(F_PROF_STATUS)) or STATUS_SELECT_ACTIVE,
+                "needs_human": bool(fields.get(F_PROF_NEEDS_HUMAN)),
+                "flagged_at": str(fields.get(F_PROF_FLAGGED_AT) or "").strip() or None,
+            })
         return out
 
     def models_by_name(self) -> dict:
