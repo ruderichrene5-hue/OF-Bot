@@ -34,7 +34,8 @@ from adb_bot.config import settings
 from adb_bot.core import locks, shutdown
 from adb_bot.core.logger import get_logger
 
-LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "warmup", "mlx-sync", "cleanup")
+LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery", "warmup",
+         "mlx-sync", "cleanup")
 # `doctor` isn't a loop -- it's the preflight check, runnable the same way.
 # `report` renders the operational page; like `doctor` it is a command rather
 # than a loop, and unlike `doctor` it is not in the recommended set, so it never
@@ -262,6 +263,63 @@ def _run_retry(args, logger) -> int:
     return 1 if tally.get("errors") else 0
 
 
+def _run_recovery(args, logger) -> int:
+    """Put parked profiles back on the air.
+
+    Two paths, and only the second one opens a phone. A profile a person has
+    un-ticked is reactivated on the spot -- un-ticking is their attestation that
+    they looked, and this pass is what makes that gesture enough. A profile
+    parked for a reason that means *our* automation gave up is re-probed on a
+    backoff and un-parked if the phone answers; verification and ban flags are
+    never touched.
+
+    Without `--apply` this touches nothing and launches nothing, so it is also
+    the fastest way to see what the fleet is waiting on.
+    """
+    from adb_bot.automation import recovery_runner
+    airtable = _airtable(args.base_id, args.airtable_token)
+
+    probe = None
+    if args.apply and not args.no_probe:
+        from adb_bot.automation.bootstrap import build_automation, build_mlx_clients
+        from adb_bot.automation.workflow import run_profile_workflow
+        clients = build_mlx_clients(_mlx_token(args.mlx_token))
+        automation = build_automation()
+
+        def probe(launch_id, name):
+            """Launch, read the post count, shut down. Posts nothing."""
+            captured = {}
+
+            def capture(result):
+                if result.get("post_count") is not None:
+                    captured["count"] = int(result["post_count"])
+
+            # Same global ceiling as posting, warmup and recheck: a recovery
+            # probe is still one more phone on the box. No slot means no probe
+            # -- the profile stays parked and the next pass tries again, which
+            # is strictly better than queueing behind a busy fleet.
+            with locks.live_profile_slot(owner="recovery") as slot:
+                if slot is None:
+                    logger.warning(
+                        "Skipping the recovery probe for %s: %s phone(s) already open "
+                        "across all loops (global ceiling).", name, locks.live_profile_count())
+                    return None
+                run_profile_workflow(
+                    launch_id, clients.api.bearer_token, clients.api, clients.adb_enable,
+                    clients.shutdown, automation, logger,
+                    readiness_wait_seconds=settings.get_saved_readiness_wait(),
+                    readiness_max_attempts=settings.get_saved_readiness_attempts(),
+                    flow_name="reel_post_count_probe", result_callback=capture,
+                    shutdown_on_success=True, launcher_client=clients.launcher,
+                )
+            return captured.get("count")
+
+    report = recovery_runner.recover_profiles(
+        airtable, probe=probe, logger=logger, dry_run=not args.apply)
+    logger.info("recovery result: %s", report.summary())
+    return 1 if report.errors else 0
+
+
 def _run_recheck(args, logger) -> int:
     """Resolve posts that were sent but could not be confirmed in-run.
 
@@ -439,6 +497,7 @@ _DISPATCH = {
     "pipeline": _run_pipeline,
     "queue": _run_queue,
     "retry": _run_retry,
+    "recovery": _run_recovery,
     "mlx-sync": _run_mlx_sync,
     "cleanup": _run_cleanup,
     "doctor": _run_doctor,
@@ -470,6 +529,9 @@ def main(argv=None) -> int:
                         help="queue: comma-separated slot times (default 09:00,12:00,15:00,18:00,21:00).")
     parser.add_argument("--max-retries", type=int, default=3,
                         help="retry: give up on a row once Retry Count reaches this (default 3).")
+    parser.add_argument("--no-probe", action="store_true",
+                        help="recovery: reactivate profiles a person un-flagged, but do not "
+                             "launch any phone to re-test the ones the bot parked.")
     parser.add_argument("--targets", choices=("accounts", "profiles"), default="accounts",
                         help="pipeline: what to spoof for -- Airtable Accounts at Lifecycle "
                              "Stage Active (default), or the MLX profile inventory, for models "

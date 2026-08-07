@@ -46,6 +46,20 @@ DEFAULT_MAX_RETRIES = 3
 RETRY_BACKOFF_BASE_SECONDS = 15 * 60
 RETRY_BACKOFF_MAX_SECONDS = 4 * 3600
 
+# Extra spacing between two rows re-queued for the SAME profile in one pass.
+#
+# The backoff above is a function of Retry Count alone, so a profile coming back
+# from a park -- where every row was reset to Retry Count 0 together -- has all
+# of them fall due at the same instant. Posting has no per-account limit, so
+# they go out back to back: Laila 3 came out of a park on 2026-08-06 with six
+# reels queued to the same minute.
+#
+# Six reels in a few minutes on an account that was just parked for repeated
+# failures is how a recoverable account earns a challenge, which is the failure
+# this whole path exists to recover from. Spacing them turns a burst into a
+# catch-up: the backlog still clears, over a couple of hours instead of at once.
+PROFILE_STAGGER_SECONDS = 20 * 60
+
 OUTCOME_RETRY = "retry"              # eligible; goes back to Pending
 OUTCOME_NOT_FAILED = "not_failed"    # not a Failed row at all -- nothing to do
 OUTCOME_NEEDS_HUMAN = "needs_human"  # banned / verification: retrying is harmful
@@ -260,6 +274,11 @@ def retry_failed_posts(airtable, ledger=None, logger=None, now=time.time,
     store = ledger or post_ledger.PostLedger()
     tally = {"considered": 0, "requeued": 0, "needs_human": 0, "exhausted": 0,
              "unresolved": 0, "blocked": 0, "errors": 0}
+    # How many rows this pass has already re-queued for each profile, so the
+    # second and later ones can be spaced out. Per pass, not per profile
+    # lifetime: two rows re-queued half an hour apart by different ticks are
+    # already spaced by the ticks themselves.
+    queued_per_profile: dict = {}
 
     try:
         rows = airtable.list_failed_posts()
@@ -339,12 +358,15 @@ def retry_failed_posts(airtable, ledger=None, logger=None, now=time.time,
                         log("warning", "Could not mark %s exhausted: %s", name, exc)
             continue
 
-        delay = retry_delay_seconds(retry)
+        already = queued_per_profile.get(profile_id, 0)
+        queued_per_profile[profile_id] = already + 1
+        delay = retry_delay_seconds(retry) + already * PROFILE_STAGGER_SECONDS
         due = _iso_at(now() + delay)
         note = (f"auto-retry {retry + 1}/{max_retries} scheduled for {due} "
                 f"(ledger clear for {profile_id})")
-        log("info", "%sRe-queueing %s in %.0f min (attempt %s/%s)",
-            "[DRY-RUN] " if dry_run else "", name, delay / 60, retry + 1, max_retries)
+        log("info", "%sRe-queueing %s in %.0f min (attempt %s/%s)%s",
+            "[DRY-RUN] " if dry_run else "", name, delay / 60, retry + 1, max_retries,
+            f" -- staggered, {already + 1} for this profile this pass" if already else "")
 
         if dry_run:
             tally["requeued"] += 1

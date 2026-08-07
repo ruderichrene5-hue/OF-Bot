@@ -101,23 +101,40 @@ class FlagProfileForHumanTest(TestCase):
         # problem on an already-parked phone must not burn a write each tick.
         ok, mock_patch = self._flag({
             "Status": "Inactive",
+            "Needs Human Check": True,
             "Issue Notes": "[2026-08-06] Retries Exhausted: nikki_1 gave up after 3 tries",
         })
         self.assertTrue(ok)
         mock_patch.assert_not_called()
 
-    def test_a_repeat_still_re_parks_a_profile_someone_reactivated(self):
-        # Un-ticking the box is the human's "I looked at it"; putting Status back
-        # to Active is their "it is fit to post". If they do the second without
-        # the first and it fails the same way, the note matches and the early
-        # return used to leave it Active -- failing the same way forever.
+    def test_a_repeat_re_parks_a_still_flagged_profile_set_back_to_active(self):
+        # The box is still ticked, so the episode is still open: somebody set
+        # Status back to Active without clearing the flag and it failed the same
+        # way again. Re-park, writing only the field that is wrong.
         ok, mock_patch = self._flag({
             "Status": "Active",
+            "Needs Human Check": True,
             "Issue Notes": "[2026-08-06] Retries Exhausted: nikki_1 gave up after 3 tries",
         })
         self.assertTrue(ok)
         self.assertEqual(mock_patch.call_args.kwargs["json"]["fields"],
                          {"Status": "Inactive"})
+
+    def test_a_repeat_after_the_flag_was_cleared_is_a_fresh_flag(self):
+        # The box is clear, so a person closed the episode. The same failure
+        # recurring is a new one: it must re-tick the box and re-stamp rather
+        # than silently setting Status and leaving the profile un-flagged,
+        # unexplained and invisible to the recovery pass.
+        ok, mock_patch = self._flag({
+            "Status": "Active",
+            "Needs Human Check": False,
+            "Issue Notes": "[2026-08-06] Retries Exhausted: nikki_1 gave up after 3 tries",
+        })
+        self.assertTrue(ok)
+        fields = mock_patch.call_args.kwargs["json"]["fields"]
+        self.assertIs(fields["Needs Human Check"], True)
+        self.assertEqual(fields["Status"], "Inactive")
+        self.assertIn("Flagged At", fields)
 
     def test_a_different_problem_still_appends_a_note(self):
         ok, mock_patch = self._flag({

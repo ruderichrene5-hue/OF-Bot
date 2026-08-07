@@ -466,20 +466,21 @@ class AirtableClient:
         nothing all day, and had the spoofer encoding variants for them too.
         Writing both fields is what makes the flag bite on this deployment.
 
-        Status is still the human's switch: un-ticking the box is not enough to
-        resume a profile, they must set Status back to Active. That is
-        deliberate -- a person who clears the flag should have to say the phone
-        is fit to post, not merely that they looked at it.
+        Un-ticking the box is what a person does to say they looked; the
+        recovery pass is what turns that back into a posting profile (see
+        `clear_profile_flag` and `recovery_runner`).
         """
         stamp = when_iso or _now_iso()
         body = f"{reason}: {note}".strip()
         entry = f"[{stamp}] {body}"
         existing = ""
         current_status = None
+        still_flagged = False
         try:
             current = self._get_record_fields(TABLE_PROFILES, record_id)
             existing = str(current.get(F_PROF_ISSUE_NOTES) or "")
             current_status = _select_name(current.get(F_PROF_STATUS))
+            still_flagged = bool(current.get(F_PROF_NEEDS_HUMAN))
         except Exception:
             # A failed read must not cost the flag -- the checkbox is the part
             # that actually surfaces the profile to a person.
@@ -490,27 +491,92 @@ class AirtableClient:
         # identical lines per profile per day, which buries the one line that
         # says what is wrong and burns a write each time. A repeat of a problem
         # already recorded is not news; a *different* problem still appends.
-        if body and body in existing:
-            # ...but a repeat still has to park the phone. A profile someone put
-            # back to Active without clearing the notes would otherwise fail the
-            # same way forever: the note matches, we return early, and nothing
-            # ever sets Status again. Same for the profiles flagged before
-            # parking-on-flag existed. Only the one field is written, so the
+        #
+        # "Already recorded" means recorded *in this episode*. Once a person
+        # clears the flag the episode is over, and the same failure happening
+        # again is a new one -- so the check requires the profile to still be
+        # flagged. Without that, matching a months-old note was enough to park a
+        # profile again, and because this branch writes only Status it did so
+        # without re-ticking the box or leaving a note: the profile went
+        # Inactive, un-flagged and unexplained, which is invisible to the
+        # recovery pass and reads to a person as the bot ignoring them. That is
+        # what happened to nine profiles on 2026-08-06.
+        if body and body in existing and still_flagged:
+            # A still-flagged profile that somebody set back to Active without
+            # clearing the box is re-parked -- the box is the bot's park, and
+            # only clearing it ends that. Only the one field is written, so the
             # steady state (already Inactive) is still no write at all.
             if current_status is not None and current_status != STATUS_SELECT_INACTIVE:
                 return self._patch_in(TABLE_PROFILES, record_id,
                                       {F_PROF_STATUS: STATUS_SELECT_INACTIVE})
             return True
-        combined = f"{entry}\n{existing}".strip() if existing else entry
-        if len(combined) > max_notes_chars:
-            combined = combined[:max_notes_chars].rsplit("\n", 1)[0] + "\n[older entries trimmed]"
         return self._patch_in(TABLE_PROFILES, record_id, {
             F_PROF_NEEDS_HUMAN: True,
             F_PROF_STATUS: STATUS_SELECT_INACTIVE,
             F_PROF_ISSUE_REASON: reason,
-            F_PROF_ISSUE_NOTES: combined,
+            F_PROF_ISSUE_NOTES: _prepend_issue_note(existing, entry, max_notes_chars),
             F_PROF_FLAGGED_AT: stamp,
         })
+
+    def list_flagged_profiles(self) -> list:
+        """Every profile the bot has parked, or that still carries its mark.
+
+        Deliberately not just `{Needs Human Check}=1`. The recovery pass has to
+        see the profiles a person has *un-ticked* too -- those are the ones
+        waiting to be put back to Active -- and after un-ticking, the only thing
+        left identifying them is the Issue Reason.
+        """
+        formula = f"OR({{{F_PROF_NEEDS_HUMAN}}}=1, NOT({{{F_PROF_ISSUE_REASON}}}=BLANK()))"
+        return self._list_table(
+            TABLE_PROFILES,
+            fields=[F_PROF_NAME, F_PROF_STATUS, F_PROF_NEEDS_HUMAN, F_PROF_ISSUE_REASON,
+                    F_PROF_ISSUE_NOTES, F_PROF_FLAGGED_AT, F_PROF_MLX_API_ID],
+            filter_formula=formula,
+        )
+
+    def clear_profile_flag(self, record_id: str, note: str,
+                           when_iso: str | None = None,
+                           max_notes_chars: int = 4000) -> bool:
+        """Un-park a profile: flag off, Status back to Active, Issue Reason gone.
+
+        The mirror of `flag_profile_for_human`. Issue Notes are *kept* and the
+        reason for un-parking is prepended to them -- the history of what a
+        phone has been through is the useful part, and it is also what tells the
+        recovery pass how many times it has already tried this one.
+
+        Clearing Issue Reason matters beyond tidiness: it is the bot's
+        fingerprint on the park, and the recovery pass keys off it to tell a
+        profile the bot parked from one a person parked by hand. Leaving it set
+        would make the profile look bot-parked forever.
+        """
+        stamp = when_iso or _now_iso()
+        existing = str(self._get_record_fields(TABLE_PROFILES, record_id).get(F_PROF_ISSUE_NOTES) or "")
+        return self._patch_in(TABLE_PROFILES, record_id, {
+            F_PROF_NEEDS_HUMAN: False,
+            F_PROF_STATUS: STATUS_SELECT_ACTIVE,
+            F_PROF_ISSUE_REASON: None,
+            F_PROF_FLAGGED_AT: None,
+            F_PROF_ISSUE_NOTES: _prepend_issue_note(existing, f"[{stamp}] {note}".strip(),
+                                                    max_notes_chars),
+        })
+
+    def note_on_profile(self, record_id: str, note: str,
+                        when_iso: str | None = None,
+                        max_notes_chars: int = 4000,
+                        restamp_flagged_at: bool = False) -> bool:
+        """Add a line to a profile's Issue Notes without changing its state.
+
+        Used to record a recovery attempt that did not work. `restamp_flagged_at`
+        pushes `Flagged At` to now, which is what makes the next attempt wait out
+        a fresh backoff instead of retrying on the following tick.
+        """
+        stamp = when_iso or _now_iso()
+        existing = str(self._get_record_fields(TABLE_PROFILES, record_id).get(F_PROF_ISSUE_NOTES) or "")
+        fields = {F_PROF_ISSUE_NOTES: _prepend_issue_note(existing, f"[{stamp}] {note}".strip(),
+                                                          max_notes_chars)}
+        if restamp_flagged_at:
+            fields[F_PROF_FLAGGED_AT] = stamp
+        return self._patch_in(TABLE_PROFILES, record_id, fields)
 
     def todays_completed_runs(self) -> set:
         """Set of (account_record_id, flow_name) that already ran to Done/Running
@@ -1040,6 +1106,21 @@ def _select_name(value):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _prepend_issue_note(existing: str, entry: str, max_notes_chars: int = 4000) -> str:
+    """Newest entry first, older history below, trimmed to a sane length.
+
+    A profile that fails the same way for three nights should read as three
+    nights. Older entries are dropped once the field would exceed
+    `max_notes_chars` rather than letting it grow without bound -- Airtable's
+    long-text limit is generous but not infinite, and a 100 KB cell is
+    unreadable anyway.
+    """
+    combined = f"{entry}\n{existing}".strip() if existing else entry
+    if len(combined) > max_notes_chars:
+        combined = combined[:max_notes_chars].rsplit("\n", 1)[0] + "\n[older entries trimmed]"
+    return combined
 
 
 def _iso_in(seconds: float) -> str:

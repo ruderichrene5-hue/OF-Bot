@@ -27,8 +27,8 @@ LOOPS = ("posting", "recheck", "warmup", "pipeline", "mlx-sync", "cleanup")
 PLANNED_LOOPS = ("queue", "retry")
 
 # Everything an unattended server should have scheduled.
-RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "warmup",
-                     "mlx-sync", "cleanup", "doctor", "reap-phones")
+RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery",
+                     "warmup", "mlx-sync", "cleanup", "doctor", "reap-phones")
 
 # Recommended cadence in minutes. The UI can override per loop; these are what
 # `install_units.sh` installs. Ordered by the flow a reel goes through, because
@@ -56,6 +56,13 @@ RECOMMENDED_INTERVALS = {
     # posting day while still spacing out retries against a genuinely broken
     # account instead of hammering it.
     "retry": 30,
+    # Un-parks profiles. Two jobs at different urgencies, and the cadence is
+    # set by the impatient one: a person who un-ticks Needs Human Check is
+    # sitting there waiting for the phone to start posting again, and making
+    # them wait half an hour to find out whether it worked reads as broken.
+    # The probe half is rate-limited by its own backoff (6h/24h/72h), not by
+    # this interval, so a fast tick costs one cheap Airtable read.
+    "recovery": 10,
     # Lifecycle day plan (Day 1-4) spreads actions across the day; hourly gives
     # the plan enough ticks to place them and to pick up a profile that only
     # became due mid-day.
@@ -100,6 +107,7 @@ DESCRIPTIONS = {
     "recheck": "ADB bot recheck loop (Verifying -> Posted/Failed)",
     "queue": "ADB bot queue loop (variants -> Posting Queue rows)",
     "retry": "ADB bot retry loop (retryable Failed -> Pending)",
+    "recovery": "ADB bot recovery loop (un-parks profiles a person cleared)",
     "warmup": "ADB bot warmup loop (lifecycle Day 1-4)",
     "pipeline": "ADB bot spoofing pipeline (Drive/raw -> Spoof Variants)",
     "mlx-sync": "ADB bot MultiLogin->Airtable profile sync",

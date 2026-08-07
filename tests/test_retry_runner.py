@@ -421,6 +421,27 @@ class FlagsProfileForHumanTest(TestCase):
         self.airtable.flag_profile_for_human.assert_not_called()
 
 
+class ProfileStaggerTest(TestCase):
+    """A profile coming back from a park must not empty its backlog at once.
+
+    Every row is reset to Retry Count 0 together, and the backoff is a function
+    of that count alone, so without a stagger they all fall due in the same
+    minute -- six reels back to back on an account that was just parked for
+    repeated failures.
+    """
+
+    def test_rows_for_one_profile_are_spaced_out(self):
+        base = retry_runner.retry_delay_seconds(0)
+        delays = [base + n * retry_runner.PROFILE_STAGGER_SECONDS for n in range(3)]
+        self.assertEqual(delays[1] - delays[0], retry_runner.PROFILE_STAGGER_SECONDS)
+        self.assertEqual(delays[2] - delays[1], retry_runner.PROFILE_STAGGER_SECONDS)
+
+    def test_the_stagger_is_long_enough_to_matter(self):
+        # Posting ticks every 5 min; a stagger shorter than that would collapse
+        # back into one burst.
+        self.assertGreaterEqual(retry_runner.PROFILE_STAGGER_SECONDS, 10 * 60)
+
+
 class FlagIsIdempotentTest(TestCase):
     """Re-flagging an unchanged problem must not append a duplicate note.
 
@@ -433,8 +454,10 @@ class FlagIsIdempotentTest(TestCase):
         self.patch_calls = []
         self.notes = ""
         # Flagging parks the profile, so the fake has to carry Status as well:
-        # a repeat is only a no-op once the phone is actually Inactive.
+        # a repeat is only a no-op once the phone is actually Inactive. The
+        # checkbox rides along too -- it is what says the episode is still open.
         self.status = "Active"
+        self.needs_human = False
 
         class Client(AirtableClient):
             def __init__(inner):
@@ -444,15 +467,40 @@ class FlagIsIdempotentTest(TestCase):
 
             def _get_record_fields(inner, table, rec):
                 return {at.F_PROF_ISSUE_NOTES: self.notes,
-                        at.F_PROF_STATUS: self.status}
+                        at.F_PROF_STATUS: self.status,
+                        at.F_PROF_NEEDS_HUMAN: self.needs_human}
 
             def _patch_in(inner, table, rec, fields, typecast=True):
                 self.patch_calls.append(fields)
                 self.notes = fields.get(at.F_PROF_ISSUE_NOTES, self.notes)
                 self.status = fields.get(at.F_PROF_STATUS, self.status)
+                self.needs_human = fields.get(at.F_PROF_NEEDS_HUMAN, self.needs_human)
                 return True
 
         self.client = Client()
+
+    def test_a_cleared_flag_ends_the_episode(self):
+        """The bug that parked nine profiles on 2026-08-06.
+
+        A person clears the flag and sets the profile back to Active. The same
+        failure recurs. Matching the old note must NOT quietly set Status back
+        to Inactive: that leaves the profile un-flagged, un-explained and
+        invisible to the recovery pass. It is a new episode, so it gets a full
+        flag -- box, reason, stamp and all.
+        """
+        self.client.flag_profile_for_human("recP", at.PROFILE_ISSUE_EXHAUSTED, "nikki 5 / 21:00")
+        # ...a person looks at the phone and puts it back on the air.
+        self.needs_human, self.status = False, "Active"
+        self.patch_calls.clear()
+
+        self.client.flag_profile_for_human("recP", at.PROFILE_ISSUE_EXHAUSTED, "nikki 5 / 21:00")
+        self.assertEqual(len(self.patch_calls), 1)
+        written = self.patch_calls[0]
+        self.assertIs(written[at.F_PROF_NEEDS_HUMAN], True,
+                      "a re-park must re-tick the box, not park silently")
+        self.assertEqual(written[at.F_PROF_STATUS], "Inactive")
+        self.assertEqual(written[at.F_PROF_ISSUE_REASON], at.PROFILE_ISSUE_EXHAUSTED)
+        self.assertIn(at.F_PROF_FLAGGED_AT, written)
 
     def test_same_problem_twice_writes_once(self):
         self.client.flag_profile_for_human("recP", at.PROFILE_ISSUE_VERIFICATION, "Laila 9 / 21:00")
