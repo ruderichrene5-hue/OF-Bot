@@ -30,6 +30,29 @@ DEFAULT_PROFILE_IDS = ["626005033091072287", "624310694145163612", "625149430776
 # See `_guarantee_profile_closed` for what this is protecting against.
 MAX_PROFILE_OPEN_SECONDS = 7 * 60
 
+# Flows that legitimately need longer, and how long. The budget belongs to the
+# **flow**, not to whoever calls it: a caller that has to remember to raise the
+# ceiling is a caller that will forget, and forgetting here does not look like a
+# misconfiguration -- it looks like a broken phone.
+#
+# `warm_up_process` scrolls the feed for 600s and then opens the activity feed
+# and taps up to 5 Follow buttons; measured end to end at 13m41s. Under the
+# 420s default the watchdog closed the phone mid-scroll every single time, the
+# heartbeat then reported `device offline`, and the Run Log recorded "profile
+# lost mid-run (heartbeat failed)" -- so the failure read as MultiLogin's fault
+# and got retried rather than fixed. It had never once reached the follow step.
+# Proven 2026-08-06 by an A/B on Blank (10): 420s -> Failed, 1200s -> Done with
+# 147 swipes and 5 follows. 20 min leaves headroom over the measured run without
+# letting a genuinely wedged phone sit all afternoon.
+FLOW_OPEN_SECONDS = {
+    "warm_up_process": 20 * 60,
+}
+
+
+def open_budget_for(flow_name) -> float:
+    """How long this flow's phone may stay open. Unlisted flows get the default."""
+    return float(FLOW_OPEN_SECONDS.get(str(flow_name or ""), MAX_PROFILE_OPEN_SECONDS))
+
 
 FLOW_ACTION_COUNTS = {
     "instagram_scroll": 12,
@@ -415,11 +438,17 @@ def _guarantee_profile_closed(inner):
     """
 
     @functools.wraps(inner)
-    def wrapper(*args, max_open_seconds=MAX_PROFILE_OPEN_SECONDS, **kwargs) -> None:
+    def wrapper(*args, max_open_seconds=None, **kwargs) -> None:
         bound = inspect.signature(inner).bind_partial(*args, **kwargs)
         shutdown_client = bound.arguments.get("shutdown_client")
         profile_id = bound.arguments.get("profile_id")
         logger = bound.arguments.get("logger")
+        # Resolved from the flow rather than defaulted here, so every caller --
+        # posting, warm-up, recheck, the desktop app -- gets the right budget
+        # without knowing one exists. An explicit value still wins, and 0 still
+        # means no watchdog at all.
+        if max_open_seconds is None:
+            max_open_seconds = open_budget_for(bound.arguments.get("flow_name"))
         closed = threading.Event()
 
         class _ObservedShutdownClient:

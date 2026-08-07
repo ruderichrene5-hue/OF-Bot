@@ -10,6 +10,7 @@ import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+from adb_bot.automation import workflow
 from adb_bot.automation.workflow import run_profile_workflow, MAX_PROFILE_OPEN_SECONDS
 from adb_bot.core.models import Profile
 
@@ -47,6 +48,67 @@ class T(unittest.TestCase):
                                  shutdown_on_success=False, max_open_seconds=0.3)
         self.assertEqual(client.calls, [["profile-1"]], "watchdog did not close the hung phone")
         self.assertLess(time.time()-started, 4, "watchdog did not fire on its budget")
+
+class FlowBudgetT(unittest.TestCase):
+    """The budget belongs to the flow, not to whoever calls it.
+
+    A warm-up takes ~14 minutes of scrolling and following; a post takes two.
+    Under one shared 7-minute ceiling every warm-up was closed mid-scroll, and
+    the heartbeat reported it as "profile lost mid-run" -- so it read as a dead
+    phone and got retried instead of fixed. Measured 13m41s on 2026-08-06.
+    """
+
+    def test_the_warm_up_gets_the_time_it_actually_needs(self):
+        self.assertGreater(workflow.open_budget_for("warm_up_process"), 13 * 60 + 41)
+
+    def test_a_post_is_unchanged(self):
+        self.assertEqual(workflow.open_budget_for("instagram_reel_upload_u2"),
+                         MAX_PROFILE_OPEN_SECONDS)
+
+    def test_an_unknown_flow_gets_the_default_rather_than_no_ceiling(self):
+        self.assertEqual(workflow.open_budget_for("something_new"), MAX_PROFILE_OPEN_SECONDS)
+        self.assertEqual(workflow.open_budget_for(None), MAX_PROFILE_OPEN_SECONDS)
+
+    def _budget_seen_by(self, **kwargs):
+        """The budget the watchdog is actually armed with, via Timer's interval."""
+        seen = {}
+        real = __import__("threading").Timer
+
+        def spy(interval, fn, *a, **k):
+            seen["budget"] = interval
+            return real(interval, lambda: None)
+
+        class Flow:
+            def run(self, *a, **k): return {"success": True}
+        class A:
+            def __init__(self): self.flows = {"warm_up_process": Flow(),
+                                              "instagram_scroll": Flow()}
+        with patch("adb_bot.automation.workflow.threading.Timer", side_effect=spy), \
+             patch("adb_bot.automation.workflow.prepare_profile_for_adb",
+                   return_value=Profile(id="p", status="ready")), \
+             patch("adb_bot.automation.workflow.connect_with_retries", return_value="d"), \
+             patch("adb_bot.automation.workflow.ADBClient") as m:
+            m.return_value.run_command.return_value = ""
+            run_profile_workflow("p", "tok", SimpleNamespace(), SimpleNamespace(),
+                                 Rec(), A(), L(), shutdown_on_success=False, **kwargs)
+        return seen.get("budget")
+
+    def test_the_warm_up_flow_arms_the_watchdog_with_its_own_budget(self):
+        """The wiring, not just the table: a caller passing nothing must still
+        get 20 minutes, because no caller knows to ask for it."""
+        self.assertEqual(self._budget_seen_by(flow_name="warm_up_process"), 20 * 60)
+
+    def test_posting_still_gets_seven_minutes(self):
+        self.assertEqual(self._budget_seen_by(flow_name="instagram_scroll"), 420.0)
+
+    def test_an_explicit_budget_still_wins(self):
+        self.assertEqual(self._budget_seen_by(flow_name="warm_up_process",
+                                              max_open_seconds=99), 99.0)
+
+    def test_zero_still_means_no_watchdog(self):
+        self.assertIsNone(self._budget_seen_by(flow_name="warm_up_process",
+                                               max_open_seconds=0))
+
 
 if __name__ == "__main__":
     unittest.main()
