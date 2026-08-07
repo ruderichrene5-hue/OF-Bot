@@ -644,7 +644,15 @@ def live_work(now=None) -> list:
         # A phone whose profile could not be read from argv still belongs on the
         # page -- it is holding memory and a slot -- so it is keyed by its pid
         # rather than dropped for having no id to join on.
-        row = blank(phone["profile_id"] or f"pid:{phone['pid']}")
+        key = phone["profile_id"] or f"pid:{phone['pid']}"
+        # Two processes can carry one profile id for a moment: readiness
+        # relaunches a profile whose launch did not take, and both are open
+        # until MultiLogin reaps the first. Collapsing them onto one row would
+        # put this table one phone below the Server tab's count, which is the
+        # one number a reader checks it against.
+        if rows.get(key, {}).get("has_phone"):
+            key = f"pid:{phone['pid']}"
+        row = blank(key)
         row.update(profile_id=phone["profile_id"] or row["profile_id"],
                    pid=phone["pid"], has_phone=True, orphan=phone["orphan"],
                    for_seconds=phone["age_seconds"])

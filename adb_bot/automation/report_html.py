@@ -493,6 +493,24 @@ def _section_live_work(rows, refresh_seconds: int = REFRESH_SECONDS) -> str:
 
     posting = sum(1 for r in rows if r["loop"] == "posting")
     named = sum(1 for r in rows if r["reel"])
+    # The reconciliation, above the table rather than below it. This count and
+    # the Server tab's "Live phones" tile are different quantities -- a profile
+    # is being worked on from the moment its loop takes the lock, and its phone
+    # comes up seconds to minutes later -- and two numbers that look like the
+    # same thing must be shown to disagree on purpose, or the page just looks
+    # wrong. Asked live 2026-08-07.
+    with_phone = sum(1 for r in rows if r["has_phone"])
+    launching = sum(1 for r in rows if not r["has_phone"] and r["profile_id"])
+    slot_only = sum(1 for r in rows if not r["has_phone"] and not r["profile_id"])
+    parts = [f'<strong>{with_phone}</strong> with a phone open']
+    if launching:
+        parts.append(f"{launching} still launching")
+    if slot_only:
+        parts.append(f"{slot_only} holding a slot with no phone yet")
+    lead = (f'<p class="sub">{len(rows)} profile(s) being worked on — {", ".join(parts)}. '
+            f'The <strong>{with_phone}</strong> with a phone open is the Server tab\'s '
+            f'"Live phones"; the rest have been claimed by a loop but have no phone yet, '
+            f'which is why this table is usually the longer of the two.</p>')
     notes = (f'<p class="sub">Started and "running for" are the phone process\'s own clock, '
              f'not the lock\'s — locks are taken for a whole batch before any phone comes up. '
              f'This is a snapshot, rebuilt every {_refresh_words(refresh_seconds)}; a post takes '
@@ -506,7 +524,7 @@ def _section_live_work(rows, refresh_seconds: int = REFRESH_SECONDS) -> str:
         notes += ('<p class="sub">Only the posting loop names a reel. Warm-up and recheck open '
                   'the same phones for other work, and their profiles\' queue rows are not what '
                   'they are sending.</p>')
-    return f'<div class="scroll"><table>{head}{"".join(body)}</table></div>{notes}'
+    return f'{lead}<div class="scroll"><table>{head}{"".join(body)}</table></div>{notes}'
 
 
 def _section_timers(timers) -> str:

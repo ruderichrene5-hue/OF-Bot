@@ -3144,3 +3144,50 @@ class SpareSlotRowTest(SlotOwnershipTest):
         row = self._work(slots=[dict(self._slot("recheck"), age_seconds=300.0)])[0]
         self.assertEqual(row["for_seconds"], 300.0)
         self.assertEqual(row["started"], "13:25:00")
+
+
+class LiveCountsAgreeTest(SlotOwnershipTest):
+    """This table and the Server tab's "Live phones" tile are read against each
+    other, so where they differ the page has to say why. Reported live
+    2026-08-07: the tile said 1, this table had 4 rows, and nothing explained
+    that three of them had not got a phone yet.
+    """
+
+    def test_every_phone_process_is_exactly_one_row(self):
+        """The invariant the tile is checked against: rows with a phone == the
+        number `live_phones()` counts."""
+        rows = self._work(phones=[self._phone("111", pid=1), self._phone("222", pid=2)])
+        self.assertEqual(sum(1 for r in rows if r["has_phone"]), 2)
+
+    def test_two_processes_for_one_profile_are_two_rows(self):
+        """Readiness relaunches a profile whose launch did not take, and both
+        are open until MultiLogin reaps the first. Collapsing them would put
+        this table one phone *below* the tile."""
+        rows = self._work(phones=[self._phone("111", pid=1), self._phone("111", pid=2)])
+        self.assertEqual(sum(1 for r in rows if r["has_phone"]), 2)
+        self.assertEqual({r["pid"] for r in rows}, {1, 2})
+
+    def test_a_lock_without_a_phone_does_not_inflate_the_phone_count(self):
+        rows = self._work(held=[self._lock("111"), self._lock("222")],
+                          phones=[self._phone("111")])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(sum(1 for r in rows if r["has_phone"]), 1)
+
+
+class LiveCountsRenderTest(LiveWorkRenderTest):
+    def test_the_difference_from_live_phones_is_stated_not_left_to_be_found(self):
+        rows = self._rows() + [dict(self._rows()[0], profile_id="222", has_phone=False,
+                                    pid="", name="Jil 2")]
+        page = report_html.render(self._data(live_work=rows))
+        self.assertIn("2 profile(s) being worked on", page)
+        self.assertIn("1</strong> with a phone open", page)
+        self.assertIn("1 still launching", page)
+        self.assertIn('"Live phones"', page)
+
+    def test_a_slot_with_no_profile_is_counted_separately_from_a_launch(self):
+        rows = [dict(self._rows()[0], profile_id="", has_phone=False, pid="",
+                     name="(phone not up yet)", loop="recheck", by_slot=True,
+                     reel="", reel_path="")]
+        page = report_html.render(self._data(live_work=rows))
+        self.assertIn("1 holding a slot with no phone yet", page)
+        self.assertNotIn("still launching", page)
