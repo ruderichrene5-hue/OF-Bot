@@ -173,14 +173,32 @@ def _rows_by_phone(queue_rows) -> dict:
     return out
 
 
-def _latest(rows, statuses) -> float:
+def _latest(rows, statuses, cap=None) -> float:
     """The newest Scheduled DateTime among `rows` in one of `statuses`, as epoch
-    seconds; 0.0 when there is none."""
+    seconds; 0.0 when there is none.
+
+    `cap` (normally `now`) **ignores** stamps after it. A row's schedule is when
+    it was due, which for every row the loops make is the past by the time it
+    has a status -- but a hand-made row can be dated tomorrow, and one of those
+    marked Posted would otherwise put "the last second-account post" in the
+    future. Every staleness rule here is `now - last`, so a future `last` is
+    negative and the "they have stopped posting" checks could never fire again:
+    the monitor would look healthy precisely because it had gone blind. Seen
+    live on 2026-08-07, from a test row dated 23:00.
+
+    Ignored rather than clamped to `cap`, which was the first fix and was worse:
+    clamping says the post happened *now*, so a single future-dated row would
+    keep the fleet looking freshly active forever. We do not know when such a
+    row posted, and the safe reading of "unknown" is "it does not count as
+    recent".
+    """
     best = 0.0
     for fields in rows:
         if at._select_name(fields.get(at.F_PQ_POST_STATUS)) not in statuses:
             continue
         stamp = _parse_epoch(fields.get(at.F_PQ_SCHEDULED))
+        if cap is not None and stamp > cap:
+            continue
         if stamp > best:
             best = stamp
     return best
@@ -264,7 +282,7 @@ def evaluate(profiles, queue_rows, ready_variants=None, log_text: str = "",
 
     first_post_at = float(state.get("first_post_at") or 0.0)
     if report.second_posted and not first_post_at:
-        first_post_at = _latest(second_rows, (at.POST_STATUS_POSTED,)) or now
+        first_post_at = _latest(second_rows, (at.POST_STATUS_POSTED,), cap=now) or now
     report.first_post_at = first_post_at
     report.started = bool(first_post_at)
 
@@ -341,7 +359,7 @@ def evaluate(profiles, queue_rows, ready_variants=None, log_text: str = "",
 
     # 3b. Still going. A second account that posted once and then stopped is the
     # rollout half-failing, which is easy to miss precisely because it did work.
-    last_second = _latest(second_rows, (at.POST_STATUS_POSTED,))
+    last_second = _latest(second_rows, (at.POST_STATUS_POSTED,), cap=now)
     silent = last_second and (now - last_second) >= SILENT_SECONDS
     report.checks.append(Check(
         "second_accounts_still_posting", not silent,
@@ -352,7 +370,7 @@ def evaluate(profiles, queue_rows, ready_variants=None, log_text: str = "",
     # phone stuck on the second account posts everything there; the primary's
     # rows fail (the switch back is refused) or, worse, quietly go to the wrong
     # account. Either way the primary stops landing posts.
-    last_primary = _latest(primary_rows, (at.POST_STATUS_POSTED,))
+    last_primary = _latest(primary_rows, (at.POST_STATUS_POSTED,), cap=now)
     starved = last_primary and last_second and (last_second - last_primary) >= SILENT_SECONDS
     report.checks.append(Check(
         "first_accounts_still_posting", not starved,

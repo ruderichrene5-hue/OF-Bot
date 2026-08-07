@@ -300,3 +300,29 @@ class ScheduleTest(TestCase):
         self.assertIn("second-accounts", schedule_spec.RECOMMENDED_LOOPS)
         self.assertIn("second-accounts", schedule_spec.RECOMMENDED_INTERVALS)
         self.assertTrue(schedule_spec.WHAT_IT_DOES.get("second-accounts"))
+
+
+class FutureDatedRowTest(TestCase):
+    """A row scheduled for later must not become "the last post".
+
+    Every staleness rule here is `now - last`. A future `last` makes that
+    negative, so "the second accounts have stopped" could never fire again --
+    the monitor would look healthy precisely because it had gone blind. Seen
+    live on 2026-08-07, from a hand-made test row dated 23:00.
+    """
+
+    def test_a_future_posted_row_does_not_silence_the_staleness_check(self):
+        rows = [_row(slot=at.SLOT_PRIMARY, variant="a", when=NOW - 40 * HOUR),
+                # Posted, but dated six hours from now.
+                _row(slot=at.SLOT_SECOND, variant="b", when=NOW + 6 * HOUR),
+                _row(slot=at.SLOT_SECOND, variant="c", when=NOW - 40 * HOUR)]
+        state = {"first_seen_at": NOW - 50 * HOUR, "first_post_at": NOW - 40 * HOUR}
+        report = evaluate([_profile()], rows, state=state, now=NOW)
+        # The fleet really has been quiet for 40h, and it says so.
+        self.assertIn("second_accounts_still_posting", report.failures)
+
+    def test_the_first_post_is_never_stamped_in_the_future(self):
+        rows = [_row(slot=at.SLOT_SECOND, variant="b", when=NOW + 6 * HOUR)]
+        report = evaluate([_profile()], rows, state={"first_seen_at": NOW}, now=NOW)
+        self.assertTrue(report.started)
+        self.assertLessEqual(report.first_post_at, NOW)
