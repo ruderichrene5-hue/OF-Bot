@@ -416,15 +416,30 @@ class AirtableClient:
         )
 
     def profile_launch_map(self) -> dict:
-        """record_id -> {'name', 'launch_id', 'serial'} for Profiles (Cloning).
-        `launch_id` is the 18-digit MLX API ID the launcher/ADB actually need."""
+        """record_id -> {'name', 'launch_id', 'serial', 'needs_human', 'status'}
+        for Profiles (Cloning). `launch_id` is the 18-digit MLX API ID the
+        launcher/ADB actually need.
+
+        The flag and Status ride along because the posting planner has to
+        re-check them: a row that went Pending before its phone was parked is
+        already in the queue, and the target filter that creates rows cannot
+        reach back to it. Without that second check a freshly flagged phone
+        still burns its outstanding slots -- a launch, a two-minute boot and an
+        upload each.
+        """
         out: dict = {}
-        for record in self._list_table(TABLE_PROFILES, fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_MLX_SERIAL]):
+        for record in self._list_table(
+            TABLE_PROFILES,
+            fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_MLX_SERIAL,
+                    F_PROF_NEEDS_HUMAN, F_PROF_STATUS],
+        ):
             fields = record.get("fields", {}) or {}
             out[record.get("id")] = {
                 "name": fields.get(F_PROF_NAME),
                 "launch_id": (str(fields.get(F_PROF_MLX_API_ID) or "").strip() or None),
                 "serial": fields.get(F_PROF_MLX_SERIAL),
+                "needs_human": bool(fields.get(F_PROF_NEEDS_HUMAN)),
+                "status": _select_name(fields.get(F_PROF_STATUS)),
             }
         return out
 

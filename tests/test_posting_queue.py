@@ -275,3 +275,51 @@ class AlreadySharedTest(TestCase):
                   at.F_PQ_RETRY_COUNT: 0}
         outcome, _detail = retry_runner.decide_retry(fields, "LID", "hash", None)
         self.assertNotEqual(outcome, retry_runner.OUTCOME_RETRY)
+
+
+class ProfileHealthGuardTest(TestCase):
+    """A phone parked *after* its row went Pending must not still post.
+
+    The filter that creates rows cannot reach a row that already exists, so
+    this second check is the only thing standing between a freshly flagged
+    phone and its outstanding slots -- a launch, a two-minute boot and an
+    upload each. Through 2026-08-06 it was missing on the running branch: 22
+    flagged profiles kept posting, Laila 3 burned 17 launches for 0 posts in a
+    day, and Viktoria 3 was launched while flagged `Banned / Blocked`.
+
+    Pinned here because the guard and the two-account support were built on
+    different branches, and the first attempt to run one tree's posting loop
+    would have silently dropped the other's fix.
+    """
+
+    ROW = {"id": "q1", "fields": {
+        "Name": "Jil 5 / 18:00", "Post Status": "Pending",
+        "Scheduled DateTime": "2026-08-07T10:00:00.000Z",
+        "Target Profile": ["recP1"], "Spoof Variant": ["recV1"]}}
+
+    def _plan(self, **profile):
+        info = {"launch_id": "111", "name": "Jil 5", "needs_human": False,
+                "status": "Active"}
+        info.update(profile)
+        return plan_posting_queue(
+            [self.ROW], accounts_by_id={}, profiles_by_recid={"recP1": info},
+            variants_by_id={"recV1": {"file_path": "/tmp/a.mp4"}}, captions_by_id={},
+            now=datetime(2026, 8, 7, 12, 0))
+
+    def test_a_healthy_profile_still_posts(self):
+        self.assertEqual(len(self._plan().to_post), 1)
+
+    def test_a_flagged_profile_is_dropped_even_though_its_row_is_pending(self):
+        plan = self._plan(needs_human=True)
+        self.assertEqual(plan.to_post, [])
+        self.assertIn("needs a human check", plan.skipped[0].reason)
+
+    def test_a_parked_profile_is_dropped(self):
+        plan = self._plan(status="Inactive")
+        self.assertEqual(plan.to_post, [])
+        self.assertIn("Inactive", plan.skipped[0].reason)
+
+    def test_a_base_with_no_status_field_is_not_read_as_parked(self):
+        """`status=None` means the column was not read, not that the profile is
+        parked. Treating the two the same would stop the whole fleet."""
+        self.assertEqual(len(self._plan(status=None).to_post), 1)
