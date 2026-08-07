@@ -152,7 +152,8 @@ def collect_warmup_targets(mlx_items, profiles_by_serial, today: date | None = N
 def plan_profile_warmup(mlx_items, profiles_by_serial, today: date | None = None,
                         tag: str = WARMUP_TAG, warmup_plan: dict | None = None,
                         completed: set | None = None,
-                        selected_launch_ids=None) -> AirtablePlan:
+                        selected_launch_ids=None, limit: int | None = None,
+                        attempted: set | None = None) -> AirtablePlan:
     """The warm-up run plan for tagged profiles, in the shape the runner takes.
 
     Deliberately returns an :class:`AirtablePlan` of :class:`AccountPlan`s with
@@ -164,6 +165,20 @@ def plan_profile_warmup(mlx_items, profiles_by_serial, today: date | None = None
     schedule in lifecycle.py applies. `completed` is
     ``{(profile name, flow)}`` from today's Run Log, which is what keeps an
     hourly timer from running the same day's warm-up over and over.
+
+    `limit` caps how many profiles **one tick** takes. A warm-up costs ~17
+    minutes of phone, and the phone ceiling (12) is shared with posting -- so an
+    uncapped run of 45 profiles at the default concurrency of 10 would hold most
+    of the fleet for an hour and a half and leave the posting loop two slots.
+    The hourly timer is what gets through the fleet; one tick only has to take a
+    bite. Everything past the cap is reported as deferred, never dropped
+    silently.
+
+    `attempted` is ``{(key, flow)}`` for every run *logged today whatever its
+    result*, and it orders that bite. Without it the cap would take the same
+    profiles every tick: a failure does not count as completed, and the order is
+    stable, so three profiles failing at the head of the list would consume the
+    whole cap all day and the tail would never run at all.
     """
     today = today or date.today()
     completed = completed or set()
@@ -233,6 +248,24 @@ def plan_profile_warmup(mlx_items, profiles_by_serial, today: date | None = None
         # Carried so the caller can stamp day 1 without re-resolving anything.
         entry.warmup_target = target
         plan.plans.append(entry)
+
+    if limit is not None and limit > 0 and len(plan.plans) > limit:
+        attempted = attempted or set()
+        # Anything already tried today goes to the back, so a profile that fails
+        # every tick cannot hold the cap against the ones that have had no turn.
+        def tried(entry) -> bool:
+            target = entry.warmup_target
+            return any((key, run.flow) in attempted
+                       for key in (_run_key(target), target.name)
+                       for run in entry.runs)
+
+        plan.plans.sort(key=tried)
+        deferred = plan.plans[limit:]
+        plan.plans = plan.plans[:limit]
+        for entry in deferred:
+            plan.skipped.append(SkippedAccount(
+                entry.profile_name,
+                f"deferred to the next tick: this run is capped at {limit} profile(s)"))
 
     return plan
 

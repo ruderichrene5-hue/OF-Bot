@@ -446,6 +446,33 @@ class AirtableClient:
         rows.sort(key=lambda r: str((r.get("fields") or {}).get(F_RUN_AT) or ""), reverse=True)
         return rows
 
+    def todays_attempted_profile_runs(self) -> set:
+        """``{(key, flow)}`` for every profile run logged today, whatever it
+        returned -- including the failures `todays_completed_profile_runs`
+        deliberately leaves out.
+
+        Not a dedupe key: a failed run must stay eligible to be retried. This is
+        what tells a capped tick which profiles have already had a turn today,
+        so a profile that fails every hour cannot hold the cap against the ones
+        that have had none.
+        """
+        formula = f"IS_SAME({{{F_RUN_AT}}}, TODAY(), 'day')"
+        seen: set = set()
+        try:
+            rows = self._list_table(TABLE_RUN_LOG,
+                                    fields=[F_RUN_NAME, F_RUN_FLOW, F_RUN_AT],
+                                    filter_formula=formula)
+        except Exception as exc:  # pragma: no cover - network path
+            print(f"[-] Airtable todays_attempted_profile_runs failed: {exc}")
+            return seen
+        for record in rows:
+            fields = record.get("fields", {}) or {}
+            flow = _select_name(fields.get(F_RUN_FLOW))
+            key = str(fields.get(F_RUN_NAME) or "").split(" / ")[0].strip()
+            if key and flow:
+                seen.add((key, flow))
+        return seen
+
     def todays_completed_profile_runs(self) -> set:
         """``{(profile name, flow)}`` already run to Done/Running today, for runs
         that have no Accounts row to link.

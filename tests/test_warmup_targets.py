@@ -201,3 +201,64 @@ class TagsReachTheNormalizerTest(TestCase):
     def test_the_default_tag_is_the_one_the_workspace_uses(self):
         self.assertEqual(WARMUP_TAG, "Created")
         self.assertIs(warmup_targets.WARMUP_TAG, WARMUP_TAG)
+
+
+class PerTickLimitTest(TestCase):
+    """One tick takes a bite; the hourly timer gets through the fleet.
+
+    A warm-up costs ~17 minutes of phone and the ceiling (12) is shared with
+    posting, so an uncapped run of 45 profiles at concurrency 10 would leave
+    the posting loop two slots for an hour and a half.
+    """
+
+    TODAY = date(2026, 8, 9)
+
+    def _mlx(self, n):
+        return [{"serial_no": f"{100 + i}", "serial_name": f"Blank ({i})",
+                 "id": f"L{100 + i}", "tags": ["Created"],
+                 "created_at": "2026-08-01T00:00:00Z"} for i in range(n)]
+
+    def _rows(self, n):
+        return {f"{100 + i}": {"record_id": f"rec{i}", "name": f"Blank ({i})",
+                               "api_id": f"L{100 + i}", "status": "Active",
+                               "warmup_started": None} for i in range(n)}
+
+    def _plan(self, n=10, **kw):
+        return warmup_targets.plan_profile_warmup(
+            self._mlx(n), self._rows(n), today=self.TODAY, **kw)
+
+    def test_without_a_limit_every_due_profile_runs(self):
+        self.assertEqual(len(self._plan(10).plans), 10)
+
+    def test_a_limit_caps_the_tick(self):
+        self.assertEqual(len(self._plan(10, limit=3).plans), 3)
+
+    def test_what_is_deferred_is_reported_not_dropped(self):
+        plan = self._plan(10, limit=3)
+        deferred = [s for s in plan.skipped if "capped at 3" in s.reason]
+        self.assertEqual(len(deferred), 7)
+
+    def test_a_limit_above_the_work_changes_nothing(self):
+        plan = self._plan(3, limit=10)
+        self.assertEqual(len(plan.plans), 3)
+        self.assertEqual(plan.skipped, [])
+
+    def test_a_profile_that_failed_today_yields_to_one_that_has_had_no_turn(self):
+        """A failure is not "completed", and the order is stable -- so without
+        this the same three profiles would burn the cap every tick all day and
+        the tail would never run at all."""
+        attempted = {(f"Blank ({i}) [{100 + i}]", lifecycle.FLOW_WARMUP) for i in range(3)}
+        plan = self._plan(10, limit=3, attempted=attempted)
+        self.assertTrue(all(p.profile_name not in {"Blank (0)", "Blank (1)", "Blank (2)"}
+                            for p in plan.plans),
+                        f"already-tried profiles took the cap: {[p.profile_name for p in plan.plans]}")
+
+    def test_a_legacy_attempt_under_the_bare_name_also_counts_as_a_turn(self):
+        attempted = {(f"Blank ({i})", lifecycle.FLOW_WARMUP) for i in range(3)}
+        plan = self._plan(10, limit=3, attempted=attempted)
+        self.assertTrue(all(p.profile_name not in {"Blank (0)", "Blank (1)", "Blank (2)"}
+                            for p in plan.plans))
+
+    def test_once_everyone_has_had_a_turn_the_cap_still_holds(self):
+        attempted = {(f"Blank ({i}) [{100 + i}]", lifecycle.FLOW_WARMUP) for i in range(10)}
+        self.assertEqual(len(self._plan(10, limit=3, attempted=attempted).plans), 3)

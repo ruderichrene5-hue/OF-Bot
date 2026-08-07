@@ -165,10 +165,14 @@ def _profile_warmup_plan(args, airtable, logger):
         warmup_plan=warmup_plan,
         completed=airtable.todays_completed_profile_runs(),
         selected_launch_ids=only,
+        limit=args.limit,
+        attempted=airtable.todays_attempted_profile_runs() if args.limit else None,
     )
-    logger.info("warmup: %d MLX profile(s), %d tagged '%s', %d due today%s",
+    deferred = sum(1 for s in plan.skipped if "capped at" in (s.reason or ""))
+    logger.info("warmup: %d MLX profile(s), %d tagged '%s', %d to run this tick%s%s",
                 len(mlx_items), len(plan.plans) + len(plan.skipped), tag, len(plan.plans),
-                f" (restricted to {len(only)} by --only)" if only else "")
+                f" (restricted to {len(only)} by --only)" if only else "",
+                f", {deferred} deferred by --limit {args.limit}" if deferred else "")
     return plan
 
 
@@ -580,6 +584,11 @@ def main(argv=None) -> int:
                              "Lifecycle Stage Active (default), or the MLX profile inventory, "
                              "for models that have phones but no Accounts rows yet. For warmup, "
                              "'profiles' warms up the MLX profiles carrying --warmup-tag.")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="warmup --targets profiles: how many profiles one tick may take. "
+                             "A warm-up costs ~17 min of phone and the phone ceiling is shared "
+                             "with posting, so an uncapped run of the whole tagged fleet starves "
+                             "it. The hourly timer gets through the fleet; a tick takes a bite.")
     parser.add_argument("--only", default=None,
                         help="warmup --targets profiles: restrict the run to these MLX API IDs "
                              "(comma-separated). Day 1 is stamped before the launch and never "
