@@ -864,8 +864,8 @@ class NeedsHumanRenderTest(RenderTest):
     def test_clean_state_says_so(self):
         data = self._data(needs_human=self._triage(retrying=[{"name": "x"}]))
         page = report_html.render(data)
-        self.assertIn("Nothing to do", page)
-        self.assertIn("No account is waiting on you", page)
+        self.assertIn("Nothing broken", page)
+        self.assertIn("No account is flagged for review", page)
 
     def test_work_is_listed_with_its_reason(self):
         data = self._data(needs_human=self._triage(
@@ -1403,14 +1403,14 @@ class RunByRunTest(RenderTest):
 
 
 class TabsTest(RenderTest):
-    """Four views on one page, switched without JavaScript.
+    """Seven views on one page, switched without JavaScript.
 
     The page must work from a file:// URL and inside a strict-CSP host, so the
     tabs are radios and CSS. These pin the wiring: a typo in an id silently
     leaves a panel permanently hidden, which no other test would catch.
     """
 
-    TABS = ("server", "schedules", "profiles", "technical")
+    TABS = ("server", "human", "posts", "schedules", "warmup", "profiles", "technical")
 
     def test_all_panels_exist(self):
         page = report_html.render(self._data())
@@ -1440,6 +1440,8 @@ class TabsTest(RenderTest):
         server_panel = page.split('id="panel-server"')[1].split("</section>")[0]
         schedules_panel = page.split('id="panel-schedules"')[1].split("</section>")[0]
         profiles_panel = page.split('id="panel-profiles"')[1].split("</section>")[0]
+        human_panel = page.split('id="panel-human"')[1].split("</section>")[0]
+        posts_panel = page.split('id="panel-posts"')[1].split("</section>")[0]
         technical_panel = page.split('id="panel-technical"')[1].split("</section>")[0]
 
         self.assertIn("Top memory use", server_panel)
@@ -1448,21 +1450,46 @@ class TabsTest(RenderTest):
         self.assertIn("When each loop runs", schedules_panel)
         self.assertIn("When each model posts", schedules_panel)
         self.assertNotIn("When each loop runs", server_panel)
-        self.assertIn("What the words mean", profiles_panel)
+        # The worklist and the inventory are two different jobs and now two
+        # different tabs: a VA works the first, nobody browses it for a phone.
+        self.assertIn("What the words mean", human_panel)
+        self.assertIn("Finished warm-up", human_panel)
+        self.assertIn("Phones by folder", profiles_panel)
+        self.assertNotIn("What the words mean", profiles_panel)
+        # Abandoned rows are a consequence of a flagged profile, not a second
+        # job -- counting them on the worklist inflates it sixfold.
+        self.assertIn("Posts that were abandoned", posts_panel)
+        self.assertNotIn("Posts that were abandoned", human_panel)
         self.assertIn("Content stock", technical_panel)
         self.assertIn("Loop health", technical_panel)
-        # The operator view must not be cluttered with engineering detail.
-        self.assertNotIn("MLX 500", profiles_panel)
-        self.assertNotIn("Top memory use", profiles_panel)
+        # The operator views must not be cluttered with engineering detail.
+        self.assertNotIn("MLX 500", human_panel)
+        self.assertNotIn("Top memory use", human_panel)
 
-    def test_the_profiles_tab_carries_a_count_when_work_is_waiting(self):
+    def test_the_worklist_tab_carries_a_count_when_work_is_waiting(self):
         data = self._data(needs_human={
             "rows": [], "retrying": [], "error": "",
             "profiles": [{"name": "Jil 1", "reason": "Banned / Blocked", "status": "Active",
                           "flagged_at": "", "note": []}]})
         page = report_html.render(data)
         self.assertIn('<span class="count">1</span>', page)
-        self.assertIn("open the <strong>Profiles</strong> tab", page)
+        self.assertIn("open the <strong>Needs human</strong> tab", page)
+
+    def test_the_count_includes_profiles_waiting_on_a_hand_off(self):
+        """A badge that counted only the broken ones would read 0 with twenty
+        profiles sitting finished and unclaimed -- which is the whole reason
+        this tab exists."""
+        data = self._data(
+            needs_human={"rows": [], "retrying": [], "error": "",
+                         "profiles": [{"name": "Jil 1", "reason": "Banned / Blocked",
+                                       "status": "Active", "flagged_at": "", "note": []}]},
+            handoff={"profiles": [{"name": "Blank (5)", "serial": "1", "launch_id": "L",
+                                   "status": "Active", "day": 5, "finished_at": "",
+                                   "outstanding": ["bio"], "done_tasks": []}],
+                     "done": 0, "plan_days": 4})
+        page = report_html.render(data)
+        self.assertIn('<span class="count">2</span>', page)
+        self.assertIn("1 finished warm-up", page)
 
 
 class ProfilesViewTest(RenderTest):

@@ -170,6 +170,25 @@ def plan_posting_queue(
             plan.skipped.append(SkippedPost(account_name, f"profile status {profile_status}"))
             continue
 
+        # --- the hand-off ---
+        # A phone that came off the warm-up is not a posting target until a
+        # person has given it a bio, a picture and one post made by hand. An
+        # account whose first ever post is an automated reel is the one
+        # Instagram acts on, and the warm-up exists precisely so that does not
+        # happen -- posting the moment day 4 completes would throw that away on
+        # the last step.
+        #
+        # Keyed on `Warm-up Started`, so it applies to exactly the cohort that
+        # went through the warm-up and to nobody else: every profile posting
+        # today predates it and has no start date, so this cannot park a
+        # working account. `Status = Inactive` remains the way to hold back
+        # anything else.
+        outstanding = info.get("handoff_outstanding")
+        if info.get("warmup_started") and outstanding:
+            plan.skipped.append(SkippedPost(
+                account_name, f"waiting on a person: {', '.join(outstanding)}"))
+            continue
+
         launch_id = info.get("launch_id")
         if not launch_id:
             plan.skipped.append(SkippedPost(account_name, "no MLX API ID on linked profile"))

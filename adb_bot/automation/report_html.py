@@ -122,6 +122,8 @@ footer { margin-top: 2.5rem; color: var(--muted); font-size: .78rem;
 .tabs label:hover { color: var(--fg); }
 .panel { display: none; }
 #tab-server:checked ~ #panel-server,
+#tab-human:checked ~ #panel-human,
+#tab-posts:checked ~ #panel-posts,
 #tab-schedules:checked ~ #panel-schedules,
 #tab-warmup:checked ~ #panel-warmup,
 #tab-profiles:checked ~ #panel-profiles,
@@ -877,12 +879,71 @@ DEFAULT_GUIDE = ("This profile was flagged for review.",
                  "Open the phone in MultiLogin and see what state Instagram is in.")
 
 
-def _section_profiles(data: dict) -> str:
-    """The worklist, for the person who fixes accounts rather than code."""
+def _pills(labels, tone: str) -> str:
+    """A list of short labels as coloured pills, or a dash when it is empty."""
+    if not labels:
+        return '<span class="empty">—</span>'
+    return " ".join(f'<span class="pill {tone}">{_e(label)}</span>' for label in labels)
+
+
+def _section_handoff(handoff: dict) -> str:
+    """Profiles that finished their warm-up and are waiting on a person.
+
+    Deliberately the first thing on the tab. Every other group here is a repair
+    -- something broke and somebody unblocks it -- while this one is the only
+    place the fleet *grows*, and it is the one nothing used to ask for. A phone
+    can sit finished for a week and no page would have said so.
+    """
+    profiles = handoff.get("profiles") or []
+    done = handoff.get("done") or 0
+    if not profiles:
+        if done:
+            return (f'<p class="empty">Nothing waiting. All {done} profile(s) that have '
+                    f'finished their warm-up have had their bio, picture and first post '
+                    f'done.</p>')
+        return ('<p class="empty">No profile has finished its warm-up yet. They appear here '
+                'the day the last day of the plan completes.</p>')
+
+    lead = (f'<p class="sub">{len(profiles)} profile(s) have finished the warm-up and are '
+            f'waiting on you. Each needs a <strong>bio</strong>, a <strong>profile '
+            f'picture</strong> and a <strong>first post made by hand</strong> before the bot '
+            f'may schedule reels for it — a fresh account whose first ever post is an '
+            f'automated reel is the one Instagram acts on.'
+            + (f' {done} other profile(s) are already done.' if done else "") + '</p>')
+
+    head = ("<tr><th>Profile</th><th class='num'>Serial</th><th class='num'>Finished</th>"
+            "<th>Still to do</th><th>Already done</th></tr>")
+    rows = "".join(
+        f"<tr><td class='mono'>{_e(p['name'])}</td>"
+        f"<td class='num mono'>{_e(p['serial'])}</td>"
+        f"<td class='num mono'>{_e(p['finished_at'] or '—')}</td>"
+        f"<td>{_pills(p['outstanding'], 'bad')}</td>"
+        f"<td>{_pills(p['done_tasks'], 'ok')}</td>"
+        f"</tr>" for p in profiles)
+    return (lead + f'<div class="scroll"><table>{head}{rows}</table></div>'
+            + '<div class="howto"><dl>'
+              '<dt>What to do</dt><dd>Open the phone in MultiLogin, write the bio, set the '
+              'profile picture, then make one post by hand and watch it appear on the '
+              'profile.</dd>'
+              '<dt>When each part is done</dt><dd>Tick <span class="mono">Bio Done</span>, '
+              '<span class="mono">Profile Picture Done</span> and <span class="mono">First '
+              'Post Done</span> on that profile in Airtable (Profiles (Cloning)). Tick them '
+              'as you go — the row drops off this list when all three are ticked, and the '
+              'bot will not schedule a reel until then.</dd>'
+              '</dl></div>')
+
+
+def _section_needs_human(data: dict) -> str:
+    """Everything waiting on a person, in one place, for the people who do it.
+
+    This used to be the Profiles tab, which also had to be the place you looked
+    up a phone -- so a VA's worklist and an inventory sat in the same scroll.
+    Split: the work lives here, the inventory lives there.
+    """
     triage = data.get("needs_human") or {}
     profiles = triage.get("profiles") or []
-    rows = triage.get("rows") or []
     retrying = triage.get("retrying") or []
+    handoff = data.get("handoff") or {}
     queue = data.get("queue") or {}
     verifying = (queue.get("by_status") or {}).get("Verifying", 0)
 
@@ -894,7 +955,10 @@ def _section_profiles(data: dict) -> str:
     for profile in profiles:
         reasons.setdefault(profile["reason"], []).append(profile)
 
+    waiting = handoff.get("profiles") or []
     tiles = [
+        _tile("Ready for hand-off", len(waiting), "warmed up, need bio / picture / first post",
+              "warn" if waiting else "ok"),
         _tile("Need you", len(profiles), "profiles flagged for review",
               "bad" if profiles else "ok"),
         _tile("Being checked", verifying,
@@ -903,14 +967,17 @@ def _section_profiles(data: dict) -> str:
               "no action needed", "ok"),
     ]
     parts = [
-        '<p class="lead">This page lists the accounts that need a person. '
-        'Everything else the bot handles on its own.</p>',
+        '<p class="lead">Everything waiting on a person, in one place. '
+        'Two kinds of work: profiles that have finished their warm-up and need setting up, '
+        'and accounts the bot has given up on. Everything else it handles on its own.</p>',
         f'<div class="grid">{"".join(tiles)}</div>',
+        '<h2>Finished warm-up — ready for a person</h2>',
+        _section_handoff(handoff),
     ]
 
     if not profiles:
-        parts.append('<h2>Nothing to do</h2><p class="empty">No account is waiting on you '
-                     'right now. Anything failing is either retrying automatically or '
+        parts.append('<h2>Nothing broken</h2><p class="empty">No account is flagged for '
+                     'review. Anything failing is either retrying automatically or '
                      'already parked.</p>')
     else:
         parts.append('<h2>Accounts to fix</h2>')
@@ -964,19 +1031,143 @@ def _section_profiles(data: dict) -> str:
         'posting — the flag simply stays until somebody unticks it.</dd>'
         '</dl></div>')
 
-    if rows:
-        parts.append('<h2>Posts that were abandoned</h2>')
-        parts.append(f'<p class="sub">{len(rows)} scheduled post(s) will not be tried again. '
-                     f'They are listed here so nothing disappears silently; fixing the '
-                     f'account above is what matters, not these rows.</p>')
-        body = "".join(
-            f"<tr><td class='mono'>{_e(r['name'])}</td><td class='mono'>{_e(r['slot'])}</td>"
-            f"<td>{_e(r['issue'])}</td><td class='num'>{_e(r['retries'])}</td></tr>"
-            for r in rows)
-        parts.append('<div class="scroll"><table>'
-                     '<tr><th>Post</th><th>Was due</th><th>Why it stopped</th>'
-                     "<th class='num'>Tries</th></tr>" + body + "</table></div>")
     return "".join(parts)
+
+
+def _section_abandoned(data: dict) -> str:
+    """Queue rows the retry pass will never pick up again.
+
+    Lives on the Posts tab rather than beside the flagged accounts. They are a
+    *consequence* of those accounts -- one flagged profile leaves six dead rows
+    behind it -- so on a worklist they inflate the job by a factor of six, and
+    the number a VA has to work through stops matching the number on the page.
+    """
+    triage = data.get("needs_human") or {}
+    rows = triage.get("rows") or []
+    if triage.get("error"):
+        return (f'<p class="sub"><span class="pill warn">could not read Airtable</span> '
+                f'<span class="mono">{_e(triage["error"])}</span></p>')
+    if not rows:
+        return ('<p class="empty">No abandoned posts. Every failed row is either still '
+                'retrying or has been settled.</p>')
+
+    body = "".join(
+        f"<tr><td class='mono'>{_e(r['name'])}</td><td class='mono'>{_e(r['slot'])}</td>"
+        f"<td>{_e(r['issue'])}</td><td class='num'>{_e(r['retries'])}</td></tr>"
+        for r in rows)
+    return (f'<p class="sub">{len(rows)} scheduled post(s) will not be tried again. They are '
+            f'listed so nothing disappears silently — but fixing the profile on the '
+            f'<strong>Needs human</strong> tab is what matters, not these rows. One flagged '
+            f'profile leaves a day of them behind it.</p>'
+            '<div class="scroll"><table>'
+            '<tr><th>Post</th><th>Was due</th><th>Why it stopped</th>'
+            "<th class='num'>Tries</th></tr>" + body + "</table></div>")
+
+
+def _section_posts_today(posts: dict) -> str:
+    """What is going out today: which clip, on which profile, and how it went.
+
+    The Schedules tab answers "when", per model and as policy. This answers
+    "what" -- which existed nowhere: the queue was only ever five status counts,
+    so nobody could see the actual reel a profile was sending.
+    """
+    rows = posts.get("posts") or []
+    by_status = posts.get("by_status") or {}
+    if not rows:
+        return (f'<p class="empty">No posts are scheduled for {_e(posts.get("day") or "today")}. '
+                f'The queue loop fills the day as each model\'s slots come round.</p>')
+
+    tiles = [
+        _tile("Posts today", posts.get("total", 0),
+              f'{len(posts.get("by_profile") or [])} profile(s)'),
+        _tile("Posted", by_status.get("Posted", 0), "confirmed live",
+              "ok" if by_status.get("Posted") else ""),
+        _tile("Still to go", by_status.get("Pending", 0), "scheduled, not sent yet"),
+        _tile("Verifying", by_status.get("Verifying", 0), "sent, not yet proved",
+              "warn" if by_status.get("Verifying") else ""),
+        _tile("Failed", by_status.get("Failed", 0), "see abandoned posts below",
+              "bad" if by_status.get("Failed") else "ok"),
+        _tile("Distinct clips", posts.get("clips", 0), "one file per account, ideally"),
+    ]
+
+    reused = posts.get("reused_clips") or []
+    warn = ""
+    if reused:
+        # The failure the whole spoof pipeline exists to prevent: two accounts
+        # posting the same file is what gets them flagged. It cannot be seen
+        # from a status count, only by laying the day's clips side by side.
+        detail = "; ".join(f'{_e(c["clip"])} → {_e(", ".join(c["profiles"]))}'
+                           for c in reused[:5])
+        warn = (f'<p><span class="pill bad">{len(reused)} clip(s) on more than one '
+                f'profile</span> {detail}. Each account is supposed to get its own spoofed '
+                f'encode — the same file on two accounts is what gets them flagged.</p>')
+
+    head = ("<tr><th class='num'>Due</th><th>Profile</th><th>Reel</th><th>Account</th>"
+            "<th>Status</th><th>Issue</th><th class='num'>Tries</th></tr>")
+    body = "".join(
+        f"<tr><td class='num mono'>{_e(p['when'])}</td>"
+        f"<td class='mono'>{_e(p['profile'])}</td>"
+        f"<td class='mono wrap-cell'>{_e(p['clip'] or '—')}</td>"
+        f"<td class='mono'>{_e(p['handle'] or ('second account' if p['slot'] == 'Second' else '—'))}</td>"
+        f"<td>{_status_pill(p['status'])}</td>"
+        f"<td>{_e(p['issue'] or '—')}</td>"
+        f"<td class='num'>{_e(p['retries'])}</td></tr>" for p in rows)
+
+    per_profile = posts.get("by_profile") or []
+    tally_head = ("<tr><th>Profile</th><th class='num'>Posts</th><th class='num'>Posted</th>"
+                  "<th class='num'>To go</th><th class='num'>Verifying</th>"
+                  "<th class='num'>Failed</th></tr>")
+    tally = "".join(
+        f"<tr><td class='mono'>{_e(p['profile'])}</td><td class='num'>{p['total']}</td>"
+        f"<td class='num'>{p['posted']}</td><td class='num'>{p['pending']}</td>"
+        f"<td class='num'>{p['verifying']}</td><td class='num'>{p['failed']}</td></tr>"
+        for p in per_profile)
+
+    return (f'<div class="grid">{"".join(tiles)}</div>' + warn
+            + '<h3>Every post, in the order it is due</h3>'
+            + f'<div class="scroll"><table>{head}{body}</table></div>'
+            + '<h3>By profile</h3>'
+            + f'<div class="scroll"><table>{tally_head}{tally}</table></div>')
+
+
+def _section_folders(folders: dict) -> str:
+    """Every MultiLogin folder, and what its phones are doing."""
+    if folders.get("error"):
+        return (f'<p class="sub"><span class="pill warn">could not read the profiles</span> '
+                f'<span class="mono">{_e(folders["error"])}</span></p>')
+    rows = folders.get("folders") or []
+    if not rows:
+        return ('<p class="empty">No profiles to group. Either Airtable could not be read, '
+                'or the MultiLogin folder list could not be.</p>')
+    totals = folders.get("totals") or {}
+
+    from adb_bot.automation.report import STAGE_LABELS, STAGE_ORDER
+
+    note = ""
+    if not folders.get("known_folders"):
+        note = ('<p class="sub"><span class="pill warn">no folder list</span> MultiLogin\'s '
+                'folder list could not be read, so every profile is shown as having no '
+                'folder. The counts are still right; only the grouping is missing.</p>')
+
+    head = ("<tr><th>Folder</th><th class='num'>Phones</th>"
+            + "".join(f"<th class='num'>{_e(STAGE_LABELS[key])}</th>" for key in STAGE_ORDER)
+            + "</tr>")
+
+    def _row(entry, klass=""):
+        cells = "".join(
+            f"<td class='num'>{entry.get(key, 0) or '<span class=\"empty\">—</span>'}</td>"
+            for key in STAGE_ORDER)
+        return (f"<tr{klass}><td class='mono'>{_e(entry.get('folder'))}</td>"
+                f"<td class='num'>{entry.get('total', 0)}</td>{cells}</tr>")
+
+    body = "".join(_row(entry) for entry in rows)
+    body += _row(totals, klass=" style='font-weight:600'")
+    return (note + f'<p class="sub">{len(rows)} folder(s), {totals.get("total", 0)} phone(s). '
+            f'The folder is the model — it is how MultiLogin groups them, and the only '
+            f'grouping that survives 46 phones all called "Blank (NN)". A phone is counted '
+            f'in exactly one column, worst first: a flagged phone that is also posting is '
+            f'somebody\'s job, not a healthy row.</p>'
+            + f'<div class="scroll"><table>{head}{body}</table></div>')
 
 
 def _counts_cell(counts: dict) -> str:
@@ -1682,19 +1873,32 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     # said 22, because 22 accounts is what a person actually has to work
     # through. Fixing the account is the job; the rows are just its wreckage.
     waiting = len(triage.get("profiles") or [])
+    # Profiles off the warm-up waiting on a bio, a picture and a first post.
+    # Counted alongside the flagged ones because both are the same errand to the
+    # person reading this -- open a phone and do something to it -- and both
+    # live on the same tab now.
+    handoff = len((data.get("handoff") or {}).get("profiles") or [])
     bad = data["health"]["bad"]
     banner = ""
-    if waiting:
-        banner = (f'<p><span class="pill bad">{waiting} profile(s) need a person</span> '
-                  f'— open the <strong>Profiles</strong> tab.</p>')
+    if waiting or handoff:
+        what = " and ".join(
+            part for part in (f"{waiting} profile(s) need a person" if waiting else "",
+                              f"{handoff} finished warm-up" if handoff else "") if part)
+        banner = (f'<p><span class="pill bad">{what}</span> '
+                  f'— open the <strong>Needs human</strong> tab.</p>')
     stopped_timers = [t["loop"] for t in (data.get("timers") or []) if t.get("stopped")]
     if stopped_timers:
         banner += (f'<p><span class="pill bad">{len(stopped_timers)} loop(s) not scheduled</span> '
                    f'{_e(", ".join(stopped_timers))} — these produce nothing and cannot alert.</p>')
     if bad:
         names = ", ".join(sorted(r["loop"] for r in bad))
-        banner = (f'<p><span class="pill bad">needs attention</span> '
-                  f'{_e(names)} — see Health below.</p>')
+        # Appended, not assigned. A sick loop and a queue of people-work are
+        # different problems with different readers, and this line used to
+        # replace the worklist banner outright -- so on any day a loop was
+        # unhappy, the twenty profiles waiting on somebody vanished from the
+        # top of the page.
+        banner += (f'<p><span class="pill bad">needs attention</span> '
+                   f'{_e(names)} — see Health below.</p>')
     if data.get("airtable_error"):
         banner += (f'<p><span class="pill warn">Airtable unreachable</span> '
                    f'<span class="mono">{_e(data["airtable_error"])}</span> — '
@@ -1702,8 +1906,15 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
 
     mode = (f"live, refreshes every {_refresh_words(refresh_seconds)}"
             if live else "snapshot — not live")
-    flagged = len((data.get("needs_human") or {}).get("profiles") or [])
-    badge = f'<span class="count">{flagged}</span>' if flagged else ""
+    # The tab badge is the size of the worklist, so it has to count both kinds
+    # of work on it -- a badge that only counted the broken ones would read 0
+    # with twenty profiles sitting finished and unclaimed.
+    todo = len((data.get("needs_human") or {}).get("profiles") or []) + handoff
+    badge = f'<span class="count">{todo}</span>' if todo else ""
+    # Only the rows nothing will retry. Pending and Verifying are the loop
+    # working; badging them would put a permanent number on a healthy day.
+    dead_rows = len((data.get("needs_human") or {}).get("rows") or [])
+    posts_badge = f'<span class="count">{dead_rows}</span>' if dead_rows else ""
     # Counts only what a person can fix by editing a field. "Finished" and
     # "starts later" are correct states, and badging them would put a permanent
     # red number on a tab where nothing is wrong.
@@ -1726,15 +1937,19 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
 
   <div class="tabnav">
     <input type="radio" name="adbbot-tab" id="tab-server" checked>
+    <input type="radio" name="adbbot-tab" id="tab-human">
+    <input type="radio" name="adbbot-tab" id="tab-posts">
     <input type="radio" name="adbbot-tab" id="tab-schedules">
     <input type="radio" name="adbbot-tab" id="tab-warmup">
     <input type="radio" name="adbbot-tab" id="tab-profiles">
     <input type="radio" name="adbbot-tab" id="tab-technical">
     <div class="tabs">
       <label for="tab-server">Server</label>
+      <label for="tab-human">Needs human{badge}</label>
+      <label for="tab-posts">Posts{posts_badge}</label>
       <label for="tab-schedules">Schedules</label>
       <label for="tab-warmup">Warm-up{warmup_badge}</label>
-      <label for="tab-profiles">Profiles{badge}</label>
+      <label for="tab-profiles">Profiles</label>
       <label for="tab-technical">Technical</label>
     </div>
 
@@ -1760,6 +1975,18 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
       {_section_top_processes(data.get('top_processes') or [])}
     </section>
 
+    <section class="panel" id="panel-human">
+      {_section_needs_human(data)}
+    </section>
+
+    <section class="panel" id="panel-posts">
+      <h2>Today's posts</h2>
+      {_section_posts_today(data.get('posts_today') or {})}
+
+      <h2>Posts that were abandoned</h2>
+      {_section_abandoned(data)}
+    </section>
+
     <section class="panel" id="panel-schedules">
       <h2>When each loop runs</h2>
       {_section_timers(data.get('timers') or [])}
@@ -1783,7 +2010,8 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     </section>
 
     <section class="panel" id="panel-profiles">
-      {_section_profiles(data)}
+      <h2>Phones by folder</h2>
+      {_section_folders(data.get('folders') or {})}
 
       <h2>Phones with two accounts</h2>
       {_section_second_accounts(data.get('second_accounts') or {})}

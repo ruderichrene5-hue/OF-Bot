@@ -174,6 +174,8 @@ F_PROF_TIME_ZONE = "Time Zone"            # equipment_info.time_zone, e.g. Europ
 F_PROF_STATUS = "Status"                  # singleSelect: Active / Inactive
 F_PROF_APP_PACKAGE = "App Package Name"   # constant com.instagram.android for these
 F_PROF_DEVICE = "Device"                  # link -> Devices
+F_PROF_ACCOUNTS = "Accounts"              # link -> Accounts
+F_PROF_POSTING_QUEUE = "Posting Queue"    # link -> Posting Queue
 # Day 1 of this profile's warm-up, written by the bot on the first warm-up run
 # and never moved afterwards. The campaign day counts from it. Empty = the
 # warm-up has not started; clearing it starts the profile over at day 1.
@@ -197,6 +199,25 @@ F_PROF_WARMUP_LAST_RESULT = "Warm-up Last Result"  # singleSelect: Done / Failed
 
 WARMUP_STATE_FIELDS = (F_PROF_WARMUP_DAY, F_PROF_WARMUP_STAGE, F_PROF_WARMUP_RUNS_DONE,
                        F_PROF_WARMUP_LAST_RUN, F_PROF_WARMUP_LAST_RESULT)
+
+# The hand-off. A profile coming off the warm-up is not a posting target yet:
+# it has no bio, no picture and has never posted, and a fresh account whose
+# first ever post is an automated reel is the one Instagram acts on. These three
+# are what a person does before the bot may schedule it, and they are three
+# boxes rather than one sign-off because the work is three errands that get done
+# on different days -- one box would mean a VA either ticks it early or cannot
+# record having done two of the three.
+#
+# Readiness is derived (all three ticked), deliberately: a separate "Ready"
+# switch is one more thing to forget, and `Status = Inactive` already exists for
+# holding a profile back for any other reason.
+F_PROF_BIO_DONE = "Bio Done"                      # checkbox
+F_PROF_PICTURE_DONE = "Profile Picture Done"      # checkbox
+F_PROF_FIRST_POST_DONE = "First Post Done"        # checkbox
+
+HANDOFF_FIELDS = (F_PROF_BIO_DONE, F_PROF_PICTURE_DONE, F_PROF_FIRST_POST_DONE)
+HANDOFF_LABELS = {F_PROF_BIO_DONE: "bio", F_PROF_PICTURE_DONE: "profile picture",
+                  F_PROF_FIRST_POST_DONE: "first post"}
 
 # Where a profile the bot has given up on is surfaced to a person. The Accounts
 # table has had `Needs Human Verification` all along, but posting is
@@ -445,12 +466,17 @@ class AirtableClient:
         reach back to it. Without that second check a freshly flagged phone
         still burns its outstanding slots -- a launch, a two-minute boot and an
         upload each.
+
+        `warmup_started` and `handoff_outstanding` ride along for the same
+        reason: a profile that has just come off the warm-up must not post
+        until a person has given it a bio, a picture and a first post.
         """
         out: dict = {}
         for record in self._list_table(
             TABLE_PROFILES,
             fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_MLX_SERIAL,
-                    F_PROF_NEEDS_HUMAN, F_PROF_STATUS],
+                    F_PROF_NEEDS_HUMAN, F_PROF_STATUS, F_PROF_WARMUP_STARTED,
+                    *HANDOFF_FIELDS],
         ):
             fields = record.get("fields", {}) or {}
             out[record.get("id")] = {
@@ -459,6 +485,10 @@ class AirtableClient:
                 "serial": fields.get(F_PROF_MLX_SERIAL),
                 "needs_human": bool(fields.get(F_PROF_NEEDS_HUMAN)),
                 "status": _select_name(fields.get(F_PROF_STATUS)),
+                "warmup_started": (str(fields.get(F_PROF_WARMUP_STARTED) or "").strip()
+                                   or None),
+                "handoff_outstanding": [HANDOFF_LABELS[name] for name in HANDOFF_FIELDS
+                                        if not fields.get(name)],
             }
         return out
 
@@ -530,6 +560,47 @@ class AirtableClient:
                 F_PROF_WARMUP_LAST_RUN: fields.get(F_PROF_WARMUP_LAST_RUN),
                 F_PROF_WARMUP_LAST_RESULT: _select_name(fields.get(F_PROF_WARMUP_LAST_RESULT)),
             }
+        return out
+
+    def profile_overview(self) -> list:
+        """Every profile row, with everything the dashboard's people-facing tabs
+        need, in one list call.
+
+        The Needs-human tab and the Profiles tab ask different questions of the
+        same 151 rows -- who is waiting on a person, and how each folder's
+        phones are distributed. Reading the table twice would double the cost
+        and let the two tabs disagree about the same profile mid-refresh.
+        """
+        out = []
+        for record in self._list_table(
+                TABLE_PROFILES,
+                fields=[F_PROF_NAME, F_PROF_MLX_SERIAL, F_PROF_MLX_API_ID, F_PROF_STATUS,
+                        F_PROF_NEEDS_HUMAN, F_PROF_ISSUE_REASON, F_PROF_ISSUE_NOTES,
+                        F_PROF_FLAGGED_AT, F_PROF_WARMUP_STARTED, F_PROF_WARMUP_DAY,
+                        F_PROF_WARMUP_STAGE, F_PROF_WARMUP_LAST_RUN, F_PROF_HAS_SECOND,
+                        F_PROF_ACCOUNTS, F_PROF_POSTING_QUEUE, *HANDOFF_FIELDS]):
+            fields = record.get("fields", {}) or {}
+            out.append({
+                "record_id": record.get("id"),
+                "name": str(fields.get(F_PROF_NAME) or "").strip() or record.get("id"),
+                "serial": str(fields.get(F_PROF_MLX_SERIAL) or "").strip(),
+                "launch_id": str(fields.get(F_PROF_MLX_API_ID) or "").strip() or None,
+                "status": _select_name(fields.get(F_PROF_STATUS)) or STATUS_SELECT_ACTIVE,
+                "needs_human": bool(fields.get(F_PROF_NEEDS_HUMAN)),
+                "reason": _select_name(fields.get(F_PROF_ISSUE_REASON)) or "",
+                "note": str(fields.get(F_PROF_ISSUE_NOTES) or "").splitlines()[:1],
+                "flagged_at": str(fields.get(F_PROF_FLAGGED_AT) or "")[:16].replace("T", " "),
+                "warmup_started": str(fields.get(F_PROF_WARMUP_STARTED) or "").strip(),
+                "warmup_day": fields.get(F_PROF_WARMUP_DAY),
+                "warmup_stage": _select_name(fields.get(F_PROF_WARMUP_STAGE)) or "",
+                "warmup_last_run": str(fields.get(F_PROF_WARMUP_LAST_RUN) or "")[:16].replace("T", " "),
+                "has_second": bool(fields.get(F_PROF_HAS_SECOND)),
+                "accounts": len(fields.get(F_PROF_ACCOUNTS) or []),
+                "queue_rows": len(fields.get(F_PROF_POSTING_QUEUE) or []),
+                # `{field: done}` rather than three keys, so the caller can name
+                # what is outstanding without re-deriving the label each time.
+                "handoff": {name: bool(fields.get(name)) for name in HANDOFF_FIELDS},
+            })
         return out
 
     def set_warmup_state(self, record_id: str, fields: dict) -> bool:

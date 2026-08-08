@@ -323,3 +323,64 @@ class ProfileHealthGuardTest(TestCase):
         """`status=None` means the column was not read, not that the profile is
         parked. Treating the two the same would stop the whole fleet."""
         self.assertEqual(len(self._plan(status=None).to_post), 1)
+
+
+class HandoffGateTest(TestCase):
+    """A phone off the warm-up may not post until a person has set it up.
+
+    The warm-up spends four days making a fresh account look used. An account
+    whose first ever post is an automated reel is the one Instagram acts on, so
+    posting the moment day 4 completes throws away the whole point of it on the
+    last step.
+
+    Scoped to the warm-up cohort by `warmup_started`, and that scoping is the
+    part worth guarding: every profile posting today predates the field and has
+    no start date, so a gate that ignored it would park the entire live fleet
+    the day it shipped.
+    """
+
+    ROW = {"id": "q1", "fields": {
+        "Name": "Blank (5) / 18:00", "Post Status": "Pending",
+        "Scheduled DateTime": "2026-08-07T10:00:00.000Z",
+        "Target Profile": ["recP1"], "Spoof Variant": ["recV1"]}}
+
+    def _plan(self, **profile):
+        info = {"launch_id": "111", "name": "Blank (5)", "needs_human": False,
+                "status": "Active", "warmup_started": "2026-08-01",
+                "handoff_outstanding": []}
+        info.update(profile)
+        return plan_posting_queue(
+            [self.ROW], accounts_by_id={}, profiles_by_recid={"recP1": info},
+            variants_by_id={"recV1": {"file_path": "/tmp/a.mp4"}}, captions_by_id={},
+            now=datetime(2026, 8, 7, 12, 0))
+
+    def test_a_warmed_profile_with_work_outstanding_does_not_post(self):
+        plan = self._plan(handoff_outstanding=["bio", "first post"])
+        self.assertEqual(plan.to_post, [])
+        self.assertIn("waiting on a person", plan.skipped[0].reason)
+        self.assertIn("bio", plan.skipped[0].reason)
+
+    def test_one_task_left_is_still_a_hold(self):
+        self.assertEqual(self._plan(handoff_outstanding=["first post"]).to_post, [])
+
+    def test_all_three_ticked_releases_it(self):
+        self.assertEqual(len(self._plan(handoff_outstanding=[]).to_post), 1)
+
+    def test_a_profile_that_never_went_through_the_warm_up_is_untouched(self):
+        """Every account posting today is one of these. If this gate reached
+        them it would stop the fleet, which is why it keys on the start date
+        rather than on the checkboxes alone."""
+        plan = self._plan(warmup_started=None,
+                          handoff_outstanding=["bio", "profile picture", "first post"])
+        self.assertEqual(len(plan.to_post), 1)
+
+    def test_a_base_without_the_fields_does_not_park_anything(self):
+        """`profile_launch_map` on an older base returns neither key. Reading a
+        missing column as "not done" is how a schema lag stops posting."""
+        plan = plan_posting_queue(
+            [self.ROW], accounts_by_id={},
+            profiles_by_recid={"recP1": {"launch_id": "111", "name": "Blank (5)",
+                                         "needs_human": False, "status": "Active"}},
+            variants_by_id={"recV1": {"file_path": "/tmp/a.mp4"}}, captions_by_id={},
+            now=datetime(2026, 8, 7, 12, 0))
+        self.assertEqual(len(plan.to_post), 1)

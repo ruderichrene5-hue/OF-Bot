@@ -2011,6 +2011,241 @@ def needs_human(airtable, max_retries: int = DEFAULT_MAX_RETRIES) -> dict:
     return out
 
 
+# How a profile is classified on the Profiles tab, worst-first. A profile is in
+# exactly one of these, and the order is the precedence: a flagged phone that is
+# also posting belongs on somebody's worklist, not in the healthy column.
+STAGE_ORDER = ("needs_person", "handoff", "posting", "ready", "warming", "parked", "other")
+STAGE_LABELS = {
+    "needs_person": "Needs a person",
+    "handoff": "Waiting on bio / picture / first post",
+    "posting": "Posting",
+    "ready": "Ready to post",
+    "warming": "Warming up",
+    "parked": "Parked (Inactive)",
+    "other": "Other",
+}
+
+
+def _handoff_outstanding(profile: dict) -> list:
+    """Which of the three hand-off tasks this profile still needs, in order."""
+    from adb_bot.clients import airtable as at
+
+    handoff = profile.get("handoff") or {}
+    return [at.HANDOFF_LABELS[name] for name in at.HANDOFF_FIELDS if not handoff.get(name)]
+
+
+def classify_profile(profile: dict, warming: set = (), finished: set = ()) -> str:
+    """Which single column of the Profiles tab this profile belongs in.
+
+    `warming` and `finished` are sets of serials from the warm-up campaign --
+    the MLX `Created` tag is the population and Airtable does not hold it, so
+    "is this phone warming up" cannot be answered from the row alone.
+    """
+    serial = profile.get("serial") or ""
+    if profile.get("needs_human"):
+        return "needs_person"
+    if profile.get("status") == "Inactive":
+        return "parked"
+    if serial in finished and _handoff_outstanding(profile):
+        return "handoff"
+    if profile.get("queue_rows") or profile.get("accounts"):
+        return "posting"
+    if serial in finished:
+        return "ready"
+    if serial in warming:
+        return "warming"
+    return "other"
+
+
+def handoff_queue(profiles, warmup_progress: dict) -> dict:
+    """Profiles that finished their warm-up and are waiting on a person.
+
+    A phone coming off the warm-up is not a posting target yet. It has no bio,
+    no picture and has never posted, and an account whose first ever post is an
+    automated reel is the one Instagram acts on -- so the three tasks are a
+    person's, and until they are done nothing should schedule a reel for it.
+
+    In practice these profiles cannot post anyway: they are the "Blank (NN)"
+    phones, with no model folder, so no Accounts row and no Spoof Variants
+    exist for them and the queue has nothing to build a row from. That is an
+    accident of how they were made, not a rule -- assign one to a model and it
+    becomes postable the same hour. `posting_planner` enforces it properly; this
+    is what tells somebody the work is waiting.
+    """
+    finished_stage = ""
+    try:
+        from adb_bot.automation import warmup_state
+        finished_stage = warmup_state.TAG_FINISHED
+    except Exception:
+        pass
+
+    plan_days = int((warmup_progress or {}).get("plan_days") or 0)
+    by_serial = {p["serial"]: p for p in (warmup_progress or {}).get("profiles") or []}
+
+    out = {"profiles": [], "done": 0, "plan_days": plan_days}
+    for profile in profiles or []:
+        entry = by_serial.get(profile.get("serial"))
+        # Finished by the campaign's own reading, not by the Airtable Stage
+        # alone: the Stage is written by a loop that may not have run yet, and a
+        # profile that finished an hour ago should appear here at once.
+        done = bool(entry) and plan_days > 0 and int(entry.get("day_done") or 0) >= plan_days
+        if not done and profile.get("warmup_stage") != finished_stage:
+            continue
+        outstanding = _handoff_outstanding(profile)
+        if not outstanding:
+            out["done"] += 1
+            continue
+        out["profiles"].append({
+            "name": profile["name"],
+            "serial": profile.get("serial") or "",
+            "launch_id": profile.get("launch_id") or "",
+            "status": profile.get("status") or "",
+            "day": (entry or {}).get("day") or profile.get("warmup_day") or 0,
+            "finished_at": (entry or {}).get("last_at") or profile.get("warmup_last_run") or "",
+            "outstanding": outstanding,
+            "done_tasks": [t for t in ("bio", "profile picture", "first post")
+                           if t not in outstanding],
+        })
+
+    # The ones a person has already started come last: a half-done profile is
+    # somebody's open errand, and an untouched one is nobody's yet.
+    out["profiles"].sort(key=lambda p: (-len(p["outstanding"]), p["name"].lower()))
+    return out
+
+
+def folder_breakdown(profiles, mlx_items=None, folder_names=None,
+                     warmup_progress: dict = None) -> dict:
+    """Every MultiLogin folder, and what its phones are doing.
+
+    The folder is the model. Counting by it answers the question nothing on this
+    page could answer before -- "how is Jasmin doing" -- without reading 151
+    rows and knowing which "Blank (12)" belongs to whom.
+    """
+    from adb_bot.automation.mlx_sync import normalize_mlx_item
+
+    progress = warmup_progress or {}
+    plan_days = int(progress.get("plan_days") or 0)
+    warming, finished = set(), set()
+    for row in progress.get("profiles") or []:
+        serial = row.get("serial") or ""
+        warming.add(serial)
+        if plan_days > 0 and int(row.get("day_done") or 0) >= plan_days:
+            finished.add(serial)
+
+    # Serial -> folder, from MLX. Airtable has no folder column, so this is the
+    # only place the grouping exists.
+    folder_of: dict = {}
+    for item in mlx_items or []:
+        normalized = normalize_mlx_item(item)
+        if normalized is None:
+            continue
+        folder_id = str(item.get("folder_id") or "")
+        folder_of[normalized.serial_no] = (folder_names or {}).get(folder_id) or ""
+
+    folders: dict = {}
+    for profile in profiles or []:
+        # A row whose phone MLX no longer has: real, and worth its own bucket
+        # rather than being silently counted under a folder it is not in.
+        name = folder_of.get(profile.get("serial") or "", "") or "(no MultiLogin folder)"
+        stage = classify_profile(profile, warming=warming, finished=finished)
+        bucket = folders.setdefault(name, {"folder": name, "total": 0,
+                                           **{key: 0 for key in STAGE_ORDER}})
+        bucket["total"] += 1
+        bucket[stage] += 1
+
+    rows = sorted(folders.values(),
+                  key=lambda f: (f["folder"].startswith("("), -f["total"], f["folder"].lower()))
+    totals = {"folder": "All folders", "total": sum(f["total"] for f in rows),
+              **{key: sum(f[key] for f in rows) for key in STAGE_ORDER}}
+    return {"folders": rows, "totals": totals, "known_folders": len(folder_names or {})}
+
+
+def todays_posts(rows, day: str, variants=None, variants_fn=None, now=None) -> dict:
+    """Today's Posting Queue, one line per post: which clip, on which profile.
+
+    The Schedules tab answers "when", per model and as policy. This answers
+    "what" -- the reel each profile is actually sending today and how that went
+    -- which until now existed nowhere: the queue was only ever shown as five
+    status counts.
+    """
+    from adb_bot.clients import airtable as at
+
+    out = {"posts": [], "by_status": {}, "by_profile": [], "total": 0,
+           "clips": 0, "day": day, "reused_clips": []}
+    now = now or datetime.now()
+
+    today_rows = [r for r in (rows or [])
+                  if str((r.get("fields") or {}).get(at.F_PQ_SCHEDULED) or "").startswith(day)]
+    if variants is None and variants_fn is not None and today_rows:
+        # Resolved here and not by the caller: naming the clips is a full read
+        # of Spoof Variants (~630 records), and on a day with no rows the answer
+        # is "nothing" and the read is pure cost. Most renders are idle.
+        try:
+            variants = variants_fn()
+        except Exception:
+            variants = {}
+    variants = variants or {}
+
+    per_profile: dict = defaultdict(lambda: {"profile": "", "total": 0, "posted": 0,
+                                             "failed": 0, "pending": 0, "verifying": 0})
+    clips = set()
+    for record in today_rows:
+        fields = record.get("fields", {}) or {}
+        scheduled = str(fields.get(at.F_PQ_SCHEDULED) or "")
+        name = str(fields.get(at.F_PQ_NAME) or "").strip()
+        # "<profile> / <slot>" is the only place a row names its target without
+        # resolving the link, and resolving 60 links per render is two more
+        # table reads for a column that is already in the string.
+        who = name.rsplit("/", 1)[0].strip() if "/" in name else name
+        status = at._select_name(fields.get(at.F_PQ_POST_STATUS)) or "Pending"
+
+        variant_id = (fields.get(at.F_PQ_SPOOF_VARIANT) or [None])[0]
+        clip = ""
+        if variant_id:
+            path = (variants.get(variant_id) or {}).get("file_path") or ""
+            clip = path.rsplit("/", 1)[-1]
+            if clip:
+                clips.add(clip)
+
+        handle = at._handle(fields.get(at.F_PQ_TARGET_HANDLE))
+        out["posts"].append({
+            "name": name,
+            "profile": who,
+            "when": scheduled[11:16],
+            "status": status,
+            "clip": clip,
+            "handle": handle or "",
+            "slot": at._select_name(fields.get(at.F_PQ_ACCOUNT_SLOT)) or "",
+            "issue": at._select_name(fields.get(at.F_PQ_ISSUE_TYPE)) or "",
+            "retries": fields.get(at.F_PQ_RETRY_COUNT) or 0,
+        })
+        out["by_status"][status] = out["by_status"].get(status, 0) + 1
+        tally = per_profile[who]
+        tally["profile"] = who
+        tally["total"] += 1
+        key = {"Posted": "posted", "Failed": "failed",
+               "Verifying": "verifying"}.get(status, "pending")
+        tally[key] += 1
+
+    out["posts"].sort(key=lambda p: (p["when"], p["profile"]))
+    out["total"] = len(out["posts"])
+    out["clips"] = len(clips)
+    # Busiest first: on a fleet this size the question is which profile is
+    # carrying the day and which has one row and failed it.
+    out["by_profile"] = sorted(per_profile.values(),
+                               key=lambda p: (-p["total"], p["profile"].lower()))
+    # A clip sent twice on one day is the failure the spoof pipeline exists to
+    # prevent -- one file on two accounts is what gets them flagged.
+    seen: dict = defaultdict(list)
+    for post in out["posts"]:
+        if post["clip"]:
+            seen[post["clip"]].append(post["profile"])
+    out["reused_clips"] = sorted(
+        ({"clip": clip, "profiles": sorted(set(who))} for clip, who in seen.items()
+         if len(set(who)) > 1), key=lambda c: c["clip"])
+    return out
+
+
 def content_stock(airtable, claimed=None) -> dict:
     """Postable content: Ready variants, split by whether a queue row holds them.
 
@@ -2522,6 +2757,35 @@ def mlx_inventory() -> list:
         return []
 
 
+def mlx_folders() -> dict:
+    """``{folder_id: folder name}`` for the mobile workspace, or {} on failure.
+
+    The folder is how MultiLogin groups phones by model, and it is the grouping
+    the client's own UI shows -- so it is the one the Profiles tab counts by.
+    `serial_name` cannot stand in: 46 of these phones are called "Blank (NN)"
+    and belong to no model at all by name, while sitting in a model's folder.
+
+    Memoised by the caller like `mlx_inventory`: one HTTP call, and folders
+    change when somebody makes one.
+    """
+    import contextlib
+    import io
+
+    try:
+        from adb_bot.automation.run_loop import _mlx_token
+        from adb_bot.clients.multilogin.folders import MultiloginFolderClient
+
+        token = _mlx_token(None)
+        if not token:
+            return {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            folders = MultiloginFolderClient(token).list_mobile_folders() or []
+        return {str(f.get("folder_id")): str(f.get("name") or "").strip()
+                for f in folders if f.get("folder_id")}
+    except Exception:
+        return {}
+
+
 def warmup_progress(airtable, mlx_items=None, timers=None, now=None) -> dict:
     """Every profile on warm-up: which day, how its last run went, when next.
 
@@ -2925,6 +3189,10 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
                                          "rate": None}, "omitted": 0, "undated": 0},
         "content": {"ready": 0, "drawable": 0, "held": 0, "by_model": {}, "held_by_model": {}},
         "needs_human": {"rows": [], "retrying": [], "profiles": [], "error": ""},
+        "handoff": {"profiles": [], "done": 0, "plan_days": 0},
+        "folders": {"folders": [], "totals": {}, "known_folders": 0, "error": ""},
+        "posts_today": {"posts": [], "by_status": {}, "by_profile": [], "total": 0,
+                        "clips": 0, "day": day, "reused_clips": []},
         "second_accounts": {"profiles": [], "supported": True, "error": "",
                             "counts": {"phones": 0, "usable": 0, "incomplete": 0,
                                        "posted_today": 0, "expected_today": 0}},
@@ -2993,6 +3261,25 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             data["daily"] = daily_success(rows)
             data["content"] = content_stock(airtable, claimed=claimed_variant_ids(rows))
             data["needs_human"] = needs_human(airtable)
+            data["posts_today"] = todays_posts(
+                rows, day, variants_fn=airtable.variants_by_id, now=now)
+            # Its own try. These two tabs are the only readers of
+            # `profile_overview`, and they sit ahead of the schedules and the
+            # outlook in this block -- so without it, one missing column on
+            # Profiles (Cloning) would blank four sections that never touch it.
+            # Placing a new read early and letting it take the rest down is
+            # exactly how `annotate_live_reels` broke this block once already.
+            try:
+                # One read serving both people-facing tabs, so they cannot
+                # disagree about the same profile mid-refresh.
+                overview = airtable.profile_overview()
+                data["handoff"] = handoff_queue(overview, data["warmup_progress"])
+                data["folders"] = folder_breakdown(
+                    overview, mlx_items=_slow("mlx_inventory", mlx_inventory),
+                    folder_names=_slow("mlx_folders", mlx_folders),
+                    warmup_progress=data["warmup_progress"])
+            except Exception as exc:
+                data["folders"]["error"] = f"{type(exc).__name__}: {exc}"
             # Reuses the same listing: which of a two-account phone's accounts
             # got rows today is already in it.
             data["second_accounts"] = second_accounts(airtable, rows=rows, day=day)
