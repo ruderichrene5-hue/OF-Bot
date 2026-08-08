@@ -35,7 +35,7 @@ from adb_bot.core import locks, shutdown
 from adb_bot.core.logger import get_logger
 
 LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery", "warmup",
-         "mlx-sync", "cleanup", "second-accounts")
+         "warmup-state", "mlx-sync", "cleanup", "second-accounts")
 # `doctor` isn't a loop -- it's the preflight check, runnable the same way.
 # `report` renders the operational page; like `doctor` it is a command rather
 # than a loop, and unlike `doctor` it is not in the recommended set, so it never
@@ -221,7 +221,45 @@ def _run_warmup(args, logger) -> int:
         plan=plan,
     )
     logger.info("warmup result: %s", result)
+    # Publish where every profile now stands, in the two places people work.
+    # Last and in its own try: the runs are already done, and a tagging failure
+    # must not turn a good tick into a failed unit.
+    try:
+        _sync_warmup_state(args, airtable, logger, token=token)
+    except Exception as exc:
+        logger.warning("warmup: could not publish the warm-up state (%s)", exc)
     return 0
+
+
+def _sync_warmup_state(args, airtable, logger, token=None, dry_run: bool = False):
+    """Write each profile's warm-up day into Airtable and onto its MLX tags.
+
+    A reconciler over the Run Log rather than a callback on the run, so it is
+    idempotent and fixes up history -- which is what lets it label profiles that
+    did their runs before any of this existed. Safe to call after every tick.
+    """
+    from adb_bot.automation import report, warmup_state
+    from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
+    from adb_bot.clients.multilogin.tags import MultiloginTagClient
+
+    token = token or _mlx_token(args.mlx_token)
+    mlx_items = MultiloginMobileListClient(token).list_mobile_profiles() if token else []
+    progress = report.warmup_progress(airtable, mlx_items=mlx_items)
+    return warmup_state.sync_warmup_state(
+        airtable, progress,
+        tag_client=MultiloginTagClient(token) if token else None,
+        mlx_items=mlx_items, dry_run=dry_run, logger=logger)
+
+
+def _run_warmup_state(args, logger) -> int:
+    """`warmup-state`: the publish step on its own, for a timer or by hand."""
+    airtable = _airtable(args.base_id, args.airtable_token)
+    result = _sync_warmup_state(args, airtable, logger, dry_run=not args.apply)
+    if not args.apply:
+        logger.info("[DRY-RUN] warm-up state: %s", result.summary())
+        for line in result.changes:
+            logger.info("  would set %s", line)
+    return 1 if result.errors else 0
 
 
 def _run_pipeline(args, logger) -> int:
@@ -578,6 +616,7 @@ _DISPATCH = {
     "posting": _run_posting,
     "recheck": _run_recheck,
     "warmup": _run_warmup,
+    "warmup-state": _run_warmup_state,
     "pipeline": _run_pipeline,
     "queue": _run_queue,
     "retry": _run_retry,

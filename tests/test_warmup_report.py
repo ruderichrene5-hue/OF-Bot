@@ -296,6 +296,51 @@ class WarmupProgressTest(unittest.TestCase):
         self.assertEqual(out["profiles"], [])
 
 
+class DayDoneTest(WarmupProgressTest):
+    """`day_done` -- the furthest day of the plan a profile has actually
+    finished. What MultiLogin's "Warmup Day N Done" tags mean, and the number
+    that stops the calendar from flattering a profile that has stalled."""
+
+    def _row(self, started, *entries):
+        return self._progress(self._mlx(("Blank (1)", "100")),
+                              self._rows(("Blank (1)", "100", started)),
+                              self._log(*entries))["profiles"][0]
+
+    def test_it_is_the_campaign_day_the_run_landed_on(self):
+        row = self._row("2026-08-07",
+                        ("Blank (1) [100]", "Done", "2026-08-08T10:00:00.000Z", ""))
+        self.assertEqual((row["day"], row["day_done"]), (3, 2))
+
+    def test_only_a_done_run_counts(self):
+        row = self._row("2026-08-07",
+                        ("Blank (1) [100]", "Failed", "2026-08-08T10:00:00.000Z", ""))
+        self.assertEqual(row["day_done"], 0)
+
+    def test_two_runs_on_one_day_do_not_advance_it_twice(self):
+        """A retry after a partial run is still one day of the plan. Counting
+        Done rows instead would put this profile a day ahead of where it is."""
+        row = self._row("2026-08-07",
+                        ("Blank (1) [100]", "Done", "2026-08-08T16:00:00.000Z", ""),
+                        ("Blank (1) [100]", "Done", "2026-08-08T10:00:00.000Z", ""))
+        self.assertEqual((row["runs_done"], row["day_done"]), (2, 2))
+
+    def test_a_gap_does_not_stop_it_reporting_the_furthest_day(self):
+        row = self._row("2026-08-07",
+                        ("Blank (1) [100]", "Done", "2026-08-09T10:00:00.000Z", ""),
+                        ("Blank (1) [100]", "Done", "2026-08-07T10:00:00.000Z", ""))
+        self.assertEqual(row["day_done"], 3)
+
+    def test_a_profile_that_has_not_started_has_no_day_done(self):
+        self.assertEqual(self._row(None)["day_done"], 0)
+
+    def test_history_predating_the_start_date_does_not_go_negative(self):
+        """`Warm-up Started` can be re-stamped by hand to restart a profile,
+        which leaves Run Log rows sitting before day 1."""
+        row = self._row("2026-08-08",
+                        ("Blank (1) [100]", "Done", "2026-08-01T10:00:00.000Z", ""))
+        self.assertEqual(row["day_done"], 0)
+
+
 class WarmupProgressRenderTest(unittest.TestCase):
     def _render(self, **overrides):
         data = {"profiles": [], "plan_days": 3, "next_run": "2026-08-09 16:00",
@@ -309,9 +354,20 @@ class WarmupProgressRenderTest(unittest.TestCase):
         row = {"name": "Blank (5)", "serial": "262894", "launch_id": "L1", "day": 2,
                "started": "2026-08-08", "runs_done": 1, "runs_logged": 1,
                "last_at": "2026-08-09 09:00", "last_result": "Done", "last_notes": "",
-               "state": "ok", "ambiguous": False}
+               "state": "ok", "ambiguous": False, "day_done": 2}
         row.update(overrides)
         return row
+
+    def test_the_day_completed_sits_next_to_the_day_reached(self):
+        """Two columns because they are two facts, and the gap between them is
+        the profile that has stalled."""
+        page = self._render(profiles=[self._row(day=3, day_done=1)])
+        self.assertIn("3 of 3", page)
+        self.assertIn(">day 1<", page)
+
+    def test_a_profile_that_has_completed_nothing_shows_a_dash_not_day_zero(self):
+        self.assertIn("<td class='num'>—</td>",
+                      self._render(profiles=[self._row(day_done=0)]))
 
     def test_it_shows_day_run_count_and_when_it_next_runs(self):
         page = self._render(profiles=[self._row()], counts={"ok": 1})
@@ -349,3 +405,96 @@ class WarmupProgressRenderTest(unittest.TestCase):
         page = self._render(profiles=[self._row(name="<script>x</script>")])
         self.assertNotIn("<script>x</script>", page)
         self.assertIn("&lt;script&gt;", page)
+
+
+class WarmupWaitingTest(unittest.TestCase):
+    """Phones that exist and are not being warmed up.
+
+    New phones are cloned in batches days before anyone works through them, and
+    the only thing that puts one on warm-up is a person adding `Created`. That
+    gate is right, but until this list existed nothing anywhere said the
+    untagged batch was there -- every dashboard read green with 17 phones idle.
+    """
+
+    def _item(self, serial="100", name="Blank (1)", tags=(), created="2026-08-06"):
+        return {"serial_no": serial, "serial_name": name, "id": f"L{serial}",
+                "tags": list(tags), "created_at": f"{created}T01:00:00Z"}
+
+    def _rows(self, serial="100", name="Blank (1)", status="Active", api_id=None):
+        return {serial: {"record_id": f"rec{serial}", "name": name,
+                         "api_id": api_id if api_id is not None else f"L{serial}",
+                         "status": status, "warmup_started": None}}
+
+    def _waiting(self, items=None, rows=None, in_warmup=()):
+        return report.warmup_waiting(items if items is not None else [self._item()],
+                                     rows if rows is not None else self._rows(),
+                                     in_warmup=set(in_warmup))
+
+    def test_an_untagged_active_profile_is_waiting(self):
+        row = self._waiting()[0]
+        self.assertEqual(row["serial"], "100")
+        self.assertEqual(row["reason"], "no tag at all")
+
+    def test_a_profile_already_on_warm_up_is_not_listed(self):
+        self.assertEqual(self._waiting(in_warmup=("100",)), [])
+
+    def test_a_profile_tagged_something_else_says_which(self):
+        row = self._waiting([self._item(tags=["gmail"])])[0]
+        self.assertIn("gmail", row["reason"])
+        self.assertIn("not Created", row["reason"])
+
+    def test_a_profile_already_posting_is_not_a_candidate(self):
+        """87 profiles are past the warm-up. Listing them would bury the few
+        that are actually waiting."""
+        for tag in ("Active / Posting", "Ready for Posting", "Banned / Dead"):
+            self.assertEqual(self._waiting([self._item(tags=[tag])]), [], tag)
+
+    def test_a_parked_profile_is_not_waiting_on_anybody(self):
+        self.assertEqual(self._waiting(rows=self._rows(status="Inactive")), [])
+
+    def test_a_profile_mlx_has_and_airtable_does_not_points_at_the_sync(self):
+        row = self._waiting(rows={})[0]
+        self.assertIn("mlx-sync", row["reason"])
+
+    def test_a_row_with_no_launch_key_says_so(self):
+        row = self._waiting(rows=self._rows(api_id=""))[0]
+        self.assertIn("nothing can launch it", row["reason"])
+
+    def test_the_newest_batch_is_first(self):
+        items = [self._item("100", "Old", created="2026-07-01"),
+                 self._item("200", "New", created="2026-08-06")]
+        rows = {**self._rows("100", "Old"), **self._rows("200", "New")}
+        self.assertEqual([p["name"] for p in self._waiting(items, rows)], ["New", "Old"])
+
+
+class WarmupWaitingRenderTest(unittest.TestCase):
+    def _render(self, waiting, error=""):
+        return report_html._section_warmup_waiting({"waiting": waiting, "error": error})
+
+    def _row(self, **kw):
+        row = {"name": "Blank (2)", "serial": "262891", "tags": "",
+               "created": "2026-08-06", "reason": "no tag at all"}
+        row.update(kw)
+        return row
+
+    def test_it_names_the_profiles_and_the_edit_that_starts_them(self):
+        page = self._render([self._row()])
+        self.assertIn("262891", page)
+        self.assertIn("no tag at all", page)
+        self.assertIn("Created", page)
+
+    def test_it_counts_the_wholly_untagged_separately(self):
+        page = self._render([self._row(), self._row(serial="1", tags="gmail",
+                                                    reason="tagged gmail, not Created")])
+        self.assertIn("2 profile(s)", page)
+        self.assertIn("1 of them carry no tag at all", page)
+
+    def test_an_empty_list_says_nothing_is_unclaimed(self):
+        self.assertIn("Nothing is sitting unclaimed", self._render([]))
+
+    def test_a_broken_progress_read_renders_nothing_rather_than_a_second_error(self):
+        self.assertEqual(self._render([], error="429"), "")
+
+    def test_a_profile_name_is_escaped(self):
+        page = self._render([self._row(name="<script>x</script>")])
+        self.assertNotIn("<script>x</script>", page)

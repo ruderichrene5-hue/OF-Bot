@@ -1357,7 +1357,12 @@ def _section_warmup_progress(progress: dict) -> str:
             f'when <em>all</em> of these run, not one at a time.</p>')
 
     head = ("<tr><th>Profile</th><th class='num'>Serial</th><th class='num'>Day</th>"
-            "<th class='num'>Runs done</th><th>Last run</th><th>Result</th>"
+            "<th class='num'>Completed" + _hint(
+                "The furthest day of the plan this profile has actually finished, which "
+                "is not the same as the day it is on — the day advances at midnight "
+                "whether or not the night's run worked. This is the number written to "
+                "Airtable's Warm-up Stage and to the profile's MultiLogin tag.")
+            + "</th><th class='num'>Runs done</th><th>Last run</th><th>Result</th>"
             "<th>State</th></tr>")
     rows = []
     for p in profiles:
@@ -1378,6 +1383,7 @@ def _section_warmup_progress(progress: dict) -> str:
             f"<tr><td class='mono'>{name}</td>"
             f"<td class='num mono'>{_e(p['serial'])}</td>"
             f"<td class='num'>{_e(day)}</td>"
+            f"<td class='num'>{('day ' + str(p['day_done'])) if p.get('day_done') else '—'}</td>"
             f"<td class='num'>{p['runs_done']}</td>"
             f"<td class='num mono'>{_e(p['last_at'] or '—')}</td>"
             f"<td>{result}</td>"
@@ -1395,6 +1401,39 @@ def _section_warmup_progress(progress: dict) -> str:
                  'the day.</p>')
     return (banner + lead + when + f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>'
             + note)
+
+
+def _section_warmup_waiting(progress: dict) -> str:
+    """Phones that exist and are not being warmed up, and whose turn it is."""
+    if progress.get("error"):
+        return ""
+    waiting = progress.get("waiting") or []
+    if not waiting:
+        return ('<p class="empty">Every MultiLogin profile is either on warm-up, '
+                'already posting, or parked. Nothing is sitting unclaimed.</p>')
+
+    untagged = sum(1 for p in waiting if not p["tags"])
+    lead = (f'<p class="sub">{len(waiting)} profile(s) exist in MultiLogin, are Active in '
+            f'Airtable, and are <strong>not</strong> being warmed up'
+            + (f' — {untagged} of them carry no tag at all' if untagged else '') + '. '
+            'The warm-up population is the <span class="mono">Created</span> tag, so a '
+            'phone joins it when somebody adds that tag and not before. That gate is '
+            'deliberate — a phone tagged <span class="mono">gmail</span> has an email '
+            'account and no Instagram, and warming it up would drive an empty app — but '
+            'nothing else on this page would ever mention these phones.</p>')
+
+    head = ("<tr><th>Profile</th><th class='num'>Serial</th><th>Tags</th>"
+            "<th class='num'>Created</th><th>Why it is not warming up</th></tr>")
+    rows = "".join(
+        f"<tr><td class='mono'>{_e(p['name'])}</td>"
+        f"<td class='num mono'>{_e(p['serial'])}</td>"
+        f"<td class='mono'>{_e(p['tags'] or '—')}</td>"
+        f"<td class='num mono'>{_e(p['created'] or '—')}</td>"
+        f"<td>{_e(p['reason'])}</td></tr>" for p in waiting)
+    return (lead + f'<div class="scroll"><table>{head}{rows}</table></div>'
+            + '<p class="sub">Adding <span class="mono">Created</span> in MultiLogin is the '
+              'whole of it: the next warm-up tick picks the profile up, stamps its '
+              '<strong>Warm-up Started</strong> and runs day 1.</p>')
 
 
 def _section_warmup(warmup: dict) -> str:
@@ -1735,6 +1774,9 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     <section class="panel" id="panel-warmup">
       <h2>Warm-up progress</h2>
       {_section_warmup_progress(data.get('warmup_progress') or {})}
+
+      <h2>Waiting to join the warm-up</h2>
+      {_section_warmup_waiting(data.get('warmup_progress') or {})}
 
       <h2>Can each account run?</h2>
       {_section_warmup(data.get('warmup') or {})}

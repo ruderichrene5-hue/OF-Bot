@@ -179,6 +179,25 @@ F_PROF_DEVICE = "Device"                  # link -> Devices
 # warm-up has not started; clearing it starts the profile over at day 1.
 F_PROF_WARMUP_STARTED = "Warm-up Started"  # date
 
+# Where the warm-up campaign is written down, so it can be read in Airtable
+# rather than only on the dashboard. Reconciled from the Run Log by
+# warmup_state.sync_warmup_state -- nothing here is authoritative, and deleting
+# a value only means the next sweep puts it back.
+#
+# `Day` and `Stage` deliberately answer different questions. Day is the calendar
+# day, which advances at midnight whether or not the night's run worked; Stage
+# is the furthest day actually completed, and carries the same words as the
+# MultiLogin tags so both tools can be filtered the same way. A profile whose
+# Day has run away from its Stage is one that has stopped moving.
+F_PROF_WARMUP_DAY = "Warm-up Day"              # number, calendar day of the plan
+F_PROF_WARMUP_STAGE = "Warm-up Stage"          # singleSelect, mirrors the MLX tag
+F_PROF_WARMUP_RUNS_DONE = "Warm-up Runs Done"  # number of warm-up runs that landed
+F_PROF_WARMUP_LAST_RUN = "Warm-up Last Run"    # dateTime of the last run, any result
+F_PROF_WARMUP_LAST_RESULT = "Warm-up Last Result"  # singleSelect: Done / Failed / Running
+
+WARMUP_STATE_FIELDS = (F_PROF_WARMUP_DAY, F_PROF_WARMUP_STAGE, F_PROF_WARMUP_RUNS_DONE,
+                       F_PROF_WARMUP_LAST_RUN, F_PROF_WARMUP_LAST_RESULT)
+
 # Where a profile the bot has given up on is surfaced to a person. The Accounts
 # table has had `Needs Human Verification` all along, but posting is
 # profile-driven -- most of the ~90 MLX profiles have no Accounts row at all --
@@ -484,6 +503,43 @@ class AirtableClient:
     def set_warmup_started(self, record_id: str, day_iso: str) -> bool:
         """Stamp day 1 on a profile. Written once, on the first warm-up run."""
         return self._patch_in(TABLE_PROFILES, record_id, {F_PROF_WARMUP_STARTED: day_iso})
+
+    def warmup_state_snapshot(self) -> dict:
+        """``{record_id: {field: value}}`` for the warm-up progress fields.
+
+        One list call so the reconciler can skip the rows that already agree.
+        Without it a sweep every hour rewrites 46 identical rows and every one
+        of them gets a fresh Last Modified, which makes the column useless for
+        seeing which profile actually moved.
+
+        ``None`` when the fields have not been added to the table yet -- the
+        same "tell the caller, don't guess" shape as `warmup_profiles_by_serial`.
+        """
+        try:
+            records = self._list_table(TABLE_PROFILES, fields=list(WARMUP_STATE_FIELDS))
+        except Exception as exc:
+            print(f"[-] Airtable: no warm-up state fields ({exc})")
+            return None
+        out: dict = {}
+        for record in records:
+            fields = record.get("fields", {}) or {}
+            out[record.get("id")] = {
+                F_PROF_WARMUP_DAY: fields.get(F_PROF_WARMUP_DAY),
+                F_PROF_WARMUP_STAGE: _select_name(fields.get(F_PROF_WARMUP_STAGE)),
+                F_PROF_WARMUP_RUNS_DONE: fields.get(F_PROF_WARMUP_RUNS_DONE),
+                F_PROF_WARMUP_LAST_RUN: fields.get(F_PROF_WARMUP_LAST_RUN),
+                F_PROF_WARMUP_LAST_RESULT: _select_name(fields.get(F_PROF_WARMUP_LAST_RESULT)),
+            }
+        return out
+
+    def set_warmup_state(self, record_id: str, fields: dict) -> bool:
+        """Write the warm-up progress fields on one profile.
+
+        `typecast` is on, so the first sweep adds the Stage and Last Result
+        options to their selects rather than 422-ing on a name Airtable has not
+        seen -- the same way `flag_profile_for_human` grows Issue Reason.
+        """
+        return self._patch_in(TABLE_PROFILES, record_id, dict(fields))
 
     def warmup_run_log(self, flow: str = "warm_up_process") -> list:
         """Every Run Log row for the warm-up flow, newest first.

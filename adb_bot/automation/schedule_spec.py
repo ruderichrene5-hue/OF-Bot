@@ -29,8 +29,8 @@ PLANNED_LOOPS = ("queue", "retry")
 
 # Everything an unattended server should have scheduled.
 RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery",
-                     "warmup", "mlx-sync", "cleanup", "doctor", "reap-phones",
-                     "second-accounts")
+                     "warmup", "warmup-state", "mlx-sync", "cleanup", "doctor",
+                     "reap-phones", "second-accounts")
 
 # Recommended cadence in minutes. The UI can override per loop; these are what
 # `install_units.sh` installs. Ordered by the flow a reel goes through, because
@@ -69,6 +69,13 @@ RECOMMENDED_INTERVALS = {
     # the plan enough ticks to place them and to pick up a profile that only
     # became due mid-day.
     "warmup": 60,
+    # Publishes each profile's warm-up day into Airtable and onto its MLX tags.
+    # The warm-up tick already calls this itself, so the timer is the backstop
+    # for the cases the tick cannot cover: a run that died before it could
+    # publish, a day rolling over with no profile due, and a person editing a
+    # tag by hand. Half-hourly because it is a reconciler -- two Airtable list
+    # calls and one MLX list, then nothing at all unless something moved.
+    "warmup-state": 30,
     # Full MultiLogin -> Airtable inventory sweep: expensive, and nothing during
     # the day depends on it being fresher than daily. Runs at 23:30 (see
     # DEFAULT_DAILY_START), after the posting day.
@@ -118,6 +125,7 @@ DESCRIPTIONS = {
     "retry": "ADB bot retry loop (retryable Failed -> Pending)",
     "recovery": "ADB bot recovery loop (un-flagged profiles -> retryable again)",
     "warmup": "ADB bot warmup loop (lifecycle Day 1-4)",
+    "warmup-state": "ADB bot warm-up state publisher (Run Log -> Airtable + MLX tags)",
     "pipeline": "ADB bot spoofing pipeline (Drive/raw -> Spoof Variants)",
     "mlx-sync": "ADB bot MultiLogin->Airtable profile sync",
     "cleanup": "ADB bot cleanup loop (old used media)",
@@ -151,6 +159,10 @@ WHAT_IT_DOES = {
     "warmup": "Works a new account through its Day 1-4 lifecycle plan: the "
               "browsing and liking that make an account look used before it is "
               "asked to post anything.",
+    "warmup-state": "Writes each profile's warm-up day into Airtable and onto its "
+                    "MultiLogin tag, reading the Run Log rather than the calendar — "
+                    "so a profile whose day has advanced without the runs landing "
+                    "shows the day it actually finished, not the day it is on.",
     "pipeline": "Spoofs new raw clips from Drive — one unique encode per active "
                 "profile, because two accounts posting the same file is what gets "
                 "them flagged. The expensive loop: it is the one that pins the CPU.",

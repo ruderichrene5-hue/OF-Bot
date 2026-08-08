@@ -6,6 +6,7 @@ from .multilogin import (
     MultiloginShutdownClient,
     MultiloginFolderClient,
     MultiloginMobileListClient,
+    MultiloginTagClient,
     CountingLauncherClient,
     LaunchStats,
 )
@@ -20,4 +21,5 @@ __all__ = [
     "MultiloginShutdownClient",
     "MultiloginFolderClient",
     "MultiloginMobileListClient",
+    "MultiloginTagClient",
 ]

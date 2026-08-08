@@ -2608,6 +2608,25 @@ def warmup_progress(airtable, mlx_items=None, timers=None, now=None) -> dict:
         done = sum(1 for h in history if h["result"] == at.RESULT_DONE)
         finished = target.day > out["plan_days"]
 
+        # The furthest day of the plan this profile has actually *completed*,
+        # which is what the MLX "Warmup Day N Done" tags mean and is not the
+        # same number as `day`. A profile advances a day at midnight whether or
+        # not the night's run worked, so a phone that has failed since day 1
+        # reads "day 4, day 1 done" -- and that gap is the whole signal.
+        # Counting Done rows would not do: two runs on one day (a retry after a
+        # partial) would push it a day ahead of the plan.
+        started = warmup_targets._parse_date(target.started)
+        days_done = {
+            # Local, not UTC: `Warm-up Started` is stamped from the server's own
+            # `date.today()`, so a run logged at 00:30 local would otherwise be
+            # counted against the previous campaign day.
+            lifecycle.day_number(started, ran.astimezone().date())
+            for ran in (_parse_airtable_dt(h["at"]) for h in history
+                        if h["result"] == at.RESULT_DONE)
+            if started and ran
+        }
+        day_done = max((d for d in days_done if d >= 1), default=0)
+
         if finished:
             state = "finished"
         elif last is None:
@@ -2624,11 +2643,19 @@ def warmup_progress(airtable, mlx_items=None, timers=None, now=None) -> dict:
             "name": target.name,
             "serial": target.serial_no,
             "launch_id": target.launch_id,
+            # Carried so `warmup_state` can write this row back without
+            # resolving the whole Profiles table a second time.
+            "record_id": target.record_id,
             "day": target.day,
+            "day_done": day_done,
             "started": target.started or "",
             "runs_done": done,
             "runs_logged": len(history),
             "last_at": _local_stamp(last["at"]) if last else "",
+            # The raw Airtable stamp as well as the display one: `warmup_state`
+            # writes this into a dateTime field, which will not take the
+            # localised "2026-08-08 08:50" the page shows.
+            "last_at_iso": (last["at"] if last else ""),
             "last_result": last["result"] if last else "",
             "last_notes": (last["notes"] if last else "")[:200],
             "state": state,
@@ -2640,7 +2667,67 @@ def warmup_progress(airtable, mlx_items=None, timers=None, now=None) -> dict:
     order = {"failed": 0, "never": 1, "running": 2, "ok": 3, "finished": 4}
     out["profiles"].sort(key=lambda p: (order.get(p["state"], 9), -p["day"],
                                         p["name"].lower(), p["serial"]))
+    out["waiting"] = warmup_waiting(mlx_items or [], rows,
+                                    in_warmup={t.serial_no for t in targets})
     return out
+
+
+# Tags that mean a profile is somewhere other than the warm-up queue -- past it,
+# or taken out of service. A profile carrying one of these is not a candidate,
+# and listing all 87 of them as "waiting" would bury the handful that are.
+LIVE_TAGS = ("active / posting", "ready for posting", "banned / dead")
+
+
+def warmup_waiting(mlx_items, profiles_by_serial, in_warmup=None) -> list:
+    """Profiles that look like warm-up candidates but are not in the population.
+
+    New phones are cloned in batches days before anyone works through them, and
+    the only thing that puts one on warm-up is a person adding the `Created`
+    tag in MultiLogin. That is the right gate -- a phone tagged `gmail` has an
+    email account and no Instagram, and warming it up would drive an empty app
+    -- but it is an invisible one: nothing anywhere said "these 17 phones exist
+    and are not being warmed up", so a batch could sit untagged indefinitely
+    with every dashboard reading green.
+
+    Each row carries the tag it does have, which is what says whose turn it is.
+    """
+    from adb_bot.automation.mlx_sync import normalize_mlx_item
+
+    in_warmup = in_warmup or set()
+    waiting = []
+    for item in mlx_items or []:
+        profile = normalize_mlx_item(item)
+        if profile is None or profile.serial_no in in_warmup:
+            continue
+        tags = [str(t) for t in (profile.tags or ())]
+        if any(t.lower() in LIVE_TAGS for t in tags):
+            continue
+
+        row = (profiles_by_serial or {}).get(profile.serial_no)
+        if row is None:
+            reason = "no Profiles (Cloning) row yet — the mlx-sync loop runs at 23:30"
+        elif (row.get("status") or "") == "Inactive":
+            # Somebody parked it. Not waiting on anything.
+            continue
+        elif not row.get("api_id"):
+            reason = "no MLX API ID on the Airtable row — nothing can launch it"
+        elif tags:
+            reason = f"tagged {', '.join(tags)}, not Created"
+        else:
+            reason = "no tag at all"
+
+        waiting.append({
+            "name": row.get("name") if row else profile.name,
+            "serial": profile.serial_no,
+            "tags": ", ".join(tags),
+            "created": (profile.created_at or "")[:10],
+            "reason": reason,
+        })
+
+    # Newest first: a batch cloned this week is the one somebody is working
+    # through, and the phones from June are a decision already taken.
+    waiting.sort(key=lambda p: (p["created"], p["name"] or ""), reverse=True)
+    return waiting
 
 
 def _local_stamp(value) -> str:
