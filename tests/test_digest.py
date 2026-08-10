@@ -150,10 +150,12 @@ class SendTest(unittest.TestCase):
 class BlockedWarmupTest(unittest.TestCase):
     """A warm-up that has run out of things the bot is allowed to do."""
 
-    def _p(self, name, started="2026-08-07"):
+    def _p(self, name, started="2026-08-07", serial=""):
         f = {at.F_PROF_NAME: name}
         if started:
             f[at.F_PROF_WARMUP_STARTED] = started
+        if serial:
+            f[at.F_PROF_MLX_SERIAL] = serial
         return {"fields": f}
 
     def test_a_blank_in_warmup_is_waiting_on_a_model(self):
@@ -181,16 +183,25 @@ class BlockedWarmupTest(unittest.TestCase):
         d = digest.build_digest([self._p("Blank (12)")], [], now=NOW)
         self.assertFalse(d.quiet)
 
-    def test_the_example_list_does_not_repeat_a_name(self):
-        """MLX names are not unique; a sample showing 'Blank (1)' twice reads
-        as a bug, while the count must stay the true number of profiles."""
-        d = digest.build_digest([self._p("Blank (1)"), self._p("Blank (1)"),
-                                 self._p("Blank (2)")], [], now=NOW)
+    def test_two_phones_sharing_a_name_are_told_apart_by_serial(self):
+        """MLX names are not unique -- three phones are called `Blank (5)`.
+        Both belong in the sample, because both are somebody's work; what must
+        not happen is two identical strings, which reads as a bug rather than
+        as two phones. The count stays the true number of profiles."""
+        d = digest.build_digest([self._p("Blank (1)", serial="257884"),
+                                 self._p("Blank (1)", serial="262899"),
+                                 self._p("Blank (2)", serial="257885")], [], now=NOW)
         self.assertEqual(len(d.blocked_warmup), 3)
         body = digest.format_digest(d)
         sample = body.split("e.g. ")[1].split("\n")[0]
-        self.assertEqual(sample.count("Blank (1)"), 1)
+        self.assertEqual(sample.count("Blank (1)"), 2)
+        self.assertIn("257884", sample)
+        self.assertIn("262899", sample)
         self.assertIn("3 warm-up phones", body)
+
+    def test_a_phone_with_no_serial_still_shows_its_name(self):
+        d = digest.build_digest([self._p("Blank (1)")], [], now=NOW)
+        self.assertEqual(d.blocked_sample, ["Blank (1)"])
 
 
 class TaggedWarmupTest(unittest.TestCase):
@@ -235,13 +246,17 @@ class TaggedWarmupTest(unittest.TestCase):
             [], [], now=NOW, tagged_warmup=self._tagged("Blank (12)")))
         self.assertIn("1 warm-up phone tagged", body)
 
-    def test_the_example_list_does_not_repeat_a_name(self):
+    def test_two_phones_sharing_a_name_are_told_apart_by_serial(self):
         """MLX names are not unique -- this workspace has three `Blank (5)`."""
-        d = digest.build_digest([], [], now=NOW,
-                                tagged_warmup=self._tagged("Blank (1)", "Blank (1)", "Blank (2)"))
+        d = digest.build_digest([], [], now=NOW, tagged_warmup=[
+            {"name": "Blank (1)", "serial": "257884", "launch_id": "L1"},
+            {"name": "Blank (1)", "serial": "262899", "launch_id": "L2"},
+            {"name": "Blank (2)", "serial": "257885", "launch_id": "L3"}])
         self.assertEqual(len(d.tagged_warmup), 3)
         sample = digest.format_digest(d).split("e.g. ")[1].split("\n")[0]
-        self.assertEqual(sample.count("Blank (1)"), 1)
+        self.assertEqual(sample.count("Blank (1)"), 2)
+        self.assertIn("257884", sample)
+        self.assertIn("262899", sample)
 
     def test_plain_strings_are_accepted_too(self):
         d = digest.build_digest([], [], now=NOW, tagged_warmup=["Blank (12)"])
@@ -320,3 +335,18 @@ class NoDoubleReportingTest(unittest.TestCase):
         d = digest.build_digest([self._p("Blank (12)", "")], [], now=NOW,
                                 tagged_warmup=[self._tag("Blank (12)", "L1")])
         self.assertEqual(d.blocked_warmup, ["Blank (12)"])
+
+    def test_a_name_in_both_sections_is_two_distinguishable_phones(self):
+        """The case that prompted the split: `Blank (10)` is three phones, one
+        tagged and two not, so the same string legitimately appears in both
+        sections. Without the serial that reads as the duplication the
+        suppression was supposed to have removed."""
+        rows = [self._p("Blank (10)", "L1"), self._p("Blank (10)", "L2")]
+        rows[0]["fields"][at.F_PROF_MLX_SERIAL] = "257884"
+        rows[1]["fields"][at.F_PROF_MLX_SERIAL] = "262899"
+        d = digest.build_digest(rows, [], now=NOW, tagged_warmup=[
+            {"name": "Blank (10)", "serial": "257884", "launch_id": "L1"}])
+        self.assertEqual(d.tagged_sample, ["Blank (10) · 257884"])
+        self.assertEqual(d.blocked_sample, ["Blank (10) · 262899"])
+        # Same name in both lines, and never the same phone.
+        self.assertEqual(set(d.tagged_sample) & set(d.blocked_sample), set())

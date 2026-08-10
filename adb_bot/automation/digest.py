@@ -67,6 +67,26 @@ def _sample(names, limit: int = 5) -> list:
     return out
 
 
+def _label(entries, limit: int = 5) -> list:
+    """Up to `limit` phones as `Name · serial`, for an "e.g." line.
+
+    Names are not unique in this workspace -- `Blank (10)` is three separate
+    phones -- so two sections can legitimately name the same string while
+    meaning different hardware. That reads as a duplicate the moment both lines
+    are in one message, which is what the serial settles. Sorted by name so the
+    sample is stable between runs, and the serial breaks the tie.
+    """
+    out = []
+    for entry in sorted(entries, key=lambda e: (str(e.get("name") or ""),
+                                                str(e.get("serial") or ""))):
+        name = str(entry.get("name") or "?")
+        serial = str(entry.get("serial") or "").strip()
+        out.append(f"{name} · {serial}" if serial else name)
+        if len(out) == limit:
+            break
+    return out
+
+
 def blocked_warmup(profiles, exclude_ids=()) -> list:
     """Warm-up profiles that cannot finish until a person assigns them a model.
 
@@ -91,6 +111,15 @@ def blocked_warmup(profiles, exclude_ids=()) -> list:
     `Blank (13)`, so subtracting by name would silently drop the untagged twin
     of every tagged phone.
     """
+    return sorted(e["name"] for e in blocked_warmup_rows(profiles, exclude_ids))
+
+
+def blocked_warmup_rows(profiles, exclude_ids=()) -> list:
+    """`blocked_warmup` with the serial kept, as `[{'name', 'serial'}]`.
+
+    The serial is what makes a sample line readable: `Blank (10)` is three
+    different phones in this workspace, so a name on its own cannot say which.
+    """
     skip = {str(i) for i in (exclude_ids or ()) if str(i).strip()}
     out = []
     for row in profiles or []:
@@ -101,8 +130,9 @@ def blocked_warmup(profiles, exclude_ids=()) -> list:
             continue
         name = str(f.get(at.F_PROF_NAME) or "").strip()
         if name.split()[:1] == ["Blank"] or name.lower().startswith("blank"):
-            out.append(name or "?")
-    return sorted(out)
+            out.append({"name": name or "?",
+                        "serial": str(f.get(at.F_PROF_MLX_SERIAL) or "").strip()})
+    return out
 
 
 @dataclass
@@ -116,6 +146,10 @@ class Digest:
     blocked_warmup: list = field(default_factory=list)     # after the tagged are removed
     blocked_warmup_total: int = 0                          # before, so the errand's real size survives
     tagged_warmup: list = field(default_factory=list)      # Issue tag in MLX, no flag
+    # Pre-labelled `Name · serial` samples: names alone repeat across the two
+    # sections and would read as the duplication this was meant to end.
+    blocked_sample: list = field(default_factory=list)
+    tagged_sample: list = field(default_factory=list)
     due: int = 0
     posted: int = 0
     failed: int = 0
@@ -177,8 +211,12 @@ def build_digest(profiles, queue_rows, now=None, tagged_warmup=None) -> Digest:
     # heading. Keys only ever come from dict entries; a caller passing bare
     # names has nothing to match on and gets no suppression.
     out.blocked_warmup_total = len(blocked_warmup(profiles))
-    out.blocked_warmup = blocked_warmup(profiles, exclude_ids=[
+    remaining = blocked_warmup_rows(profiles, exclude_ids=[
         e.get("launch_id") for e in (tagged_warmup or []) if isinstance(e, dict)])
+    out.blocked_warmup = sorted(e["name"] for e in remaining)
+    out.blocked_sample = _label(remaining)
+    out.tagged_sample = _label(
+        [e if isinstance(e, dict) else {"name": e} for e in (tagged_warmup or [])])
 
     for row in queue_rows or []:
         f = row.get("fields", row) or {}
@@ -226,7 +264,7 @@ def format_digest(d: Digest) -> str:
                       f"the warm-up keeps running them. Check the phone, then tick "
                       f"<b>Needs Human Check</b> in Airtable if it still needs a person "
                       f"— or clear the tag in MultiLogin if it does not.",
-                  "e.g. " + ", ".join(f"<b>{name}</b>" for name in _sample(d.tagged_warmup))
+                  "e.g. " + ", ".join(f"<b>{name}</b>" for name in d.tagged_sample)
                   + (f" … {n} in total" if n > 5 else "")]
 
     # How many of the model backlog are already named in the tagged section.
@@ -255,7 +293,7 @@ def format_digest(d: Digest) -> str:
                   # (this workspace has three "Blank (5)"), and a sample that
                   # repeats a name reads as a bug rather than as two phones.
                   # The count above stays the true number of profiles.
-                  "e.g. " + ", ".join(f"<b>{n}</b>" for n in _sample(d.blocked_warmup))
+                  "e.g. " + ", ".join(f"<b>{n}</b>" for n in d.blocked_sample)
                   + (f" … {n} in total" if n > 5 else "")]
 
     lines += ["", f"Last {WINDOW_HOURS}h: <b>{d.posted} posted</b>, {d.failed} failed, "
