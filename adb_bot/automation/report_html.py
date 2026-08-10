@@ -944,6 +944,97 @@ def _section_handoff(handoff: dict) -> str:
               '</dl></div>')
 
 
+def _rows_mlx_issue(entries) -> str:
+    """One table body for a group of hand-tagged phones."""
+    out = []
+    for e in entries:
+        where = e["stage"] or (f"day {e['day']}" if e["day"] else "-")
+        out.append(
+            f"<tr><td class='mono'>{_e(e['name'])}</td>"
+            f"<td class='mono'>{_e(e['serial'] or '-')}</td>"
+            f"<td>{_e(e['status'])}</td>"
+            f"<td>{_e(where)}</td>"
+            f"<td class='mono'>{_e(e['last_run'] or '-')}</td>"
+            f"<td class='mono'>{_e(', '.join(e['tags']) or '-')}</td></tr>")
+    return "".join(out)
+
+
+def _section_mlx_issues(tagged: dict) -> str:
+    """Phones a person marked in MultiLogin that no Airtable field records.
+
+    The `Issue` tag is applied by hand, in the workspace where the VAs actually
+    work; the bot's own flag is `Needs Human Check` in Airtable, and the mirror
+    between them runs one way only. So a tag put on by hand reaches nothing --
+    not this page, not `posting_planner`, not the Telegram alert. It is the one
+    kind of "this phone is broken" the system could not see.
+
+    Warm-up phones get the table because they are the ones nothing else can
+    catch: no queue rows to fail, no flag to tick, so neither the flagged list
+    above nor the abandoned rows on the Posts tab can ever mention them. Parked
+    phones get a single line -- the tag there is usually the note saying why
+    somebody switched it off, and listing eighteen of those as work would bury
+    the ones that are work.
+    """
+    if tagged.get("error"):
+        return (f'<h2>Tagged in MultiLogin</h2><p class="sub">'
+                f'<span class="pill warn">could not read MultiLogin</span> '
+                f'<span class="mono">{_e(tagged["error"])}</span> — '
+                f'hand-applied tags were not checked this refresh.</p>')
+
+    warmup = tagged.get("warmup") or []
+    parked = tagged.get("parked") or []
+    other = tagged.get("other") or []
+    if not (warmup or parked or other):
+        return ('<h2>Tagged in MultiLogin</h2><p class="empty">Every phone carrying the '
+                '<span class="mono">Issue</span> tag is also flagged in Airtable, so it is '
+                'already in the list above.</p>')
+
+    header = ('<tr><th>Profile</th><th>Serial</th><th>Status</th><th>Warm-up</th>'
+              '<th>Last run</th><th>Other tags</th></tr>')
+    parts = ['<h2>Tagged <span class="mono">Issue</span> in MultiLogin, '
+             'not flagged in Airtable</h2>',
+             '<p class="sub">Somebody marked these phones in the MultiLogin workspace. '
+             'Nothing in the bot reads that tag, so until the checkbox is ticked in Airtable '
+             'they are invisible to every other list on this page.</p>']
+
+    if warmup:
+        parts.append(
+            f'<h3>In warm-up — {len(warmup)} phone(s)</h3>'
+            f'<div class="howto"><dl>'
+            f'<dt>What happened</dt><dd>These phones are part-way through the warm-up and '
+            f'somebody tagged them <span class="mono">Issue</span> in MultiLogin. The '
+            f'warm-up loop does not read tags, so it will keep running them as if nothing '
+            f'were wrong — and because a warming phone has no posts queued, nothing else '
+            f'can notice either.</dd>'
+            f'<dt>What to do</dt><dd>Open the phone and see what the tag was about. If it '
+            f'still needs a person, tick <span class="mono">Needs Human Check</span> on that '
+            f'profile in Airtable (Profiles (Cloning)) — that is what stops the loops and '
+            f'puts it in the list above. If it is fine now, remove the tag in MultiLogin.</dd>'
+            f'<dt>Why it is not already up there</dt><dd>The bot copies the Airtable checkbox '
+            f'onto the MultiLogin tag, never the other way round. Ticking a box because '
+            f'somebody added a tag would also re-tick it every time a VA cleared one.</dd>'
+            f'</dl></div>'
+            f'<div class="scroll"><table>{header}{_rows_mlx_issue(warmup)}</table></div>')
+
+    if other:
+        parts.append(
+            f'<h3>Active, not warming up — {len(other)} phone(s)</h3>'
+            f'<p class="sub">Switched on and tagged, but carrying no flag — so every other '
+            f'list on this page reads them as healthy. Mostly unassigned blanks.</p>'
+            f'<div class="scroll"><table>{header}{_rows_mlx_issue(other)}</table></div>')
+
+    if parked:
+        names = ", ".join(f"<span class='mono'>{_e(e['name'])}</span>" for e in parked[:12])
+        more = f" and {len(parked) - 12} more" if len(parked) > 12 else ""
+        parts.append(
+            f'<h3>Already parked — {len(parked)} phone(s)</h3>'
+            f'<p class="sub">Tagged and <span class="mono">Inactive</span>, so the bot is '
+            f'already ignoring them and the tag is most likely the note explaining why. '
+            f'Listed for completeness, not as work: {names}{more}.</p>')
+
+    return "".join(parts)
+
+
 def _section_needs_human(data: dict) -> str:
     """Everything waiting on a person, in one place, for the people who do it.
 
@@ -967,11 +1058,16 @@ def _section_needs_human(data: dict) -> str:
         reasons.setdefault(profile["reason"], []).append(profile)
 
     waiting = handoff.get("profiles") or []
+    tagged = data.get("mlx_issues") or {}
+    tagged_warmup = tagged.get("warmup") or []
     tiles = [
         _tile("Ready for hand-off", len(waiting), "warmed up, need bio / picture / first post",
               "warn" if waiting else "ok"),
         _tile("Need you", len(profiles), "profiles flagged for review",
               "bad" if profiles else "ok"),
+        _tile("Tagged in warm-up", len(tagged_warmup),
+              "marked Issue in MultiLogin, never flagged",
+              "bad" if tagged_warmup else "ok"),
         _tile("Being checked", verifying,
               "posted, waiting on confirmation", "warn" if verifying else "ok"),
         _tile("Retrying by itself", len(retrying),
@@ -979,11 +1075,14 @@ def _section_needs_human(data: dict) -> str:
     ]
     parts = [
         '<p class="lead">Everything waiting on a person, in one place. '
-        'Two kinds of work: profiles that have finished their warm-up and need setting up, '
-        'and accounts the bot has given up on. Everything else it handles on its own.</p>',
+        'Three kinds of work: profiles that have finished their warm-up and need setting up, '
+        'accounts the bot has given up on, and phones somebody tagged '
+        '<span class="mono">Issue</span> in MultiLogin that the bot never heard about. '
+        'Everything else it handles on its own.</p>',
         f'<div class="grid">{"".join(tiles)}</div>',
         '<h2>Finished warm-up — ready for a person</h2>',
         _section_handoff(handoff),
+        _section_mlx_issues(tagged),
     ]
 
     if not profiles:
@@ -1920,7 +2019,12 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     # The tab badge is the size of the worklist, so it has to count both kinds
     # of work on it -- a badge that only counted the broken ones would read 0
     # with twenty profiles sitting finished and unclaimed.
-    todo = len((data.get("needs_human") or {}).get("profiles") or []) + handoff
+    # The hand-tagged warm-up phones count too: they are somebody's finding that
+    # no loop will ever act on, so if the badge ignored them the tab would read
+    # 0 with twenty-one phones marked in the workspace people work in.
+    tagged_warmup = len((data.get("mlx_issues") or {}).get("warmup") or [])
+    todo = (len((data.get("needs_human") or {}).get("profiles") or [])
+            + handoff + tagged_warmup)
     badge = f'<span class="count">{todo}</span>' if todo else ""
     # Only the rows nothing will retry. Pending and Verifying are the loop
     # working; badging them would put a permanent number on a healthy day.

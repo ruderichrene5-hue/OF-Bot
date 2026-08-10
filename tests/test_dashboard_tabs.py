@@ -404,3 +404,118 @@ class BannerTest(unittest.TestCase):
         page = report_html.render(data)
         self.assertIn("need a person", page)
         self.assertIn("needs attention", page)
+
+
+def _mlx(api_id="L1", serial="262894", tags=("Created", "Issue")):
+    """One row shaped like the MultiLogin mobile-profile list."""
+    return {"id": api_id, "serial_no": serial, "serial_name": "Blank (12)",
+            "tags": list(tags)}
+
+
+class MlxOnlyIssuesTest(unittest.TestCase):
+    """Hand-applied `Issue` tags, which reach no Airtable field at all.
+
+    The mirror runs Airtable -> MultiLogin only, so a tag a VA adds in the
+    workspace is invisible to every list the bot draws. On 2026-08-10 that was
+    56 phones, 21 of them mid-warm-up -- and a warming phone has no queue rows
+    to fail and no flag to tick, so nothing else could ever have surfaced it.
+    """
+
+    def test_a_tagged_warmup_profile_is_listed(self):
+        out = report.mlx_only_issues([_profile(launch_id="L1")], [_mlx()])
+        self.assertEqual([e["name"] for e in out["warmup"]], ["Blank (5)"])
+        self.assertEqual(out["counts"]["unflagged"], 1)
+
+    def test_a_tagged_profile_already_flagged_is_not_repeated(self):
+        """It is in the flagged list above; the tag agreeing is the mirror
+        working, not a second errand."""
+        out = report.mlx_only_issues([_profile(launch_id="L1", needs_human=True)], [_mlx()])
+        self.assertEqual(out["warmup"], [])
+        self.assertEqual(out["counts"]["flagged"], 1)
+
+    def test_an_untagged_profile_is_not_listed(self):
+        out = report.mlx_only_issues([_profile(launch_id="L1")],
+                                     [_mlx(tags=("Created",))])
+        self.assertEqual((out["warmup"], out["parked"], out["other"]), ([], [], []))
+
+    def test_the_tag_is_matched_case_insensitively(self):
+        """MLX tag names are free text; `tag_ids_by_name` lower-cases too."""
+        out = report.mlx_only_issues([_profile(launch_id="L1")], [_mlx(tags=("ISSUE",))])
+        self.assertEqual(len(out["warmup"]), 1)
+
+    def test_a_parked_profile_is_filed_apart_from_the_worklist(self):
+        """Tagged and Inactive: the bot already ignores it and the tag is
+        usually the note saying why. Eighteen of those would bury the real work."""
+        row = _profile(name="Jasmin 10", launch_id="L1", status="Inactive")
+        row["warmup_started"] = ""
+        out = report.mlx_only_issues([row], [_mlx()])
+        self.assertEqual([e["name"] for e in out["parked"]], ["Jasmin 10"])
+        self.assertEqual(out["warmup"], [])
+
+    def test_an_active_non_warmup_profile_is_its_own_group(self):
+        row = _profile(name="Blank (7)", launch_id="L1", status="Active")
+        row["warmup_started"] = ""
+        out = report.mlx_only_issues([row], [_mlx()])
+        self.assertEqual([e["name"] for e in out["other"]], ["Blank (7)"])
+
+    def test_warmup_wins_over_parked(self):
+        """The campaign is the more specific fact; Status is in the row anyway."""
+        out = report.mlx_only_issues(
+            [_profile(launch_id="L1", status="Inactive")], [_mlx()])
+        self.assertEqual(len(out["warmup"]), 1)
+        self.assertEqual(out["parked"], [])
+
+    def test_the_issue_tag_itself_is_not_echoed_back_as_context(self):
+        out = report.mlx_only_issues([_profile(launch_id="L1")], [_mlx()])
+        self.assertEqual(out["warmup"][0]["tags"], ["Created"])
+
+    def test_an_unread_inventory_says_so_instead_of_reading_as_clean(self):
+        """An empty inventory looks exactly like 'nobody tagged anything', and a
+        worklist that silently empties on an outage is worse than one that says
+        why -- the same refusal `sync_issue_tags` makes."""
+        out = report.mlx_only_issues([_profile(launch_id="L1")], [])
+        self.assertTrue(out["error"])
+        self.assertEqual(out["warmup"], [])
+
+    def test_a_profile_with_no_api_id_cannot_be_matched(self):
+        out = report.mlx_only_issues([_profile(launch_id=None)], [_mlx()])
+        self.assertEqual(out["counts"]["tagged"], 0)
+
+
+class MlxIssuesOnTheTabTest(unittest.TestCase):
+    """The point of the whole change: it has to be on the page a VA opens."""
+
+    def _data(self, **over):
+        data = {"needs_human": {"rows": [], "retrying": [], "profiles": [], "error": ""},
+                "handoff": {"profiles": [], "done": 0, "plan_days": 4},
+                "queue": {"by_status": {}},
+                "mlx_issues": report.mlx_only_issues([_profile(launch_id="L1")], [_mlx()])}
+        data.update(over)
+        return data
+
+    def test_a_tagged_warmup_phone_reaches_the_needs_human_tab(self):
+        html = report_html._section_needs_human(self._data())
+        self.assertIn("Blank (5)", html)
+        self.assertIn("MultiLogin", html)
+
+    def test_the_section_says_what_to_do_not_just_that_it_is_tagged(self):
+        html = report_html._section_needs_human(self._data())
+        self.assertIn("Needs Human Check", html)
+
+    def test_it_counts_towards_the_tab_badge(self):
+        """A badge that ignored these would read 0 with 21 phones marked."""
+        from tests.test_report import RenderTest
+        page = report_html.render(RenderTest()._data(
+            mlx_issues=report.mlx_only_issues([_profile(launch_id="L1")], [_mlx()])))
+        self.assertRegex(page, r'Needs human<span class="count">1</span>')
+
+    def test_a_multilogin_outage_is_visible_rather_than_silently_empty(self):
+        html = report_html._section_needs_human(
+            self._data(mlx_issues=report.mlx_only_issues([_profile()], [])))
+        self.assertIn("could not read MultiLogin", html)
+
+    def test_nothing_tagged_says_so(self):
+        html = report_html._section_needs_human(self._data(
+            mlx_issues=report.mlx_only_issues([_profile(launch_id="L1", needs_human=True)],
+                                              [_mlx()])))
+        self.assertIn("also flagged in Airtable", html)

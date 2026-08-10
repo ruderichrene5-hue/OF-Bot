@@ -105,6 +105,7 @@ class Digest:
     stale: int = 0                                    # flagged longer than STALE_FLAG_DAYS
     parked_unflagged: list = field(default_factory=list)   # cleared, but Status Inactive
     blocked_warmup: list = field(default_factory=list)
+    tagged_warmup: list = field(default_factory=list)      # Issue tag in MLX, no flag
     due: int = 0
     posted: int = 0
     failed: int = 0
@@ -114,11 +115,18 @@ class Digest:
     def quiet(self) -> bool:
         """Nothing waiting and nothing stuck -- worth saying so in one line."""
         return not self.flagged and not self.parked_unflagged \
-               and not self.blocked_warmup
+               and not self.blocked_warmup and not self.tagged_warmup
 
 
-def build_digest(profiles, queue_rows, now=None) -> Digest:
-    """Compose the day's numbers. Pure: rows in, summary out."""
+def build_digest(profiles, queue_rows, now=None, tagged_warmup=None) -> Digest:
+    """Compose the day's numbers. Pure: rows in, summary out.
+
+    `tagged_warmup` is `report.mlx_only_issues(...)["warmup"]` -- warm-up phones
+    somebody tagged `Issue` in MultiLogin without ticking anything in Airtable.
+    Passed in rather than read here because it needs the MultiLogin inventory,
+    and the digest's whole shape is that composition takes rows and returns a
+    string. Omitted, it is simply absent from the message.
+    """
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=WINDOW_HOURS)
     out = Digest()
@@ -148,6 +156,9 @@ def build_digest(profiles, queue_rows, now=None) -> Digest:
 
     out.by_reason = reasons.most_common()
     out.blocked_warmup = blocked_warmup(profiles)
+    out.tagged_warmup = sorted(
+        str(e.get("name") or "?") if isinstance(e, dict) else str(e)
+        for e in (tagged_warmup or []))
 
     for row in queue_rows or []:
         f = row.get("fields", row) or {}
@@ -187,6 +198,17 @@ def format_digest(d: Digest) -> str:
         lines += ["", f"⚠️ Un-flagged but still switched off, so still not posting: "
                       f"{names}{more}. Set <b>Status</b> back to <b>Active</b> in Airtable."]
 
+    if d.tagged_warmup:
+        n = len(d.tagged_warmup)
+        lines += ["", f"🏷 <b>{n} warm-up phone{'' if n == 1 else 's'} tagged "
+                      f"<code>Issue</code> in MultiLogin</b> with nothing ticked in "
+                      f"Airtable. Somebody marked them and no loop reads that tag, so "
+                      f"the warm-up keeps running them. Check the phone, then tick "
+                      f"<b>Needs Human Check</b> in Airtable if it still needs a person "
+                      f"— or clear the tag in MultiLogin if it does not.",
+                  "e.g. " + ", ".join(f"<b>{name}</b>" for name in _sample(d.tagged_warmup))
+                  + (f" … {n} in total" if n > 5 else "")]
+
     if d.blocked_warmup:
         n = len(d.blocked_warmup)
         lines += ["", f"🕓 <b>{n} warm-up phone{'' if n == 1 else 's'} cannot finish "
@@ -225,7 +247,21 @@ def run_digest(airtable, notifier=None, dry_run: bool = True, logger=None,
     profiles = airtable.list_profile_rows() if hasattr(airtable, "list_profile_rows") \
         else airtable._list_table(at.TABLE_PROFILES)
     queue_rows = airtable._list_table(at.TABLE_POSTING_QUEUE)
-    d = build_digest(profiles, queue_rows, now=now)
+
+    # Its own try, and a soft failure: the hand-applied tags need MultiLogin and
+    # a second, differently-shaped read of the same table, and neither is worth
+    # losing the whole digest over. Missing, the section is simply absent.
+    tagged: list = []
+    try:
+        from adb_bot.automation.report import mlx_inventory, mlx_only_issues
+        tagged = mlx_only_issues(airtable.profile_overview(),
+                                 mlx_items=mlx_inventory()).get("warmup") or []
+    except Exception as exc:
+        if logger is not None:
+            logger.info("digest: hand-applied tags not read (%s: %s)",
+                        type(exc).__name__, exc)
+
+    d = build_digest(profiles, queue_rows, now=now, tagged_warmup=tagged)
     body = format_digest(d)
 
     if logger is not None:

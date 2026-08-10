@@ -191,3 +191,58 @@ class BlockedWarmupTest(unittest.TestCase):
         sample = body.split("e.g. ")[1].split("\n")[0]
         self.assertEqual(sample.count("Blank (1)"), 1)
         self.assertIn("3 warm-up phones", body)
+
+
+class TaggedWarmupTest(unittest.TestCase):
+    """Warm-up phones marked `Issue` in MultiLogin with nothing ticked here.
+
+    The mirror runs Airtable -> MultiLogin only, so a tag a VA applies by hand
+    reaches no field the bot reads. For a warming phone that is total silence:
+    it has no queue rows to fail and no flag to raise, so this is the only line
+    that can ever mention it.
+    """
+
+    def _tagged(self, *names):
+        return [{"name": n, "serial": "1", "status": "Active"} for n in names]
+
+    def test_the_names_are_carried_into_the_digest(self):
+        d = digest.build_digest([], [], now=NOW,
+                                tagged_warmup=self._tagged("Blank (12)", "Blank (8)"))
+        self.assertEqual(d.tagged_warmup, ["Blank (12)", "Blank (8)"])
+
+    def test_it_says_what_to_do_not_just_the_count(self):
+        d = digest.build_digest([], [], now=NOW, tagged_warmup=self._tagged("Blank (12)"))
+        body = digest.format_digest(d)
+        self.assertIn("Blank (12)", body)
+        self.assertIn("MultiLogin", body)
+        self.assertIn("Needs Human Check", body)
+
+    def test_tagged_alone_means_the_day_is_not_quiet(self):
+        """Twenty-one marked phones and a message saying 'nothing waiting on a
+        person' is the exact failure this was written to end."""
+        d = digest.build_digest([], [], now=NOW, tagged_warmup=self._tagged("Blank (12)"))
+        self.assertFalse(d.quiet)
+        self.assertNotIn("nothing waiting on a person", digest.format_digest(d))
+
+    def test_omitting_it_leaves_the_section_out_entirely(self):
+        """MultiLogin being unreadable costs this section, not the digest."""
+        d = digest.build_digest([], [], now=NOW)
+        self.assertEqual(d.tagged_warmup, [])
+        self.assertNotIn("tagged", digest.format_digest(d).lower())
+
+    def test_one_phone_reads_as_singular(self):
+        body = digest.format_digest(digest.build_digest(
+            [], [], now=NOW, tagged_warmup=self._tagged("Blank (12)")))
+        self.assertIn("1 warm-up phone tagged", body)
+
+    def test_the_example_list_does_not_repeat_a_name(self):
+        """MLX names are not unique -- this workspace has three `Blank (5)`."""
+        d = digest.build_digest([], [], now=NOW,
+                                tagged_warmup=self._tagged("Blank (1)", "Blank (1)", "Blank (2)"))
+        self.assertEqual(len(d.tagged_warmup), 3)
+        sample = digest.format_digest(d).split("e.g. ")[1].split("\n")[0]
+        self.assertEqual(sample.count("Blank (1)"), 1)
+
+    def test_plain_strings_are_accepted_too(self):
+        d = digest.build_digest([], [], now=NOW, tagged_warmup=["Blank (12)"])
+        self.assertEqual(d.tagged_warmup, ["Blank (12)"])

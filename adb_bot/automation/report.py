@@ -2135,6 +2135,96 @@ def handoff_queue(profiles, warmup_progress: dict) -> dict:
     return out
 
 
+def mlx_only_issues(profiles, mlx_items=None) -> dict:
+    """Phones carrying MultiLogin's `Issue` tag that Airtable does not flag.
+
+    The dashboard's worklist is `{Needs Human Check}=1` on Airtable, and
+    `issue_tags` mirrors that checkbox *onto* the MultiLogin tag. The mirror is
+    deliberately one-way -- see that module on why a reverse sync would be
+    wrong -- which leaves a blind spot nothing was reporting: a tag applied **by
+    hand** in the workspace, where the VAs actually work, reaches no system at
+    all. On 2026-08-10 that was 85 phones tagged `Issue` in MultiLogin against
+    29 flagged in Airtable: 56 phones somebody had marked and nothing counted.
+
+    Twenty-one of the 56 are in the warm-up, which is what makes this worth a
+    section rather than a log line. A warm-up phone is invisible twice over --
+    it has no queue rows to fail and no `Needs Human Check` to tick, so neither
+    the flagged list nor the abandoned-rows list can ever mention it, and the
+    only trace that a person found something wrong with it is the tag they
+    added.
+
+    Three groups, because they are three different errands:
+
+    * **warmup** -- in the campaign (`Warm-up Started` is set). Somebody marked
+      it mid-warm-up and no loop will act on it. This is the worklist.
+    * **parked** -- `Status = Inactive`. Deliberately switched off, and the tag
+      is usually the note explaining why. Reported as names, not as work.
+    * **other** -- Active, not warming up. Mostly staging blanks; listed because
+      "Active and tagged but not flagged" is the state that reads as fine
+      everywhere else.
+
+    Read-only, and the classification never ticks anything: turning these into
+    real flags would put 56 profiles past `posting_planner`'s hard stop on the
+    strength of a hand-applied tag, and re-tick the box the moment a VA cleared
+    it while the tag remained. Showing them is the whole fix.
+    """
+    from adb_bot.automation.issue_tags import ISSUE_TAG
+    from adb_bot.automation.warmup_state import tags_by_launch_id
+    from adb_bot.clients import airtable as at
+
+    out = {"warmup": [], "parked": [], "other": [], "error": "",
+           "counts": {"tagged": 0, "flagged": 0, "unflagged": 0}}
+    if not mlx_items:
+        # Same refusal as the tag sweep itself: an unread inventory looks
+        # exactly like "nobody has tagged anything", and a worklist that
+        # silently empties on an outage is worse than one that says why.
+        out["error"] = "could not read MultiLogin; tags not checked this refresh"
+        return out
+
+    by_launch = tags_by_launch_id(mlx_items)
+    wanted = ISSUE_TAG.strip().lower()
+
+    for profile in profiles or []:
+        launch_id = str(profile.get("launch_id") or "").strip()
+        if not launch_id:
+            continue
+        held = tuple(by_launch.get(launch_id) or ())
+        if wanted not in {str(tag).strip().lower() for tag in held}:
+            continue
+        out["counts"]["tagged"] += 1
+        if profile.get("needs_human"):
+            # Already on the worklist above; the tag agreeing with the flag is
+            # the mirror working, not a finding.
+            out["counts"]["flagged"] += 1
+            continue
+        out["counts"]["unflagged"] += 1
+        entry = {
+            "name": profile.get("name") or "(unnamed)",
+            "serial": profile.get("serial") or "",
+            "launch_id": launch_id,
+            "status": profile.get("status") or at.STATUS_SELECT_ACTIVE,
+            "day": profile.get("warmup_day") or 0,
+            "stage": profile.get("warmup_stage") or "",
+            "last_run": profile.get("warmup_last_run") or "",
+            # The other tags are the context a person left behind -- `Created`,
+            # `Second Account`, `Link` -- and reading them beside the name is
+            # usually enough to know which errand this is.
+            "tags": [str(tag) for tag in held if str(tag).strip().lower() != wanted],
+        }
+        # Warm-up first, and before the parked check: the campaign is the more
+        # specific fact about a phone, and `Status` is shown in the row anyway.
+        if profile.get("warmup_started"):
+            out["warmup"].append(entry)
+        elif entry["status"] == at.STATUS_SELECT_INACTIVE:
+            out["parked"].append(entry)
+        else:
+            out["other"].append(entry)
+
+    for group in ("warmup", "parked", "other"):
+        out[group].sort(key=lambda e: e["name"].lower())
+    return out
+
+
 def folder_breakdown(profiles, mlx_items=None, folder_names=None,
                      warmup_progress: dict = None) -> dict:
     """Every MultiLogin folder, and what its phones are doing.
@@ -3212,6 +3302,8 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         "content": {"ready": 0, "drawable": 0, "held": 0, "by_model": {}, "held_by_model": {}},
         "needs_human": {"rows": [], "retrying": [], "profiles": [], "error": ""},
         "handoff": {"profiles": [], "done": 0, "plan_days": 0},
+        "mlx_issues": {"warmup": [], "parked": [], "other": [], "error": "",
+                       "counts": {"tagged": 0, "flagged": 0, "unflagged": 0}},
         "folders": {"folders": [], "totals": {}, "known_folders": 0, "error": ""},
         "posts_today": {"posts": [], "by_status": {}, "by_profile": [], "total": 0,
                         "clips": 0, "day": day, "reused_clips": []},
@@ -3296,6 +3388,10 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
                 # disagree about the same profile mid-refresh.
                 overview = airtable.profile_overview()
                 data["handoff"] = handoff_queue(overview, data["warmup_progress"])
+                # Same listing and the same memoised inventory `folders` uses
+                # below, so the hand-tagged worklist costs no extra call.
+                data["mlx_issues"] = mlx_only_issues(
+                    overview, mlx_items=_slow("mlx_inventory", mlx_inventory))
                 data["folders"] = folder_breakdown(
                     overview, mlx_items=_slow("mlx_inventory", mlx_inventory),
                     folder_names=_slow("mlx_folders", mlx_folders),
