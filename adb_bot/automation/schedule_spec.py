@@ -217,6 +217,12 @@ WHAT_IT_DOES = {
                 "them flagged. The expensive loop: it is the one that pins the CPU.",
     "mlx-sync": "Sweeps the MultiLogin inventory into Airtable overnight so the "
                 "Profiles table matches the phones that actually exist.",
+    "digest": "Sends one message a day to the VAs' Telegram topic: how many phones "
+              "are waiting on a person, broken down by reason, how long the oldest "
+              "has been waiting, and what posted in the last 24 hours. It reads "
+              "Airtable and writes nothing; if Telegram is not configured it does "
+              "nothing at all. The per-phone alert is a different loop -- this one "
+              "is the backlog, so a problem nobody picked up gets louder with age.",
     "cleanup": "Deletes media the bot has finished with (older than 2 days). It is "
                "the only thing standing between the spoofed-video folder and a "
                "full disk.",
