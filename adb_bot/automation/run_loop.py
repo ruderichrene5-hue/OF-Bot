@@ -35,7 +35,7 @@ from adb_bot.core import locks, shutdown
 from adb_bot.core.logger import get_logger
 
 LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery", "warmup",
-         "warmup-state", "mlx-sync", "cleanup", "second-accounts")
+         "warmup-state", "issue-tags", "mlx-sync", "cleanup", "second-accounts")
 # `doctor` isn't a loop -- it's the preflight check, runnable the same way.
 # `report` renders the operational page; like `doctor` it is a command rather
 # than a loop, and unlike `doctor` it is not in the recommended set, so it never
@@ -260,6 +260,54 @@ def _run_warmup_state(args, logger) -> int:
         for line in result.changes:
             logger.info("  would set %s", line)
     return 1 if result.errors else 0
+
+
+def _run_issue_tags(args, logger) -> int:
+    """`issue-tags`: put Airtable's `Needs Human Check` onto the MLX `Issue` tag.
+
+    Its own loop rather than a step inside `recovery` or `mlx-sync`. `recovery`
+    runs out of /opt/adbbot-recovery, a checkout that has no `tags.py` and takes
+    no MultiLogin token, so folding it in would couple an Airtable-only pass to
+    MLX availability. `mlx-sync` fires once a day, which would leave a profile
+    flagged at 00:05 invisible in MultiLogin for 23 hours -- the whole point is
+    that the person opening the workspace sees today's flags.
+
+    Dry-run by default like every other pass here. A dry run makes **no** MLX
+    write calls at all: it does not even resolve the tag id, because that would
+    create the tag on a workspace that had not got it.
+    """
+    from adb_bot.automation import issue_tags
+    from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
+    from adb_bot.clients.multilogin.tags import MultiloginTagClient
+
+    airtable = _airtable(args.base_id, args.airtable_token)
+    token = _mlx_token(args.mlx_token)
+
+    # MultiLogin being unreachable costs this pass and nothing else: the client
+    # stays None and `sync_issue_tags` reports the reason instead of raising.
+    tag_client = None
+    mlx_items = []
+    if token:
+        try:
+            mlx_items = MultiloginMobileListClient(token).list_mobile_profiles()
+            tag_client = MultiloginTagClient(token)
+        except Exception as exc:
+            logger.warning("issue-tags: MultiLogin unreachable (%s); nothing tagged this tick", exc)
+    else:
+        logger.warning("issue-tags: no MultiLogin token; nothing tagged this tick")
+
+    result = issue_tags.sync_issue_tags(
+        airtable, tag_client=tag_client, mlx_items=mlx_items,
+        dry_run=not args.apply, logger=logger,
+        adopt_existing=args.adopt_existing)
+    if not args.apply:
+        logger.info("[DRY-RUN] issue tags: %s", result.summary())
+        for line in result.changes:
+            logger.info("  would %s", line)
+    # A MultiLogin outage is reported, not failed on: this pass has no deadline
+    # and the next tick will pick it up. Exit 0 keeps the unit green so a real
+    # regression still stands out in `systemctl --failed`.
+    return 0
 
 
 def _run_pipeline(args, logger) -> int:
@@ -617,6 +665,7 @@ _DISPATCH = {
     "recheck": _run_recheck,
     "warmup": _run_warmup,
     "warmup-state": _run_warmup_state,
+    "issue-tags": _run_issue_tags,
     "pipeline": _run_pipeline,
     "queue": _run_queue,
     "retry": _run_retry,
@@ -681,6 +730,13 @@ def main(argv=None) -> int:
     parser.add_argument("--warmup-tag", default=None,
                         help="warmup --targets profiles: the MultiLogin tag that marks a profile "
                              "as ready to warm up (default 'Created').")
+    parser.add_argument("--adopt-existing", action="store_true",
+                        help="issue-tags: treat every profile already carrying the MLX 'Issue' "
+                             "tag as one the bot put there, so an unflagged one has it "
+                             "REMOVED. Off by default: the tag has ~33 hand-applied uses on "
+                             "parked profiles that were never flagged in Airtable, and which "
+                             "of those were deliberate is not recoverable from Airtable. Only "
+                             "turn this on having decided those tags are stale.")
     parser.add_argument("--skip-staging", action="store_true",
                         help="mlx-sync: skip staging profiles that belong to no model.")
     parser.add_argument("--out", default=None,

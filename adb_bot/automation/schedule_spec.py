@@ -29,8 +29,8 @@ PLANNED_LOOPS = ("queue", "retry")
 
 # Everything an unattended server should have scheduled.
 RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery",
-                     "warmup", "warmup-state", "mlx-sync", "cleanup", "doctor",
-                     "reap-phones", "second-accounts")
+                     "warmup", "warmup-state", "issue-tags", "mlx-sync", "cleanup",
+                     "doctor", "reap-phones", "second-accounts")
 
 # Recommended cadence in minutes. The UI can override per loop; these are what
 # `install_units.sh` installs. Ordered by the flow a reel goes through, because
@@ -76,6 +76,12 @@ RECOMMENDED_INTERVALS = {
     # tag by hand. Half-hourly because it is a reconciler -- two Airtable list
     # calls and one MLX list, then nothing at all unless something moved.
     "warmup-state": 30,
+    # Mirrors Airtable's Needs Human Check onto the MultiLogin `Issue` tag.
+    # Paced to the person, like `recovery`: somebody clearing the checkbox
+    # expects the tag to follow within minutes, and somebody opening the
+    # workspace expects this morning's flags to be on it. 15 min is one filtered
+    # Airtable read plus one MLX list, then nothing at all unless a flag moved.
+    "issue-tags": 15,
     # Full MultiLogin -> Airtable inventory sweep: expensive, and nothing during
     # the day depends on it being fresher than daily. Runs at 23:30 (see
     # DEFAULT_DAILY_START), after the posting day.
@@ -126,6 +132,7 @@ DESCRIPTIONS = {
     "recovery": "ADB bot recovery loop (un-flagged profiles -> retryable again)",
     "warmup": "ADB bot warmup loop (lifecycle Day 1-4)",
     "warmup-state": "ADB bot warm-up state publisher (Run Log -> Airtable + MLX tags)",
+    "issue-tags": "ADB bot issue-tag mirror (Needs Human Check -> MLX 'Issue' tag)",
     "pipeline": "ADB bot spoofing pipeline (Drive/raw -> Spoof Variants)",
     "mlx-sync": "ADB bot MultiLogin->Airtable profile sync",
     "cleanup": "ADB bot cleanup loop (old used media)",
@@ -163,6 +170,11 @@ WHAT_IT_DOES = {
                     "MultiLogin tag, reading the Run Log rather than the calendar — "
                     "so a profile whose day has advanced without the runs landing "
                     "shows the day it actually finished, not the day it is on.",
+    "issue-tags": "Puts a profile's Needs Human Check onto its MultiLogin 'Issue' "
+                  "tag, and takes it off again when you clear the box — so the "
+                  "phones waiting on you are visible in the workspace you fix them "
+                  "in. It only ever removes tags it put there itself; an 'Issue' "
+                  "somebody applied by hand is left alone.",
     "pipeline": "Spoofs new raw clips from Drive — one unique encode per active "
                 "profile, because two accounts posting the same file is what gets "
                 "them flagged. The expensive loop: it is the one that pins the CPU.",
