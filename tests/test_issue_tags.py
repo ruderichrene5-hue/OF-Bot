@@ -638,7 +638,7 @@ class TelegramNotifyTest(unittest.TestCase):
             [("Nikki 12", "Retries Exhausted"), ("Jil 6", "No Recent Success")],
             notifier=n))
         body = n.sent[0]
-        self.assertIn("2 profile(s) need a person", body)
+        self.assertIn("2 profiles need a person", body)
         self.assertIn("Nikki 12", body)
         self.assertIn("Retries Exhausted", body)
         self.assertIn("Jil 6", body)
@@ -686,3 +686,23 @@ class TelegramTopicTest(unittest.TestCase):
 
     def test_no_topic_means_no_thread_field(self):
         self.assertNotIn("message_thread_id", self._payload(topic_id=""))
+
+
+class TelegramWordingTest(unittest.TestCase):
+    """A line the VAs read hundreds of times should read like English."""
+
+    class _N:
+        configured = True
+        def __init__(self): self.sent = []
+        def send(self, text, logger=None): self.sent.append(text); return True
+
+    def _headline(self, count):
+        n = self._N()
+        issue_tags.notify_newly_flagged([(f"P{i}", None) for i in range(count)], notifier=n)
+        return n.sent[0].splitlines()[0]
+
+    def test_one_profile_is_singular(self):
+        self.assertIn("1 profile needs a person", self._headline(1))
+
+    def test_several_profiles_are_plural(self):
+        self.assertIn("3 profiles need a person", self._headline(3))

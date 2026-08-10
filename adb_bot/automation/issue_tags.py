@@ -547,7 +547,9 @@ def notify_newly_flagged(flagged: list, logger=None, notifier=None) -> bool:
     if not notifier.configured:
         return False
 
-    lines = [f"⚠️ <b>{len(flagged)} profile(s) need a person</b>", ""]
+    n = len(flagged)
+    lines = [f"⚠️ <b>{n} profile{'' if n == 1 else 's'} "
+             f"need{'s' if n == 1 else ''} a person</b>", ""]
     for name, reason in flagged:
         lines.append(f"• <b>{name}</b>" + (f" — {reason}" if reason else ""))
     lines += [
