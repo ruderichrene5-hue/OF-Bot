@@ -349,7 +349,7 @@ def resolve_issue_tag_id(tag_client) -> str:
 
 def sync_issue_tags(airtable, tag_client=None, mlx_items=None, dry_run: bool = True,
                     logger=None, app_dir=None, adopt_existing: bool = False,
-                    now=None, profiles=None) -> IssueTagReport:
+                    now=None, profiles=None, notifier=None) -> IssueTagReport:
     """Make the MultiLogin `Issue` tag agree with Airtable's flag. Idempotent.
 
     `tag_client` is optional and `mlx_items` may be empty, for the same reason
@@ -426,6 +426,7 @@ def sync_issue_tags(airtable, tag_client=None, mlx_items=None, dry_run: bool = T
 
     ledger_dirty = False
     consecutive_failures = 0
+    newly_flagged: list = []
 
     for state in states:
         report.checked += 1
@@ -489,6 +490,12 @@ def sync_issue_tags(airtable, tag_client=None, mlx_items=None, dry_run: bool = T
                 ledger[state.launch_id] = {"name": state.name, "at": stamp,
                                            "reason": state.reason}
                 ledger_dirty = True
+                # The transition into flagged, and the only place it is known
+                # exactly once: the ledger write above is what makes the next
+                # sweep call this profile "unchanged". Collect here, send one
+                # message at the end -- ten profiles failing in the same sweep
+                # is one notification, not ten.
+                newly_flagged.append((state.name, state.reason))
             else:
                 tag_client.unassign(state.launch_id, [tag_id])
                 report.untagged += 1
@@ -513,8 +520,49 @@ def sync_issue_tags(airtable, tag_client=None, mlx_items=None, dry_run: bool = T
                 "tags written this pass are not recorded as ours" if ledger_dirty
                 else "stale-row warnings will repeat next tick"))
 
+    if not dry_run and newly_flagged:
+        notify_newly_flagged(newly_flagged, logger=logger, notifier=notifier)
+
     _log(logger, report, dry_run)
     return report
+
+
+def notify_newly_flagged(flagged: list, logger=None, notifier=None) -> bool:
+    """Tell the group chat which profiles just started needing a person.
+
+    Sent on the *transition* only -- the caller collects these at the moment the
+    ledger records a tag, so a profile that has been flagged all night produces
+    one message, not one every fifteen minutes. That is the same discipline
+    `loop_watchdog` applies to stall alerts, and for the same reason: a channel
+    that repeats itself stops being read.
+
+    Silent and harmless when Telegram is not configured, which is the state of
+    every box that has not been given a token.
+    """
+    if not flagged:
+        return False
+    if notifier is None:
+        from adb_bot.clients.telegram import TelegramNotifier
+        notifier = TelegramNotifier()
+    if not notifier.configured:
+        return False
+
+    lines = [f"⚠️ <b>{len(flagged)} profile(s) need a person</b>", ""]
+    for name, reason in flagged:
+        lines.append(f"• <b>{name}</b>" + (f" — {reason}" if reason else ""))
+    lines += [
+        "",
+        f"They are tagged <code>{ISSUE_TAG}</code> in MultiLogin — filter on it "
+        f"to find them.",
+        "When it is fixed, untick <b>Needs Human Check</b> on that profile in "
+        "Airtable → Profiles (Cloning). The tag comes off and the profile starts "
+        "posting again on its own; nothing else to do.",
+    ]
+    sent = notifier.send("\n".join(lines), logger=logger)
+    if logger is not None:
+        logger.info("issue tags: %s the group about %d newly flagged profile(s)",
+                    "notified" if sent else "could not notify", len(flagged))
+    return sent
 
 
 def _log(logger, report: IssueTagReport, dry_run: bool = False) -> None:

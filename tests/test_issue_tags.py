@@ -616,3 +616,45 @@ class WiringTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TelegramNotifyTest(unittest.TestCase):
+    """The group chat hears about a flag once, when it appears."""
+
+    class _Notifier:
+        def __init__(self, configured=True, ok=True):
+            self.configured = configured
+            self.ok = ok
+            self.sent = []
+
+        def send(self, text, logger=None):
+            self.sent.append(text)
+            return self.ok
+
+    def test_it_names_every_profile_and_its_reason(self):
+        n = self._Notifier()
+        self.assertTrue(issue_tags.notify_newly_flagged(
+            [("Nikki 12", "Retries Exhausted"), ("Jil 6", "No Recent Success")],
+            notifier=n))
+        body = n.sent[0]
+        self.assertIn("2 profile(s) need a person", body)
+        self.assertIn("Nikki 12", body)
+        self.assertIn("Retries Exhausted", body)
+        self.assertIn("Jil 6", body)
+        # It has to say what to do, or the channel is just noise.
+        self.assertIn("Needs Human Check", body)
+
+    def test_nothing_flagged_sends_nothing(self):
+        n = self._Notifier()
+        self.assertFalse(issue_tags.notify_newly_flagged([], notifier=n))
+        self.assertEqual(n.sent, [])
+
+    def test_an_unconfigured_notifier_is_a_silent_no_op(self):
+        n = self._Notifier(configured=False)
+        self.assertFalse(issue_tags.notify_newly_flagged([("Jil 6", None)], notifier=n))
+        self.assertEqual(n.sent, [])
+
+    def test_a_telegram_failure_does_not_raise(self):
+        n = self._Notifier(ok=False)
+        self.assertFalse(issue_tags.notify_newly_flagged([("Jil 6", None)], notifier=n))
+        self.assertEqual(len(n.sent), 1)
