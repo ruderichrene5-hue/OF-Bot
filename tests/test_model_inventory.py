@@ -99,7 +99,11 @@ class RawFolderTest(TestCase):
         self.assertIn("RAW_FOLDER_MODEL_ALIASES", hint)
 
     def test_targets_with_no_raw_folder_are_reported(self):
-        inv = Inventory(target_keys={"lou": 4}, model_rows={"lou"}, raw_folders=[])
+        # Nikki's folder is there, Lou's is not -- so the listing was read and
+        # Lou is genuinely missing one. (An *empty* listing means the opposite;
+        # see DegradedRawSourceTest.)
+        inv = Inventory(target_keys={"lou": 4, "nikki": 19}, model_rows={"lou", "nikki"},
+                        raw_folders=["Nikki"])
         found = _kinds(diff_models(inv), "targets_no_raw_folder")
         self.assertEqual([f.model for f in found], ["lou"])
 
@@ -108,6 +112,154 @@ class RawFolderTest(TestCase):
         # reporting them would bury the two findings that matter.
         inv = Inventory(target_keys={"blank": 67})
         self.assertEqual(_kinds(diff_models(inv), "targets_no_raw_folder"), [])
+
+
+class DegradedRawSourceTest(TestCase):
+    """An unreadable raw source must read as "not compared", never as "empty".
+
+    Found in review: with no Drive folder id configured (or Drive down), the raw
+    folder set is empty and "targets with no raw folder" fires for EVERY model
+    with active profiles -- 5 real gaps became 9, the extra four telling the
+    operator to create Drive folders that already exist. A check that cries wolf
+    on an outage is a check people stop reading.
+    """
+
+    FLEET = {"jasmin": 6, "jil": 5, "katja": 4, "laila": 3,
+             "luisa": 11, "nikki": 19, "viktoria": 2}
+
+    def test_an_unread_source_produces_no_missing_folder_findings(self):
+        inv = Inventory(target_keys=dict(self.FLEET), raw_folders=[],
+                        raw_source_read=False, raw_source_error="no raw source configured")
+        self.assertEqual(_kinds(diff_models(inv), "targets_no_raw_folder"), [])
+
+    def test_an_empty_listing_is_treated_the_same_way(self):
+        # A raw root that lists zero folders is a credential/folder-id problem,
+        # not seven models losing their content at once.
+        inv = Inventory(target_keys=dict(self.FLEET), raw_folders=[], raw_source_read=True)
+        self.assertEqual(_kinds(diff_models(inv), "targets_no_raw_folder"), [])
+
+    def test_the_mlx_rule_still_runs_without_a_raw_source(self):
+        # Rule 1 reads no raw folders; a Drive outage must not hide the earliest
+        # signal that a new model exists.
+        inv = Inventory(mlx_folders={"Kathi": ["Blank (1)"]}, raw_source_read=False)
+        self.assertEqual([f.model for f in _kinds(diff_models(inv), "mlx_folder_unnamed")],
+                         ["Kathi"])
+
+    def test_collect_records_a_missing_source_rather_than_an_empty_one(self):
+        inv = model_inventory.collect(aliases={})
+        self.assertFalse(inv.raw_source_read)
+        self.assertTrue(inv.raw_source_error)
+
+    def test_collect_records_a_source_that_raises(self):
+        class _Broken:
+            def list_folder_names(self):
+                raise RuntimeError("drive says 403")
+
+        inv = model_inventory.collect(raw_source=_Broken(), aliases={})
+        self.assertFalse(inv.raw_source_read)
+        self.assertIn("403", inv.raw_source_error)
+        self.assertEqual(inv.raw_folders, [])
+
+    def test_a_readable_source_is_marked_read(self):
+        class _Source:
+            def list_folder_names(self):
+                return ["Jasmin"]
+
+        self.assertTrue(model_inventory.collect(raw_source=_Source(), aliases={}).raw_source_read)
+
+
+class TwoWordModelTest(TestCase):
+    """The model of a profile is derived exactly as `mlx_sync` derives it.
+
+    Taking the first word instead ("Anna Maria 1" -> "Anna") never matched a
+    two-word folder, so the folder carried a permanent `mlx_folder_unnamed` WARN
+    that renaming could not clear.
+    """
+
+    def test_a_two_word_model_matches_its_folder(self):
+        inv = Inventory(mlx_folders={"Anna Maria": ["Anna Maria 1", "Anna Maria 2"]})
+        self.assertEqual(_kinds(diff_models(inv), "mlx_folder_unnamed"), [])
+
+    def test_an_underscore_separated_number_matches_too(self):
+        inv = Inventory(mlx_folders={"Kathi": ["Kathi_1", "Kathi_2"]})
+        self.assertEqual(_kinds(diff_models(inv), "mlx_folder_unnamed"), [])
+
+    def test_a_link_profile_counts_as_named_after_its_folder(self):
+        inv = Inventory(mlx_folders={"Jasmin": ["Jasmin Link"]})
+        self.assertEqual(_kinds(diff_models(inv), "mlx_folder_unnamed"), [])
+
+    def test_blank_profiles_are_still_flagged(self):
+        # The bug this whole module exists for must survive the fix.
+        inv = Inventory(mlx_folders={"Katherine": ["Blank (1)", "Blank 2 (6)"]})
+        self.assertEqual([f.model for f in _kinds(diff_models(inv), "mlx_folder_unnamed")],
+                         ["Katherine"])
+
+
+class ParkedModelTest(TestCase):
+    """Parking a model -- Status Inactive on every one of its profiles -- is a
+    documented ops action, and the clips normally stay in Drive. Reported as a
+    gap, it is a WARN nobody can clear without deleting content: the same shape
+    as the starved-target alert that had to be reverted on 2026-08-05.
+    """
+
+    def test_a_parked_model_is_information_not_a_gap(self):
+        inv = Inventory(raw_folders=["Jasmin", "Katja"], target_keys={"jasmin": 6},
+                        model_rows={"jasmin", "katja"}, parked_keys={"katja"})
+        self.assertEqual(_kinds(diff_models(inv), "raw_folder_no_targets"), [])
+        parked = _kinds(diff_models(inv), "raw_folder_model_parked")
+        self.assertEqual([f.model for f in parked], ["Katja"])
+        self.assertEqual(parked[0].severity, INFO)
+
+    def test_a_never_onboarded_model_is_still_a_gap(self):
+        inv = Inventory(raw_folders=["Jasmin", "Katherine"], target_keys={"jasmin": 6},
+                        model_rows={"jasmin"}, parked_keys=set())
+        self.assertEqual([f.model for f in _kinds(diff_models(inv), "raw_folder_no_targets")],
+                         ["Katherine"])
+
+    def test_collect_reads_parked_models_from_the_profile_rows(self):
+        class _Airtable:
+            def profile_targets_by_model(self):
+                return {"jasmin": [{"handle": "Jasmin 1"}]}
+
+            def models_by_name(self):
+                return {"jasmin": "recM"}
+
+            def posting_profiles(self):
+                return [{"name": "Jasmin 1", "status": "Active"},
+                        {"name": "Katja 1", "status": "Inactive"},
+                        {"name": "Katja 2", "status": "Inactive"},
+                        {"name": "Blank (1)", "status": "Inactive"}]
+
+        inv = model_inventory.collect(airtable=_Airtable(), aliases={})
+        self.assertEqual(inv.parked_keys, {"katja"})
+
+    def test_one_active_row_means_not_parked(self):
+        # A model with an Active row that yields no target has a different
+        # problem (no MLX API ID, "Link" in the name) and keeps the louder
+        # finding that names it.
+        class _Airtable:
+            def profile_targets_by_model(self):
+                return {}
+
+            def models_by_name(self):
+                return {}
+
+            def posting_profiles(self):
+                return [{"name": "Katja 1", "status": "Active"},
+                        {"name": "Katja 2", "status": "Inactive"}]
+
+        self.assertEqual(model_inventory.collect(airtable=_Airtable(), aliases={}).parked_keys,
+                         set())
+
+    def test_an_airtable_client_without_posting_profiles_is_tolerated(self):
+        class _Old:
+            def profile_targets_by_model(self):
+                return {"jasmin": [{"handle": "j1"}]}
+
+            def models_by_name(self):
+                return {"jasmin": "recM"}
+
+        self.assertEqual(model_inventory.collect(airtable=_Old(), aliases={}).parked_keys, set())
 
 
 class ModelsRowTest(TestCase):

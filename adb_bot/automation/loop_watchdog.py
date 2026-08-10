@@ -658,11 +658,27 @@ def observe_pipeline(watchdog: LoopWatchdog, report, now=None) -> Verdict:
     **An unroutable clip is due work** (added 2026-08-10). A raw folder whose
     model has no target contributes nothing to `processed_videos` and nothing to
     `variants_created`, so a folder full of fresh clips going nowhere read as
-    IDLE -- "no new raw video" -- which is the opposite of what happened. Unlike
-    the queue's starved targets (see `observe_queue`), this is not a permanent
-    condition somebody has to delete rows to clear: it means a model was set up
-    in Drive and never finished in Airtable/MultiLogin, and finishing it clears
-    the alert. So it counts as due, and the loop reads STALLED until it is.
+    IDLE -- "no new raw video" -- which is the opposite of what happened. It
+    means a model was set up in Drive and never finished in Airtable/MultiLogin,
+    and finishing it clears the alert.
+
+    Two corrections to how that was first described (2026-08-10, review):
+
+    * It does **not** make "a folder of clips going nowhere read STALLED".
+      `LoopWatchdog.observe` short-circuits to STATE_OK the moment `produced >
+      0`, so unroutable clips only move the state while the WHOLE run encodes
+      zero variants. On a fleet that is spoofing for anyone at all, the effect is
+      the detail line below, not a state change -- which is the intended
+      loudness for "one model is half onboarded".
+    * It is therefore *mostly* not the permanent condition `observe_queue`'s
+      starved targets were (reverted 2026-08-05) -- but not never. A **parked**
+      model (Status Inactive on every profile, a documented ops action) whose
+      clips stay in Drive is unroutable for as long as it is parked, so a quiet
+      run that produces nothing at all reads STALLED until somebody moves the
+      clips out. Known and accepted while it stays a detail line; if that ever
+      pages anyone, the fix is for the pipeline to report parked-model skips as
+      their own reason and for this to stop counting them as due -- doctor's
+      `raw_folder_model_parked` finding already makes the distinction.
     """
     from adb_bot.automation.spoof_pipeline import UNROUTABLE_SKIP_MARKERS
 

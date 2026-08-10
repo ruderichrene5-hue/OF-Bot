@@ -53,6 +53,66 @@ def _exe_version(exe: str, args=("--version",)) -> str | None:
         return path
 
 
+# --- one live listing per doctor run -----------------------------------------
+
+_probe_cache: dict = {}
+
+
+def _probe(key, fetch):
+    """Memoise a live listing for the length of one :func:`run_checks`.
+
+    Two checks want the same MLX mobile-profile inventory (`check_multilogin`,
+    `check_models`) and two want the same Drive subfolder listing (`check_drive`,
+    `check_models`), so an otherwise idle doctor run made four API calls where
+    two do -- every 30 minutes, on a MultiLogin token whose whole job is to still
+    be valid when a loop needs it.
+
+    Deliberately not a TTL cache: it is cleared at the top of `run_checks`, so
+    "one run, one fetch" is the only guarantee it makes and a long-lived process
+    can never be served a stale fleet. Failures are cached too, so a dead token
+    is reported by both checks without being asked twice.
+    """
+    if key not in _probe_cache:
+        try:
+            _probe_cache[key] = (fetch(), None)
+        except Exception as exc:
+            _probe_cache[key] = (None, exc)
+    value, error = _probe_cache[key]
+    if error is not None:
+        raise error
+    return value
+
+
+def _mlx_mobile_profiles(token: str) -> list:
+    from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
+
+    return _probe(("mlx_mobile_profiles", token),
+                  lambda: MultiloginMobileListClient(token).list_mobile_profiles())
+
+
+class _CachedSubfolders:
+    """A DriveClient stand-in holding one already-fetched subfolder listing.
+
+    Lets `check_models` hand the real `DriveRawSource` the listing `check_drive`
+    already paid for, instead of a second identical call. It answers only
+    `list_subfolders`; anything that tried to download a file through it would
+    (correctly) fail loudly, because nothing in a doctor run should.
+    """
+
+    def __init__(self, folders: list):
+        self._folders = list(folders or [])
+
+    def list_subfolders(self, _folder_id) -> list:
+        return list(self._folders)
+
+
+def _drive_subfolders(service_account_json: str, folder_id: str) -> list:
+    from adb_bot.clients.gdrive import DriveClient
+
+    return _probe(("drive_subfolders", service_account_json, folder_id),
+                  lambda: DriveClient(service_account_json).list_subfolders(folder_id))
+
+
 # --- individual checks -------------------------------------------------------
 
 def check_adb() -> CheckResult:
@@ -189,9 +249,8 @@ def check_multilogin(token: str) -> CheckResult:
     if not token:
         return CheckResult("MultiLogin", FAIL, "no token configured",
                            "Set MULTILOGIN_TOKEN (use the workspace Automation Token for unattended runs).")
-    from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
     try:
-        items = MultiloginMobileListClient(token).list_mobile_profiles()
+        items = _mlx_mobile_profiles(token)
     except Exception as exc:
         text = str(exc)
         hint = ("Token expired? A regular MLX token lasts ~1h -- use the workspace Automation Token."
@@ -236,10 +295,9 @@ def check_drive(service_account_json: str, folder_id: str) -> CheckResult:
     if not service_account_json or not folder_id:
         return CheckResult("Google Drive", FAIL, "half-configured",
                            "Drive needs BOTH DRIVE_RAW_FOLDER_ID and GOOGLE_SERVICE_ACCOUNT_JSON.")
-    from adb_bot.clients.gdrive import DriveClient, DriveUnavailable
+    from adb_bot.clients.gdrive import DriveUnavailable
     try:
-        client = DriveClient(service_account_json)
-        folders = client.list_subfolders(folder_id)
+        folders = _drive_subfolders(service_account_json, folder_id)
     except DriveUnavailable as exc:
         return CheckResult("Google Drive", FAIL, str(exc)[:90],
                            "pip install google-api-python-client google-auth, and check the key path.")
@@ -261,6 +319,12 @@ def check_models(airtable_token: str, base_id: str, mlx_token: str,
 
     WARN, never FAIL: nothing here is broken, something is un-onboarded, and a
     FAIL would block `--apply` runs that are otherwise fine.
+
+    A source that cannot be read makes the rules that depend on it *drop*, never
+    run against an empty list. Without that, a Drive outage (or simply no
+    DRIVE_RAW_FOLDER_ID) turned "I could not look" into "no model has a raw
+    folder" and WARNed for every model on the fleet, hinting at Drive folders
+    that already exist. What was skipped leads the detail line.
     """
     from adb_bot.automation import model_inventory, spoof_pipeline
 
@@ -281,9 +345,8 @@ def check_models(airtable_token: str, base_id: str, mlx_token: str,
     if mlx_token:
         try:
             from adb_bot.clients.multilogin.folders import MultiloginFolderClient
-            from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
 
-            mlx_profiles = MultiloginMobileListClient(mlx_token).list_mobile_profiles()
+            mlx_profiles = _mlx_mobile_profiles(mlx_token)
             mlx_folders = MultiloginFolderClient(mlx_token).list_mobile_folders()
         except Exception as exc:
             mlx_profiles = mlx_folders = None
@@ -292,12 +355,19 @@ def check_models(airtable_token: str, base_id: str, mlx_token: str,
         partial.append("no MultiLogin token")
 
     source = None
+    build_error = ""
     try:
-        source = spoof_pipeline.build_source(raw_root, drive_folder, service_account_json)
+        if drive_folder and service_account_json:
+            # Reuse the listing check_drive just fetched rather than asking Drive
+            # for the same folder twice. The real DriveRawSource still does the
+            # name derivation, so the two paths cannot drift.
+            source = spoof_pipeline.DriveRawSource(
+                _CachedSubfolders(_drive_subfolders(service_account_json, drive_folder)),
+                drive_folder)
+        else:
+            source = spoof_pipeline.build_source(raw_root, drive_folder, service_account_json)
     except Exception as exc:
-        partial.append(f"raw source unreadable ({str(exc)[:40]})")
-    if source is None:
-        partial.append("no raw source configured")
+        build_error = str(exc)[:40]
 
     try:
         inventory = model_inventory.collect(airtable=client, mlx_profiles=mlx_profiles,
@@ -306,9 +376,18 @@ def check_models(airtable_token: str, base_id: str, mlx_token: str,
     except Exception as exc:
         return CheckResult("Model inventory", WARN, f"could not compare models: {str(exc)[:70]}")
 
+    # The raw half of the comparison is either done or not done; there is no
+    # half. When it is not done, `diff_models` has already dropped the two rules
+    # that read raw folders, and the reader has to be told that BEFORE the
+    # summary -- a trailing "[partial: ...]" reads as a footnote on a sentence
+    # that has already claimed everything lines up.
+    if not model_inventory.raw_source_known(inventory):
+        why = build_error or inventory.raw_source_error or "no folders listed"
+        partial.insert(0, f"raw source unreadable ({why}); "
+                          f"raw-folder rules skipped")
     detail = model_inventory.summarise(findings)
     if partial:
-        detail += f" [partial: {'; '.join(partial)}]"
+        detail = f"[partial: {'; '.join(partial)}] {detail}"
     gaps = [f for f in findings if f.severity == model_inventory.WARN]
     if not gaps:
         return CheckResult("Model inventory", PASS, detail)
@@ -443,6 +522,9 @@ def run_checks(settings_mod=None) -> list:
     """Run every check using the app's saved settings/env. Returns CheckResults."""
     if settings_mod is None:
         from adb_bot.config import settings as settings_mod
+
+    # Every run reads the fleet fresh; only checks *within* one run share.
+    _probe_cache.clear()
 
     airtable_token = settings_mod.get_saved_airtable_token()
     base_id = settings_mod.get_saved_airtable_base_id()

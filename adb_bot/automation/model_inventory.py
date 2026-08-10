@@ -53,10 +53,56 @@ class Inventory:
     target_keys: dict = field(default_factory=dict)        # model key -> target count
     model_rows: set = field(default_factory=set)           # lower-cased Models names
     aliases: dict = field(default_factory=dict)            # raw folder -> model
+    parked_keys: set = field(default_factory=set)          # model keys whose profiles are all Inactive
+    # False when the raw folder listing could NOT be read: no source configured
+    # (no DRIVE_RAW_FOLDER_ID / no service-account key), or the listing raised.
+    # `raw_folders` is then empty because we do not know, not because Drive is.
+    # Defaults to True so a hand-built Inventory (tests, callers that already
+    # have the listing) keeps meaning "these are the folders that exist".
+    raw_source_read: bool = True
+    raw_source_error: str = ""                             # why, when raw_source_read is False
 
 
 def _norm(value) -> str:
     return str(value or "").strip().lower()
+
+
+def raw_source_known(inv: Inventory) -> bool:
+    """May rules 2 and 3 say anything about raw folders?
+
+    Only when we actually hold the listing. Two ways we do not:
+
+    * the source could not be read at all (`raw_source_read=False`);
+    * it read back **zero** folders -- which on a live box means the same thing.
+      A raw root with no subfolders at all is not "every model lost its folder",
+      it is a credential, permission or folder-id problem, and treating it as
+      data made rule 3 WARN for every model with active profiles: in review, 5
+      real gaps became 9 findings, the four extra ones telling the operator to
+      create Drive folders that already exist.
+
+    Rule 1 (MLX) and rule 4 (`Models` row) do not read raw folders, so they stay
+    on -- a degraded Drive must not blind the check to a new MLX folder.
+    """
+    return bool(getattr(inv, "raw_source_read", True)) and bool(inv.raw_folders)
+
+
+def _model_of_profile(name) -> str:
+    """The model a profile name belongs to, normalised.
+
+    Delegates to `mlx_sync._model_from_serial_name`, which is the derivation the
+    audited code actually uses ("Nikki 1" / "Kathi_1" / "Luisa Link" -> the
+    model). Taking the first word instead -- what this did -- broke on every
+    two-word model: a folder "Anna Maria" holding "Anna Maria 1" derived "Anna",
+    which never matches the folder, so the folder carried a permanent
+    `mlx_folder_unnamed` WARN that no rename could clear.
+    """
+    text = str(name or "")
+    try:
+        from adb_bot.automation.mlx_sync import _model_from_serial_name
+
+        return _norm(_model_from_serial_name(text) or "")
+    except Exception:
+        return _norm(text.split()[0] if text.split() else "")
 
 
 def _staging_folders() -> set:
@@ -81,16 +127,24 @@ def diff_models(inv: Inventory) -> list:
        (the live workspace has a folder spelled "NIkki").
     2. **A raw folder with no targets.** Clips can be dropped in and nothing will
        ever pick them up. Fires for empty folders too -- that is the state a
-       brand-new model's folder is in.
+       brand-new model's folder is in. Demoted to INFO when the model's profiles
+       exist but are all Inactive: that is a *parked* model, a documented ops
+       action, and a WARN nobody can clear without deleting clips is the shape of
+       alert that had to be reverted on 2026-08-05.
     3. **A target model with no raw folder.** Profiles exist and are eligible to
        post; no content will ever be made for them.
     4. **A model known to MLX/Drive/targets with no `Models` row.** Lowest
        severity: posting works without one (`queue_runner` treats a missing
        schedule as flexible mode), but the dashboard calls such a model "stray"
        and `mlx_sync` cannot link its Devices.
+
+    Rules 2 and 3 are skipped entirely when the raw folder listing could not be
+    read -- see :func:`raw_source_known`.
     """
     staging = _staging_folders()
     aliases = {_norm(k): str(v) for k, v in (inv.aliases or {}).items()}
+    raw_known = raw_source_known(inv)
+    parked = {_norm(k) for k in (getattr(inv, "parked_keys", None) or set())}
     findings: list = []
 
     def resolved(folder: str) -> str:
@@ -100,7 +154,7 @@ def diff_models(inv: Inventory) -> list:
     for folder, profile_names in sorted((inv.mlx_folders or {}).items()):
         if _norm(folder) in staging or not profile_names:
             continue
-        matching = [n for n in profile_names if _norm(str(n).split()[0] if str(n).split() else "") == _norm(folder)]
+        matching = [n for n in profile_names if _model_of_profile(n) == _norm(folder)]
         if matching:
             continue
         findings.append(Finding(
@@ -114,11 +168,22 @@ def diff_models(inv: Inventory) -> list:
 
     # --- 2. a raw folder with no targets -------------------------------------
     target_keys = {_norm(k): int(v or 0) for k, v in (inv.target_keys or {}).items()}
-    for folder in sorted(inv.raw_folders or []):
+    for folder in (sorted(inv.raw_folders or []) if raw_known else []):
         model = resolved(folder)
         if target_keys.get(_norm(model)):
             continue
         via = "" if _norm(model) == _norm(folder) else f" (aliased to '{model}')"
+        if _norm(model) in parked:
+            # Every profile under this model is Inactive: somebody parked it on
+            # purpose. Say so once, quietly; do not ask for it to be un-parked.
+            findings.append(Finding(
+                model=model, kind="raw_folder_model_parked", severity=INFO,
+                detail=(f"raw folder '{folder}'{via} still holds clips, but every "
+                        f"'{model} N' profile is Inactive (parked)"),
+                hint=("Nothing to do if the model is parked on purpose. To restart it, set "
+                      "Status back to Active on its Profiles (Cloning) rows."),
+            ))
+            continue
         findings.append(Finding(
             model=model, kind="raw_folder_no_targets",
             detail=f"raw folder '{folder}'{via} has no active profile to spoof for",
@@ -129,7 +194,7 @@ def diff_models(inv: Inventory) -> list:
 
     # --- 3. targets with no raw folder ---------------------------------------
     raw_models = {_norm(resolved(f)) for f in (inv.raw_folders or [])}
-    for key, count in sorted(target_keys.items()):
+    for key, count in (sorted(target_keys.items()) if raw_known else []):
         if not count or key in NON_MODEL_TARGET_KEYS or key in raw_models:
             continue
         findings.append(Finding(
@@ -175,18 +240,31 @@ def collect(airtable=None, mlx_profiles=None, mlx_folders=None,
     """Build an :class:`Inventory` from live clients, tolerating missing ones.
 
     Every source is optional: a box with no MLX token still gets the Drive vs
-    Airtable half of the answer rather than no answer.
+    Airtable half of the answer rather than no answer. A source that is missing
+    or throws is recorded as *unknown* (`raw_source_read=False`), never as "no
+    folders exist" -- see :func:`raw_source_known` for what that costs.
     """
     from adb_bot.automation import spoof_pipeline
 
     inv = Inventory(aliases=dict(aliases or spoof_pipeline.raw_folder_model_aliases()))
 
-    if raw_source is not None:
+    if raw_source is None:
+        inv.raw_source_read = False
+        inv.raw_source_error = "no raw source configured"
+    else:
         lister = getattr(raw_source, "list_folder_names", None)
-        if callable(lister):
-            inv.raw_folders = list(lister())
-        else:  # a source predating list_folder_names: folders with work only
-            inv.raw_folders = list(raw_source.list_by_model().keys())
+        try:
+            if callable(lister):
+                inv.raw_folders = list(lister())
+            else:  # a source predating list_folder_names: folders with work only
+                inv.raw_folders = list(raw_source.list_by_model().keys())
+            inv.raw_source_read = True
+        except Exception as exc:
+            # Swallowed on purpose: Drive being unreachable is check_drive's
+            # story to tell. Here it only means rules 2 and 3 have no input.
+            inv.raw_folders = []
+            inv.raw_source_read = False
+            inv.raw_source_error = str(exc)[:80] or exc.__class__.__name__
 
     if mlx_profiles is not None:
         names = {str(f.get("folder_id")): str(f.get("name") or "")
@@ -206,5 +284,43 @@ def collect(airtable=None, mlx_profiles=None, mlx_folders=None,
         inv.target_keys = {key: len(targets)
                            for key, targets in (airtable.profile_targets_by_model() or {}).items()}
         inv.model_rows = set((airtable.models_by_name() or {}).keys())
+        inv.parked_keys = _parked_keys(airtable, inv.target_keys)
 
     return inv
+
+
+def _parked_keys(airtable, target_keys: dict) -> set:
+    """Models whose Profiles (Cloning) rows all exist but are all Inactive.
+
+    Parking a model -- setting Status to Inactive on its rows -- is a documented
+    ops action, and its clips usually stay in Drive. Without this, such a model
+    reads exactly like one that was never onboarded, and rule 2 WARNs forever
+    with no way to clear it short of deleting content.
+
+    Optional and best-effort: an Airtable client without `posting_profiles` (or
+    a read that fails) simply yields no parked models, i.e. today's behaviour.
+
+    It costs one extra read of `Profiles (Cloning)` per doctor run, on purpose:
+    the alternative is `profile_targets_by_model` growing a second return value
+    that every one of its other callers would ignore.
+    """
+    lister = getattr(airtable, "posting_profiles", None)
+    if not callable(lister):
+        return set()
+    try:
+        rows = lister() or []
+    except Exception:
+        return set()
+    inactive: set = set()
+    active: set = set()
+    for row in rows:
+        key = _model_of_profile(str((row or {}).get("name") or ""))
+        if not key or key in NON_MODEL_TARGET_KEYS:
+            continue
+        # `posting_profiles` already reads an empty Status as Active, the way
+        # the planners do.
+        (active if _norm((row or {}).get("status")) == "active" else inactive).add(key)
+    # Parked means EVERY row is Inactive. A model with an Active row that still
+    # yields no target has a different problem (no MLX API ID, "Link" in the
+    # name) and must keep the louder finding that names it.
+    return {key for key in inactive - active if not target_keys.get(key)}
