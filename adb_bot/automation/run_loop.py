@@ -353,28 +353,89 @@ def _run_cleanup(args, logger) -> int:
     """Delete media the bot has finished with (default: older than 2 days)."""
     from adb_bot.automation import retention
 
+    from adb_bot.automation import spoof_pipeline
+
     days = args.max_age_days if args.max_age_days is not None else retention.DEFAULT_MAX_AGE_DAYS
+    orphan_days = (args.orphan_age_days if args.orphan_age_days is not None
+                   else retention.DEFAULT_ORPHAN_AGE_DAYS)
     dry_run = not args.apply
 
     roots = [r for r in (args.raw_root or settings.get_saved_raw_videos_dir(),
                          settings.get_saved_story_media_path()) if r]
-    inputs = retention.purge_used_inputs(roots, days, dry_run=dry_run, logger=logger)
+    inputs = retention.PurgeReport(dry_run=dry_run)
+    if retention.has_used_inbox(roots):
+        inputs = retention.purge_used_inputs(roots, days, dry_run=dry_run, logger=logger)
+    else:
+        # Say so instead of logging `deleted=0 kept=0`, which reads like a sweep
+        # that ran and found nothing. Only the story-media queue ever creates a
+        # `used/` folder; the reel path takes its raw videos straight from Drive.
+        logger.info("cleanup: no used/ inbox under %s (raw source is Drive); "
+                    "skipping the input sweep", roots or "<no roots>")
+
+    out_root = args.out_root or settings.get_saved_spoofed_videos_dir()
 
     variants = retention.PurgeReport(dry_run=dry_run)
+    orphans = retention.PurgeReport(dry_run=True)
+    airtable_failed = False
     try:
         airtable = _airtable(args.base_id, args.airtable_token)
         variants = retention.purge_used_variants(airtable, days, dry_run=dry_run, logger=logger)
+        # The orphan sweep deletes files Airtable says nothing about, which is a
+        # weaker proof than `Status = Used`. It therefore needs its own opt-in
+        # flag on top of --apply; without it the pass still runs and logs what it
+        # *would* remove, so the number can be watched before anyone arms it.
+        # `variants=` hands it the listing the sweep above already read, which it
+        # cross-checks against a second read: that comparison, not the 50%
+        # magnitude guard, is what detects a truncated listing.
+        orphan_dry_run = dry_run or not args.orphan_sweep
+        orphans = retention.purge_orphan_variants(
+            airtable, out_root, orphan_days, dry_run=orphan_dry_run, logger=logger,
+            variants=variants.listing)
+        retention.report_stranded_ready(airtable, logger=logger)
     except SystemExit:
         logger.warning("cleanup: no Airtable token; skipping the spoofed-variant sweep")
+    except Exception as exc:
+        # One unusable File Path cell, or any other surprise from the table,
+        # used to take the entire cleanup run down with it -- including the
+        # empty-dir passes below, which need no Airtable at all. Report it in
+        # the exit code and carry on.
+        airtable_failed = True
+        logger.exception("cleanup: the Airtable-driven sweeps failed: %s", exc)
 
-    out_root = args.out_root or settings.get_saved_spoofed_videos_dir()
-    retention.prune_empty_dirs(out_root, logger=logger, dry_run=dry_run)
+    retention.prune_empty_dirs(out_root, logger=logger, dry_run=dry_run,
+                               label="spoofed output")
+    # Drive downloads are unlinked by DriveRawSource.release, but the per-model
+    # folder it made is left behind. Pruning them is opt-in and stays that way:
+    # it RACES the pipeline unit (OnUnitActiveSec=30min, so it overlaps the
+    # 04:00 cleanup). gdrive.download() does `mkdir(parents=True, exist_ok=True)`
+    # and then opens `io.FileIO(dest, "wb")` as two separate statements, and
+    # DriveRawSource.release() unlinks each file the moment its spoof is done --
+    # so the per-model folder sits empty for most of the pipeline's runtime, and
+    # an rmdir landing between those two statements raises FileNotFoundError,
+    # which spoof_pipeline.py swallows as "could not fetch the raw video". The
+    # clip is then silently skipped. The window cannot be closed from this side
+    # (an mkdir on an already-existing folder leaves no mtime to check), and the
+    # thing being reclaimed is one empty directory per model -- a bounded, few-KB
+    # set that /tmp clears on reboot anyway. So: not worth the risk by default.
+    if args.drive_temp_sweep:
+        retention.prune_empty_dirs(spoof_pipeline.drive_temp_root(), logger=logger,
+                                   dry_run=dry_run, label="Drive scratch")
 
-    total = len(inputs.deleted) + len(variants.deleted)
-    freed = (inputs.freed_bytes + variants.freed_bytes) / 1_048_576
+    # An unarmed orphan sweep is a report, not a deletion: keep its numbers out
+    # of a line that says "removed" and give them their own.
+    armed = not orphans.dry_run
+    if not armed and orphans.deleted:
+        logger.info("cleanup: orphan sweep is report-only -- %s file(s), %.1f MB have no "
+                    "Spoof Variant row and are older than %s day(s). Pass --orphan-sweep "
+                    "with --apply to actually remove them.",
+                    len(orphans.deleted), orphans.freed_bytes / 1_048_576, orphan_days)
+
+    total = len(inputs.deleted) + len(variants.deleted) + (len(orphans.deleted) if armed else 0)
+    freed = (inputs.freed_bytes + variants.freed_bytes
+             + (orphans.freed_bytes if armed else 0)) / 1_048_576
     logger.info("cleanup: %s file(s) %s, %.1f MB freed (older than %s day(s))",
                 total, "would be removed" if dry_run else "removed", freed, days)
-    return 1 if (inputs.errors or variants.errors) else 0
+    return 1 if (airtable_failed or inputs.errors or variants.errors or orphans.errors) else 0
 
 
 def _run_queue(args, logger) -> int:
@@ -695,6 +756,24 @@ def main(argv=None) -> int:
                         help="warmup: run reel actions from the plan (default: on; use --no-reels to skip).")
     parser.add_argument("--max-age-days", type=float, default=None,
                         help="cleanup: delete finished media older than this (default 2).")
+    parser.add_argument("--orphan-age-days", type=float, default=None,
+                        help="cleanup: age a spoofed file with no Spoof Variant row must reach "
+                             "before the orphan sweep counts it (default 7).")
+    # To arm this on the timer, the durable change is
+    # LOOP_EXTRA_ARGS["cleanup"] = ("--orphan-sweep",) in schedule_spec.py,
+    # followed by `sudo deploy/systemd/install_units.sh --apply`. Hand-editing
+    # /etc/systemd/system/adbbot-cleanup.service works until the next deploy
+    # regenerates it from schedule_spec, which silently reverts the arming.
+    parser.add_argument("--orphan-sweep", action="store_true",
+                        help="cleanup: actually delete spoofed files that no Spoof Variant row "
+                             "references. Off by default -- without it the sweep only reports "
+                             "what it would remove. Needs --apply too.")
+    parser.add_argument("--drive-temp-sweep", action="store_true",
+                        help="cleanup: also remove the empty per-model folders left under the "
+                             "Drive scratch root in /tmp. Off by default because it races the "
+                             "pipeline loop: an rmdir between the pipeline's mkdir and its file "
+                             "open makes that clip fail as 'could not fetch the raw video'. "
+                             "Only run it when the pipeline is stopped.")
     parser.add_argument("--max-concurrent", type=int, default=None,
                         help="posting/warmup: max profiles running at once (default 10).")
     parser.add_argument("--max-variants", type=int, default=None,

@@ -105,6 +105,21 @@ class LocalRawSource:
         return out
 
 
+DRIVE_TEMP_DIRNAME = "adbbot_raw"
+
+
+def drive_temp_root(temp_dir: str | None = None) -> str:
+    """Where Drive downloads land: `<tmp>/adbbot_raw/<Model>/<file>`.
+
+    A function rather than a constant because the cleanup loop needs the same
+    answer `DriveRawSource.resolve` uses -- `release()` unlinks the downloaded
+    file but leaves the per-model folder behind, so without a shared definition
+    the empty dirs pile up unseen.
+    """
+    base = Path(temp_dir) if temp_dir else Path(tempfile.gettempdir())
+    return str(base / DRIVE_TEMP_DIRNAME)
+
+
 class DriveRawSource:
     """Raw videos in Google Drive: per-model subfolders under a root folder
     (`01_Raw_Videos/{Model}/*.mp4`), matching the local layout.
@@ -140,8 +155,7 @@ class DriveRawSource:
     def resolve(self, video: RawVideo) -> str | None:
         if not video.source_id:
             return video.path or None
-        base = Path(self.temp_dir) if self.temp_dir else Path(tempfile.gettempdir())
-        dest = base / "adbbot_raw" / video.model / video.name
+        dest = Path(drive_temp_root(self.temp_dir)) / video.model / video.name
         return self.client.download(video.source_id, str(dest))
 
     def release(self, video: RawVideo, path: str) -> None:
