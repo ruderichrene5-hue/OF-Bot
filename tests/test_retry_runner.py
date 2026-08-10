@@ -461,8 +461,12 @@ class FlagIsIdempotentTest(TestCase):
         self.assertEqual(len(self.patch_calls), 2)
         self.assertIn("Laila 9 / 21:00", self.notes)
         self.assertIn("Laila 9 / 23:00", self.notes)
-        # Newest first.
-        self.assertLess(self.notes.index("23:00"), self.notes.index("21:00"))
+        # Newest first. Match the whole note body, not the bare time: every
+        # entry is prefixed with an ISO timestamp, so a plain "21:00" also
+        # matches inside "[2026-08-10T15:21:00]" and this assertion inverts for
+        # one second in every hour.
+        self.assertLess(self.notes.index("Laila 9 / 23:00"),
+                        self.notes.index("Laila 9 / 21:00"))
 
     def test_the_flag_itself_is_still_set_on_the_first_write(self):
         self.client.flag_profile_for_human("recP", at.PROFILE_ISSUE_BANNED, "Jasmin 9")
