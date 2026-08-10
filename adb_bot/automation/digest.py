@@ -55,6 +55,18 @@ def _select(fields: dict, key: str):
     return value.get("name") if isinstance(value, dict) else value
 
 
+def _sample(names, limit: int = 5) -> list:
+    """Up to `limit` distinct names, in order -- for an "e.g." line."""
+    seen, out = set(), []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+        if len(out) == limit:
+            break
+    return out
+
+
 def blocked_warmup(profiles) -> list:
     """Warm-up profiles that cannot finish until a person assigns them a model.
 
@@ -183,9 +195,12 @@ def format_digest(d: Digest) -> str:
                       f"and a reel needs a model's video. Rename them from "
                       f"<code>Blank (NN)</code> to <code>&lt;Model&gt; N</code> in "
                       f"MultiLogin and Airtable and they finish on their own.",
-                  "e.g. " + ", ".join(f"<b>{n}</b>" for n in d.blocked_warmup[:5])
-                  + (f" and {len(d.blocked_warmup) - 5} more"
-                     if len(d.blocked_warmup) > 5 else "")]
+                  # De-duplicated for display only: MLX names are not unique
+                  # (this workspace has three "Blank (5)"), and a sample that
+                  # repeats a name reads as a bug rather than as two phones.
+                  # The count above stays the true number of profiles.
+                  "e.g. " + ", ".join(f"<b>{n}</b>" for n in _sample(d.blocked_warmup))
+                  + (f" … {n} in total" if n > 5 else "")]
 
     lines += ["", f"Last {WINDOW_HOURS}h: <b>{d.posted} posted</b>, {d.failed} failed, "
                   f"{d.pending} still queued (of {d.due} due)."]

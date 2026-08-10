@@ -180,3 +180,14 @@ class BlockedWarmupTest(unittest.TestCase):
     def test_blocked_warmup_alone_means_the_day_is_not_quiet(self):
         d = digest.build_digest([self._p("Blank (12)")], [], now=NOW)
         self.assertFalse(d.quiet)
+
+    def test_the_example_list_does_not_repeat_a_name(self):
+        """MLX names are not unique; a sample showing 'Blank (1)' twice reads
+        as a bug, while the count must stay the true number of profiles."""
+        d = digest.build_digest([self._p("Blank (1)"), self._p("Blank (1)"),
+                                 self._p("Blank (2)")], [], now=NOW)
+        self.assertEqual(len(d.blocked_warmup), 3)
+        body = digest.format_digest(d)
+        sample = body.split("e.g. ")[1].split("\n")[0]
+        self.assertEqual(sample.count("Blank (1)"), 1)
+        self.assertIn("3 warm-up phones", body)
