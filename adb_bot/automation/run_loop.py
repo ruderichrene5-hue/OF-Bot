@@ -35,7 +35,8 @@ from adb_bot.core import locks, shutdown
 from adb_bot.core.logger import get_logger
 
 LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery", "warmup",
-         "warmup-state", "issue-tags", "mlx-sync", "cleanup", "second-accounts")
+         "warmup-state", "issue-tags", "mlx-sync", "cleanup", "second-accounts",
+         "digest")
 # `doctor` isn't a loop -- it's the preflight check, runnable the same way.
 # `report` renders the operational page; like `doctor` it is a command rather
 # than a loop, and unlike `doctor` it is not in the recommended set, so it never
@@ -268,6 +269,24 @@ def _run_warmup_state(args, logger) -> int:
         for line in result.changes:
             logger.info("  would set %s", line)
     return 1 if result.errors else 0
+
+
+def _run_digest(args, logger) -> int:
+    """`digest`: the once-a-day backlog message for the VAs' Telegram topic.
+
+    Read-only against Airtable, and the only loop here whose entire output is a
+    chat message. `--apply` is what sends it; without that it composes the
+    digest and logs it, which is how you check the wording without posting to
+    the group.
+
+    Exit code is 0 even when Telegram is unconfigured or the send fails: a
+    digest is a convenience, and a red unit would train people to ignore a
+    colour that also means the fleet is broken. The reason is logged.
+    """
+    from adb_bot.automation import digest as digest_mod
+    airtable = _airtable(args.base_id, args.airtable_token)
+    digest_mod.run_digest(airtable, dry_run=not args.apply, logger=logger)
+    return 0
 
 
 def _run_issue_tags(args, logger) -> int:
@@ -745,6 +764,7 @@ _DISPATCH = {
     "warmup": _run_warmup,
     "warmup-state": _run_warmup_state,
     "issue-tags": _run_issue_tags,
+    "digest": _run_digest,
     "pipeline": _run_pipeline,
     "queue": _run_queue,
     "retry": _run_retry,
