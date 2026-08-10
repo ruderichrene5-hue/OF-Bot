@@ -95,14 +95,26 @@ def get_saved_airtable_token() -> str:
     return _get_saved_or_env("airtable_token", "AIRTABLE_TOKEN")
 
 
-# OFM Agency OS test base (the clone built for orchestrator testing). Used as a
-# fallback so the app points at the test base out of the box; a saved value or
-# the AIRTABLE_BASE_ID env var still wins.
-DEFAULT_AIRTABLE_BASE_ID = "appNAm6iTuzmOn4ib"
-
-
+# There is deliberately NO default base id.
+#
+# Until 2026-08-10 this fell back to the test base `appNAm6iTuzmOn4ib`. The bot
+# now runs against production, and 15 of the 16 units load their credentials
+# with `EnvironmentFile=-/etc/adbbot/env` -- the leading `-` means systemd
+# treats a missing file as fine and starts the loop anyway. So a renamed,
+# unreadable or half-written env file used to hand every loop a silent, working
+# connection to the WRONG base: posts, run-log rows and flag clears would land
+# in the old base while production sat still and nothing anywhere reported an
+# error. A missing base id is a broken deployment, and it should say so on the
+# first call rather than quietly do the wrong thing to real data.
 def get_saved_airtable_base_id() -> str:
-    return _get_saved_or_env("airtable_base_id", "AIRTABLE_BASE_ID") or DEFAULT_AIRTABLE_BASE_ID
+    base_id = _get_saved_or_env("airtable_base_id", "AIRTABLE_BASE_ID")
+    if not base_id:
+        raise RuntimeError(
+            "No Airtable base id configured. Set AIRTABLE_BASE_ID (normally from "
+            "/etc/adbbot/env -- check the file exists and is readable) or save an "
+            "`airtable_base_id` in the settings file. There is no default: "
+            "guessing a base risks writing to the wrong one.")
+    return base_id
 
 
 def get_saved_airtable_table_name() -> str:
