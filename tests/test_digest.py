@@ -246,3 +246,77 @@ class TaggedWarmupTest(unittest.TestCase):
     def test_plain_strings_are_accepted_too(self):
         d = digest.build_digest([], [], now=NOW, tagged_warmup=["Blank (12)"])
         self.assertEqual(d.tagged_warmup, ["Blank (12)"])
+
+
+class NoDoubleReportingTest(unittest.TestCase):
+    """A phone named once per message.
+
+    Every tagged warm-up phone is also a `Blank`, so both warm-up sections
+    described the same twenty-one phones. The tagged section keeps them --
+    "somebody marked this" is a finding a person made, "waiting for a model" is
+    the default state of the whole population -- and the model backlog keeps
+    its true size so the errand does not appear to shrink.
+    """
+
+    def _p(self, name, api_id, started="2026-08-07"):
+        return {"fields": {at.F_PROF_NAME: name, at.F_PROF_MLX_API_ID: api_id,
+                           at.F_PROF_WARMUP_STARTED: started}}
+
+    def _tag(self, name, api_id):
+        return {"name": name, "serial": "1", "status": "Active", "launch_id": api_id}
+
+    def test_a_tagged_phone_is_dropped_from_the_blocked_list(self):
+        d = digest.build_digest(
+            [self._p("Blank (12)", "L1"), self._p("Blank (8)", "L2")], [], now=NOW,
+            tagged_warmup=[self._tag("Blank (12)", "L1")])
+        self.assertEqual(d.tagged_warmup, ["Blank (12)"])
+        self.assertEqual(d.blocked_warmup, ["Blank (8)"])
+
+    def test_the_model_backlog_keeps_its_true_size(self):
+        """They still need a model; they are just filed under the sharper heading."""
+        d = digest.build_digest(
+            [self._p("Blank (12)", "L1"), self._p("Blank (8)", "L2")], [], now=NOW,
+            tagged_warmup=[self._tag("Blank (12)", "L1")])
+        self.assertEqual(d.blocked_warmup_total, 2)
+        body = digest.format_digest(d)
+        self.assertIn("1 more warm-up phone", body)
+        self.assertIn("2 in all", body)
+
+    def test_no_phone_appears_in_both_sections(self):
+        d = digest.build_digest(
+            [self._p("Blank (12)", "L1"), self._p("Blank (8)", "L2")], [], now=NOW,
+            tagged_warmup=[self._tag("Blank (12)", "L1")])
+        self.assertEqual(set(d.tagged_warmup) & set(d.blocked_warmup), set())
+
+    def test_an_untagged_twin_is_not_dropped_with_its_namesake(self):
+        """The workspace has two `Blank (13)` and three `Blank (5)`. Subtracting
+        by name would silently drop the untagged one of every pair -- which is a
+        phone waiting for a model that nothing would then mention."""
+        d = digest.build_digest(
+            [self._p("Blank (13)", "L1"), self._p("Blank (13)", "L2")], [], now=NOW,
+            tagged_warmup=[self._tag("Blank (13)", "L1")])
+        self.assertEqual(d.blocked_warmup, ["Blank (13)"])
+        self.assertEqual(d.blocked_warmup_total, 2)
+
+    def test_suppressing_everything_still_names_the_model_errand(self):
+        """The thing that actually unblocks them must not vanish with the line."""
+        d = digest.build_digest([self._p("Blank (12)", "L1")], [], now=NOW,
+                                tagged_warmup=[self._tag("Blank (12)", "L1")])
+        self.assertEqual(d.blocked_warmup, [])
+        body = digest.format_digest(d)
+        self.assertIn("model", body)
+        self.assertIn("Blank (NN)", body)
+        self.assertIn("Those 1", body)
+
+    def test_with_nothing_tagged_the_wording_is_unchanged(self):
+        """No suppression, so no 'more' and no cross-reference."""
+        d = digest.build_digest([self._p("Blank (12)", "L1")], [], now=NOW)
+        body = digest.format_digest(d)
+        self.assertIn("1 warm-up phone cannot finish", body)
+        self.assertNotIn("more warm-up", body)
+        self.assertNotIn("in all", body)
+
+    def test_a_phone_with_no_api_id_is_never_matched_away(self):
+        d = digest.build_digest([self._p("Blank (12)", "")], [], now=NOW,
+                                tagged_warmup=[self._tag("Blank (12)", "L1")])
+        self.assertEqual(d.blocked_warmup, ["Blank (12)"])

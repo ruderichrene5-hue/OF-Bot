@@ -67,7 +67,7 @@ def _sample(names, limit: int = 5) -> list:
     return out
 
 
-def blocked_warmup(profiles) -> list:
+def blocked_warmup(profiles, exclude_ids=()) -> list:
     """Warm-up profiles that cannot finish until a person assigns them a model.
 
     Day 4 of the plan is a reel, and the warm-up loop deliberately does not run
@@ -84,11 +84,20 @@ def blocked_warmup(profiles) -> list:
     Keyed on the model being `Blank`, which is what "no model assigned" means
     here -- the same first-word derivation `mlx_sync` uses -- rather than on the
     absence of variants, so it reports the cause and not a symptom of it.
+
+    `exclude_ids` drops profiles already named by the hand-tagged section, so a
+    phone is not reported twice in one message. Matched on the **MLX API ID**
+    and never on the name: this workspace has three `Blank (5)` and two
+    `Blank (13)`, so subtracting by name would silently drop the untagged twin
+    of every tagged phone.
     """
+    skip = {str(i) for i in (exclude_ids or ()) if str(i).strip()}
     out = []
     for row in profiles or []:
         f = row.get("fields", row) or {}
         if not f.get(at.F_PROF_WARMUP_STARTED):
+            continue
+        if skip and str(f.get(at.F_PROF_MLX_API_ID) or "").strip() in skip:
             continue
         name = str(f.get(at.F_PROF_NAME) or "").strip()
         if name.split()[:1] == ["Blank"] or name.lower().startswith("blank"):
@@ -104,7 +113,8 @@ class Digest:
     oldest_days: int = 0
     stale: int = 0                                    # flagged longer than STALE_FLAG_DAYS
     parked_unflagged: list = field(default_factory=list)   # cleared, but Status Inactive
-    blocked_warmup: list = field(default_factory=list)
+    blocked_warmup: list = field(default_factory=list)     # after the tagged are removed
+    blocked_warmup_total: int = 0                          # before, so the errand's real size survives
     tagged_warmup: list = field(default_factory=list)      # Issue tag in MLX, no flag
     due: int = 0
     posted: int = 0
@@ -155,10 +165,20 @@ def build_digest(profiles, queue_rows, now=None, tagged_warmup=None) -> Digest:
             out.parked_unflagged.append(str(f.get(at.F_PROF_NAME) or "?"))
 
     out.by_reason = reasons.most_common()
-    out.blocked_warmup = blocked_warmup(profiles)
     out.tagged_warmup = sorted(
         str(e.get("name") or "?") if isinstance(e, dict) else str(e)
         for e in (tagged_warmup or []))
+    # Every tagged phone is also a `Blank`, so without this the same twenty-one
+    # names appear in both warm-up sections of one message. The tagged section
+    # keeps them: "somebody marked this phone" is a finding a person made, while
+    # "waiting for a model" is the default state of the whole population. The
+    # total is kept so the model backlog does not appear to shrink -- these
+    # phones still need one, they are just listed under the more specific
+    # heading. Keys only ever come from dict entries; a caller passing bare
+    # names has nothing to match on and gets no suppression.
+    out.blocked_warmup_total = len(blocked_warmup(profiles))
+    out.blocked_warmup = blocked_warmup(profiles, exclude_ids=[
+        e.get("launch_id") for e in (tagged_warmup or []) if isinstance(e, dict)])
 
     for row in queue_rows or []:
         f = row.get("fields", row) or {}
@@ -209,14 +229,28 @@ def format_digest(d: Digest) -> str:
                   "e.g. " + ", ".join(f"<b>{name}</b>" for name in _sample(d.tagged_warmup))
                   + (f" … {n} in total" if n > 5 else "")]
 
-    if d.blocked_warmup:
+    # How many of the model backlog are already named in the tagged section.
+    suppressed = max(0, d.blocked_warmup_total - len(d.blocked_warmup))
+
+    if not d.blocked_warmup and suppressed:
+        # Every blocked phone was tagged, so they are all listed above already.
+        # Without this line the model errand -- the thing that actually unblocks
+        # them -- would vanish from the message entirely.
+        lines += ["", f"🕓 Those {suppressed} also need a <b>model</b> before day 4 can "
+                      f"run: day 4 is the first reel, and a reel needs a model's video. "
+                      f"Rename them from <code>Blank (NN)</code> to "
+                      f"<code>&lt;Model&gt; N</code> in MultiLogin and Airtable."]
+    elif d.blocked_warmup:
         n = len(d.blocked_warmup)
-        lines += ["", f"🕓 <b>{n} warm-up phone{'' if n == 1 else 's'} cannot finish "
+        also = (f" The {suppressed} tagged above need one too — "
+                f"{d.blocked_warmup_total} in all." if suppressed else "")
+        lines += ["", f"🕓 <b>{n} {'more ' if suppressed else ''}warm-up phone"
+                      f"{'' if n == 1 else 's'} cannot finish "
                       f"without a person.</b> They have done every day the bot can "
                       f"run and are waiting for a model: day 4 is the first reel, "
                       f"and a reel needs a model's video. Rename them from "
                       f"<code>Blank (NN)</code> to <code>&lt;Model&gt; N</code> in "
-                      f"MultiLogin and Airtable and they finish on their own.",
+                      f"MultiLogin and Airtable and they finish on their own." + also,
                   # De-duplicated for display only: MLX names are not unique
                   # (this workspace has three "Blank (5)"), and a sample that
                   # repeats a name reads as a bug rather than as two phones.
