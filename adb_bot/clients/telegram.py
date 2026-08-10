@@ -19,6 +19,14 @@ Config, both from the environment (normally `/etc/adbbot/env`):
 
     TELEGRAM_BOT_TOKEN   the token @BotFather gives you, "123456:ABC-DEF..."
     TELEGRAM_CHAT_ID     the group's id. Negative for groups, e.g. -1001234567890
+    TELEGRAM_TOPIC_ID    optional. In a forum group (one with topics), the
+                         thread to post in; without it every message lands in
+                         "General", which is not where anybody is looking.
+
+Finding the topic id: open the topic in Telegram and copy its link. For a
+private supergroup that is `t.me/c/<chat>/<topic>` -- the last number is the
+thread id. Note the chat id for the API is `-100` prefixed to the middle
+number: `t.me/c/4448753764/43` means chat `-1004448753764`, topic `43`.
 """
 from __future__ import annotations
 
@@ -41,11 +49,16 @@ TIMEOUT_SECONDS = 10
 class TelegramNotifier:
     """Posts to one chat. Never raises."""
 
-    def __init__(self, token: str | None = None, chat_id: str | None = None) -> None:
+    def __init__(self, token: str | None = None, chat_id: str | None = None,
+                 topic_id: str | None = None) -> None:
         self.token = (token if token is not None
                       else os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
         self.chat_id = (chat_id if chat_id is not None
                         else os.environ.get("TELEGRAM_CHAT_ID", "")).strip()
+        # Optional: only forum groups have topics, and a chat that has them
+        # rejects nothing without it -- the message just lands in "General".
+        self.topic_id = (topic_id if topic_id is not None
+                         else os.environ.get("TELEGRAM_TOPIC_ID", "")).strip()
 
     @property
     def configured(self) -> bool:
@@ -61,13 +74,16 @@ class TelegramNotifier:
             return False
         body = text if len(text) <= MAX_MESSAGE_CHARS else (
             text[:MAX_MESSAGE_CHARS - 20].rsplit("\n", 1)[0] + "\n… (truncated)")
-        payload = json.dumps({
+        fields = {
             "chat_id": self.chat_id,
             "text": body,
             "parse_mode": "HTML",
             # The alert is the message; a link preview would only add noise.
             "disable_web_page_preview": True,
-        }).encode()
+        }
+        if self.topic_id:
+            fields["message_thread_id"] = int(self.topic_id)
+        payload = json.dumps(fields).encode()
         req = urllib.request.Request(
             f"{API}/bot{self.token}/sendMessage", data=payload, method="POST",
             headers={"Content-Type": "application/json"})
@@ -99,7 +115,9 @@ class TelegramNotifier:
             missing = [n for n, v in (("TELEGRAM_BOT_TOKEN", self.token),
                                       ("TELEGRAM_CHAT_ID", self.chat_id)) if not v]
             return f"not configured (missing {', '.join(missing)})"
-        return f"configured for chat {self.chat_id}"
+        where = f"chat {self.chat_id}"
+        return f"configured for {where}" + (
+            f", topic {self.topic_id}" if self.topic_id else " (no topic -- General)")
 
 
 def _emit(logger, level: str, message: str, *args) -> None:

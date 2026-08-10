@@ -11,6 +11,7 @@ what follows is about the two fences on removal: the owned-tag set, and the
 ledger of profiles this pass tagged itself.
 """
 
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -658,3 +659,30 @@ class TelegramNotifyTest(unittest.TestCase):
         n = self._Notifier(ok=False)
         self.assertFalse(issue_tags.notify_newly_flagged([("Jil 6", None)], notifier=n))
         self.assertEqual(len(n.sent), 1)
+
+
+class TelegramTopicTest(unittest.TestCase):
+    """A forum group needs the thread id, or the alert lands in General."""
+
+    def _payload(self, **kw):
+        from adb_bot.clients import telegram
+        seen = {}
+
+        class _Resp:
+            def read(self): return b'{"ok": true}'
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(req, timeout=None):
+            seen.update(json.loads(req.data.decode()))
+            return _Resp()
+
+        with mock.patch.object(telegram.urllib.request, "urlopen", fake_urlopen):
+            telegram.TelegramNotifier(token="1:a", chat_id="-100", **kw).send("hi")
+        return seen
+
+    def test_a_topic_is_sent_as_message_thread_id(self):
+        self.assertEqual(self._payload(topic_id="43").get("message_thread_id"), 43)
+
+    def test_no_topic_means_no_thread_field(self):
+        self.assertNotIn("message_thread_id", self._payload(topic_id=""))
