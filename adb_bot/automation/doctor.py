@@ -249,6 +249,72 @@ def check_drive(service_account_json: str, folder_id: str) -> CheckResult:
     return CheckResult("Google Drive", PASS, f"{len(folders)} model folder(s) visible")
 
 
+def check_models(airtable_token: str, base_id: str, mlx_token: str,
+                 raw_root: str, drive_folder: str, service_account_json: str) -> CheckResult:
+    """Do Drive, MultiLogin and Airtable agree on which models exist?
+
+    The gap this closes: a model can be created in MultiLogin, cloned onto real
+    phones and warmed up for a week while every posting code path is blind to it,
+    because the join key is the *Airtable* profile name and `mlx_sync` writes
+    that field only on create. The failure mode is silence -- zero variants, no
+    error -- so the only way to catch it is to compare the systems on purpose.
+
+    WARN, never FAIL: nothing here is broken, something is un-onboarded, and a
+    FAIL would block `--apply` runs that are otherwise fine.
+    """
+    from adb_bot.automation import model_inventory, spoof_pipeline
+
+    if not airtable_token:
+        return CheckResult("Model inventory", WARN, "no Airtable token; cannot compare models",
+                           "Set AIRTABLE_TOKEN.")
+
+    mlx_profiles = mlx_folders = None
+    partial = []
+    try:
+        from adb_bot.clients import airtable as at
+        from adb_bot.clients.airtable import AirtableClient
+
+        client = AirtableClient(airtable_token, base_id, at.TABLE_PROFILES)
+    except Exception as exc:
+        return CheckResult("Model inventory", WARN, f"Airtable unreadable: {str(exc)[:70]}")
+
+    if mlx_token:
+        try:
+            from adb_bot.clients.multilogin.folders import MultiloginFolderClient
+            from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
+
+            mlx_profiles = MultiloginMobileListClient(mlx_token).list_mobile_profiles()
+            mlx_folders = MultiloginFolderClient(mlx_token).list_mobile_folders()
+        except Exception as exc:
+            mlx_profiles = mlx_folders = None
+            partial.append(f"MultiLogin unreadable ({str(exc)[:40]})")
+    else:
+        partial.append("no MultiLogin token")
+
+    source = None
+    try:
+        source = spoof_pipeline.build_source(raw_root, drive_folder, service_account_json)
+    except Exception as exc:
+        partial.append(f"raw source unreadable ({str(exc)[:40]})")
+    if source is None:
+        partial.append("no raw source configured")
+
+    try:
+        inventory = model_inventory.collect(airtable=client, mlx_profiles=mlx_profiles,
+                                            mlx_folders=mlx_folders, raw_source=source)
+        findings = model_inventory.diff_models(inventory)
+    except Exception as exc:
+        return CheckResult("Model inventory", WARN, f"could not compare models: {str(exc)[:70]}")
+
+    detail = model_inventory.summarise(findings)
+    if partial:
+        detail += f" [partial: {'; '.join(partial)}]"
+    gaps = [f for f in findings if f.severity == model_inventory.WARN]
+    if not gaps:
+        return CheckResult("Model inventory", PASS, detail)
+    return CheckResult("Model inventory", WARN, detail, gaps[0].hint)
+
+
 def check_spoofer(spoofer_python: str, spoofer_root: str) -> CheckResult:
     if not spoofer_python or not spoofer_root:
         return CheckResult("Video spoofer", WARN, "not configured",
@@ -401,6 +467,7 @@ def run_checks(settings_mod=None) -> list:
     results.extend(check_paths(raw_root, out_root, drive_folder))
     results.extend([
         check_drive(sa_json, drive_folder),
+        check_models(airtable_token, base_id, mlx_token, raw_root, drive_folder, sa_json),
         check_spoofer(spoofer_python, spoofer_root),
         check_scheduler(),
         check_locks(),

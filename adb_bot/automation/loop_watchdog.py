@@ -654,11 +654,27 @@ def observe_pipeline(watchdog: LoopWatchdog, report, now=None) -> Verdict:
     upstream, so this is genuinely new work). Produced = variants encoded. No
     new raw video is not a failure -- that is the "check raw video stock" job on
     somebody's list, and it reads IDLE.
+
+    **An unroutable clip is due work** (added 2026-08-10). A raw folder whose
+    model has no target contributes nothing to `processed_videos` and nothing to
+    `variants_created`, so a folder full of fresh clips going nowhere read as
+    IDLE -- "no new raw video" -- which is the opposite of what happened. Unlike
+    the queue's starved targets (see `observe_queue`), this is not a permanent
+    condition somebody has to delete rows to clear: it means a model was set up
+    in Drive and never finished in Airtable/MultiLogin, and finishing it clears
+    the alert. So it counts as due, and the loop reads STALLED until it is.
     """
-    due = len(report.processed_videos or [])
+    from adb_bot.automation.spoof_pipeline import UNROUTABLE_SKIP_MARKERS
+
+    unroutable = sum(1 for _, reason in (report.skipped or [])
+                     if any(marker in str(reason) for marker in UNROUTABLE_SKIP_MARKERS))
+    due = len(report.processed_videos or []) + unroutable
     produced = int(report.variants_created or 0)
-    return watchdog.observe("pipeline", due, produced, now=now,
-                            detail=f"{due} raw video(s) picked up, {produced} variant(s) encoded")
+    detail = f"{len(report.processed_videos or [])} raw video(s) picked up, {produced} variant(s) encoded"
+    if unroutable:
+        detail += (f", {unroutable} clip(s) under a model with no profile to spoof for "
+                   f"(see the 'pipeline: skipped' lines for which model)")
+    return watchdog.observe("pipeline", due, produced, now=now, detail=detail)
 
 
 def observe_recheck(watchdog: LoopWatchdog, tally, now=None) -> Verdict:

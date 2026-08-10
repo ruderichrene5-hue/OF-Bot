@@ -84,6 +84,14 @@ def _run_mlx_sync(args, logger) -> int:
     base_id = (args.base_id or "").strip() or settings.get_saved_airtable_base_id()
     report = sync_cli.run_sync(token, airtable_token, base_id, dry_run=not args.apply,
                                skip_staging=args.skip_staging)
+    # A model folder MLX knows about and Airtable's Models table does not is the
+    # first sign of a model nobody finished onboarding. It was print()ed to
+    # stdout only, so under systemd it landed in the journal unlabelled and in
+    # no log a person reads on purpose.
+    if report.unmatched_models:
+        logger.warning("mlx-sync: no Models row for %s -- devices created without a Model "
+                       "link; add the row or check the folder's spelling",
+                       ", ".join(sorted(report.unmatched_models)))
     return 1 if report.errors else 0
 
 
@@ -254,6 +262,12 @@ def _run_pipeline(args, logger) -> int:
         only_handles=[h for h in (args.profile or "").split(",") if h.strip()] or None,
     )
     logger.info("pipeline result: %s", report.summary())
+    # Say *what* was dropped and why, the way `_run_queue` already does. The most
+    # informative string the pipeline produces -- "no MLX profiles under model
+    # 'Kathi'", the one line that names an un-onboarded model -- was computed and
+    # then thrown away, leaving the journal with a bare "skipped=3".
+    for name, reason in report.skipped:
+        logger.info("pipeline: skipped %s: %s", name, reason)
     if args.apply:
         _watch(logger, airtable, lambda wd: loop_watchdog.observe_pipeline(wd, report))
     return 1 if report.errors else 0

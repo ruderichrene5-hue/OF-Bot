@@ -1815,6 +1815,43 @@ class SpoofQueueTest(unittest.TestCase):
         self.assertEqual(queue["unroutable"],
                          [{"folder": "Mandy", "model": "Luisa", "clips": 1}])
 
+    def test_an_empty_folder_for_a_model_with_no_profiles_is_reported(self):
+        """A half-onboarded model. `list_by_model` drops a folder with no
+        videos, so before `list_folder_names` a model somebody had created a
+        Drive folder for -- and nothing else -- appeared literally nowhere: no
+        clips, no skips, no row, no error. Zero output that looked like zero
+        work."""
+        source = mock.Mock()
+        source.list_by_model.return_value = {
+            "Laila": [SimpleNamespace(name="a.mp4")]}
+        source.list_folder_names.return_value = ["Kathi", "Katherine", "Laila"]
+        airtable = self.FakeAirtable(targets={"laila": [{"handle": "Laila 1"}]})
+        with mock.patch.object(spoof_pipeline, "build_source", return_value=source):
+            queue = report.spoof_queue(airtable)
+        self.assertEqual(queue["unclaimed"],
+                         [{"folder": "Katherine", "model": "Katherine"},
+                          {"folder": "Kathi", "model": "Kathi"}])
+        # ...and the healthy model is untouched by the new key.
+        self.assertEqual(queue["clips"], 1)
+
+    def test_an_empty_folder_whose_model_has_profiles_is_not_reported(self):
+        # Nikki has profiles and simply ran out of clips: normal, not a gap.
+        source = mock.Mock()
+        source.list_by_model.return_value = {}
+        source.list_folder_names.return_value = ["Corina"]
+        airtable = self.FakeAirtable(targets={"nikki": [{"handle": "Nikki 1"}]})
+        with mock.patch.object(spoof_pipeline, "build_source", return_value=source):
+            queue = report.spoof_queue(airtable)
+        self.assertEqual(queue["unclaimed"], [])
+
+    def test_a_source_without_folder_listing_still_renders(self):
+        source = mock.Mock(spec=["list_by_model"])
+        source.list_by_model.return_value = {}
+        with mock.patch.object(spoof_pipeline, "build_source", return_value=source):
+            queue = report.spoof_queue(self.FakeAirtable(targets={}))
+        self.assertEqual(queue["unclaimed"], [])
+        self.assertEqual(queue["error"], "")
+
     def test_no_airtable_client_says_so_rather_than_reporting_zero(self):
         self.assertEqual(report.spoof_queue(None)["error"], "no Airtable client")
 
@@ -1938,6 +1975,26 @@ class CpuAndSpoofRenderTest(RenderTest):
             "unroutable": [{"folder": "Mandy", "model": "Luisa", "clips": 3}]}))
         self.assertIn("no active profile", page)
         self.assertNotIn("Every raw clip in Drive has been through", page)
+
+    def test_a_half_onboarded_model_is_named_on_the_page(self):
+        """Its folder is empty and it has no profiles, so every count on this
+        page is legitimately zero. Saying nothing is how two real models stayed
+        invisible for six days."""
+        page = report_html.render(self._data(spoof={
+            "now": {"running": False, "encoding": False, "clip": "", "model": "",
+                    "run": "", "seconds": 0.0, "done": []},
+            "clips": 0, "variants": 0, "error": "", "models": [], "unroutable": [],
+            "unclaimed": [{"folder": "Kathi", "model": "Kathi"}]}))
+        self.assertIn("Kathi", page)
+        self.assertIn("part-way through", page)
+
+    def test_a_spoof_panel_without_the_key_still_renders(self):
+        # The deployed collector under /opt is older than this renderer.
+        page = report_html.render(self._data(spoof={
+            "now": {"running": False, "encoding": False, "clip": "", "model": "",
+                    "run": "", "seconds": 0.0, "done": []},
+            "clips": 0, "variants": 0, "error": "", "models": [], "unroutable": []}))
+        self.assertIn("Spoofing", page)
 
     def test_a_broken_queue_still_reports_the_encoder(self):
         """The encoder is read from this box; Drive being unreachable says
