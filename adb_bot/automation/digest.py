@@ -55,6 +55,35 @@ def _select(fields: dict, key: str):
     return value.get("name") if isinstance(value, dict) else value
 
 
+def blocked_warmup(profiles) -> list:
+    """Warm-up profiles that cannot finish until a person assigns them a model.
+
+    Day 4 of the plan is a reel, and the warm-up loop deliberately does not run
+    it: `warmup_targets` skips with "the plan's reel is left to the Posting
+    Queue", because a reel needs a spoofed variant and a variant needs a model.
+    A profile still called `Blank (NN)` belongs to no model, so the queue has
+    nothing to build a row from -- and the hand-off never happens.
+
+    The result is a dead end rather than a failure: on 2026-08-10 all 54 warm-up
+    profiles sat at `Warmup Day 3 Done` with `Last Result: Done`, zero Spoof
+    Variants and zero queue rows between them. Nothing was broken; the warm-up
+    had simply run out of things it was allowed to do, and no loop said so.
+
+    Keyed on the model being `Blank`, which is what "no model assigned" means
+    here -- the same first-word derivation `mlx_sync` uses -- rather than on the
+    absence of variants, so it reports the cause and not a symptom of it.
+    """
+    out = []
+    for row in profiles or []:
+        f = row.get("fields", row) or {}
+        if not f.get(at.F_PROF_WARMUP_STARTED):
+            continue
+        name = str(f.get(at.F_PROF_NAME) or "").strip()
+        if name.split()[:1] == ["Blank"] or name.lower().startswith("blank"):
+            out.append(name or "?")
+    return sorted(out)
+
+
 @dataclass
 class Digest:
     flagged: int = 0
@@ -63,6 +92,7 @@ class Digest:
     oldest_days: int = 0
     stale: int = 0                                    # flagged longer than STALE_FLAG_DAYS
     parked_unflagged: list = field(default_factory=list)   # cleared, but Status Inactive
+    blocked_warmup: list = field(default_factory=list)
     due: int = 0
     posted: int = 0
     failed: int = 0
@@ -71,7 +101,8 @@ class Digest:
     @property
     def quiet(self) -> bool:
         """Nothing waiting and nothing stuck -- worth saying so in one line."""
-        return not self.flagged and not self.parked_unflagged
+        return not self.flagged and not self.parked_unflagged \
+               and not self.blocked_warmup
 
 
 def build_digest(profiles, queue_rows, now=None) -> Digest:
@@ -104,6 +135,7 @@ def build_digest(profiles, queue_rows, now=None) -> Digest:
             out.parked_unflagged.append(str(f.get(at.F_PROF_NAME) or "?"))
 
     out.by_reason = reasons.most_common()
+    out.blocked_warmup = blocked_warmup(profiles)
 
     for row in queue_rows or []:
         f = row.get("fields", row) or {}
@@ -142,6 +174,18 @@ def format_digest(d: Digest) -> str:
         more = f" and {len(d.parked_unflagged) - 8} more" if len(d.parked_unflagged) > 8 else ""
         lines += ["", f"⚠️ Un-flagged but still switched off, so still not posting: "
                       f"{names}{more}. Set <b>Status</b> back to <b>Active</b> in Airtable."]
+
+    if d.blocked_warmup:
+        n = len(d.blocked_warmup)
+        lines += ["", f"🕓 <b>{n} warm-up phone{'' if n == 1 else 's'} cannot finish "
+                      f"without a person.</b> They have done every day the bot can "
+                      f"run and are waiting for a model: day 4 is the first reel, "
+                      f"and a reel needs a model's video. Rename them from "
+                      f"<code>Blank (NN)</code> to <code>&lt;Model&gt; N</code> in "
+                      f"MultiLogin and Airtable and they finish on their own.",
+                  "e.g. " + ", ".join(f"<b>{n}</b>" for n in d.blocked_warmup[:5])
+                  + (f" and {len(d.blocked_warmup) - 5} more"
+                     if len(d.blocked_warmup) > 5 else "")]
 
     lines += ["", f"Last {WINDOW_HOURS}h: <b>{d.posted} posted</b>, {d.failed} failed, "
                   f"{d.pending} still queued (of {d.due} due)."]

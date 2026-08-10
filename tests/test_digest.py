@@ -145,3 +145,38 @@ class SendTest(unittest.TestCase):
         n = self._Notifier(configured=False)
         digest.run_digest(self._Airtable(), notifier=n, dry_run=False)
         self.assertEqual(n.sent, [])
+
+
+class BlockedWarmupTest(unittest.TestCase):
+    """A warm-up that has run out of things the bot is allowed to do."""
+
+    def _p(self, name, started="2026-08-07"):
+        f = {at.F_PROF_NAME: name}
+        if started:
+            f[at.F_PROF_WARMUP_STARTED] = started
+        return {"fields": f}
+
+    def test_a_blank_in_warmup_is_waiting_on_a_model(self):
+        self.assertEqual(
+            digest.blocked_warmup([self._p("Blank (12)"), self._p("Blank 1 (3)")]),
+            ["Blank (12)", "Blank 1 (3)"])
+
+    def test_a_named_profile_in_warmup_is_not_blocked(self):
+        """It has a model, so day 4's reel can be built for it."""
+        self.assertEqual(digest.blocked_warmup([self._p("Nikki 15")]), [])
+
+    def test_a_blank_that_never_started_warmup_is_not_reported(self):
+        """Staging profiles sitting in the workspace are nobody's errand yet."""
+        self.assertEqual(digest.blocked_warmup([self._p("Blank (40)", started=None)]), [])
+
+    def test_the_digest_explains_the_fix_not_just_the_count(self):
+        d = digest.build_digest([self._p("Blank (12)")], [], now=NOW)
+        body = digest.format_digest(d)
+        self.assertIn("cannot finish", body)
+        self.assertIn("Blank (12)", body)
+        # the actual remedy, or it is just another number
+        self.assertIn("Model", body)
+
+    def test_blocked_warmup_alone_means_the_day_is_not_quiet(self):
+        d = digest.build_digest([self._p("Blank (12)")], [], now=NOW)
+        self.assertFalse(d.quiet)
