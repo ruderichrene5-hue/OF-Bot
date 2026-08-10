@@ -36,7 +36,7 @@ PLANNED_LOOPS = ("queue", "retry")
 # writing timer on the next routine run of the installer -- whatever that run
 # was actually for.
 RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery",
-                     "warmup", "warmup-state", "mlx-sync", "cleanup",
+                     "warmup", "warmup-state", "mlx-sync", "cleanup", "digest",
                      "doctor", "reap-phones", "second-accounts")
 
 # Loops the CLI can run that are deliberately NOT scheduled: arming them has to
@@ -116,6 +116,11 @@ RECOMMENDED_INTERVALS = {
     "mlx-sync": 1440,
     # Disk housekeeping (old used media). Once a night, off-peak (04:00).
     "cleanup": 1440,
+
+    # Once a day, and the only loop whose whole output is a chat message. It
+    # reads Airtable and sends; it changes nothing, so there is no harm in it
+    # running on a schedule the way the rest do.
+    "digest": 1440,
     # Preflight, on a timer rather than only when a person asks. Its checks are
     # what the loops silently depend on -- the MLX agent listening, Airtable
     # readable, Drive reachable -- and on 2026-08-04 a dead agent went unnoticed
@@ -146,7 +151,10 @@ DEFAULT_INTERVALS = RECOMMENDED_INTERVALS
 FALLBACK_INTERVAL_MIN = 30
 
 # For a daily task (interval a whole number of days) we need a start time.
-DEFAULT_DAILY_START = {"mlx-sync": "23:30", "warmup": "08:00", "cleanup": "04:00"}
+DEFAULT_DAILY_START = {"mlx-sync": "23:30", "warmup": "08:00", "cleanup": "04:00",
+                       # Before the VAs start, so the backlog is the first thing
+                       # in the topic rather than something they scroll back for.
+                       "digest": "08:00"}
 
 # A loop that overruns this is considered wedged and is killed, so the next
 # cycle gets a clean start. Matches the Windows ExecutionTimeLimit of PT2H.
@@ -164,6 +172,7 @@ DESCRIPTIONS = {
     "pipeline": "ADB bot spoofing pipeline (Drive/raw -> Spoof Variants)",
     "mlx-sync": "ADB bot MultiLogin->Airtable profile sync",
     "cleanup": "ADB bot cleanup loop (old used media)",
+    "digest": "ADB bot daily digest (backlog -> Telegram)",
     "doctor": "ADB bot preflight checks (alerts on failures)",
     "reap-phones": "ADB bot orphan-phone reaper (closes abandoned phones)",
     "second-accounts": "ADB bot two-account watch (both accounts of a phone posting?)",
