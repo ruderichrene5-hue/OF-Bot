@@ -15,6 +15,7 @@ from adb_bot.automation.schedule_spec import (  # noqa: F401  (re-exported for c
     DEFAULT_INTERVALS,
     FALLBACK_INTERVAL_MIN,
     LOOPS,
+    MANUAL_ONLY_LOOPS,
     PLANNED_LOOPS,
     RECOMMENDED_INTERVALS,
     RECOMMENDED_LOOPS,
@@ -143,7 +144,12 @@ def installable_loops() -> tuple[str, ...]:
     the installer picks them up once they land.
     """
     known = cli_loops()
-    return tuple(loop for loop in RECOMMENDED_LOOPS if loop in known)
+    # MANUAL_ONLY_LOOPS is excluded twice over: those names are not in
+    # RECOMMENDED_LOOPS to begin with, and this is the function the installer
+    # asks, so a name put back into the recommended set by accident still cannot
+    # arm an unattended writer without the exclusion below being removed too.
+    return tuple(loop for loop in RECOMMENDED_LOOPS
+                 if loop in known and loop not in MANUAL_ONLY_LOOPS)
 
 
 def pending_loops() -> tuple[str, ...]:

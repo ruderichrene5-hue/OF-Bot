@@ -35,10 +35,39 @@ def fake_systemd(status: dict, listed=None):
 
 class RecommendedSetTest(unittest.TestCase):
     def test_every_cli_loop_is_in_the_recommended_set(self):
-        """A loop the CLI can run but nobody scheduled runs only by hand."""
+        """A loop the CLI can run but nobody scheduled runs only by hand.
+
+        Unless running only by hand is the point: `MANUAL_ONLY_LOOPS` is the
+        explicit, named exception, so "not scheduled" cannot happen by
+        forgetting -- it has to be written down.
+        """
         from adb_bot.automation import run_loop
         for loop in run_loop.LOOPS:
+            if loop in schedule_spec.MANUAL_ONLY_LOOPS:
+                continue
             self.assertIn(loop, scheduling.RECOMMENDED_LOOPS, loop)
+
+    def test_a_manual_only_loop_is_runnable_but_never_installed(self):
+        """The deploy footgun this exists to close: `install_units.sh` asks for
+        `installable_loops()` and enables every name it gets back, with
+        `--apply` appended by `loop_arguments`. So a loop that writes to the
+        shared MultiLogin workspace must not be reachable from that list -- or
+        the next routine installer run, for any unrelated reason, silently arms
+        an unattended 15-minute writer."""
+        from adb_bot.automation import run_loop
+        for loop in schedule_spec.MANUAL_ONLY_LOOPS:
+            self.assertIn(loop, run_loop.COMMANDS, loop)
+            self.assertNotIn(loop, scheduling.RECOMMENDED_LOOPS, loop)
+            self.assertNotIn(loop, scheduling.installable_loops(), loop)
+            self.assertNotIn(loop, scheduling.pending_loops(), loop)
+
+    def test_a_manual_only_loop_cannot_be_armed_by_re_listing_it(self):
+        """The second fence. Putting the name back in the recommended set --
+        the easy edit, and the one somebody tidying the spec would make -- must
+        still not make it installable."""
+        with mock.patch.object(scheduling, "RECOMMENDED_LOOPS",
+                               tuple(scheduling.RECOMMENDED_LOOPS) + ("issue-tags",)):
+            self.assertNotIn("issue-tags", scheduling.installable_loops())
 
     def test_spec_declares_no_loop_the_cli_cannot_run(self):
         # The reverse (a CLI loop missing from the spec) is tolerated: the
@@ -221,12 +250,28 @@ class InstallScriptTest(unittest.TestCase):
     """The shell installer keeps its own loop list for --remove; it has to cover
     everything this module may have installed, or removal leaves timers behind."""
 
-    def test_remove_list_covers_the_recommended_set(self):
-        script = (Path(__file__).resolve().parents[1]
-                  / "deploy" / "systemd" / "install_units.sh").read_text(encoding="utf-8")
-        match = re.search(r"^LOOPS=\(([^)]*)\)", script, re.MULTILINE)
+    def _script(self):
+        return (Path(__file__).resolve().parents[1]
+                / "deploy" / "systemd" / "install_units.sh").read_text(encoding="utf-8")
+
+    def test_remove_list_covers_everything_that_may_be_on_disk(self):
+        """Including the manual-only loops. They are never *installed* by this
+        script, but a person may have installed one by hand -- and `--remove`
+        saying "unregister every loop" while leaving an armed MultiLogin writer
+        firing is a worse trap than the one MANUAL_ONLY closes."""
+        match = re.search(r"^LOOPS=\(([^)]*)\)", self._script(), re.MULTILINE)
         self.assertIsNotNone(match, "install_units.sh no longer declares LOOPS=(...)")
-        self.assertEqual(set(match.group(1).split()), set(scheduling.RECOMMENDED_LOOPS))
+        self.assertEqual(set(match.group(1).split()),
+                         set(scheduling.RECOMMENDED_LOOPS)
+                         | set(schedule_spec.MANUAL_ONLY_LOOPS))
+
+    def test_the_scripts_manual_only_list_matches_the_spec(self):
+        """The script filters what Python hands it, so the two lists have to
+        agree or the guard silently stops covering the loop it names."""
+        match = re.search(r"^MANUAL_ONLY=\(([^)]*)\)", self._script(), re.MULTILINE)
+        self.assertIsNotNone(match, "install_units.sh no longer declares MANUAL_ONLY=(...)")
+        self.assertEqual(set(match.group(1).split()),
+                         set(schedule_spec.MANUAL_ONLY_LOOPS))
 
 
 if __name__ == "__main__":

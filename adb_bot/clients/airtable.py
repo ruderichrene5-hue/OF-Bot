@@ -729,7 +729,7 @@ class AirtableClient:
         for record in self._list_table(
                 TABLE_PROFILES,
                 fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_STATUS,
-                        F_PROF_NEEDS_HUMAN, F_PROF_FLAGGED_AT]):
+                        F_PROF_NEEDS_HUMAN, F_PROF_ISSUE_REASON, F_PROF_FLAGGED_AT]):
             fields = record.get("fields", {}) or {}
             out.append({
                 "record_id": record.get("id"),
@@ -738,6 +738,12 @@ class AirtableClient:
                 # Empty Status counts as Active, exactly as the planners read it.
                 "status": _select_name(fields.get(F_PROF_STATUS)) or STATUS_SELECT_ACTIVE,
                 "needs_human": bool(fields.get(F_PROF_NEEDS_HUMAN)),
+                # Why it was flagged (PROFILE_ISSUE_*), for a caller that has to
+                # say something to a person -- "24 flagged" and "19 of them
+                # waiting on an Instagram checkpoint" are different sentences,
+                # and the second one is the actionable one. Costs nothing: it
+                # rides along in the same list call as the checkbox.
+                "reason": _select_name(fields.get(F_PROF_ISSUE_REASON)) or "",
                 "flagged_at": str(fields.get(F_PROF_FLAGGED_AT) or "").strip() or None,
             })
         return out

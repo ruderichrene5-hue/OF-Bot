@@ -31,21 +31,32 @@ class FakeTagClient:
     `fail_on` names the profile ids whose tag calls raise, because the real
     client's `_post` raises on any status >= 400 -- one dead profile id would
     otherwise abort a whole sweep.
+
+    `ensure_tag` is present and *explodes*: the real one creates the tag when
+    the search does not return it, and this module must never call it.
     """
 
-    def __init__(self, fail_on=(), fail_ensure=False, tag_id=ISSUE_TAG_ID):
+    def __init__(self, fail_on=(), fail_lookup=False, tag_id=ISSUE_TAG_ID,
+                 known_tags=None):
         self.assigned = []      # (profile_id, [tag_ids])
         self.unassigned = []
-        self.ensured = []       # (name, colour)
+        self.lookups = 0        # calls to tag_ids_by_name
         self.fail_on = set(fail_on)
-        self.fail_ensure = fail_ensure
+        self.fail_lookup = fail_lookup
         self.tag_id = tag_id
+        # What `/tag/search` comes back with. Default: the workspace's real one.
+        self.known_tags = ({"issue": tag_id} if known_tags is None else dict(known_tags))
+
+    def tag_ids_by_name(self, refresh=False):
+        self.lookups += 1
+        if self.fail_lookup:
+            raise RuntimeError("MLX 503")
+        return dict(self.known_tags)
 
     def ensure_tag(self, name, color="gray"):
-        if self.fail_ensure:
-            raise RuntimeError("MLX 503")
-        self.ensured.append((name, color))
-        return self.tag_id
+        raise AssertionError(
+            "issue_tags must never call ensure_tag: it creates the tag, and this "
+            "workspace already has an 'Issue' with ~33 hand-applied uses")
 
     def _check(self, profile_id):
         if profile_id in self.fail_on:
@@ -75,9 +86,11 @@ class FakeAirtable:
         return list(self.rows)
 
 
-def _row(name="Jil 3", launch_id="100000001", needs_human=False, record_id="recA"):
+def _row(name="Jil 3", launch_id="100000001", needs_human=False, record_id="recA",
+         reason=""):
     return {"record_id": record_id, "name": name, "launch_id": launch_id,
-            "status": "Active", "needs_human": needs_human, "flagged_at": None}
+            "status": "Active", "needs_human": needs_human, "reason": reason,
+            "flagged_at": None}
 
 
 def _mlx(launch_id="100000001", serial="262894", tags=()):
@@ -148,6 +161,14 @@ class TagChangeTest(unittest.TestCase):
 
     def test_the_owned_set_is_exactly_the_issue_tag(self):
         self.assertEqual([t.lower() for t in issue_tags.owned_tags()], ["issue"])
+
+    def test_the_owned_set_is_single_valued_by_construction(self):
+        """Not a coincidence to be widened casually. The sweep resolves ONE tag
+        id and passes that id to assign/unassign, so a second name would be
+        planned here and then not carried out -- the plan and the API call would
+        disagree, silently. Widening it means making the sweep resolve an id per
+        name first; the module raises on import if the two drift apart."""
+        self.assertEqual(len(issue_tags.OWNED_TAGS), 1)
 
 
 # ------------------------------------------------------------------ the sweep
@@ -232,6 +253,59 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(client.assigned, [])
         self.assertEqual(report.no_launch_id, 1)
 
+    def test_two_rows_sharing_one_profile_are_one_decision(self):
+        """A duplicated `MLX API ID` (a re-made row, a hand-copied id) would
+        otherwise be two calls a tick for one profile -- and if the rows
+        disagree, the profile's tag would depend on which row Airtable listed
+        first. Flagged anywhere wins."""
+        rows = [_row(name="Jil 3", record_id="recA", needs_human=False),
+                _row(name="Jil 3 (copy)", record_id="recB", needs_human=True)]
+        report, client = _sync(rows, [_mlx()], self.tmpdir)
+        self.assertEqual(client.assigned, [("100000001", [ISSUE_TAG_ID])])
+        self.assertEqual((report.checked, report.tagged), (1, 1))
+        self.assertEqual(report.duplicate_rows, 1)
+
+    def test_rows_with_no_api_id_are_never_folded_together(self):
+        """They all join on the empty string; merging them would report one
+        skipped row where there are three to fix."""
+        rows = [_row(name=f"Blank {i}", launch_id=None, record_id=f"rec{i}")
+                for i in range(3)]
+        report, _ = _sync(rows, [_mlx()], self.tmpdir)
+        self.assertEqual((report.checked, report.no_launch_id), (3, 3))
+        self.assertEqual(report.duplicate_rows, 0)
+
+    # ------------------------------------------------------- the issue reason
+
+    def test_the_reason_a_profile_was_flagged_reaches_the_log(self):
+        """`Issue Reason` is the difference between "24 profiles need a person"
+        and "19 of them are sitting on an Instagram checkpoint". It is on the
+        row `posting_profiles` returns, and it decorates the change line."""
+        report, _ = _sync([_row(needs_human=True, reason="Human Verification Required")],
+                          [_mlx()], self.tmpdir)
+        self.assertTrue(any("Human Verification Required" in line
+                            for line in report.changes))
+
+    def test_the_reason_is_recorded_with_the_tag_the_pass_applied(self):
+        _sync([_row(needs_human=True, reason="Retries Exhausted")], [_mlx()], self.tmpdir)
+        entry = issue_tags.load_ledger(self.tmpdir)["100000001"]
+        self.assertEqual(entry["reason"], "Retries Exhausted")
+
+    def test_the_client_actually_returns_the_field_the_plan_reads(self):
+        """The dead-field trap this replaces: `build_states` read `reason`,
+        `posting_profiles` never returned the key, so the decoration could not
+        fire and the stored reason was always ''. Assert the two agree."""
+        from adb_bot.clients import airtable as at
+
+        client = at.AirtableClient.__new__(at.AirtableClient)
+        record = {"id": "recA", "fields": {at.F_PROF_NAME: "Jil 3",
+                                           at.F_PROF_MLX_API_ID: "100000001",
+                                           at.F_PROF_NEEDS_HUMAN: True,
+                                           at.F_PROF_ISSUE_REASON: "Banned / Blocked"}}
+        with mock.patch.object(at.AirtableClient, "_list_table", return_value=[record]):
+            rows = client.posting_profiles()
+        self.assertEqual(rows[0]["reason"], "Banned / Blocked")
+        self.assertEqual(issue_tags.build_states(rows)[0].reason, "Banned / Blocked")
+
     def test_a_row_pointing_at_a_deleted_profile_is_skipped_not_attempted(self):
         """`Jasmin 9` on the live base: flagged, and its MLX profile is gone.
         Attempting it would 400, and the real client raises -- one stale id would
@@ -243,6 +317,36 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(report.missing_in_mlx, 1)
         self.assertTrue(any("Jasmin 9" in line for line in report.stale))
 
+    def test_a_dangling_row_is_warned_about_once_a_day_not_once_a_tick(self):
+        """`Jasmin 9` has been in this state for days and will not change on its
+        own. At a 15-minute cadence, warning every tick is ~96 identical
+        WARNINGs a day in the log people read for the real ones -- so the second
+        pass counts it instead, and the count stays in the summary."""
+        rows, items = [_row(name="Jasmin 9", launch_id="999", needs_human=True)], [_mlx()]
+        first, _ = _sync(rows, items, self.tmpdir)
+        second, _ = _sync(rows, items, self.tmpdir)
+        self.assertEqual(len(first.stale), 1)
+        self.assertEqual((second.stale, second.stale_quiet), ([], 1))
+        self.assertIn("stale-quiet=1", second.summary())
+
+    def test_it_says_so_again_the_next_day(self):
+        from datetime import datetime, timedelta, timezone
+
+        rows, items = [_row(name="Jasmin 9", launch_id="999", needs_human=True)], [_mlx()]
+        t0 = datetime(2026, 8, 10, 9, 0, tzinfo=timezone.utc)
+        _sync(rows, items, self.tmpdir, now=t0)
+        later, _ = _sync(rows, items, self.tmpdir,
+                         now=t0 + timedelta(hours=issue_tags.STALE_RENOTIFY_HOURS + 1))
+        self.assertEqual(len(later.stale), 1)
+
+    def test_the_quiet_period_does_not_touch_the_ownership_ledger(self):
+        """Two sections in one file: writing the warning bookkeeping must not
+        drop the record of which tags are the bot's to remove."""
+        _sync([_row(needs_human=True)], [_mlx()], self.tmpdir)
+        _sync([_row(name="Jasmin 9", launch_id="999", needs_human=True)],
+              [_mlx()], self.tmpdir)
+        self.assertIn("100000001", issue_tags.load_ledger(self.tmpdir))
+
     # ------------------------------------------------------------ outages
 
     def test_no_tag_client_reports_and_writes_nothing(self):
@@ -252,6 +356,20 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(report.checked, 0)
         self.assertTrue(report.errors)
 
+    def test_a_multilogin_outage_does_not_cost_a_full_airtable_scan(self):
+        """`posting_profiles` is a full scan of the 151-row Profiles table. It
+        used to run before these guards, so every tick of an MLX outage paid for
+        a whole table read and then threw the answer away -- 96 a day, on the
+        table everything else is also reading."""
+        airtable = FakeAirtable([_row(needs_human=True)])
+        issue_tags.sync_issue_tags(airtable, tag_client=None, mlx_items=[_mlx()],
+                                   app_dir=self.tmpdir, dry_run=False)
+        issue_tags.sync_issue_tags(airtable, tag_client=FakeTagClient(), mlx_items=[],
+                                   app_dir=self.tmpdir, dry_run=False)
+        issue_tags.sync_issue_tags(airtable, tag_client=FakeTagClient(known_tags={}),
+                                   mlx_items=[_mlx()], app_dir=self.tmpdir, dry_run=False)
+        self.assertEqual(airtable.calls, 0)
+
     def test_an_empty_inventory_is_refused_rather_than_reconciled_against(self):
         """An empty list is indistinguishable from MultiLogin being unreachable,
         and reconciling against it would read all 151 profiles as untagged."""
@@ -260,11 +378,34 @@ class SyncTest(unittest.TestCase):
         self.assertTrue(report.errors)
 
     def test_an_unresolvable_tag_id_stops_before_any_profile_call(self):
-        client = FakeTagClient(fail_ensure=True)
+        client = FakeTagClient(fail_lookup=True)
         report, _ = _sync([_row(needs_human=True)], [_mlx()], self.tmpdir,
                           tag_client=client)
         self.assertEqual(client.assigned, [])
         self.assertTrue(any("Issue" in e for e in report.errors))
+        self.assertIn(issue_tags.ERR_TAG_LOOKUP, report.error_kinds)
+
+    def test_a_workspace_without_the_tag_is_an_error_not_a_creation(self):
+        """THE unguarded-write guard. `ensure_tag` creates the tag when the
+        search does not return it -- and a soft `/tag/search` failure is
+        indistinguishable from an absent tag, while `tags.py` documents that two
+        tags may share a name here. So on an unattended tick that path would
+        mint a SECOND 'Issue', tag profiles with its id, and leave the ~33
+        hand-applied uses on the first one. Search-only, and missing is fatal to
+        the pass."""
+        client = FakeTagClient(known_tags={})
+        report, _ = _sync([_row(needs_human=True)], [_mlx()], self.tmpdir,
+                          tag_client=client)
+        self.assertEqual(client.assigned, [])
+        self.assertIn(issue_tags.ERR_TAG_LOOKUP, report.error_kinds)
+        self.assertTrue(any("will not create" in e for e in report.errors))
+
+    def test_the_tag_id_comes_from_the_search_and_never_from_a_create(self):
+        _, client = _sync([_row(needs_human=True)], [_mlx()], self.tmpdir)
+        # FakeTagClient.ensure_tag raises; getting here at all is the assertion,
+        # and the id used is the one the workspace already had.
+        self.assertEqual(client.assigned, [("100000001", [ISSUE_TAG_ID])])
+        self.assertEqual(client.lookups, 1)
 
     def test_one_failing_profile_does_not_stop_the_others(self):
         rows = [_row(name="A", launch_id="1", record_id="recA", needs_human=True),
@@ -305,12 +446,12 @@ class SyncTest(unittest.TestCase):
     # ------------------------------------------------------------ dry run
 
     def test_dry_run_plans_without_touching_multilogin(self):
-        """Not even `ensure_tag`: resolving the name is a write on a workspace
-        that has not got the tag, and a plan-only run must not create one."""
+        """Not one call, not even the read: a plan is Airtable plus the
+        inventory the caller already fetched."""
         report, client = _sync([_row(needs_human=True)], [_mlx()], self.tmpdir,
                                dry_run=True)
-        self.assertEqual((client.assigned, client.unassigned, client.ensured),
-                         ([], [], []))
+        self.assertEqual((client.assigned, client.unassigned, client.lookups),
+                         ([], [], 0))
         self.assertEqual(report.tagged, 1)
         self.assertTrue(report.changes)
         self.assertFalse((self.tmpdir / issue_tags.STATE_FILENAME).exists())
@@ -334,7 +475,7 @@ class SyncTest(unittest.TestCase):
         rows = [_row(name=f"P{i}", launch_id=i, record_id=f"rec{i}", needs_human=True)
                 for i in ids]
         _, client = _sync(rows, [_mlx(i, f"s{i}") for i in ids], self.tmpdir)
-        self.assertEqual(client.ensured, [("Issue", "purple")])
+        self.assertEqual(client.lookups, 1)
         self.assertEqual(len(client.assigned), 5)
 
     def test_no_call_exceeds_the_documented_per_call_tag_ceiling(self):
@@ -355,20 +496,42 @@ class WiringTest(unittest.TestCase):
         self.assertIn("issue-tags", run_loop.LOOPS)
         self.assertIn("issue-tags", run_loop._DISPATCH)
 
-    def test_it_is_scheduled_and_has_something_to_say_for_itself(self):
-        self.assertIn("issue-tags", schedule_spec.RECOMMENDED_LOOPS)
-        self.assertIn("issue-tags", schedule_spec.RECOMMENDED_INTERVALS)
+    def test_it_is_manual_only_and_never_installs_itself(self):
+        """The deploy footgun, from this side. `install_units.sh --apply` asks
+        `installable_loops()` and enables everything it gets back, and
+        `loop_arguments` appends `--apply` to anything outside
+        READ_ONLY_COMMANDS -- so being in the recommended set means the next
+        routine installer run, for any unrelated reason, arms an unattended
+        15-minute writer against the live MultiLogin workspace. It is listed as
+        manual-only instead, which is a thing a person does on purpose."""
+        from adb_bot.automation import scheduling
+
+        self.assertIn("issue-tags", schedule_spec.MANUAL_ONLY_LOOPS)
+        self.assertNotIn("issue-tags", schedule_spec.RECOMMENDED_LOOPS)
+        self.assertNotIn("issue-tags", scheduling.installable_loops())
+        # ...but it still knows its cadence and can describe itself, so a
+        # hand-installed unit and the dashboard both have something to read.
+        self.assertEqual(schedule_spec.RECOMMENDED_INTERVALS["issue-tags"], 15)
         self.assertTrue(schedule_spec.WHAT_IT_DOES.get("issue-tags"))
         self.assertTrue(schedule_spec.DESCRIPTIONS.get("issue-tags"))
 
-    def _run(self, argv):
+    def test_the_unit_it_would_get_still_runs_with_apply(self):
+        """Manual-only is about *who installs it*, not about it being crippled:
+        the rendered command is a real applying run, so the handover text a
+        person pastes is the real thing."""
+        self.assertIn("--apply", schedule_spec.loop_arguments("issue-tags", apply=True))
+        self.assertNotIn("--apply", schedule_spec.loop_arguments("issue-tags", apply=False))
+
+    def _run(self, argv, report=None, expect_code=0):
         from adb_bot.automation import run_loop
 
         with mock.patch.object(run_loop, "_airtable", return_value=FakeAirtable([])), \
                 mock.patch.object(run_loop, "_mlx_token", return_value=""), \
+                mock.patch.object(run_loop, "_watch") as watch, \
                 mock.patch.object(issue_tags, "sync_issue_tags") as sync:
-            sync.return_value = issue_tags.IssueTagReport()
-            self.assertEqual(run_loop.main(argv), 0)
+            sync.return_value = report if report is not None else issue_tags.IssueTagReport()
+            self.assertEqual(run_loop.main(argv), expect_code)
+        self.watched = watch.call_count
         return sync.call_args.kwargs
 
     def test_the_cli_defaults_to_a_dry_run_that_adopts_nothing(self):
@@ -384,11 +547,71 @@ class WiringTest(unittest.TestCase):
         self.assertFalse(kwargs["dry_run"])
         self.assertTrue(kwargs["adopt_existing"])
 
-    def test_a_missing_multilogin_token_is_survived_not_fatal(self):
-        """No token means no tag client, and the pass says so and exits clean --
-        a MultiLogin outage must not turn the unit red."""
+    def test_a_missing_multilogin_token_does_not_raise(self):
+        """No token means no tag client and a reported reason, not a traceback
+        -- the pass still runs, decides it can do nothing, and says so."""
         kwargs = self._run(["issue-tags"])
         self.assertIsNone(kwargs["tag_client"])
+
+    # ----------------------------------------------------- being noticeable
+
+    def test_a_tick_that_failed_exits_non_zero(self):
+        """`return 0` unconditionally meant an Airtable auth failure, a missing
+        MLX token, an empty inventory, a missing `Issue` tag and a run of failing
+        writes were ALL a green unit. Nothing about this loop could ever appear
+        in `systemctl --failed`. Follows warmup-state: 1 if result.errors."""
+        failed = issue_tags.IssueTagReport()
+        failed.fail(issue_tags.ERR_NO_CLIENT, "no MultiLogin tag client")
+        self._run(["issue-tags", "--apply"], report=failed, expect_code=1)
+
+    def test_a_clean_tick_exits_zero(self):
+        self._run(["issue-tags", "--apply"], expect_code=0)
+
+    def test_an_applying_tick_reports_to_the_loop_watchdog(self):
+        """Exit codes are per-tick; the watchdog is what turns "failing every
+        tick since 02:00" into an alert. Every other writing loop registers."""
+        self._run(["issue-tags", "--apply"])
+        self.assertEqual(self.watched, 1)
+
+    def test_a_dry_run_leaves_the_watchdog_state_alone(self):
+        """A hand-run plan must not clear (or trip) the alert state of the
+        timed runs -- same rule as pipeline and queue."""
+        self._run(["issue-tags"])
+        self.assertEqual(self.watched, 0)
+
+    def test_the_watchdog_alerts_on_the_kind_of_failure_not_the_wording(self):
+        """Error strings carry profile names; alerting on those would re-fire
+        every time a different profile was the failing one. The stable
+        `error_kinds` labels are what the health signature is built from."""
+        from adb_bot.automation import loop_watchdog
+
+        report = issue_tags.IssueTagReport()
+        report.fail(issue_tags.ERR_MLX_WRITE, "Jil 3: MLX RuntimeError: 400")
+        watchdog = mock.Mock()
+        loop_watchdog.observe_issue_tags(watchdog, report)
+        loop, kinds = watchdog.observe_health.call_args.args
+        self.assertEqual(loop, "issue-tags")
+        self.assertEqual(kinds, [issue_tags.ERR_MLX_WRITE])
+
+    def test_a_clean_report_is_healthy(self):
+        from adb_bot.automation import loop_watchdog
+
+        watchdog = mock.Mock()
+        loop_watchdog.observe_issue_tags(watchdog, issue_tags.IssueTagReport())
+        self.assertEqual(watchdog.observe_health.call_args.args[1], [])
+
+    def test_the_pass_prints_itself_exactly_once(self):
+        """Both the module and the caller used to print every planned change, so
+        a dry run listed each one twice. One printer: the module's `_log`."""
+        logger = mock.Mock()
+        with TemporaryDirectory() as tmp:
+            issue_tags.sync_issue_tags(
+                FakeAirtable([_row(needs_human=True)]), tag_client=FakeTagClient(),
+                mlx_items=[_mlx()], dry_run=True, logger=logger, app_dir=tmp)
+        lines = [call.args[0] % call.args[1:] if len(call.args) > 1 else call.args[0]
+                 for call in logger.info.call_args_list]
+        self.assertEqual(sum(1 for line in lines if "tag Jil 3" in line), 1)
+        self.assertTrue(any("[DRY-RUN]" in line for line in lines))
 
 
 if __name__ == "__main__":

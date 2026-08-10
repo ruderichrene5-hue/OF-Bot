@@ -28,9 +28,35 @@ LOOPS = ("posting", "recheck", "warmup", "pipeline", "mlx-sync", "cleanup")
 PLANNED_LOOPS = ("queue", "retry")
 
 # Everything an unattended server should have scheduled.
+#
+# This tuple is not a wish list: `scheduling.installable_loops()` filters it by
+# what the CLI can run and `install_units.sh` installs and `systemctl enable
+# --now`s the result, with `--apply` appended by `loop_arguments` for anything
+# outside READ_ONLY_COMMANDS. So a name landing here is, in practice, an armed
+# writing timer on the next routine run of the installer -- whatever that run
+# was actually for.
 RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery",
-                     "warmup", "warmup-state", "issue-tags", "mlx-sync", "cleanup",
+                     "warmup", "warmup-state", "mlx-sync", "cleanup",
                      "doctor", "reap-phones", "second-accounts")
+
+# Loops the CLI can run that are deliberately NOT scheduled: arming them has to
+# be a separate, deliberate act by a person, not a side effect of running the
+# installer for some unrelated reason.
+#
+# `issue-tags` writes to the shared MultiLogin workspace -- a system this bot
+# does not own, where a person's hand-applied tags live and where a wrong
+# `unassign` is not recoverable from Airtable. Its safety rests on a per-profile
+# ledger under the app data dir; a timer would put the first `--apply` of that
+# ledger's whole life on a machine at 15-minute intervals with nobody watching.
+# It is written to be run by hand (dry-run first, then `--apply`) until somebody
+# has read a few days of its plans and decided to arm it -- and arming it means
+# installing its unit deliberately, not adding a name to the tuple above.
+#
+# Everything else about a manual-only loop stays defined here: it keeps its
+# entry in RECOMMENDED_INTERVALS (the cadence a hand-installed unit should use,
+# and what `loop_watchdog.stall_after_seconds` reads), DESCRIPTIONS and
+# WHAT_IT_DOES.
+MANUAL_ONLY_LOOPS = ("issue-tags",)
 
 # Recommended cadence in minutes. The UI can override per loop; these are what
 # `install_units.sh` installs. Ordered by the flow a reel goes through, because
@@ -77,10 +103,12 @@ RECOMMENDED_INTERVALS = {
     # calls and one MLX list, then nothing at all unless something moved.
     "warmup-state": 30,
     # Mirrors Airtable's Needs Human Check onto the MultiLogin `Issue` tag.
-    # Paced to the person, like `recovery`: somebody clearing the checkbox
-    # expects the tag to follow within minutes, and somebody opening the
-    # workspace expects this morning's flags to be on it. 15 min is one filtered
-    # Airtable read plus one MLX list, then nothing at all unless a flag moved.
+    # MANUAL_ONLY_LOOPS: this cadence is what a hand-installed unit should use,
+    # not something `install_units.sh` will arm. Paced to the person, like
+    # `recovery`: somebody clearing the checkbox expects the tag to follow within
+    # minutes, and somebody opening the workspace expects this morning's flags to
+    # be on it. 15 min is one MLX list plus one Airtable read, then nothing at
+    # all unless a flag moved.
     "issue-tags": 15,
     # Full MultiLogin -> Airtable inventory sweep: expensive, and nothing during
     # the day depends on it being fresher than daily. Runs at 23:30 (see

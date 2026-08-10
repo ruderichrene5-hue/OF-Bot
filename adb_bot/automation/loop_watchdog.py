@@ -117,6 +117,10 @@ HINTS = {
                 "without --apply lists them)"),
     "doctor": ("the failing check names say what to look at; full report and remedies "
                "from `run_loop doctor`, history in logs/loop_doctor.log"),
+    "issue-tags": ("the flagged profiles are not being mirrored into MultiLogin, so "
+                   "nobody sees them in the workspace -- check the MLX token "
+                   "(MULTILOGIN_TOKEN in /etc/adbbot/env), that /tag/search still "
+                   "returns an 'Issue' tag, and logs/loop_issue-tags.log"),
 }
 
 
@@ -676,6 +680,38 @@ def observe_recheck(watchdog: LoopWatchdog, tally, now=None) -> Verdict:
     due = resolved + unknown
     return watchdog.observe("recheck", due, resolved, now=now,
                             detail=f"{resolved} resolved, {unknown} still unknown")
+
+
+ISSUE_TAGS_WATCHDOG_LOOP = "issue-tags"
+
+
+def observe_issue_tags(watchdog: LoopWatchdog, report, now=None) -> Verdict:
+    """Tick the issue-tag mirror from the report `sync_issue_tags` returns.
+
+    Health, not production (`observe_health`, the way `doctor` reports). This is
+    a reconciler: on a settled fleet a correct tick changes *nothing*, so the
+    due/produced question has no honest answer here -- zero changes is the
+    healthy steady state, and phrasing it as production would either alert on a
+    quiet day or never alert at all.
+
+    What can go wrong is enumerated instead: `report.error_kinds` carries stable
+    labels (`no-mlx-client`, `empty-mlx-inventory`, `issue-tag-lookup`,
+    `airtable-read`, `mlx-write`, ...) rather than error strings with profile
+    names in them, so the alert fires on the *kind* of failure and does not
+    re-fire every time a different profile is the one failing. A clean tick
+    clears it, with the usual `recovered` notice.
+
+    Without this the loop was invisible: nothing about a 15-minute pass that
+    silently stopped mirroring flags would have reached a person, which is the
+    same shape as the failure the feature exists to fix.
+    """
+    kinds = list(getattr(report, "error_kinds", None) or [])
+    if getattr(report, "errors", None) and not kinds:
+        kinds = ["error"]
+    detail = "; ".join(str(e) for e in (report.errors or [])[:3]) or report.summary()
+    return watchdog.observe_health(ISSUE_TAGS_WATCHDOG_LOOP, kinds,
+                                   checked=int(getattr(report, "checked", 0) or 0),
+                                   detail=detail, now=now)
 
 
 def build_watchdog(logger=None, airtable=None) -> LoopWatchdog:

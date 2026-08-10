@@ -16,13 +16,19 @@
 #   recovery  every 15 min   (un-flagged profiles -> retryable again)
 #   warmup    hourly
 #   warmup-state every 30 min  (publishes the warm-up day to Airtable + MLX tags)
-#   issue-tags   every 15 min  (Needs Human Check -> the MLX 'Issue' tag, both ways)
 #   mlx-sync  daily (23:30 local)
 #   cleanup   daily (04:00 local)
 #
 # Loops that are in the recommended set but not yet CLI commands (queue/retry,
 # until they land) are skipped with a note rather than installed -- a timer for
 # a command that does not exist just fails every tick.
+#
+# NOT installed by this script, on purpose (schedule_spec.MANUAL_ONLY_LOOPS):
+#   issue-tags   writes tags into the shared MultiLogin workspace. Arming it is
+#                a deliberate act -- see the loop's own notes -- not something a
+#                routine `--apply` run for an unrelated reason should do. This
+#                script still REMOVES its units (see LOOPS below), so `--remove`
+#                cannot leave a hand-installed writer running.
 #
 # Usage:
 #   sudo ./install_units.sh                # register in DRY-RUN (safe; plans only)
@@ -36,10 +42,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 ENV_FILE="${ENV_FILE:-/etc/adbbot/env}"
 SERVICE_USER="${SERVICE_USER:-}"
-# Every loop that may have a unit on disk, including ones not wired yet -- used
-# by --remove, which must clean up whatever a previous run installed. The set we
-# *install* is asked of Python below, so there is one definition of it.
+# Every loop that may have a unit on disk -- used by --remove, which must clean
+# up whatever a previous run installed AND anything a person installed by hand.
+# It therefore covers the manual-only loops too: "unregister every loop" that
+# quietly leaves an armed `issue-tags` writer behind would be a worse trap than
+# the one MANUAL_ONLY exists to close. The set we *install* is asked of Python
+# below, so there is exactly one definition of that.
 LOOPS=(pipeline queue posting recheck retry recovery warmup warmup-state issue-tags mlx-sync cleanup doctor reap-phones second-accounts)
+# Loops this script must never install or enable, whatever Python answers.
+# Mirrors schedule_spec.MANUAL_ONLY_LOOPS; a test keeps the two in step.
+MANUAL_ONLY=(issue-tags)
 
 APPLY=0
 ACTION=install
@@ -110,6 +122,23 @@ if [[ ${#INSTALL_LOOPS[@]} -eq 0 ]]; then
     echo "Error: could not determine the loop set (is the venv installed?)." >&2
     exit 1
 fi
+
+# Belt and braces: whatever Python answered, a manual-only loop is not armed
+# here. `installable_loops()` already excludes them; this makes the guarantee
+# survive an edit to the recommended set on the Python side.
+FILTERED=()
+for loop in "${INSTALL_LOOPS[@]}"; do
+    skip=0
+    for manual in "${MANUAL_ONLY[@]}"; do
+        [[ "$loop" == "$manual" ]] && skip=1
+    done
+    if [[ $skip -eq 1 ]]; then
+        echo "  NOT installing $loop: install it by hand when you mean to arm it"
+    else
+        FILTERED+=("$loop")
+    fi
+done
+INSTALL_LOOPS=("${FILTERED[@]}")
 
 # Delegate the unit text to the same builders the UI and tests use, so there is
 # exactly one definition of what a loop's unit looks like.

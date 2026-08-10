@@ -315,20 +315,28 @@ def check_loop_production() -> CheckResult:
         states = loop_watchdog.LoopWatchdog(sinks=[]).snapshot()
     except Exception as exc:
         return CheckResult("Loop production", WARN, f"could not read the watchdog state: {exc}")
-    # Drop doctor's own health entry. It is written by `observe_doctor` from the
-    # result of this very check, so reading it back here would make a single
-    # failing check latch: doctor fails -> entry goes unhealthy -> this check
-    # fails because that entry is unhealthy, and it never recovers.
-    states = {name: s for name, s in states.items()
-              if name != DOCTOR_WATCHDOG_LOOP and s.state != loop_watchdog.STATE_UNHEALTHY}
+    # Drop doctor's own health entry, and only that one. It is written by
+    # `observe_doctor` from the result of this very check, so reading it back
+    # here would make a single failing check latch: doctor fails -> entry goes
+    # unhealthy -> this check fails because that entry is unhealthy, and it
+    # never recovers. Another loop's unhealthy entry has no such feedback path
+    # and must be surfaced -- `issue-tags` reports itself this way, and dropping
+    # every unhealthy entry would have hidden it completely.
+    states = {name: s for name, s in states.items() if name != DOCTOR_WATCHDOG_LOOP}
     if not states:
         return CheckResult("Loop production", WARN, "no loop has reported yet",
                            "Expected until the scheduled loops have each run once.")
-    stalled = [s for s in states.values() if s.stalled]
-    if stalled:
-        names = ", ".join(sorted(s.loop for s in stalled))
-        return CheckResult("Loop production", FAIL,
-                           f"{len(stalled)} loop(s) producing nothing while work is due: {names}",
+    stalled = [s for s in states.values() if s.state == loop_watchdog.STATE_STALLED]
+    unhealthy = [s for s in states.values() if s.state == loop_watchdog.STATE_UNHEALTHY]
+    if stalled or unhealthy:
+        parts = []
+        if stalled:
+            parts.append(f"{len(stalled)} loop(s) producing nothing while work is due: "
+                         + ", ".join(sorted(s.loop for s in stalled)))
+        if unhealthy:
+            parts.append(f"{len(unhealthy)} loop(s) failing: "
+                         + ", ".join(sorted(s.loop for s in unhealthy)))
+        return CheckResult("Loop production", FAIL, "; ".join(parts),
                            "See logs/alerts.log for when it started and what to check.")
     return CheckResult("Loop production", PASS,
                        f"{len(states)} loop(s) watched, none stalled")

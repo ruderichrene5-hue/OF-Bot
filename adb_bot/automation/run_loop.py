@@ -273,8 +273,14 @@ def _run_issue_tags(args, logger) -> int:
     that the person opening the workspace sees today's flags.
 
     Dry-run by default like every other pass here. A dry run makes **no** MLX
-    write calls at all: it does not even resolve the tag id, because that would
-    create the tag on a workspace that had not got it.
+    call at all -- not even the `tag/search` that resolves the id.
+
+    Exit code follows `warmup-state`: non-zero when the pass recorded an error,
+    so a tick that could not do its job (Airtable auth gone, no MLX token, an
+    empty inventory, the `Issue` tag missing, a run of failing writes) shows up
+    in `systemctl --failed` instead of being a green unit that quietly changed
+    nothing. Under `--apply` it also reports to the loop watchdog, which is what
+    turns "this failed once" into an alert when it keeps failing.
     """
     from adb_bot.automation import issue_tags
     from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
@@ -300,14 +306,12 @@ def _run_issue_tags(args, logger) -> int:
         airtable, tag_client=tag_client, mlx_items=mlx_items,
         dry_run=not args.apply, logger=logger,
         adopt_existing=args.adopt_existing)
-    if not args.apply:
-        logger.info("[DRY-RUN] issue tags: %s", result.summary())
-        for line in result.changes:
-            logger.info("  would %s", line)
-    # A MultiLogin outage is reported, not failed on: this pass has no deadline
-    # and the next tick will pick it up. Exit 0 keeps the unit green so a real
-    # regression still stands out in `systemctl --failed`.
-    return 0
+    # No summary/change lines here: `issue_tags._log` already printed them, in
+    # dry-run wording when it is a dry run. Printing them again made every
+    # planned change appear twice in the log.
+    if args.apply:
+        _watch(logger, airtable, lambda wd: loop_watchdog.observe_issue_tags(wd, result))
+    return 1 if result.errors else 0
 
 
 def _run_pipeline(args, logger) -> int:

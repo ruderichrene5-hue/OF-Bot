@@ -44,6 +44,19 @@ it can ever reach an unassign call, whatever the ledger says), and the ledger is
 checked second. `Created` selects the warm-up population and the `Warmup Day N`
 tags are `warmup_state`'s; stripping either would silently drop profiles out of
 the warm-up. Both fences are tested.
+
+**The tag is never created, and this loop never installs itself.** Two rules
+about writing to somebody else's system, both of which read as over-caution
+until the day they do not:
+
+* the id comes from a search, never from `ensure_tag` -- see
+  `resolve_issue_tag_id`, where a soft `/tag/search` failure would otherwise
+  mint a *second* `Issue` and strand the 33 real uses on the first;
+* it is in `schedule_spec.MANUAL_ONLY_LOOPS`, so `install_units.sh` will not arm
+  it. Everything else in the recommended set writes to systems this bot owns;
+  this one writes to the workspace people work in, and the first unattended
+  `--apply` of its ledger's life should not arrive as a side effect of an
+  installer run somebody made for an unrelated reason.
 """
 
 from __future__ import annotations
@@ -57,26 +70,58 @@ from adb_bot.config.settings import get_app_data_dir
 
 # The tag as it already exists in the workspace: id
 # de2aef69-b8c1-4547-90a4-0875b1d85361, purple, 33 uses. Matched
-# case-insensitively on assignment (`tag_ids_by_name` lower-cases), so the
-# colour below is only ever consulted if the tag had to be created -- which on
-# this workspace it does not.
+# case-insensitively (`tag_ids_by_name` lower-cases). This module never creates
+# it -- see `resolve_issue_tag_id` for why that is a rule and not an oversight.
 ISSUE_TAG = "Issue"
-ISSUE_TAG_COLOR = "purple"
 
 # Every tag this module may write, and therefore the *only* tag it may remove.
-# Deliberately a set of one. Nothing outside it can reach an unassign call: see
-# `tag_changes`, which intersects the profile's held tags with this before it
-# considers the ledger at all.
+# Nothing outside it can reach an unassign call: see `tag_changes`, which
+# intersects the profile's held tags with this before it considers the ledger at
+# all.
+#
+# SINGLE-VALUED, and not merely as it happens today. The sweep resolves ONE tag
+# id up front and passes that one id to `assign`/`unassign`, so a second name
+# here would be planned in `tag_changes` and then silently not carried out --
+# the plan and the API call would disagree. Adding a name therefore means
+# changing the sweep to resolve an id per name and to un/assign the ids the plan
+# actually named; the guard below is what stops the constant being widened on
+# its own. (Tested: `test_the_owned_set_is_single_valued_by_construction`.)
 OWNED_TAGS = (ISSUE_TAG,)
+if len(OWNED_TAGS) != 1:      # pragma: no cover - a guard on editing the line above
+    raise RuntimeError(
+        "issue_tags.OWNED_TAGS is single-valued by construction: the sweep resolves "
+        "one tag id and un/assigns it. Make the sweep multi-tag before widening this.")
 
 STATE_FILENAME = "issue_tag_state.json"
-STATE_VERSION = 1
+# 2: grew a `stale_seen` section next to `tagged`. A version-1 file still loads
+# (the section reads as empty), which only costs one repeat of a stale warning.
+STATE_VERSION = 2
 
 # A MultiLogin outage shows up as every profile's tag call failing in turn.
 # Rather than walk the whole fleet making failing HTTP calls, give up after this
 # many consecutive failures and report it. Not a threshold on *total* errors: a
 # handful of dead profile ids scattered through a good sweep should not stop it.
 MAX_CONSECUTIVE_FAILURES = 5
+
+# How often a flagged Airtable row whose MultiLogin profile no longer exists is
+# worth a WARNING. It is a real condition needing a person (`Jasmin 9`,
+# 628516863629918338, has been in this state for days) but it does not change
+# between ticks, and at a 15-minute cadence warning every time is ~96 identical
+# lines a day -- which is how the ones that matter stop being read. Once a day
+# per profile; the count of the suppressed ones stays in the summary line.
+STALE_RENOTIFY_HOURS = 24
+
+# Stable labels for the ways a tick can fail, so the watchdog can alert on a
+# *kind* of failure rather than on an error string with a profile name in it
+# (which would re-alert every time the name changed). See
+# `loop_watchdog.observe_issue_tags`.
+ERR_AIRTABLE = "airtable-read"
+ERR_NO_CLIENT = "no-mlx-client"
+ERR_EMPTY_INVENTORY = "empty-mlx-inventory"
+ERR_TAG_LOOKUP = "issue-tag-lookup"
+ERR_MLX_WRITE = "mlx-write"
+ERR_MLX_OUTAGE = "mlx-outage"
+ERR_LEDGER_WRITE = "ledger-write"
 
 
 def owned_tags() -> list:
@@ -91,30 +136,63 @@ def _state_path(app_dir=None) -> Path:
     return Path(app_dir or get_app_data_dir()) / STATE_FILENAME
 
 
+def _read_state(app_dir=None) -> dict:
+    """The whole state document, or ``{}`` if it is missing or unreadable."""
+    try:
+        raw = json.loads(_state_path(app_dir).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
 def load_ledger(app_dir=None) -> dict:
     """``{MLX API ID: {"name": ..., "at": ...}}`` -- the profiles this pass tagged.
 
     A missing or unreadable file reads as empty, which is the safe direction:
     the bot then owns nothing and can only ever add.
     """
-    try:
-        raw = json.loads(_state_path(app_dir).read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}
-    tagged = raw.get("tagged")
+    tagged = _read_state(app_dir).get("tagged")
     return dict(tagged) if isinstance(tagged, dict) else {}
 
 
-def save_ledger(tagged: dict, app_dir=None) -> bool:
+def load_stale_notices(app_dir=None) -> dict:
+    """``{MLX API ID: ISO timestamp}`` -- when each dangling row was last warned
+    about. Empty on a version-1 file, which costs one repeated warning."""
+    seen = _read_state(app_dir).get("stale_seen")
+    return dict(seen) if isinstance(seen, dict) else {}
+
+
+def save_ledger(tagged: dict, app_dir=None, stale_seen=None) -> bool:
+    """Write both sections. `stale_seen=None` keeps whatever is on disk, so a
+    caller that only moved the ledger cannot drop the warning bookkeeping."""
+    if stale_seen is None:
+        stale_seen = load_stale_notices(app_dir)
     try:
         path = _state_path(app_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(
-            {"version": STATE_VERSION, "tagged": dict(tagged)},
+            {"version": STATE_VERSION, "tagged": dict(tagged),
+             "stale_seen": dict(stale_seen)},
             indent=2, sort_keys=True), encoding="utf-8")
         return True
     except Exception:
         return False
+
+
+def _hours_since(stamp: str, now: datetime) -> float:
+    """Hours between an ISO stamp and `now`; a stamp we cannot read is treated
+    as long ago, so an unparseable file re-warns rather than staying silent."""
+    try:
+        seen = datetime.fromisoformat(str(stamp))
+        # A caller's `now` and a stored stamp can differ in awareness; treat a
+        # naive one as UTC rather than letting the subtraction raise.
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        return (now - seen).total_seconds() / 3600.0
+    except Exception:
+        return float("inf")
 
 
 # ------------------------------------------------------------------ planning
@@ -163,15 +241,30 @@ class IssueTagReport:
     no_launch_id: int = 0      # Airtable row with no MLX API ID
     missing_in_mlx: int = 0    # API ID that the workspace no longer knows
     skipped_not_ours: int = 0  # unflagged, carries a hand-applied `Issue`
+    duplicate_rows: int = 0    # extra Airtable rows sharing one MLX API ID
+    stale_quiet: int = 0       # dangling rows warned about within the last day
     errors: list = dc_field(default_factory=list)
+    error_kinds: list = dc_field(default_factory=list)
     changes: list = dc_field(default_factory=list)
     stale: list = dc_field(default_factory=list)
 
+    def fail(self, kind: str, message: str) -> None:
+        """Record one failure under a stable `kind` as well as in words."""
+        self.errors.append(message)
+        if kind not in self.error_kinds:
+            self.error_kinds.append(kind)
+
     def summary(self) -> str:
+        extra = ""
+        if self.duplicate_rows:
+            extra += f" dup-rows={self.duplicate_rows}"
+        if self.stale_quiet:
+            extra += f" stale-quiet={self.stale_quiet}"
         return (f"checked={self.checked} tagged={self.tagged} "
                 f"untagged={self.untagged} unchanged={self.unchanged} "
                 f"no-id={self.no_launch_id} missing-in-mlx={self.missing_in_mlx} "
-                f"hand-tagged={self.skipped_not_ours} errors={len(self.errors)}")
+                f"hand-tagged={self.skipped_not_ours}{extra} "
+                f"errors={len(self.errors)}")
 
 
 def build_states(profiles, tags_by_api_id: dict | None = None) -> list:
@@ -181,15 +274,27 @@ def build_states(profiles, tags_by_api_id: dict | None = None) -> list:
     what the tag endpoints take as `profile_id`. Never the human serial
     (`MultiLogin Profile ID`), which those endpoints reject.
 
-    `reason` is read if the row carries one (`profile_overview` rows do) and left
-    blank otherwise; it only ever decorates a log line, so `posting_profiles`
-    staying lean is worth more than having it.
+    `reason` is Airtable's `Issue Reason` (`posting_profiles` returns it): the
+    single-select `retry_runner` / `stale_profiles` stamp when they tick the box
+    -- `Human Verification Required`, `Retries Exhausted`, `Banned / Blocked`,
+    `No Recent Success`. It decorates the log line, which is the difference
+    between "24 profiles need a person" and knowing that 19 of them are one
+    Instagram checkpoint and 2 are dead accounts.
+
+    **De-duplicated on the API ID.** Two Airtable rows can point at one
+    MultiLogin profile (a re-created row, a hand-copied API ID), and the sweep
+    is one call per state: duplicates would mean two identical assigns a tick,
+    and -- worse -- an unflagged duplicate could plan a removal right after the
+    flagged one planned an add, so the profile's tag would depend on row order.
+    One profile, one decision: flagged anywhere wins, and the first reason given
+    for it is the one reported.
     """
     inventory = tags_by_api_id or {}
-    states = []
+    states: list = []
+    by_id: dict = {}
     for row in profiles or []:
         launch_id = str(row.get("launch_id") or "").strip()
-        states.append(ProfileIssue(
+        state = ProfileIssue(
             record_id=str(row.get("record_id") or ""),
             name=str(row.get("name") or "").strip() or str(row.get("record_id") or ""),
             launch_id=launch_id,
@@ -197,11 +302,49 @@ def build_states(profiles, tags_by_api_id: dict | None = None) -> list:
             reason=str(row.get("reason") or "").strip(),
             current_tags=tuple(inventory.get(launch_id) or ()),
             in_mlx=bool(launch_id) and launch_id in inventory,
-        ))
+        )
+        # Rows with no API ID are all "" and are not each other's duplicates:
+        # they are separate rows to count and report, so they are never merged.
+        if not launch_id:
+            states.append(state)
+            continue
+        first = by_id.get(launch_id)
+        if first is None:
+            by_id[launch_id] = state
+            states.append(state)
+            continue
+        if state.flagged and not first.flagged:
+            first.flagged = True
+        if state.flagged and not first.reason:
+            first.reason = state.reason
     return states
 
 
 # -------------------------------------------------------------------- reconcile
+
+
+def resolve_issue_tag_id(tag_client) -> str:
+    """The id of the workspace's existing `Issue` tag. **Search only.**
+
+    Deliberately not `tag_client.ensure_tag`, which creates the tag when
+    `tag_ids_by_name()` does not return it (tags.py:105-108). Three facts make
+    that creation unacceptable on an unattended tick:
+
+    * the workspace *has* the tag -- de2aef69-b8c1-4547-90a4-0875b1d85361, with
+      ~33 hand-applied uses -- so "not found" here is never really "not there";
+    * two tags may share a name in this workspace (tags.py:81-89), so nothing at
+      the far end would reject the duplicate;
+    * a soft `/tag/search` failure (an empty page, a truncated answer, a 200
+      with no `data`) is indistinguishable from an absent tag, and would mint a
+      *second* `Issue`, assign its id, and leave the 33 real uses on the first
+      one -- so the person filtering the workspace on `Issue` would see only
+      what the bot had tagged since, and the fix would be a manual merge.
+
+    Missing is therefore an error the pass reports and stops on. Creating the
+    tag is a person's job in the MultiLogin UI, once.
+    """
+    ids = tag_client.tag_ids_by_name() or {}
+    return str(ids.get(ISSUE_TAG.strip().lower()) or "")
 
 
 def sync_issue_tags(airtable, tag_client=None, mlx_items=None, dry_run: bool = True,
@@ -212,7 +355,8 @@ def sync_issue_tags(airtable, tag_client=None, mlx_items=None, dry_run: bool = T
     `tag_client` is optional and `mlx_items` may be empty, for the same reason
     `warmup_state` allows it: MultiLogin being down should cost this pass, not
     the caller. Both cases return an empty report with the reason in `errors`,
-    having made no calls.
+    having made no calls -- Airtable included, which is why those two guards run
+    before the profile read rather than after it.
 
     `adopt_existing` is the escape hatch for the 33 hand-applied `Issue` tags:
     with it on, every profile currently carrying the tag counts as bot-owned and
@@ -221,49 +365,64 @@ def sync_issue_tags(airtable, tag_client=None, mlx_items=None, dry_run: bool = T
     stale, because the information is not recoverable from Airtable.
     """
     report = IssueTagReport()
-    stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    moment = now or datetime.now(timezone.utc)
+    stamp = moment.isoformat(timespec="seconds")
 
-    if profiles is None:
-        try:
-            profiles = airtable.posting_profiles()
-        except Exception as exc:
-            report.errors.append(f"Airtable profiles: {type(exc).__name__}: {exc}")
-            _log(logger, report)
-            return report
-
+    # The MultiLogin guards come FIRST, before Airtable is read. Either one ends
+    # the pass having done nothing, and `posting_profiles` is a full scan of the
+    # 151-row Profiles table -- so reading it first meant every tick of an MLX
+    # outage still cost a full table read (96 a day) to throw the answer away.
     if tag_client is None:
-        report.errors.append("no MultiLogin tag client; nothing read or written")
-        _log(logger, report)
+        report.fail(ERR_NO_CLIENT, "no MultiLogin tag client; nothing read or written")
+        _log(logger, report, dry_run)
         return report
     if not mlx_items:
         # An empty inventory is indistinguishable from "MultiLogin answered but
         # is not reachable", and reconciling against it would read every profile
         # as carrying no tags. Refuse rather than guess.
-        report.errors.append("empty MultiLogin inventory; skipping the tag pass")
-        _log(logger, report)
+        report.fail(ERR_EMPTY_INVENTORY, "empty MultiLogin inventory; skipping the tag pass")
+        _log(logger, report, dry_run)
         return report
+
+    # Resolved once per sweep, not once per profile -- one name, ~150 profiles.
+    # Search-only (`resolve_issue_tag_id`), and before the Airtable read for the
+    # same reason as the guards above: it is the last thing that can stop the
+    # pass without a row being needed. Skipped under dry-run, which therefore
+    # makes no MultiLogin call at all.
+    tag_id = None
+    if not dry_run:
+        try:
+            tag_id = resolve_issue_tag_id(tag_client)
+        except Exception as exc:
+            report.fail(ERR_TAG_LOOKUP,
+                        f"resolving tag {ISSUE_TAG!r}: {type(exc).__name__}: {exc}")
+            _log(logger, report, dry_run)
+            return report
+        if not tag_id:
+            report.fail(ERR_TAG_LOOKUP,
+                        f"MultiLogin has no tag named {ISSUE_TAG!r} (this pass will not "
+                        "create one -- add it in the workspace, or check /tag/search)")
+            _log(logger, report, dry_run)
+            return report
+
+    if profiles is None:
+        try:
+            profiles = airtable.posting_profiles()
+        except Exception as exc:
+            report.fail(ERR_AIRTABLE, f"Airtable profiles: {type(exc).__name__}: {exc}")
+            _log(logger, report, dry_run)
+            return report
 
     from adb_bot.automation.warmup_state import tags_by_launch_id
 
     states = build_states(profiles, tags_by_launch_id(mlx_items))
+    linked = sum(1 for row in (profiles or []) if str(row.get("launch_id") or "").strip())
+    report.duplicate_rows = max(0, linked - sum(1 for s in states if s.launch_id))
     ledger = load_ledger(app_dir)
-
-    # Resolved once per sweep, not once per profile -- one name, ~150 profiles.
-    # `ensure_tag` is a read (`tag/search`) that only writes if the workspace has
-    # not got the tag; under dry-run it is skipped entirely so a plan-only run
-    # cannot create anything.
-    tag_id = None
-    if not dry_run:
-        try:
-            tag_id = tag_client.ensure_tag(ISSUE_TAG, ISSUE_TAG_COLOR)
-        except Exception as exc:
-            report.errors.append(f"resolving tag {ISSUE_TAG!r}: {type(exc).__name__}: {exc}")
-            _log(logger, report)
-            return report
-        if not tag_id:
-            report.errors.append(f"MultiLogin returned no id for tag {ISSUE_TAG!r}")
-            _log(logger, report)
-            return report
+    # Dry runs never touch the state file (a plan must leave nothing behind), so
+    # they always warn about a dangling row rather than reading the bookkeeping.
+    stale_seen = {} if dry_run else load_stale_notices(app_dir)
+    stale_now: dict = {}
 
     ledger_dirty = False
     consecutive_failures = 0
@@ -284,7 +443,18 @@ def sync_issue_tags(airtable, tag_client=None, mlx_items=None, dry_run: bool = T
             # the row is also flagged, so it is reported by name.
             report.missing_in_mlx += 1
             if state.flagged:
-                report.stale.append(f"{state.name} [{state.launch_id}] flagged, not in MultiLogin")
+                # Worth a person's attention, but it does not change between
+                # ticks: warn once a day per profile and count the rest, or the
+                # one profile in this state (`Jasmin 9`) writes ~96 identical
+                # WARNING lines a day into the log people read for real ones.
+                last = stale_seen.get(state.launch_id)
+                if last is not None and _hours_since(last, moment) < STALE_RENOTIFY_HOURS:
+                    report.stale_quiet += 1
+                    stale_now[state.launch_id] = last
+                else:
+                    report.stale.append(
+                        f"{state.name} [{state.launch_id}] flagged, not in MultiLogin")
+                    stale_now[state.launch_id] = stamp
             continue
 
         owned_by_bot = adopt_existing or (state.launch_id in ledger)
@@ -326,30 +496,47 @@ def sync_issue_tags(airtable, tag_client=None, mlx_items=None, dry_run: bool = T
                     ledger_dirty = True
             consecutive_failures = 0
         except Exception as exc:
-            report.errors.append(f"{state.name}: MLX {type(exc).__name__}: {exc}")
+            report.fail(ERR_MLX_WRITE, f"{state.name}: MLX {type(exc).__name__}: {exc}")
             consecutive_failures += 1
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                report.errors.append(
-                    f"{consecutive_failures} MultiLogin failures in a row; stopping this sweep")
+                report.fail(ERR_MLX_OUTAGE,
+                            f"{consecutive_failures} MultiLogin failures in a row; "
+                            "stopping this sweep")
                 break
 
-    if ledger_dirty and not save_ledger(ledger, app_dir):
-        # Non-fatal, but it means the tags just written are not yet owned and a
-        # later clear will leave them on. Say so loudly.
-        report.errors.append(f"could not write {STATE_FILENAME}; "
-                             "tags written this pass are not recorded as ours")
+    # One writer for both sections. The stale bookkeeping changes on its own
+    # (nothing was tagged, a dangling row was warned about), so the write is not
+    # conditional on the ledger having moved.
+    if not dry_run and (ledger_dirty or stale_now != stale_seen):
+        if not save_ledger(ledger, app_dir, stale_seen=stale_now):
+            report.fail(ERR_LEDGER_WRITE, f"could not write {STATE_FILENAME}; " + (
+                "tags written this pass are not recorded as ours" if ledger_dirty
+                else "stale-row warnings will repeat next tick"))
 
-    _log(logger, report)
+    _log(logger, report, dry_run)
     return report
 
 
-def _log(logger, report: IssueTagReport) -> None:
+def _log(logger, report: IssueTagReport, dry_run: bool = False) -> None:
+    """The one place this pass prints itself.
+
+    Deliberately the *only* one: the caller used to re-print every change line
+    under `--apply`-less runs, so a dry run listed each planned change twice.
+    """
     if not logger:
         return
-    logger.info("issue tags: %s", report.summary())
+    prefix = "[DRY-RUN] " if dry_run else ""
+    verb = "would " if dry_run else ""
+    logger.info("%sissue tags: %s", prefix, report.summary())
     for line in report.changes[:20]:
-        logger.info("  %s", line)
+        logger.info("  %s%s", verb, line)
+    if len(report.changes) > 20:
+        logger.info("  ... and %d more", len(report.changes) - 20)
     for line in report.stale[:10]:
         logger.warning("  %s", line)
+    if report.stale_quiet:
+        logger.info("  (%d more row(s) flagged with no MultiLogin profile, "
+                    "already reported in the last %dh)", report.stale_quiet,
+                    STALE_RENOTIFY_HOURS)
     for line in report.errors[:10]:
         logger.warning("  %s", line)
