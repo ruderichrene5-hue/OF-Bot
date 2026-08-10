@@ -537,6 +537,45 @@ class PipelineSourcesTest(WatchdogTestBase):
         self.assertEqual(verdict.state, STATE_IDLE)
         self.assertEqual(self.delivered, [])
 
+    def test_clips_for_a_model_with_no_profiles_are_not_idle(self):
+        """The silent failure this whole change exists for.
+
+        A raw folder whose model has no target contributes 0 processed videos
+        and 0 variants, so the watchdog read IDLE -- "no new raw video" -- while
+        clips were piling up in Drive going nowhere. That is production failure,
+        and unlike the queue's starved targets it is cleared by finishing the
+        model's onboarding rather than by deleting rows.
+        """
+        from adb_bot.automation.spoof_pipeline import PipelineReport
+
+        report = PipelineReport(dry_run=False)
+        report.skipped = [("clip1.mp4", "no MLX profiles under model 'Kathi'"),
+                          ("clip2.mp4", "no MLX profiles under model 'Kathi'")]
+        wd = self.build()
+        grace = loop_watchdog.stall_after_seconds("pipeline")
+        loop_watchdog.observe_pipeline(wd, report, now=T0)
+        verdict = loop_watchdog.observe_pipeline(wd, report, now=T0 + grace + 60)
+        self.assertEqual(verdict.state, STATE_STALLED)
+        self.assertEqual(verdict.due, 2)
+        # The alert has to name the condition, or "pipeline stalled" sends
+        # somebody looking at the encoder instead of at the model's profiles.
+        self.assertTrue(any("no profile to spoof for" in a.detail for a in verdict.alerts),
+                        [a.detail for a in verdict.alerts])
+
+    def test_an_ordinary_skip_does_not_make_the_loop_due(self):
+        # The run cap is the loop doing its job, not a gap. Counting every skip
+        # would make a capped run alert every night.
+        from adb_bot.automation.spoof_pipeline import PipelineReport
+
+        report = PipelineReport(dry_run=False)
+        report.skipped = [("clip9.mp4", "run cap of 20 variant(s) reached")]
+        wd = self.build()
+        grace = loop_watchdog.stall_after_seconds("pipeline")
+        loop_watchdog.observe_pipeline(wd, report, now=T0)
+        verdict = loop_watchdog.observe_pipeline(wd, report, now=T0 + grace + 60)
+        self.assertEqual(verdict.state, STATE_IDLE)
+        self.assertEqual(self.delivered, [])
+
 
 class DoctorSurfacesTheAlertTest(WatchdogTestBase):
     """The alert fires once, at 02:00, into a log. Somebody running `doctor` at

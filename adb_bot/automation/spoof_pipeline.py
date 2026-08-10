@@ -23,11 +23,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from adb_bot.clients import airtable as at
+from adb_bot.config.settings import DEFAULT_RAW_FOLDER_MODEL_ALIASES
 
 # Video extensions the pipeline treats as raw sources.
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
 
 SPOOF_METHOD = "video_spoofer/vtf run"
+
+# A skip whose reason contains one of these means "raw clips arrived for a model
+# that has no target to spoof them for" -- an onboarding gap, not an idle run.
+# `loop_watchdog.observe_pipeline` matches on it so an unroutable folder stops
+# reading as IDLE, so the exact wording below is load-bearing; change both.
+UNROUTABLE_SKIP_MARKERS = ("no MLX profiles under model",
+                           "no active accounts under model")
 
 # Most variants one run will produce before stopping and leaving the rest for the
 # next cycle. Without this, the first run against a full raw library would kick
@@ -49,15 +57,40 @@ TARGETS_PROFILES = "profiles"
 #
 # Keys are compared lower-cased; values are the model name as Airtable spells
 # it. Delete an entry once the Drive folder itself is renamed.
-RAW_FOLDER_MODEL_ALIASES = {
-    "corina": "Nikki",
-    "mandy": "Luisa",
-}
+#
+# The map is CONFIGURATION, not code (moved 2026-08-10): it lives in
+# `settings.get_raw_folder_model_aliases()`, overridable by the
+# `RAW_FOLDER_MODEL_ALIASES` env var or a saved `raw_folder_model_aliases` dict,
+# and defaults to exactly the two entries below. Onboarding a model whose Drive
+# folder is named after it needs no entry at all; one whose folder disagrees is
+# now an ops edit rather than a code change plus a redeploy of the pinned copy
+# under /opt. The default is defined once, in settings, and re-exported here so
+# importers (and the report's `_aliased_folder`) keep working and the two copies
+# can never drift.
+RAW_FOLDER_MODEL_ALIASES = dict(DEFAULT_RAW_FOLDER_MODEL_ALIASES)  # back-compat name
 
 
-def resolve_model(folder_name: str) -> str:
-    """The model a raw folder's videos belong to, honouring the alias map."""
-    return RAW_FOLDER_MODEL_ALIASES.get((folder_name or "").strip().lower(), folder_name)
+def raw_folder_model_aliases() -> dict:
+    """The live alias map. Falls back to the built-in default if settings can't
+    be read -- an unreadable settings file must not silently re-point Nikki's
+    and Luisa's content at folders with no profiles."""
+    try:
+        from adb_bot.config import settings
+
+        aliases = settings.get_raw_folder_model_aliases()
+    except Exception:
+        aliases = None
+    return aliases if isinstance(aliases, dict) and aliases else dict(DEFAULT_RAW_FOLDER_MODEL_ALIASES)
+
+
+def resolve_model(folder_name: str, aliases: dict | None = None) -> str:
+    """The model a raw folder's videos belong to, honouring the alias map.
+
+    `aliases` is for callers that already loaded the map (a loop over folders,
+    a test); omitted, it is read from settings.
+    """
+    table = raw_folder_model_aliases() if aliases is None else aliases
+    return table.get((folder_name or "").strip().lower(), folder_name)
 
 
 @dataclass
@@ -87,6 +120,18 @@ class LocalRawSource:
 
     def release(self, video: RawVideo, path: str) -> None:
         return None
+
+    def list_folder_names(self) -> list:
+        """Every model folder that exists, INCLUDING the empty ones.
+
+        `list_by_model` deliberately drops a folder with no videos -- the
+        pipeline only wants folders with work. But an empty folder is exactly
+        what a just-onboarded model looks like, so dropping it everywhere made a
+        new model invisible to every check. Inventory checks use this instead.
+        """
+        if not self.raw_root.is_dir():
+            return []
+        return sorted(d.name for d in self.raw_root.iterdir() if d.is_dir())
 
     def list_by_model(self) -> dict:
         out: dict = {}
@@ -133,6 +178,12 @@ class DriveRawSource:
         self.client = client
         self.root_folder_id = root_folder_id
         self.temp_dir = temp_dir
+
+    def list_folder_names(self) -> list:
+        """Every model folder under the raw root, empty ones included. One cheap
+        metadata call -- no per-folder file listing. See the local source."""
+        return sorted(str(f.get("name") or "") for f in self.client.list_subfolders(self.root_folder_id)
+                      if str(f.get("name") or "").strip())
 
     def list_by_model(self) -> dict:
         out: dict = {}
@@ -369,11 +420,13 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
     model_ids = airtable.models_by_name()
 
     capped = False
+    # Read the (now configurable) alias map once per run, not once per folder.
+    aliases = raw_folder_model_aliases()
     for raw_folder, videos in by_model.items():
         # The folder name is only a label for the model; an aliased folder is
         # treated as its real model everywhere below (targets, the Content
         # Pipeline link, and the output run folder).
-        model = resolve_model(raw_folder)
+        model = resolve_model(raw_folder, aliases)
         if model != raw_folder:
             logger.info("pipeline: raw folder %r holds %s content", raw_folder, model)
         accounts = active_by_model.get(model.lower(), [])

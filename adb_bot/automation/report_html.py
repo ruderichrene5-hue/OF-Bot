@@ -414,6 +414,17 @@ def _section_spoof(spoof: dict) -> str:
                  f'have no active profile to be spoofed for, so nothing will pick them up. '
                  f'Either the folder is named for a model that has no profiles, or every '
                  f'profile under {_e(entry["model"])} is parked.</p>')
+
+    for entry in spoof.get("unclaimed") or []:
+        # An empty raw folder with no profiles behind it: a model somebody has
+        # started onboarding and not finished. Shown because the alternative is
+        # that it appears nowhere at all until a person notices the silence.
+        body += (f'<p class="sub" style="margin-top:.7rem">'
+                 f'Raw folder <span class="mono">{_e(entry["folder"])}</span> is empty and '
+                 f'{_e(entry["model"])} has no active profile — a model part-way through '
+                 f'onboarding. Nothing dropped in that folder will ever be spoofed until a '
+                 f'profile is named <span class="mono">{_e(entry["model"])} 1</span> (in '
+                 f'MultiLogin <em>and</em> in Profiles (Cloning)) with Status Active.</p>')
     return body
 
 

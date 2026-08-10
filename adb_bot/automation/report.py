@@ -1511,7 +1511,13 @@ def spoof_queue(airtable, spoof_dir=None) -> dict:
 
 
 def _spoof_queue(airtable) -> dict:
-    out = {"models": [], "clips": 0, "variants": 0, "unroutable": [], "error": ""}
+    # `unclaimed`: a raw folder that exists but has no profile to spoof for AND
+    # no clips waiting. That is exactly what a half-onboarded model looks like on
+    # the day somebody makes its Drive folder, and until this key existed it was
+    # the one state the page could not show -- `list_by_model` drops empty
+    # folders, so the model was invisible rather than merely idle.
+    out = {"models": [], "clips": 0, "variants": 0, "unroutable": [],
+           "unclaimed": [], "error": ""}
     try:
         from adb_bot.automation import spoof_pipeline
         from adb_bot.config import settings
@@ -1541,8 +1547,24 @@ def _spoof_queue(airtable) -> dict:
         out["error"] = f"{type(exc).__name__}: {exc}"
         return out
 
+    aliases = spoof_pipeline.raw_folder_model_aliases()
+    # In its own try: the empty-folder listing is an extra, and the panel it is
+    # bolted onto answers "how far behind is the encoder", which must keep
+    # working even if the folder listing misbehaves.
+    try:
+        lister = getattr(source, "list_folder_names", None)
+        all_folders = sorted(str(f) for f in lister()) if callable(lister) else []
+    except Exception:
+        all_folders = []
+    for folder in all_folders:
+        if folder in by_folder:
+            continue
+        model = spoof_pipeline.resolve_model(folder, aliases)
+        if not targets.get(model.lower()):
+            out["unclaimed"].append({"folder": folder, "model": model})
+
     for folder, videos in sorted(by_folder.items()):
-        model = spoof_pipeline.resolve_model(folder)
+        model = spoof_pipeline.resolve_model(folder, aliases)
         waiting = sorted(v.name for v in videos if v.name not in processed)
         handles = [t["handle"] for t in targets.get(model.lower(), [])]
         if not waiting:
@@ -2633,9 +2655,9 @@ def _parse_airtable_dt(value):
 def _aliased_folder(model_key: str) -> str:
     """The raw folder whose contents belong to `model_key`, when it is not named
     after that model. "" when the folder and the model agree."""
-    from adb_bot.automation.spoof_pipeline import RAW_FOLDER_MODEL_ALIASES
+    from adb_bot.automation.spoof_pipeline import raw_folder_model_aliases
 
-    for folder, model in RAW_FOLDER_MODEL_ALIASES.items():
+    for folder, model in raw_folder_model_aliases().items():
         if str(model).strip().lower() == model_key:
             return folder.capitalize()
     return ""

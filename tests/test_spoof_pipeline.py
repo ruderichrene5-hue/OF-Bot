@@ -119,6 +119,104 @@ class ResolveModelTest(TestCase):
         self.assertEqual(report.skipped, [])
 
 
+class ConfigurableAliasTest(TestCase):
+    """The alias map moved out of the module into settings so that onboarding a
+    model whose Drive folder disagrees with its name is an ops edit rather than
+    a code change plus a redeploy of the pinned copy under /opt. The default has
+    to stay byte-identical or Nikki's and Luisa's content stops routing."""
+
+    def setUp(self):
+        from adb_bot.config import settings
+
+        self.settings = settings
+        self._original = settings.get_raw_folder_model_aliases
+
+    def tearDown(self):
+        self.settings.get_raw_folder_model_aliases = self._original
+
+    def test_the_default_is_exactly_what_was_hardcoded(self):
+        self.assertEqual(self.settings.DEFAULT_RAW_FOLDER_MODEL_ALIASES,
+                         {"corina": "Nikki", "mandy": "Luisa"})
+        self.assertEqual(spoof_pipeline.DEFAULT_RAW_FOLDER_MODEL_ALIASES,
+                         self.settings.DEFAULT_RAW_FOLDER_MODEL_ALIASES)
+
+    def test_an_override_adds_a_folder_without_touching_code(self):
+        self.settings.get_raw_folder_model_aliases = lambda: {"kathi_raw": "Kathi"}
+        self.assertEqual(spoof_pipeline.resolve_model("Kathi_Raw"), "Kathi")
+
+    def test_unreadable_settings_fall_back_to_the_default(self):
+        # An override that blows up must not silently re-point Nikki's clips at
+        # a folder with no profiles -- that is a whole model producing nothing.
+        def boom():
+            raise RuntimeError("settings file is corrupt")
+
+        self.settings.get_raw_folder_model_aliases = boom
+        self.assertEqual(spoof_pipeline.resolve_model("Corina"), "Nikki")
+
+    def test_env_string_parsing(self):
+        self.assertEqual(self.settings.parse_raw_folder_aliases("corina=Nikki, mandy=Luisa"),
+                         {"corina": "Nikki", "mandy": "Luisa"})
+        # Tolerant: a stray comma or a half-written pair drops that entry only.
+        self.assertEqual(self.settings.parse_raw_folder_aliases("a=B,,junk,=X,y="),
+                         {"a": "B"})
+        self.assertEqual(self.settings.parse_raw_folder_aliases(""), {})
+
+    def test_env_override_wins_over_the_builtin_default(self):
+        import os
+
+        original = os.environ.get("RAW_FOLDER_MODEL_ALIASES")
+        saved_loader = self.settings.load_settings
+        self.settings.load_settings = lambda: {}
+        os.environ["RAW_FOLDER_MODEL_ALIASES"] = "corina=Nikki,mandy=Luisa,katja_raw=Katja"
+        try:
+            self.assertEqual(self.settings.get_raw_folder_model_aliases()["katja_raw"], "Katja")
+            # and the two live entries are still there -- an override replaces
+            # the map, so leaving them out is how you remove them.
+            self.assertEqual(self.settings.get_raw_folder_model_aliases()["corina"], "Nikki")
+        finally:
+            self.settings.load_settings = saved_loader
+            if original is None:
+                os.environ.pop("RAW_FOLDER_MODEL_ALIASES", None)
+            else:
+                os.environ["RAW_FOLDER_MODEL_ALIASES"] = original
+
+
+class ListFolderNamesTest(TestCase):
+    """An empty raw folder is what a model's Drive folder looks like on day one.
+    `list_by_model` drops it (the pipeline only wants folders with work), which
+    is why a half-onboarded model signalled nothing at all, anywhere."""
+
+    def test_local_source_lists_empty_folders_too(self):
+        import os, tempfile
+
+        root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(root, "Jasmin"))
+        os.makedirs(os.path.join(root, "Kathi"))          # brand new, no clips
+        open(os.path.join(root, "Jasmin", "a.mp4"), "w").close()
+        open(os.path.join(root, "loose.mp4"), "w").close()  # not a model folder
+        source = LocalRawSource(root)
+        self.assertEqual(source.list_folder_names(), ["Jasmin", "Kathi"])
+        self.assertEqual(list(source.list_by_model()), ["Jasmin"])
+
+    def test_missing_root_lists_nothing(self):
+        self.assertEqual(LocalRawSource("/no/such/dir").list_folder_names(), [])
+
+    def test_drive_source_lists_folders_with_one_call(self):
+        class FakeDrive:
+            def __init__(self):
+                self.calls = 0
+
+            def list_subfolders(self, folder_id):
+                self.calls += 1
+                return [{"id": "f1", "name": "Jasmin"}, {"id": "f2", "name": "Katherine"}]
+
+        client = FakeDrive()
+        source = spoof_pipeline.DriveRawSource(client, "root")
+        self.assertEqual(source.list_folder_names(), ["Jasmin", "Katherine"])
+        # Cheap on purpose: no per-folder file listing, so a check can call it.
+        self.assertEqual(client.calls, 1)
+
+
 class RunPipelineTest(TestCase):
     def test_dry_run_counts_but_writes_nothing(self):
         client = FakePipelineClient(active={"nikki": [{"account_id": "a1", "handle": "nikki_1"},
@@ -239,6 +337,24 @@ class RunPipelineTest(TestCase):
                               source=FakeSource(_one_video()), dry_run=True, targets="profiles")
         self.assertEqual(report.variants_created, 0)
         self.assertIn("no MLX profiles", report.skipped[0][1])
+
+    def test_the_unroutable_skip_reason_matches_the_marker_the_watchdog_reads(self):
+        """A contract test, not a tautology: `loop_watchdog.observe_pipeline`
+        decides IDLE vs STALLED by substring-matching this reason. Reword the
+        skip without the marker and an un-onboarded model goes quiet again --
+        which is the exact regression this ticket was about."""
+        for targets, client in (
+            ("profiles", FakePipelineClient(profiles={})),
+            ("accounts", FakePipelineClient(active={})),
+        ):
+            report = run_pipeline(client, LOG, raw_root="/raw", out_root="/out",
+                                  source=FakeSource(_one_video(model="Kathi")),
+                                  dry_run=True, targets=targets)
+            reason = report.skipped[0][1]
+            self.assertTrue(
+                any(m in reason for m in spoof_pipeline.UNROUTABLE_SKIP_MARKERS),
+                f"{reason!r} matches no UNROUTABLE_SKIP_MARKERS entry")
+            self.assertIn("Kathi", reason)   # and it names the model
 
     def test_spoof_failure_marks_content_failed(self):
         client = FakePipelineClient(active={"nikki": [{"account_id": "a1", "handle": "nikki_1"}]})

@@ -228,6 +228,55 @@ def get_saved_spoofed_videos_dir() -> str:
     return _get_saved_or_env("spoofed_videos_dir", "SPOOFED_VIDEOS_DIR")
 
 
+# Raw folders whose name is not the model whose content they hold. See
+# `spoof_pipeline.resolve_model`. These are the values that were hardcoded in
+# the pipeline until 2026-08-10; they stay here as the default so a box with no
+# override behaves exactly as before.
+DEFAULT_RAW_FOLDER_MODEL_ALIASES = {
+    "corina": "Nikki",
+    "mandy": "Luisa",
+}
+
+
+def parse_raw_folder_aliases(text: str) -> dict:
+    """Parse `folder=Model,folder2=Model2` into {folder_lower: Model}.
+
+    Tolerant on purpose: this is set by hand in /etc/adbbot/env, and a stray
+    comma or a blank entry must not take the pipeline down. Malformed pairs are
+    dropped, not raised.
+    """
+    out: dict = {}
+    for chunk in str(text or "").replace(";", ",").split(","):
+        if "=" not in chunk:
+            continue
+        folder, _, model = chunk.partition("=")
+        folder, model = folder.strip().lower(), model.strip()
+        if folder and model:
+            out[folder] = model
+    return out
+
+
+def get_raw_folder_model_aliases() -> dict:
+    """Raw-folder -> model overrides for the spoofing pipeline.
+
+    Order: saved dev settings (`raw_folder_model_aliases`, a dict), then the
+    `RAW_FOLDER_MODEL_ALIASES` env var (`corina=Nikki,mandy=Luisa`), else the
+    built-in default. Whichever source wins replaces the map wholesale rather
+    than merging -- a merge would make an alias impossible to *remove* once the
+    Drive folder is finally renamed, which is the one edit this exists to allow.
+    """
+    saved = load_settings().get("raw_folder_model_aliases")
+    if isinstance(saved, dict):
+        cleaned = {str(k).strip().lower(): str(v).strip()
+                   for k, v in saved.items() if str(k).strip() and str(v).strip()}
+        if cleaned:
+            return cleaned
+    env = parse_raw_folder_aliases(os.environ.get("RAW_FOLDER_MODEL_ALIASES", ""))
+    if env:
+        return env
+    return dict(DEFAULT_RAW_FOLDER_MODEL_ALIASES)
+
+
 # The flows the per-folder media mapping feeds. Only these read a Profile's
 # media_path, so mapping a folder must not change any other flow's behaviour.
 # Lives here (a leaf module) so both the UI and the headless runners can use it.
