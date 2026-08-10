@@ -1973,12 +1973,36 @@ class InstagramReelUploadU2Flow:
 
         return probe
 
-    def _open_profile_tab_u2(self, d, target, logger=None) -> bool:
-        """Tap the bottom-nav Profile tab (IG's own, not the launcher)."""
+    # How long to give the Profile tab to appear. This is called right after an
+    # account switch, when Instagram is still rebuilding its nav bar, so the
+    # first probe routinely lands too early.
+    PROFILE_TAB_TIMEOUT_SECONDS = 8.0
+
+    def _open_profile_tab_u2(self, d, target, logger=None,
+                             timeout: float | None = None) -> bool:
+        """Tap the bottom-nav Profile tab (IG's own, not the launcher).
+
+        Waits for the tab instead of probing once. `.exists` is an immediate
+        RPC that does NOT honour implicitly_wait (see `waits.any_exists`), so
+        the old single-shot check reported "not found" for any phone that was
+        merely a second behind.
+
+        That mattered far more than a missing tap: the only caller reads the
+        signed-in handle through this tab, and when it cannot, the account
+        switch guard refuses to post rather than risk the wrong account. On
+        2026-08-10, 18 of these misses turned into 16 refused posts against 13
+        switches that had actually worked -- the switch was fine, the read was
+        just early.
+        """
         selectors = (
             {"resourceId": "com.instagram.android:id/profile_tab"},
             {"resourceIdMatches": r"com\.instagram\.android:id/(profile_tab|main_profile_tab)"},
         )
+        cap = waits.scaled(self.PROFILE_TAB_TIMEOUT_SECONDS if timeout is None else timeout)
+        if not waits.wait_for(waits.u2_ready(d, *selectors), timeout=cap):
+            _emit(logger, "info",
+                  "u2: profile tab not found for %s after %.1fs", target, cap)
+            return False
         for kwargs in selectors:
             try:
                 node = d(**kwargs)
@@ -1987,7 +2011,10 @@ class InstagramReelUploadU2Flow:
                     return True
             except Exception:
                 continue
-        _emit(logger, "info", "u2: profile tab not found for %s", target)
+        # Matched during the wait but gone by the tap -- rare, and a retry next
+        # tick is better than clicking blind on a screen that just changed.
+        _emit(logger, "info",
+              "u2: profile tab vanished between the wait and the tap on %s", target)
         return False
 
     # The profile header's own title -- the account's handle, and the control

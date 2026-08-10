@@ -11,6 +11,7 @@ in front. Both look like success everywhere the bot reports.
 """
 
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from unittest import TestCase
@@ -432,6 +433,55 @@ class AccountSwitchTest(TestCase):
     def test_the_at_sign_is_ignored_on_both_sides(self):
         device = FakeDevice(handle="@helenaiscutee")
         self.assertTrue(self._ensure(device, "@helenaiscutee"))
+
+
+class ProfileTabWaitTest(TestCase):
+    """The Profile tab is read right after a switch, while IG redraws its nav.
+
+    `.exists` is an immediate RPC that ignores implicitly_wait, so a probe fired
+    the instant the switch returns can miss a tab that is about to appear. The
+    caller reads the signed-in handle through this tab, and a handle it cannot
+    read makes the guard refuse the post -- so an early probe costs a good post,
+    not just a tap.
+    """
+
+    class _LateTab(FakeDevice):
+        """A phone whose Profile tab only shows up after a few probes."""
+
+        def __init__(self, appear_on_probe=3, **kw):
+            super().__init__(**kw)
+            self.probes = 0
+            self.appear_on_probe = appear_on_probe
+
+        def __call__(self, **kwargs):
+            rid = (kwargs.get("resourceId") or "") + (kwargs.get("resourceIdMatches") or "")
+            if "profile_tab" in rid:
+                self.probes += 1
+                if self.probes < self.appear_on_probe:
+                    return FakeNode(exists=False)
+            return super().__call__(**kwargs)
+
+    def setUp(self):
+        from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
+        self.flow = InstagramReelUploadU2Flow()
+
+    def test_a_tab_that_arrives_late_is_still_opened(self):
+        device = self._LateTab(appear_on_probe=3)
+        self.assertTrue(
+            self.flow._open_profile_tab_u2(device, "1.2.3.4:5555", timeout=5.0))
+        self.assertGreaterEqual(device.probes, 3)
+
+    def test_a_tab_that_never_arrives_still_gives_up(self):
+        device = self._LateTab(appear_on_probe=10_000)
+        self.assertFalse(
+            self.flow._open_profile_tab_u2(device, "1.2.3.4:5555", timeout=0.3))
+
+    def test_a_tab_already_there_is_not_delayed(self):
+        device = FakeDevice()
+        started = time.monotonic()
+        self.assertTrue(
+            self.flow._open_profile_tab_u2(device, "1.2.3.4:5555", timeout=5.0))
+        self.assertLess(time.monotonic() - started, 1.0)
 
 
 class ReportTest(TestCase):
