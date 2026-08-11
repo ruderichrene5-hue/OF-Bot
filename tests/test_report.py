@@ -784,8 +784,10 @@ class NeedsHumanTest(unittest.TestCase):
                                 "Issue Type": "Human Verification Required", "Retry Count": 0,
                                 "Scheduled DateTime": "2026-08-05T07:00:00.000Z"}},
         # Retryable by issue type, but out of attempts -- a person's job now.
+        # Counted off the live limit: the point is "has used them all", not "3".
         {"id": "q5", "fields": {"Name": "Nikki 3 / 20:00", "Issue Type": "Failed - Needs Retry",
-                                "Retry Count": 3, "Scheduled DateTime": "2026-08-05T18:00:00.000Z"}},
+                                "Retry Count": report.DEFAULT_MAX_RETRIES,
+                                "Scheduled DateTime": "2026-08-05T18:00:00.000Z"}},
     ]
     PROFILES = [
         {"id": "p1", "fields": {"Profile Name": "Laila 9", "Needs Human Check": True,

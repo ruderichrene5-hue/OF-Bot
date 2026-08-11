@@ -1883,7 +1883,11 @@ def claimed_variant_ids(queue_rows) -> set:
 # about the account -- a ban, a verification prompt, or a human parking the row
 # -- and posting into it again does not fix it. See retry_runner.
 RETRYABLE_ISSUE = "Failed - Needs Retry"
-DEFAULT_MAX_RETRIES = 3
+
+# Imported, not redeclared: this page's job is to say which rows the retry pass
+# will still pick up, and a second copy of the number is a page that quietly
+# lies the day the limit changes.
+from adb_bot.automation.retry_runner import DEFAULT_MAX_RETRIES  # noqa: E402
 
 
 def second_accounts(airtable, rows=None, day: str = "") -> dict:

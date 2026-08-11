@@ -75,7 +75,12 @@ class DeadRowTest(TestCase):
         self.assertFalse(is_dead_row(_row(issue=at.ISSUE_NEEDS_RETRY, retry=1)["fields"]))
 
     def test_a_retryable_row_at_the_limit_is_dead(self):
-        self.assertTrue(is_dead_row(_row(issue=at.ISSUE_NEEDS_RETRY, retry=3)["fields"]))
+        # Follows the constant rather than restating it: "at the limit" is the
+        # claim, and the limit itself has already moved once (3 -> 5).
+        at_limit = recovery_runner.DEFAULT_MAX_RETRIES
+        self.assertTrue(is_dead_row(_row(issue=at.ISSUE_NEEDS_RETRY, retry=at_limit)["fields"]))
+        self.assertFalse(
+            is_dead_row(_row(issue=at.ISSUE_NEEDS_RETRY, retry=at_limit - 1)["fields"]))
 
     def test_rows_a_person_owns_are_dead_too(self):
         """A ban or a verification prompt is exactly what gets fixed by hand,

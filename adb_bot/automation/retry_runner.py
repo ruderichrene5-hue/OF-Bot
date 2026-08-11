@@ -33,16 +33,23 @@ from adb_bot.automation import post_ledger
 
 # How many attempts a row gets before it stops being retried automatically.
 # The posting runner bumps Retry Count on each failed attempt, so this counts
-# real attempts: 3 means the row is tried up to three times and then waits for a
-# person. A row that has failed three times is not failing by chance.
-DEFAULT_MAX_RETRIES = 3
+# real attempts: 5 means the row is tried up to five times and then waits for a
+# person. A row that has failed five times is not failing by chance.
+#
+# Raised from 3 to 5 on 2026-08-11: three attempts was sending rows to the
+# needs-human worklist that a fourth or fifth try would have cleared on its own,
+# because the failures that repeat here are usually the phone (MLX slow to
+# launch, ADB dropping, a device mid-reboot) rather than the account. A person
+# should only be asked once the phone has genuinely refused five times.
+DEFAULT_MAX_RETRIES = 5
 
 # Backoff: 15min * 2**retry_count, capped. 15 minutes is the same settling time
 # the deferred recheck uses -- long enough that whatever transient broke the run
 # (phone rebooting, MLX restarting, Instagram throttling a device) has had a
 # chance to clear, short enough to still land inside the same posting window.
-# The cap keeps a third retry from drifting into the middle of the night: 4h
-# after a 15/30/60-minute ladder still leaves the row inside a normal day.
+# The cap is what keeps the tail of the ladder from drifting into the middle of
+# the night: with five attempts the waits are 15m/30m/1h/2h, so the last try
+# lands under 4h after the first failure and stays inside a normal day.
 RETRY_BACKOFF_BASE_SECONDS = 15 * 60
 RETRY_BACKOFF_MAX_SECONDS = 4 * 3600
 

@@ -28,6 +28,7 @@ from pathlib import Path
 
 from adb_bot.automation import loop_watchdog, schedule_spec
 from adb_bot.automation.flows import reel_verify
+from adb_bot.automation.retry_runner import DEFAULT_MAX_RETRIES
 from adb_bot.clients import airtable as at
 from adb_bot.clients.airtable import AirtableClient
 from adb_bot.config import settings
@@ -871,8 +872,9 @@ def main(argv=None) -> int:
     parser.add_argument("--anytime-max", type=int, default=None,
                         help="queue: most posts per day for a model that picked no times "
                              "(default 7; Models.Reels Per Day overrides it per model).")
-    parser.add_argument("--max-retries", type=int, default=3,
-                        help="retry: give up on a row once Retry Count reaches this (default 3).")
+    parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES,
+                        help="retry: give up on a row once Retry Count reaches this "
+                             f"(default {DEFAULT_MAX_RETRIES}).")
     parser.add_argument("--targets", choices=("accounts", "profiles"), default="accounts",
                         help="pipeline/queue/warmup: what to work on -- Airtable Accounts at "
                              "Lifecycle Stage Active (default), or the MLX profile inventory, "

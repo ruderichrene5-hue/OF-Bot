@@ -17,6 +17,7 @@ from collections import Counter
 from datetime import datetime
 
 from adb_bot.automation import schedule_spec
+from adb_bot.automation.retry_runner import DEFAULT_MAX_RETRIES
 
 REFRESH_SECONDS = 30
 
@@ -863,8 +864,8 @@ ISSUE_GUIDE = {
         "If the account is gone for good, set the profile\u2019s Status to Inactive so "
         "the bot stops choosing it."),
     "Retries Exhausted": (
-        "The bot tried to post three times and failed every time. It has stopped "
-        "trying so it does not keep hammering the account.",
+        f"The bot tried to post {DEFAULT_MAX_RETRIES} times and failed every time. It has "
+        "stopped trying so it does not keep hammering the account.",
         "Open the phone and see what state Instagram is in — logged out, an update "
         "prompt, a frozen screen. Fix whatever blocks it, then clear the checkbox."),
     "Repeated Failures": (
@@ -1143,8 +1144,8 @@ def _section_needs_human(data: dict) -> str:
         'nothing from you — it resolves by itself into posted or failed.</dd>'
         '<dt>Retrying by itself</dt>'
         '<dd>A post failed for a reason that often clears up on its own — the phone was '
-        'slow, MultiLogin hiccuped. The bot tries up to three times, half an hour apart, '
-        'before it gives up and asks for you.</dd>'
+        f'slow, MultiLogin hiccuped. The bot tries up to {DEFAULT_MAX_RETRIES} times, waiting '
+        'longer after each one, before it gives up and asks for you.</dd>'
         '<dt>Profile status Active / Inactive</dt>'
         '<dd>Inactive means the bot ignores this profile completely: no posts are planned '
         'for it. That is how you park an account you are still fixing, or one that is gone '

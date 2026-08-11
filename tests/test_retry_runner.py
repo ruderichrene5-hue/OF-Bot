@@ -32,6 +32,11 @@ from adb_bot.clients.airtable import AirtableClient
 PROFILE_ID = "624354174112432228"       # the 18-digit MLX API ID
 NOW = 1_785_000_000.0                   # fixed clock so backoff stamps are exact
 FIFTEEN_MIN = 15 * 60
+# "This row has used every attempt it gets." Written as the constant so the
+# tests that mean *at the cap* keep meaning that when the cap moves -- the ones
+# below that pass an explicit `max_retries` are testing the override instead,
+# and stay hard-coded on purpose.
+AT_CAP = retry_runner.DEFAULT_MAX_RETRIES
 
 
 def failed_row(rec_id="recQ1", issue=at.ISSUE_NEEDS_RETRY, retry=1, account="recAcc1",
@@ -105,6 +110,18 @@ class DecideRetryTest(TestCase):
     def test_the_cap_is_caller_overridable(self):
         outcome, _ = self._decide(failed_row(retry=3), max_retries=5)
         self.assertEqual(outcome, OUTCOME_RETRY)
+
+    def test_the_shipped_default_gives_a_row_five_attempts(self):
+        """The number every service actually runs on -- none of them pass
+        --max-retries, so the default *is* the policy: a person is asked only
+        after five real attempts, not three."""
+        self.assertEqual(retry_runner.DEFAULT_MAX_RETRIES, 5)
+        # A row on its fourth failure is still the bot's problem, not a human's.
+        outcome, _ = decide_retry(failed_row(retry=4)["fields"], PROFILE_ID, "abc123", None)
+        self.assertEqual(outcome, OUTCOME_RETRY)
+        outcome, detail = decide_retry(failed_row(retry=5)["fields"], PROFILE_ID, "abc123", None)
+        self.assertEqual(outcome, OUTCOME_EXHAUSTED)
+        self.assertIn("limit of 5", detail)
 
     def test_an_unresolved_shared_entry_blocks(self):
         """The case the whole module is built around: Share was tapped and the
@@ -258,7 +275,7 @@ class RetryPassTest(TestCase):
         self.airtable.requeue_post.assert_not_called()
 
     def test_a_row_at_the_cap_is_not_requeued(self):
-        self.airtable.list_failed_posts.return_value = [failed_row(retry=3)]
+        self.airtable.list_failed_posts.return_value = [failed_row(retry=AT_CAP)]
         tally = self._run()
         self.assertEqual(tally["exhausted"], 1)
         self.airtable.requeue_post.assert_not_called()
@@ -368,7 +385,7 @@ class FlagsProfileForHumanTest(TestCase):
         return self.airtable.flag_profile_for_human.call_args[0]
 
     def test_exhausted_row_flags_the_profile_and_retires_the_row(self):
-        tally = self._run(failed_row(retry=3))
+        tally = self._run(failed_row(retry=AT_CAP))
         self.assertEqual(tally["exhausted"], 1)
         recid, reason, note = self._flagged()
         self.assertEqual(recid, "recProf1")
@@ -400,12 +417,12 @@ class FlagsProfileForHumanTest(TestCase):
     def test_profile_driven_row_resolves_its_profile_directly(self):
         # No Accounts row at all -- the common case here, since posting is
         # profile-driven and most MLX profiles have no account.
-        self._run(failed_row(retry=3, account=None, profile="recProfX"))
+        self._run(failed_row(retry=AT_CAP, account=None, profile="recProfX"))
         recid, _, _ = self._flagged()
         self.assertEqual(recid, "recProfX")
 
     def test_dry_run_writes_nothing(self):
-        tally = self._run(failed_row(retry=3), dry_run=True)
+        tally = self._run(failed_row(retry=AT_CAP), dry_run=True)
         self.assertEqual(tally["exhausted"], 1)
         self.airtable.flag_profile_for_human.assert_not_called()
         self.airtable.mark_post_retries_exhausted.assert_not_called()
