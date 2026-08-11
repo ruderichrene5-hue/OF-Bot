@@ -8,10 +8,23 @@ visible -- they see 170 phones and no way to tell which twenty are waiting on
 them. This puts the flag where they are looking.
 
 A **reconciler**, in the shape of `warmup_state`: it reads both systems and
-makes MultiLogin agree with Airtable, rather than being a callback on the
-moment of flagging. That is what makes it idempotent, two-way (the tag goes on
-when the box is ticked and comes off when it is cleared), and self-healing after
-a tick that died halfway.
+makes them agree, rather than being a callback on the moment of flagging. That
+is what makes it idempotent, two-way (the tag goes on when the box is ticked and
+comes off when it is cleared), and self-healing after a tick that died halfway.
+
+**Since 2026-08-11 it also carries the answer back.** Removing this pass's own
+`Issue` tag in MultiLogin unticks `Needs Human Check` in Airtable, so a VA never
+has to open Airtable to say they dealt with something -- they work in one
+system, the one with the phones in it. `recovery_runner` then does what it has
+always done with a cleared flag: sets Status back to Active and hands the
+profile's dead queue rows back to the retry pass, within about fifteen minutes.
+
+That direction is fenced by the same ledger as removal, and for the same reason:
+only a tag *this module put on* means anything when it disappears. Of the ~69
+`Issue` tags on this workspace, 40 are hand-applied and were never a bot flag;
+somebody tidying one of those must not rewrite an Airtable row. And a flagged
+profile that is missing from the inventory is not "untagged" -- it is unread, so
+it is left alone. See `ProfileIssue.cleared_by_person`.
 
 Three decisions worth writing down, because each one is a way this could go
 wrong quietly:
@@ -223,6 +236,12 @@ class ProfileIssue:
         has_issue = any(t.lower() == ISSUE_TAG.lower() for t in held)
 
         if self.flagged:
+            # A tag *this module put on* that is no longer there is not drift to
+            # correct. It is a person, in the workspace they work in, saying they
+            # have dealt with it -- see `cleared_by_person`. Re-asserting it would
+            # overwrite the only signal they can give, every fifteen minutes.
+            if not has_issue and owned_by_bot:
+                return [], []
             return ([] if has_issue else [ISSUE_TAG]), []
 
         # Not flagged. The only tag that may come off is one this module owns
@@ -231,12 +250,43 @@ class ProfileIssue:
                      if t.lower() in {o.lower() for o in OWNED_TAGS}]
         return [], (removable if (has_issue and owned_by_bot) else [])
 
+    def cleared_by_person(self, owned_by_bot: bool) -> bool:
+        """True when a person took this pass's own `Issue` tag off in MultiLogin.
+
+        The mirror used to run one way, so the only way to say "I have dealt with
+        this" was to untick a checkbox in Airtable -- a system the people doing
+        the dealing do not otherwise open. This is the same statement, made where
+        they already are: the tag goes on when the bot flags, and taking it off
+        says a person looked.
+
+        Every clause is load-bearing:
+
+        * `flagged` -- there is a flag to clear. An unflagged profile losing a
+          tag is the mirror's own removal, one tick later.
+        * `owned_by_bot` -- the ledger says *this module* put the tag there. A
+          hand-applied `Issue` was never a bot flag, so its removal clears
+          nothing; the 40 profiles wearing one on this workspace must not have
+          Airtable rows rewritten because somebody tidied a tag.
+        * `in_mlx` -- the profile is in the inventory we just read. "Not in the
+          listing" and "listed without the tag" are the same shape and opposite
+          meanings, and only one of them is a person.
+
+        The caller's own guard matters as much: `sync_issue_tags` refuses the
+        whole pass on an empty inventory, so a MultiLogin outage cannot read as
+        the whole fleet being resolved at once.
+        """
+        if not (self.flagged and self.in_mlx and owned_by_bot):
+            return False
+        held = {str(t).strip() for t in (self.current_tags or ()) if str(t).strip()}
+        return not any(t.lower() == ISSUE_TAG.lower() for t in held)
+
 
 @dataclass
 class IssueTagReport:
     checked: int = 0
     tagged: int = 0            # tag added
     untagged: int = 0          # tag removed
+    resolved: int = 0          # person removed the tag; the flag came off
     unchanged: int = 0
     no_launch_id: int = 0      # Airtable row with no MLX API ID
     missing_in_mlx: int = 0    # API ID that the workspace no longer knows
@@ -261,7 +311,8 @@ class IssueTagReport:
         if self.stale_quiet:
             extra += f" stale-quiet={self.stale_quiet}"
         return (f"checked={self.checked} tagged={self.tagged} "
-                f"untagged={self.untagged} unchanged={self.unchanged} "
+                f"untagged={self.untagged} resolved={self.resolved} "
+                f"unchanged={self.unchanged} "
                 f"no-id={self.no_launch_id} missing-in-mlx={self.missing_in_mlx} "
                 f"hand-tagged={self.skipped_not_ours}{extra} "
                 f"errors={len(self.errors)}")
@@ -459,6 +510,36 @@ def sync_issue_tags(airtable, tag_client=None, mlx_items=None, dry_run: bool = T
             continue
 
         owned_by_bot = adopt_existing or (state.launch_id in ledger)
+
+        # The other direction: a person removed the tag, so the flag comes off.
+        # Only `Needs Human Check` is written -- `recovery_runner` is what then
+        # sets Status back to Active and re-queues what was stuck, and it finds
+        # profiles by the pair "unchecked but `Flagged At` still stamped". See
+        # `AirtableClient.clear_human_flag`.
+        if state.cleared_by_person(owned_by_bot):
+            report.changes.append(
+                f"unflag {state.name} [{state.launch_id}] -- {ISSUE_TAG} tag removed")
+            if dry_run:
+                report.resolved += 1
+                continue
+            try:
+                if airtable.clear_human_flag(
+                        state.record_id,
+                        note=f"{ISSUE_TAG} tag removed in MultiLogin: somebody looked at this."):
+                    report.resolved += 1
+                else:
+                    # The box was already clear -- the two systems simply agree
+                    # ahead of the ledger. Drop the entry so this stops being
+                    # reconsidered every quarter of an hour.
+                    report.unchanged += 1
+            except Exception as exc:
+                report.fail(ERR_AIRTABLE,
+                            f"{state.name}: clearing the flag: {type(exc).__name__}: {exc}")
+                continue
+            if ledger.pop(state.launch_id, None) is not None:
+                ledger_dirty = True
+            continue
+
         add, remove = state.tag_changes(owned_by_bot)
 
         if not add and not remove:

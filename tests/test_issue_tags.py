@@ -75,16 +75,26 @@ class FakeTagClient:
 
 
 class FakeAirtable:
-    def __init__(self, rows, raises=False):
+    def __init__(self, rows, raises=False, clear_returns=True, clear_raises=False):
         self.rows = rows
         self.raises = raises
         self.calls = 0
+        # The other direction: what the sweep did about a tag a person removed.
+        self.cleared = []
+        self._clear_returns = clear_returns
+        self._clear_raises = clear_raises
 
     def posting_profiles(self):
         self.calls += 1
         if self.raises:
             raise RuntimeError("Airtable 500")
         return list(self.rows)
+
+    def clear_human_flag(self, record_id, note=""):
+        if self._clear_raises:
+            raise RuntimeError("Airtable 429")
+        self.cleared.append((record_id, note))
+        return self._clear_returns
 
 
 def _row(name="Jil 3", launch_id="100000001", needs_human=False, record_id="recA",
@@ -105,9 +115,11 @@ def _sync(rows, items, tmpdir, **kwargs):
     client = kwargs.pop("tag_client", None)
     if client is None:
         client = FakeTagClient()
+    airtable = kwargs.pop("airtable", None) or FakeAirtable(rows)
     report = issue_tags.sync_issue_tags(
-        FakeAirtable(rows), tag_client=client, mlx_items=items,
+        airtable, tag_client=client, mlx_items=items,
         app_dir=tmpdir, **kwargs)
+    report.airtable = airtable
     return report, client
 
 
@@ -706,3 +718,117 @@ class TelegramWordingTest(unittest.TestCase):
 
     def test_several_profiles_are_plural(self):
         self.assertIn("3 profiles need a person", self._headline(3))
+
+
+class ClearedByPersonTest(unittest.TestCase):
+    """`ProfileIssue.cleared_by_person` on its own -- no clients, no ledger file."""
+
+    def _cleared(self, tags, flagged, owned, in_mlx=True):
+        return issue_tags.ProfileIssue(
+            record_id="recA", name="Jil 3", launch_id="1", flagged=flagged,
+            current_tags=tuple(tags), in_mlx=in_mlx).cleared_by_person(owned)
+
+    def test_the_bots_own_tag_taken_off_is_a_person_saying_they_looked(self):
+        self.assertTrue(self._cleared([], True, True))
+
+    def test_a_hand_applied_tag_taken_off_clears_nothing(self):
+        """40 of the ~69 `Issue` tags here were never a bot flag. Somebody
+        tidying one must not rewrite an Airtable row."""
+        self.assertFalse(self._cleared([], True, False))
+
+    def test_a_profile_still_wearing_the_tag_is_not_resolved(self):
+        self.assertFalse(self._cleared(["Issue"], True, True))
+        self.assertFalse(self._cleared(["issue"], True, True), "matched case-insensitively")
+
+    def test_an_unflagged_profile_has_nothing_to_clear(self):
+        """It is the mirror's own removal, one tick early."""
+        self.assertFalse(self._cleared([], False, True))
+
+    def test_a_profile_missing_from_the_inventory_is_unread_not_untagged(self):
+        """"Not in the listing" and "listed without the tag" are the same shape
+        and opposite meanings. Only one of them is a person."""
+        self.assertFalse(self._cleared([], True, True, in_mlx=False))
+
+
+class ResolveByTagRemovalTest(unittest.TestCase):
+    """The whole point: a VA works in MultiLogin and never opens Airtable."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.tmpdir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _flag_then_remove(self, **kwargs):
+        """Flag a profile (which tags it and writes the ledger), then present it
+        back with the tag gone -- exactly what a VA does."""
+        _sync([_row(needs_human=True)], [_mlx()], self.tmpdir)
+        return _sync([_row(needs_human=True)], [_mlx(tags=[])], self.tmpdir, **kwargs)
+
+    def test_removing_the_tag_clears_the_flag(self):
+        report, _client = self._flag_then_remove()
+        self.assertEqual(len(report.airtable.cleared), 1)
+        self.assertEqual(report.airtable.cleared[0][0], "recA")
+        self.assertEqual(report.resolved, 1)
+
+    def test_it_does_not_put_the_tag_straight_back(self):
+        """The mirror's whole job is making MultiLogin agree with Airtable, so
+        without the ledger check it would re-assert the tag every 15 minutes and
+        the VA's only way of saying "done" would never survive a tick."""
+        _report, client = self._flag_then_remove()
+        self.assertEqual(client.assigned, [])
+
+    def test_the_profile_stops_being_reconsidered(self):
+        report, _client = self._flag_then_remove()
+        self.assertEqual(issue_tags.load_ledger(self.tmpdir), {})
+
+    def test_the_note_says_where_it_came_from(self):
+        """One shared login on the dashboard and none at all in MultiLogin, so
+        the note is the only record of how the flag came off."""
+        report, _client = self._flag_then_remove()
+        self.assertIn("MultiLogin", report.airtable.cleared[0][1])
+
+    def test_a_dry_run_writes_nothing_but_says_what_it_would_do(self):
+        _sync([_row(needs_human=True)], [_mlx()], self.tmpdir)
+        report, _client = _sync([_row(needs_human=True)], [_mlx(tags=[])],
+                                self.tmpdir, dry_run=True)
+        self.assertEqual(report.airtable.cleared, [])
+        self.assertEqual(report.resolved, 1)
+        self.assertTrue(any("unflag" in c for c in report.changes))
+
+    def test_a_hand_tagged_profile_losing_its_tag_is_left_alone(self):
+        """No ledger entry: the tag was never this pass's, so its absence says
+        nothing about the flag."""
+        report, client = _sync([_row(needs_human=True)], [_mlx(tags=[])], self.tmpdir)
+        self.assertEqual(report.airtable.cleared, [])
+        self.assertEqual(client.assigned, [("100000001", [ISSUE_TAG_ID])],
+                         "a flagged profile with no tag and no ledger entry is a new flag")
+
+    def test_an_airtable_failure_keeps_the_ledger_entry(self):
+        """So the next tick tries again rather than forgetting the profile was
+        ever the bot's -- which would strand the tag as un-removable."""
+        _sync([_row(needs_human=True)], [_mlx()], self.tmpdir)
+        airtable = FakeAirtable([_row(needs_human=True)], clear_raises=True)
+        report, _client = _sync([_row(needs_human=True)], [_mlx(tags=[])], self.tmpdir,
+                                airtable=airtable)
+        self.assertEqual(report.resolved, 0)
+        self.assertTrue(report.errors)
+        self.assertIn("100000001", issue_tags.load_ledger(self.tmpdir))
+
+    def test_a_flag_already_cleared_in_airtable_just_settles(self):
+        """`clear_human_flag` returns False when the box was not ticked. The two
+        systems already agree; drop the ledger entry and stop looking."""
+        _sync([_row(needs_human=True)], [_mlx()], self.tmpdir)
+        airtable = FakeAirtable([_row(needs_human=True)], clear_returns=False)
+        report, _client = _sync([_row(needs_human=True)], [_mlx(tags=[])], self.tmpdir,
+                                airtable=airtable)
+        self.assertEqual(report.resolved, 0)
+        self.assertEqual(issue_tags.load_ledger(self.tmpdir), {})
+
+    def test_an_empty_inventory_resolves_nobody(self):
+        """A MultiLogin outage reads as every profile having lost its tag. The
+        pass already refuses on an empty inventory; this is that guard holding
+        for the direction that writes to Airtable."""
+        _sync([_row(needs_human=True)], [_mlx()], self.tmpdir)
+        report, _client = _sync([_row(needs_human=True)], [], self.tmpdir)
+        self.assertEqual(report.airtable.cleared, [])
+        self.assertEqual(report.resolved, 0)
