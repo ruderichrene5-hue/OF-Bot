@@ -77,9 +77,8 @@ class PageCacheTest(unittest.TestCase):
             self.built += 1
             return {"n": self.built}
 
-        def render(data, live=True, title="", refresh_seconds=0, actions=False):
+        def render(data, live=True, title="", refresh_seconds=0):
             self.refresh_seconds = refresh_seconds
-            self.actions = actions
             return f"page {data['n']}"
 
         return site.PageCache(ttl=ttl, collect=collect, render=render)
@@ -189,20 +188,6 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body.strip(), "ok")
 
-    def test_the_unflag_action_needs_a_session(self):
-        """The write endpoint is on the same public port as the login screen.
-        Without a session it must refuse before it ever reaches Airtable."""
-        request = urllib.request.Request(
-            self.url + "/unflag", data=b"record_id=recX",
-            headers={"Content-Type": "application/x-www-form-urlencoded"})
-        opener = urllib.request.build_opener(_NoRedirect())
-        try:
-            with opener.open(request, timeout=10) as response:
-                status = response.status
-        except urllib.error.HTTPError as exc:
-            status = exc.code
-        self.assertEqual(status, 401)
-
     def test_unknown_paths_are_not_the_report(self):
         status, body, _ = self._get("/admin")
         self.assertEqual(status, 404)
@@ -218,8 +203,9 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class UnflagWriteTest(unittest.TestCase):
-    """The one write this site is allowed, and the reasons it stays that narrow.
+class ClearHumanFlagTest(unittest.TestCase):
+    """`AirtableClient.clear_human_flag`, the write the issue-tag mirror makes
+    when a person takes the `Issue` tag off a phone in MultiLogin.
 
     `Needs Human Check` is half of a handshake: `profiles_awaiting_recovery`
     finds profiles by the pair "unchecked but `Flagged At` still stamped", and
@@ -280,34 +266,3 @@ class UnflagWriteTest(unittest.TestCase):
         client = Exploding()
         self.assertFalse(self._clear(client))
         self.assertIsNone(client.patched)
-
-
-class UnflagButtonTest(unittest.TestCase):
-    """The button only exists where pressing it does something."""
-
-    def _page(self, actions):
-        from adb_bot.automation import report_html
-        return report_html._section_needs_human({
-            "needs_human": {"rows": [], "retrying": [], "error": "", "profiles": [
-                {"record_id": "recX", "name": "Jil 3", "reason": "Device Unreachable",
-                 "status": "Inactive", "flagged_at": "2026-08-11 09:00", "note": ["adb offline"]}]},
-            "handoff": {"profiles": [], "done": 0},
-            "queue": {"by_status": {}},
-        }, actions)
-
-    def test_the_signed_in_site_gets_a_button(self):
-        page = self._page(True)
-        self.assertIn('action="/unflag"', page)
-        self.assertIn("recX", page)
-
-    def test_a_page_that_cannot_act_gets_none(self):
-        """The same renderer makes the unauthenticated loopback report and the
-        snapshots people paste into chat. A button there would 404, or worse,
-        look like it worked."""
-        page = self._page(False)
-        self.assertNotIn("/unflag", page)
-        self.assertNotIn("recX", page)
-
-    def test_the_instructions_follow_the_button(self):
-        self.assertIn("Press <strong>Done</strong>", self._page(True))
-        self.assertIn("in Airtable", self._page(False))

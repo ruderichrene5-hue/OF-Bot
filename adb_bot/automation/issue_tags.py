@@ -219,6 +219,9 @@ class ProfileIssue:
     launch_id: str
     flagged: bool
     reason: str = ""
+    # Airtable's park switch. Read only by `raised_by_person`, which refuses to
+    # flag a profile a person has deliberately taken out of service.
+    status: str = ""
     current_tags: tuple = ()
     # False when the row's MLX API ID is not in the fleet inventory -- the
     # profile was deleted in MultiLogin but the Airtable row outlived it. Kept
@@ -249,6 +252,36 @@ class ProfileIssue:
         removable = [t for t in held
                      if t.lower() in {o.lower() for o in OWNED_TAGS}]
         return [], (removable if (has_issue and owned_by_bot) else [])
+
+    def raised_by_person(self, owned_by_bot: bool) -> bool:
+        """True when a person put the `Issue` tag on a profile nothing has flagged.
+
+        The other half of "the VA works in one system". Until now a hand-applied
+        tag reached nothing at all: it did not flag the profile, did not stop the
+        warm-up, and did not stop posting -- on 2026-08-11, 40 tags were in that
+        state, fourteen of them on phones the warm-up was still driving.
+
+        `status` is the one exception, and it is not a fudge. A profile a person
+        has set `Inactive` is already held out of service by an explicit switch;
+        flagging it adds nothing, and it would matter later, because clearing a
+        flag hands the profile to `recovery_runner`, which sets Status back to
+        **Active**. Raising a flag on a deliberately parked phone would therefore
+        un-park it the moment somebody tidied the tag -- ten `Link` rows, blanks
+        and retired numbers on this workspace are exactly that.
+        """
+        if self.flagged or not self.in_mlx:
+            return False
+        # A tag this pass put on is not a person's statement, and an unflagged
+        # profile still wearing one means the opposite of a raise: somebody
+        # cleared the flag in Airtable and the tag has not caught up yet. Raising
+        # here would re-flag it every fifteen minutes and the Airtable route --
+        # which still has to work -- would become impossible to use.
+        if owned_by_bot:
+            return False
+        if str(self.status or "").strip().lower() == "inactive":
+            return False
+        held = {str(t).strip() for t in (self.current_tags or ()) if str(t).strip()}
+        return any(t.lower() == ISSUE_TAG.lower() for t in held)
 
     def cleared_by_person(self, owned_by_bot: bool) -> bool:
         """True when a person took this pass's own `Issue` tag off in MultiLogin.
@@ -287,6 +320,8 @@ class IssueTagReport:
     tagged: int = 0            # tag added
     untagged: int = 0          # tag removed
     resolved: int = 0          # person removed the tag; the flag came off
+    raised: int = 0            # person added the tag; the flag went on
+    parked_not_raised: int = 0 # hand-tagged, but Inactive: left alone
     unchanged: int = 0
     no_launch_id: int = 0      # Airtable row with no MLX API ID
     missing_in_mlx: int = 0    # API ID that the workspace no longer knows
@@ -312,6 +347,7 @@ class IssueTagReport:
             extra += f" stale-quiet={self.stale_quiet}"
         return (f"checked={self.checked} tagged={self.tagged} "
                 f"untagged={self.untagged} resolved={self.resolved} "
+                f"raised={self.raised} "
                 f"unchanged={self.unchanged} "
                 f"no-id={self.no_launch_id} missing-in-mlx={self.missing_in_mlx} "
                 f"hand-tagged={self.skipped_not_ours}{extra} "
@@ -351,6 +387,7 @@ def build_states(profiles, tags_by_api_id: dict | None = None) -> list:
             launch_id=launch_id,
             flagged=bool(row.get("needs_human")),
             reason=str(row.get("reason") or "").strip(),
+            status=str(row.get("status") or "").strip(),
             current_tags=tuple(inventory.get(launch_id) or ()),
             in_mlx=bool(launch_id) and launch_id in inventory,
         )
@@ -539,6 +576,41 @@ def sync_issue_tags(airtable, tag_client=None, mlx_items=None, dry_run: bool = T
             if ledger.pop(state.launch_id, None) is not None:
                 ledger_dirty = True
             continue
+
+        # And the direction that starts the whole thing: a person put the tag on
+        # a profile nothing had flagged. Recorded in the ledger like a tag this
+        # pass applied itself, because from here on the pair is managed -- which
+        # is what lets taking the tag off again clear the flag.
+        if state.raised_by_person(owned_by_bot):
+            report.changes.append(
+                f"flag {state.name} [{state.launch_id}] -- {ISSUE_TAG} tag added by hand")
+            if dry_run:
+                report.raised += 1
+                continue
+            try:
+                if airtable.flag_profile_from_tag(
+                        state.record_id,
+                        note=f"{ISSUE_TAG} tag applied in MultiLogin."):
+                    report.raised += 1
+                else:
+                    report.unchanged += 1
+            except Exception as exc:
+                report.fail(ERR_AIRTABLE,
+                            f"{state.name}: raising the flag: {type(exc).__name__}: {exc}")
+                continue
+            ledger[state.launch_id] = {"name": state.name, "at": stamp,
+                                       "reason": f"hand-applied {ISSUE_TAG} tag"}
+            ledger_dirty = True
+            newly_flagged.append((state.name, f"{ISSUE_TAG} tag applied in MultiLogin"))
+            continue
+
+        # Hand-tagged but parked: counted so the population stays visible rather
+        # than disappearing into `unchanged`. See `raised_by_person` for why an
+        # Inactive profile is left alone.
+        if (not state.flagged
+                and str(state.status or "").strip().lower() == "inactive"
+                and any(t.lower() == ISSUE_TAG.lower() for t in state.current_tags)):
+            report.parked_not_raised += 1
 
         add, remove = state.tag_changes(owned_by_bot)
 

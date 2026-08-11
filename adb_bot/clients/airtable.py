@@ -509,7 +509,7 @@ class AirtableClient:
     def warmup_profiles_by_serial(self) -> dict | None:
         """MLX serial_no -> the Profiles (Cloning) row the warm-up needs.
 
-        ``{'record_id', 'name', 'api_id', 'status', 'warmup_started'}``. The
+        ``{'record_id', 'name', 'api_id', 'status', 'warmup_started', 'needs_human'}``. The
         serial is the match key because MLX profile *names* are not unique --
         this workspace has three different profiles called "Blank (1)", created
         on different days -- so matching on the name would warm up the wrong
@@ -524,7 +524,7 @@ class AirtableClient:
             rows = self._list_table(
                 TABLE_PROFILES,
                 fields=[F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_MLX_SERIAL,
-                        F_PROF_STATUS, F_PROF_WARMUP_STARTED],
+                        F_PROF_STATUS, F_PROF_WARMUP_STARTED, F_PROF_NEEDS_HUMAN],
             )
         except Exception as exc:  # pragma: no cover - network/schema path
             print(f"[-] Airtable: no {F_PROF_WARMUP_STARTED} field ({exc})")
@@ -541,6 +541,10 @@ class AirtableClient:
                 "api_id": (str(fields.get(F_PROF_MLX_API_ID) or "").strip() or None),
                 "status": _select_name(fields.get(F_PROF_STATUS)),
                 "warmup_started": (str(fields.get(F_PROF_WARMUP_STARTED) or "").strip() or None),
+                # The warm-up honours this the way the posting planner does: a
+                # phone somebody has flagged should not be spending seventeen
+                # minutes scrolling before they get to it.
+                "needs_human": bool(fields.get(F_PROF_NEEDS_HUMAN)),
             }
         return out
 
@@ -843,6 +847,50 @@ class AirtableClient:
         return self._patch_in(TABLE_PROFILES, record_id, {
             F_PROF_NEEDS_HUMAN: True,
             F_PROF_ISSUE_REASON: reason,
+            F_PROF_ISSUE_NOTES: combined,
+            F_PROF_FLAGGED_AT: stamp,
+        })
+
+    def flag_profile_from_tag(self, record_id: str, note: str,
+                              when_iso: str | None = None,
+                              max_notes_chars: int = 4000) -> bool:
+        """Flag a profile because a person tagged it in MultiLogin.
+
+        Deliberately not `flag_profile_for_human`: that one takes an
+        `Issue Reason`, and a hand-applied tag does not carry one. Writing a
+        made-up reason into a singleSelect would either invent an option in the
+        client's own field or say something the person did not say, so the
+        reason is left unset and the note carries what is actually known. The
+        dashboard already groups those under "(none set)".
+
+        `Flagged At` is not optional. `profiles_awaiting_recovery` finds
+        profiles by "unchecked but still stamped", so a flag raised without the
+        stamp could be cleared later and never recovered -- the phone would sit
+        Inactive and invisible, which is the failure `adbbot-unpark-stranded.py`
+        had to undo by hand.
+
+        Returns False when the profile is already flagged, so a tag that has sat
+        there for a week is not re-stamped on every fifteen-minute tick.
+        """
+        try:
+            if bool(self._get_field(TABLE_PROFILES, record_id, F_PROF_NEEDS_HUMAN)):
+                return False
+        except Exception as exc:  # pragma: no cover - network path
+            print(f"[-] Airtable flag_profile_from_tag read failed: {exc}")
+            return False
+
+        stamp = when_iso or _now_iso()
+        existing = ""
+        try:
+            existing = str(self._get_field(TABLE_PROFILES, record_id, F_PROF_ISSUE_NOTES) or "")
+        except Exception:
+            existing = ""
+        entry = f"[{stamp}] {note}"
+        combined = f"{entry}\n{existing}".strip() if existing else entry
+        if len(combined) > max_notes_chars:
+            combined = combined[:max_notes_chars].rsplit("\n", 1)[0] + "\n[older entries trimmed]"
+        return self._patch_in(TABLE_PROFILES, record_id, {
+            F_PROF_NEEDS_HUMAN: True,
             F_PROF_ISSUE_NOTES: combined,
             F_PROF_FLAGGED_AT: stamp,
         })

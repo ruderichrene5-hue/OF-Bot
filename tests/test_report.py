@@ -1640,9 +1640,14 @@ class ProfilesViewTest(RenderTest):
         self.assertIn("Something New", page)
 
     def test_it_says_how_to_signal_the_work_is_done(self):
+        """The instruction follows the workflow. It used to send people into
+        Airtable to untick a box; the tag mirror now runs both ways, so the
+        whole job is done in MultiLogin and Airtable follows within about
+        fifteen minutes."""
         page = report_html.render(self._with("Banned / Blocked"))
-        self.assertIn("Needs Human Check", page)
-        self.assertIn("Nothing unticks it for you", page)
+        self.assertIn("Issue", page)
+        self.assertIn("MultiLogin", page)
+        self.assertNotIn("Nothing unticks it for you", page)
 
     def test_the_worst_issue_is_listed_first(self):
         data = self._data(needs_human={"rows": [], "retrying": [], "error": "", "profiles": [

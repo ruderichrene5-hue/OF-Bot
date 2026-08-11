@@ -81,6 +81,7 @@ class FakeAirtable:
         self.calls = 0
         # The other direction: what the sweep did about a tag a person removed.
         self.cleared = []
+        self.flagged = []
         self._clear_returns = clear_returns
         self._clear_raises = clear_raises
 
@@ -89,6 +90,12 @@ class FakeAirtable:
         if self.raises:
             raise RuntimeError("Airtable 500")
         return list(self.rows)
+
+    def flag_profile_from_tag(self, record_id, note=""):
+        if self._clear_raises:
+            raise RuntimeError("Airtable 429")
+        self.flagged.append((record_id, note))
+        return self._clear_returns
 
     def clear_human_flag(self, record_id, note=""):
         if self._clear_raises:
@@ -219,14 +226,25 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(client.unassigned, [])
         self.assertEqual(report.unchanged, 1)
 
-    def test_a_hand_tagged_unflagged_profile_survives_the_sweep(self):
-        """The 26. No ledger entry, so nothing may come off -- and it is counted
-        separately rather than filed under `unchanged`, so the population this
-        pass is deliberately not managing stays visible in the log."""
+    def test_a_hand_tagged_profile_keeps_its_tag_and_now_raises_the_flag(self):
+        """The tag itself is still untouchable -- no ledger entry, so nothing may
+        come off. What changed on 2026-08-11 is that it no longer reaches
+        nothing: a person tagging a phone in MultiLogin is how a flag gets
+        raised, so the sweep writes the flag rather than shrugging."""
         report, client = _sync([_row(needs_human=False)],
                                [_mlx(tags=["Issue"])], self.tmpdir)
         self.assertEqual(client.unassigned, [])
         self.assertEqual(report.untagged, 0)
+        self.assertEqual(report.raised, 1)
+
+    def test_a_parked_hand_tagged_profile_is_still_only_counted(self):
+        """The population this pass is deliberately not managing: parked phones
+        wearing somebody's tag. Counted rather than filed under `unchanged`, so
+        it stays visible in the log."""
+        rows = [dict(_row(needs_human=False), status="Inactive")]
+        report, client = _sync(rows, [_mlx(tags=["Issue"])], self.tmpdir)
+        self.assertEqual(client.unassigned, [])
+        self.assertEqual((report.raised, report.untagged), (0, 0))
         self.assertEqual(report.skipped_not_ours, 1)
 
     def test_a_lost_ledger_can_only_cost_an_extra_tag_never_a_removal(self):
@@ -832,3 +850,93 @@ class ResolveByTagRemovalTest(unittest.TestCase):
         report, _client = _sync([_row(needs_human=True)], [], self.tmpdir)
         self.assertEqual(report.airtable.cleared, [])
         self.assertEqual(report.resolved, 0)
+
+
+class RaisedByPersonTest(unittest.TestCase):
+    """`ProfileIssue.raised_by_person` on its own."""
+
+    def _raised(self, tags, flagged=False, status="Active", in_mlx=True, owned=False):
+        return issue_tags.ProfileIssue(
+            record_id="recA", name="Jil 3", launch_id="1", flagged=flagged,
+            status=status, current_tags=tuple(tags),
+            in_mlx=in_mlx).raised_by_person(owned)
+
+    def test_the_bots_own_tag_on_an_unflagged_profile_is_not_a_raise(self):
+        """The regression this nearly shipped with. An unflagged profile still
+        wearing a tag this pass applied means somebody cleared the flag in
+        Airtable and the tag has not caught up -- the removal is one branch
+        below. Raising here would re-flag it every fifteen minutes and make the
+        Airtable route, which still has to work, impossible to use."""
+        self.assertFalse(self._raised(["Issue"], owned=True))
+
+    def test_a_hand_applied_tag_raises_the_flag(self):
+        self.assertTrue(self._raised(["Issue"]))
+        self.assertTrue(self._raised(["issue"]), "matched case-insensitively")
+
+    def test_a_profile_already_flagged_is_not_re_raised(self):
+        self.assertFalse(self._raised(["Issue"], flagged=True))
+
+    def test_an_untagged_profile_is_not_flagged(self):
+        self.assertFalse(self._raised(["Created", "Warmup Day 2 Done"]))
+
+    def test_a_parked_profile_is_left_alone(self):
+        """Clearing a flag hands the profile to `recovery_runner`, which sets
+        Status back to Active. Flagging a deliberately parked phone would
+        therefore un-park it the moment somebody tidied the tag."""
+        self.assertFalse(self._raised(["Issue"], status="Inactive"))
+
+    def test_a_profile_missing_from_the_inventory_is_not_flagged(self):
+        self.assertFalse(self._raised(["Issue"], in_mlx=False))
+
+
+class RaiseByTagTest(unittest.TestCase):
+    """A VA tags a phone in MultiLogin and never opens Airtable."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.tmpdir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_a_hand_tagged_profile_gets_flagged(self):
+        report, client = _sync([_row(needs_human=False)],
+                               [_mlx(tags=["Issue"])], self.tmpdir)
+        self.assertEqual(report.raised, 1)
+        self.assertEqual(report.airtable.flagged, [("recA", "Issue tag applied in MultiLogin.")])
+        self.assertEqual(client.assigned, [], "the tag is already on; nothing to write")
+
+    def test_the_round_trip_closes(self):
+        """Tag on -> flagged; tag off -> cleared. The ledger entry written by the
+        raise is what lets the removal be recognised as a person's."""
+        _sync([_row(needs_human=False)], [_mlx(tags=["Issue"])], self.tmpdir)
+        self.assertIn("100000001", issue_tags.load_ledger(self.tmpdir))
+        report, _client = _sync([_row(needs_human=True)], [_mlx(tags=[])], self.tmpdir)
+        self.assertEqual(report.resolved, 1)
+        self.assertEqual(issue_tags.load_ledger(self.tmpdir), {})
+
+    def test_a_settled_pair_costs_nothing(self):
+        """Flagged and tagged: the two systems agree, so a 15-minute timer must
+        not re-stamp anything."""
+        report, client = _sync([_row(needs_human=True)],
+                               [_mlx(tags=["Issue"])], self.tmpdir)
+        self.assertEqual((report.raised, report.resolved), (0, 0))
+        self.assertEqual(report.airtable.flagged, [])
+        self.assertEqual((client.assigned, client.unassigned), ([], []))
+
+    def test_a_parked_profile_is_counted_not_flagged(self):
+        rows = [dict(_row(needs_human=False), status="Inactive")]
+        report, _client = _sync(rows, [_mlx(tags=["Issue"])], self.tmpdir)
+        self.assertEqual(report.raised, 0)
+        self.assertEqual(report.airtable.flagged, [])
+        self.assertEqual(report.parked_not_raised, 1)
+
+    def test_a_dry_run_writes_nothing(self):
+        report, _client = _sync([_row(needs_human=False)], [_mlx(tags=["Issue"])],
+                                self.tmpdir, dry_run=True)
+        self.assertEqual(report.airtable.flagged, [])
+        self.assertEqual(report.raised, 1)
+        self.assertTrue(any("flag Jil 3" in c for c in report.changes))
+
+    def test_an_empty_inventory_flags_nobody(self):
+        report, _client = _sync([_row(needs_human=False)], [], self.tmpdir)
+        self.assertEqual(report.airtable.flagged, [])
+        self.assertEqual(report.raised, 0)

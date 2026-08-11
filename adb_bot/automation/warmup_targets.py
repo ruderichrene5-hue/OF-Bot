@@ -165,6 +165,17 @@ def collect_warmup_targets(mlx_items, profiles_by_serial, today: date | None = N
         if status is not None and status == "Inactive":
             skipped.append(SkippedAccount(profile.name, "Airtable Status is Inactive"))
             continue
+        if row.get("needs_human"):
+            # Honoured the way `posting_planner` honours it. Flagging does not
+            # set Status, so without this a phone somebody has flagged keeps
+            # being handed seventeen minutes of scrolling every hour while it
+            # waits for them -- and, worse, can finish its plan and arrive on
+            # the hand-off worklist as ready. On 2026-08-11 fourteen warm-up
+            # profiles wore a hand-applied `Issue` tag and one of them did
+            # exactly that.
+            skipped.append(SkippedAccount(
+                profile.name, "flagged in Airtable (Needs Human Check) -- waiting on a person"))
+            continue
 
         started = _parse_date(row.get("warmup_started"))
         # No start date yet -> this run is day 1, and the caller stamps today.
