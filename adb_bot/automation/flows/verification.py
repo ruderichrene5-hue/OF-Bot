@@ -452,9 +452,43 @@ class _Session:
                                 f"could not rent a number: {exc}")
 
         self.numbers_used += 1
+        self._check_country_picker()
         if not self.driver.enter_phone(self.lease.typed_number):
             return self._result(RESULT_FAILED, "could not enter the phone number")
         return None
+
+    def _check_country_picker(self) -> None:
+        """Warn when the on-screen country does not match the rented number.
+
+        Instagram's phone box holds only the national part; the country picker
+        beside it supplies the prefix. A real challenge screen on this fleet
+        (`Blank (10)`, 2026-08-11) was set to `DE +49` while the router rents US
+        numbers by default -- and nothing anywhere would have said so. The
+        submitted number is simply wrong, no code ever arrives, the lease times
+        out, and the breaker counts it as the provider's fault. Ten of those in
+        a row switch providers over a problem no provider has.
+
+        This only reports. Changing the picker is a device action that needs a
+        real screen to design against, and renting to match is a decision about
+        which country these accounts should use at all.
+        """
+        read = getattr(self.driver, "read_country_code", None)
+        if not callable(read) or self.lease is None:
+            return
+        try:
+            on_screen = read()
+        except Exception:
+            return
+        expected = getattr(self.lease.order, "country_code", None)
+        if not on_screen or not expected:
+            return
+        if str(on_screen).lstrip("+") != str(expected).lstrip("+"):
+            self._log("warning",
+                      "verification: the phone screen's country picker is set to "
+                      "+%s but the rented number is +%s. The number submitted "
+                      "will not be the one that was rented, so no code can "
+                      "arrive -- this is not a provider problem.",
+                      on_screen, expected)
 
     def _handle_code(self):
         if self.lease is None:

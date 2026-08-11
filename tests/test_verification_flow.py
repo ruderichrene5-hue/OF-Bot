@@ -244,6 +244,103 @@ class OrderIndependenceTest(FlowTestCase):
         self.assertEqual(provider.purchases, 0, "a banned account must not cost a number")
 
 
+class RealScreenTest(FlowTestCase):
+    """Classification checked against text read off real phones, not paraphrase.
+
+    Two screens have been captured so far. Both are here verbatim so that a
+    later edit to the marker lists cannot quietly stop recognising the only
+    screens anyone has actually seen.
+    """
+
+    # `Blank (10)`, 2026-08-11 -- the first real challenge screen.
+    PHONE = ("get support menu enter your mobile number enter your mobile "
+             "number you'll need to confirm this mobile number with a code via "
+             "sms or whatsapp. de +49 de +49 phone number we use phone numbers "
+             "added here to help you log in, protect our community, accurately "
+             "count people who use our services, and assist you in accessing "
+             "instagram and opt-in programs, but not for purposes such as "
+             "suggesting friends or providing ads. send code send code")
+
+    # `Jil 23`, same evening -- a healthy feed on a profile carrying the tag.
+    FEED = ("reels tray container jil_456xx's story, 0 of 1, unseen. add to "
+            "story your story for you home reels message search and explore "
+            "profile")
+
+    def test_the_real_phone_challenge_is_recognised(self):
+        self.assertEqual(classify_challenge(self.PHONE), CHALLENGE_PHONE)
+
+    def test_the_real_phone_challenge_is_not_read_as_a_code_screen(self):
+        """It says 'a code via SMS' -- which must not outvote 'enter your
+        mobile number'. Reading this as a code screen would wait 45 seconds for
+        an SMS nobody asked for."""
+        self.assertNotEqual(classify_challenge(self.PHONE), CHALLENGE_CODE)
+
+    # `Blank (13)`, same sweep -- the real code step.
+    CODE = ("get support menu enter confirmation code enter the 6-digit "
+            "confirmation code we sent via sms to +4967870390593. it may take "
+            "up to a minute for you to receive this code. 6-digit code request "
+            "new code next update mobile number")
+
+    def test_a_healthy_feed_is_still_nothing(self):
+        self.assertEqual(classify_challenge(self.FEED), CHALLENGE_NONE)
+
+    def test_the_real_code_challenge_is_recognised(self):
+        self.assertEqual(classify_challenge(self.CODE), CHALLENGE_CODE)
+
+    def test_the_real_code_screen_is_not_read_as_a_phone_screen(self):
+        """It says 'update mobile number' -- the weak phone marker 'mobile
+        number' must not outvote 'enter confirmation code'. Reading this as a
+        phone screen would abandon a number seconds from receiving and rent
+        another."""
+        self.assertNotEqual(classify_challenge(self.CODE), CHALLENGE_PHONE)
+
+    def test_the_two_real_screens_are_told_apart(self):
+        """The pair that motivated the strong/weak split, now on real text."""
+        self.assertEqual(classify_challenge(self.PHONE), CHALLENGE_PHONE)
+        self.assertEqual(classify_challenge(self.CODE), CHALLENGE_CODE)
+
+
+class CountryPickerTest(FlowTestCase):
+    """The picker beside the phone box decides what number is really submitted."""
+
+    class PickerDriver(FakeDriver):
+        def __init__(self, screens, code):
+            super().__init__(screens)
+            self._code = code
+
+        def read_country_code(self):
+            return self._code
+
+    def _warnings(self, on_screen):
+        logged = []
+
+        class Logger:
+            def info(self, message, *args):
+                pass
+
+            def warning(self, message, *args):
+                logged.append(message % args if args else message)
+
+        driver = self.PickerDriver([SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED],
+                                   on_screen)
+        provider = FakeProvider("smspool", code="885485")
+        run_verification(driver, self.router(provider), solver=FakeSolver(),
+                         logger=Logger())
+        return " | ".join(logged)
+
+    def test_a_mismatched_picker_is_called_out(self):
+        """A US number under a +49 prefix can never receive its code."""
+        self.assertIn("country picker", self._warnings("49"))
+
+    def test_a_matching_picker_says_nothing(self):
+        self.assertNotIn("country picker", self._warnings("1"))
+
+    def test_a_driver_without_the_method_still_runs(self):
+        result, _driver, _provider = self.run_chain(
+            [SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED])
+        self.assertEqual(result.status, RESULT_SOLVED)
+
+
 class SignedOutTest(FlowTestCase):
     """A phone with nobody logged in must never be reported as solved.
 

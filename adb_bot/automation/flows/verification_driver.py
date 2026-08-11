@@ -53,11 +53,17 @@ RUN_ROOT = Path.home() / ".adb_bot" / "verification"
 SETTLE_SECONDS = 2.5
 
 # Buttons that advance a verification screen, in preferred order. EXACT matches.
-# "next" and "continue" lead because they are the primary action; "confirm" and
-# "submit" follow; "done" is last because it also appears on screens that are
-# already finished.
+#
+# "send code" is first because it is the one label confirmed off a real
+# challenge screen (`Blank (10)`, 2026-08-11) -- and it is exactly the case an
+# exact-match rule gets wrong if you only list the short form: "send" does NOT
+# match a button reading "Send code", so the first version of this list would
+# have typed the number correctly and then failed to submit it, burning the
+# rental. Short forms stay for the screens that use them; "done" is last
+# because it also appears on screens that are already finished.
 _SUBMIT_LABELS = (
-    "next", "continue", "confirm", "submit", "send", "verify", "done", "ok",
+    "send code", "send confirmation code", "next", "continue", "confirm",
+    "submit", "send", "verify", "done", "ok",
 )
 
 # The SMS option on the "how do you want to get the code?" chooser. Exact match
@@ -67,11 +73,21 @@ _SMS_OPTION_LABELS = (
     "send code to phone", "text",
 )
 
-# Getting from the code screen back to the phone screen.
+# Getting from the code screen back to the phone screen, so a *different*
+# number can be rented. Confirmed off the real code screen (`Blank (13)`,
+# 2026-08-11), which offers exactly two ways on: "Update mobile number" and
+# "Request new code".
+#
+# Only the first is any use here. This is called after the 45-second wait has
+# already expired, refunded the number and counted a failure against the
+# provider -- the number is gone. "Request new code" resends to that dead
+# number, which cannot produce anything, and the loop would then wait another
+# 45 seconds and count a second failure against a provider that did nothing
+# wrong. So the resend labels are deliberately absent, not merely ranked lower.
 _NEW_NUMBER_LABELS = (
-    "change number", "use a different number", "change phone number",
-    "i didn't get the code", "didn't get the code", "try another way",
-    "use another method", "resend code",
+    "update mobile number", "update phone number", "change number",
+    "change phone number", "change mobile number", "use a different number",
+    "try another way", "use another method",
 )
 
 # Hints/labels that identify the field a phone number goes in.
@@ -405,6 +421,28 @@ class AdbChallengeDriver:
                 if value:
                     out.append(value)
         return out
+
+    def read_country_code(self) -> str | None:
+        """The dialling code the country picker is set to, e.g. '49' for DE.
+
+        Instagram's phone field is paired with a country selector and only the
+        national part goes in the box, so the selector decides what number was
+        actually submitted. On `Blank (10)` it read `DE +49` -- against a US
+        number rented from SMSPool. Nothing would have complained: a US national
+        number under a +49 prefix is simply a different, invalid number, the
+        code never arrives, and the run looks exactly like a burned pool.
+        """
+        if self._root is None:
+            return None
+        for node in self._root.iter():
+            attrs = node.attrib
+            for key in ("text", "content-desc"):
+                value = str(attrs.get(key, "") or "").strip()
+                # "DE +49", "US +1", "+44"
+                match = re.fullmatch(r"(?:[A-Za-z]{2}\s*)?\+\s*(\d{1,4})", value)
+                if match:
+                    return match.group(1)
+        return None
 
     def _find_exact(self, labels) -> tuple | None:
         """Center of a node whose text/desc EQUALS one of `labels`.

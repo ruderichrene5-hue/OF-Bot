@@ -308,6 +308,101 @@ class ProtocolTest(unittest.TestCase):
             self.assertTrue(callable(getattr(driver, name, None)), name)
 
 
+class RealPhoneScreenTest(unittest.TestCase):
+    """The first real challenge screen this flow ever saw.
+
+    Captured from `Blank (10)` on 2026-08-11
+    (`~/.adb_bot/verification/Blank-10-20260811-222623/`). Reproduced here node
+    for node, because everything about how the driver handles a phone screen was
+    guesswork until this dump existed -- and two of the guesses were wrong.
+    """
+
+    SCREEN = _root(
+        '<node text="Get support" bounds="[900,100][1100,160]" clickable="true"/>',
+        '<node text="Enter your mobile number" bounds="[60,400][900,470]"/>',
+        '<node text="You\'ll need to confirm this mobile number with a code via '
+        'SMS or WhatsApp." bounds="[60,500][1200,600]"/>',
+        '<node text="DE +49" bounds="[60,775][300,838]" clickable="true"/>',
+        _edit(bounds="[314,775][1228,838]", hint="Phone number"),
+        _button("Send code", bounds="[60,950][1228,1050]"),
+    )
+
+    def test_the_number_field_is_found_by_its_hint(self):
+        field = _driver(self.SCREEN)._pick_field(vd._PHONE_FIELD_HINTS)
+        self.assertIsNotNone(field)
+        self.assertEqual(field["center"], (771, 806))
+
+    def test_send_code_is_recognised_as_the_submit_button(self):
+        """'send' does NOT exact-match 'Send code'.
+
+        The first version of _SUBMIT_LABELS listed only the short forms, so it
+        would have typed the number correctly and then found no button -- a
+        rented number burned for nothing, reported as a driver failure.
+        """
+        driver = _driver(self.SCREEN)
+        self.assertEqual(driver._find_exact(vd._SUBMIT_LABELS), (644, 1000))
+
+    def test_the_country_picker_is_read(self):
+        self.assertEqual(_driver(self.SCREEN).read_country_code(), "49")
+
+    def test_a_screen_with_no_picker_reads_none(self):
+        driver = _driver(_root(_edit(hint="Phone number")))
+        self.assertIsNone(driver.read_country_code())
+
+    def test_the_get_support_link_is_not_mistaken_for_a_submit(self):
+        driver = _driver(_root(
+            '<node text="Get support" bounds="[900,100][1100,160]" clickable="true"/>'))
+        self.assertIsNone(driver._find_exact(vd._SUBMIT_LABELS))
+
+
+class RealCodeScreenTest(unittest.TestCase):
+    """The real code screen, from `Blank (13)` on 2026-08-11.
+
+    Recording: `~/.adb_bot/verification/Blank-13-20260811-223021/`.
+    """
+
+    SCREEN = _root(
+        '<node text="Get support" bounds="[900,100][1100,160]" clickable="true"/>',
+        '<node text="Enter confirmation code" bounds="[60,400][900,470]"/>',
+        '<node text="Enter the 6-digit confirmation code we sent via SMS to '
+        '+4967870390593. It may take up to a minute for you to receive this '
+        'code." bounds="[60,500][1200,700]"/>',
+        _edit(bounds="[147,937][1113,1003]", hint="6-digit code"),
+        _button("Request new code", bounds="[60,1100][1200,1180]"),
+        _button("Next", bounds="[60,1250][1200,1330]"),
+        _button("Update mobile number", bounds="[60,1400][1200,1480]"),
+    )
+
+    def test_the_code_field_is_found_by_its_hint(self):
+        field = _driver(self.SCREEN)._pick_field(vd._CODE_FIELD_HINTS)
+        self.assertIsNotNone(field)
+        self.assertEqual(field["center"], (630, 970))
+
+    def test_next_is_the_submit_button(self):
+        self.assertEqual(_driver(self.SCREEN)._find_exact(vd._SUBMIT_LABELS),
+                         (630, 1290))
+
+    def test_a_new_number_means_update_mobile_number(self):
+        """Not 'Request new code' -- that resends to a number already refunded.
+
+        Taking the resend would burn another 45-second wait and count a second
+        failure against a provider that did nothing wrong.
+        """
+        self.assertEqual(_driver(self.SCREEN)._find_exact(vd._NEW_NUMBER_LABELS),
+                         (630, 1440))
+
+    def test_no_resend_label_is_in_the_new_number_list(self):
+        joined = " ".join(vd._NEW_NUMBER_LABELS)
+        self.assertNotIn("resend", joined)
+        self.assertNotIn("request new code", joined)
+
+    def test_the_phone_and_code_screens_pick_different_buttons(self):
+        """Both screens have a submit; they must not be the same control."""
+        phone = _driver(RealPhoneScreenTest.SCREEN)._find_exact(vd._SUBMIT_LABELS)
+        code = _driver(self.SCREEN)._find_exact(vd._SUBMIT_LABELS)
+        self.assertNotEqual(phone, code)
+
+
 class ProbeProfileLookupTest(unittest.TestCase):
     """Resolving --profile to one MultiLogin profile.
 
