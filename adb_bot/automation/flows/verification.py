@@ -320,7 +320,7 @@ MAX_REPEATS = 3
 def run_verification(driver: ChallengeDriver, router, solver=None, logger=None,
                      max_steps: int = MAX_STEPS,
                      max_number_attempts: int = MAX_NUMBER_ATTEMPTS,
-                     service: str = "instagram", country: str = "US"
+                     service: str = "instagram", country: str | None = None
                      ) -> VerificationResult:
     """Drive one account through whatever verification screens it shows.
 
@@ -339,6 +339,11 @@ def run_verification(driver: ChallengeDriver, router, solver=None, logger=None,
     if solver is None:
         from adb_bot.clients.captcha import build_solver
         solver = build_solver(logger=logger)
+    if country is None:
+        # Resolved here rather than as a default argument so the SMS layer stays
+        # the single owner of which country the fleet rents from.
+        from adb_bot.clients.sms.base import DEFAULT_COUNTRY
+        country = DEFAULT_COUNTRY
 
     session = _Session(driver, router, solver, logger, max_number_attempts,
                        service, country)

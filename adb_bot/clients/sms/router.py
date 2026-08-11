@@ -29,7 +29,7 @@ from __future__ import annotations
 import time
 
 from adb_bot.clients.sms.base import (
-    COUNTRY_US,
+    DEFAULT_COUNTRY,
     InsufficientBalance,
     NumberOrder,
     SERVICE_INSTAGRAM,
@@ -99,7 +99,7 @@ class SmsRouter:
 
     # --- leasing --------------------------------------------------------------
     def lease(self, service: str = SERVICE_INSTAGRAM,
-              country: str = COUNTRY_US) -> "NumberLease":
+              country: str = DEFAULT_COUNTRY) -> "NumberLease":
         """Rent one number, falling through to the next provider if one refuses.
 
         A provider that cannot sell a number *is* a failing provider -- a burned

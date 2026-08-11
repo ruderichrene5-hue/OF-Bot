@@ -20,6 +20,7 @@ Two deliberate choices:
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
@@ -31,6 +32,29 @@ PROVIDER_5SIM = "5sim"
 # --- canonical service / country names ----------------------------------------
 SERVICE_INSTAGRAM = "instagram"
 COUNTRY_US = "US"
+COUNTRY_DE = "DE"
+
+# International dialling code per canonical country. Used to split an
+# international number into the part Instagram's form actually wants: its phone
+# box takes only the national digits, with a country picker beside it supplying
+# the prefix.
+DIALLING_CODES = {
+    COUNTRY_US: "1",
+    COUNTRY_DE: "49",
+}
+
+# Where numbers are rented from unless a caller says otherwise.
+#
+# Germany, not the US. The MLX profiles are German throughout -- device numbers
+# are +49, the timezone is Europe/Berlin -- and the real challenge screen's
+# country picker was already set to `DE +49`. Instagram's box takes only the
+# national part, so a US number typed under a +49 prefix is simply a different,
+# invalid number: no code can arrive, the lease times out, and the circuit
+# breaker blames the provider for a problem no provider has.
+#
+# Overridable with SMS_COUNTRY for a one-off, but the default is the one that
+# matches the phones.
+DEFAULT_COUNTRY = os.environ.get("SMS_COUNTRY", "").strip().upper() or COUNTRY_DE
 
 
 class SmsProviderError(RuntimeError):

@@ -300,6 +300,48 @@ class RealScreenTest(FlowTestCase):
         self.assertEqual(classify_challenge(self.CODE), CHALLENGE_CODE)
 
 
+class GermanNumbersTest(FlowTestCase):
+    """Germany is the default, because the phones and the form are German.
+
+    Approved 2026-08-11 after the real challenge screen turned out to have its
+    country picker fixed at `DE +49`. The US pool is cheaper and more reliable
+    ($0.42/71% vs $0.60/56% at SMSPool), but a US number under a +49 prefix is
+    a different number and can never receive its code.
+    """
+
+    def test_the_default_country_is_germany(self):
+        from adb_bot.clients.sms import base
+        self.assertEqual(base.DEFAULT_COUNTRY, base.COUNTRY_DE)
+
+    def test_both_providers_can_sell_a_german_number(self):
+        from adb_bot.clients.sms import fivesim, smspool
+        self.assertIn("DE", smspool._COUNTRY_IDS)
+        self.assertIn("DE", fivesim._COUNTRIES)
+
+    def test_a_german_number_is_split_for_the_form(self):
+        """Instagram's box wants the national part only; +49 comes from the picker."""
+        from adb_bot.clients.sms.fivesim import _split_number
+        self.assertEqual(_split_number("4967870390593", "DE"),
+                         ("49", "67870390593"))
+
+    def test_a_us_number_still_splits(self):
+        from adb_bot.clients.sms.fivesim import _split_number
+        self.assertEqual(_split_number("15550100001", "US"), ("1", "5550100001"))
+
+    def test_a_us_number_of_the_wrong_length_is_left_whole(self):
+        """Better to type the full international number than a mangled one."""
+        from adb_bot.clients.sms.fivesim import _split_number
+        self.assertEqual(_split_number("1555", "US"), (None, None))
+
+    def test_an_unmapped_country_is_left_whole(self):
+        from adb_bot.clients.sms.fivesim import _split_number
+        self.assertEqual(_split_number("33612345678", "FR"), (None, None))
+
+    def test_a_number_that_does_not_match_its_country_is_left_whole(self):
+        from adb_bot.clients.sms.fivesim import _split_number
+        self.assertEqual(_split_number("15550100001", "DE"), (None, None))
+
+
 class CountryPickerTest(FlowTestCase):
     """The picker beside the phone box decides what number is really submitted."""
 

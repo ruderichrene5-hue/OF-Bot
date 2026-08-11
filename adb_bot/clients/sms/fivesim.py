@@ -29,6 +29,9 @@ from __future__ import annotations
 import requests
 
 from adb_bot.clients.sms.base import (
+    COUNTRY_DE,
+    DEFAULT_COUNTRY,
+    DIALLING_CODES,
     COUNTRY_US,
     PROVIDER_5SIM,
     InsufficientBalance,
@@ -49,6 +52,7 @@ _PRODUCTS = {
 }
 _COUNTRIES = {
     COUNTRY_US: "usa",
+    COUNTRY_DE: "germany",
 }
 # "any" lets 5sim pick the cheapest operator with stock, which is what keeps the
 # fallback useful when one operator's pool is the burned one.
@@ -117,7 +121,7 @@ class FiveSimProvider:
 
     # --- provider protocol ----------------------------------------------------
     def purchase(self, service: str = SERVICE_INSTAGRAM,
-                 country: str = COUNTRY_US) -> NumberOrder:
+                 country: str = DEFAULT_COUNTRY) -> NumberOrder:
         product = _PRODUCTS.get(service)
         country_slug = _COUNTRIES.get(country)
         if product is None:
@@ -144,7 +148,7 @@ class FiveSimProvider:
             raise SmsProviderError(
                 self.name, f"buy gave no order id / number: {body}")
 
-        country_code, national = _split_us_number(phone, country)
+        country_code, national = _split_number(phone, country)
         return NumberOrder(
             provider=self.name,
             order_id=order_id,
@@ -205,16 +209,31 @@ class FiveSimProvider:
 
 
 # --- helpers ------------------------------------------------------------------
-def _split_us_number(phone: str, country: str):
+def _split_number(phone: str, country: str):
     """Split an international number into (country code, national part).
 
-    Only US is mapped, because US is the only country the flow rents from today.
-    An unmapped country returns (None, None) and the flow types the full
-    international number instead -- correct, just less convenient for the form.
+    Instagram's phone box takes only the national digits; the country picker
+    beside it supplies the prefix. Getting this wrong is silent -- the form
+    accepts whatever is typed and simply confirms a different number -- so an
+    unmapped country returns (None, None) and the flow types the full
+    international number instead. That is correct rather than clever: worse for
+    the form, but never wrong.
+
+    German numbers vary in length (national parts run ~10-11 digits), so this
+    checks the prefix and leaves the rest alone rather than asserting a total
+    length the way the US branch can.
     """
-    if country == COUNTRY_US and phone.startswith("1") and len(phone) == 11:
-        return "1", phone[1:]
-    return None, None
+    code = DIALLING_CODES.get(country)
+    if not code or not phone.startswith(code):
+        return None, None
+    national = phone[len(code):]
+    if not national:
+        return None, None
+    if country == COUNTRY_US and len(phone) != 11:
+        # A US number is always 1 + 10 digits. Anything else is not the shape
+        # this split assumes, so leave it whole.
+        return None, None
+    return code, national
 
 
 def _as_float(value):

@@ -342,9 +342,13 @@ def _run_on_phone(args, clients, adb_client, recorder, logger,
                   "read the saved .txt files to tell which.")
         return 0
 
+    from adb_bot.clients.sms.base import DEFAULT_COUNTRY
     from adb_bot.clients.sms.router import build_router
     router = build_router(logger=logger)
-    result = verification.run_verification(driver, router, logger=logger)
+    country = args.country or DEFAULT_COUNTRY
+    logger.info("probe: renting %s numbers for %s", country, name)
+    result = verification.run_verification(driver, router, logger=logger,
+                                           country=country)
 
     print(f"\n{'=' * 70}\nresult  : {result.status}\ndetail  : {result.detail}\n"
           f"screens : {result.steps}\nnumbers : {result.numbers_used}\n"
@@ -432,6 +436,11 @@ def main(argv=None) -> int:
     parser.add_argument("--force", action="store_true",
                         help=f"run even on a profile with no '{ISSUE_TAG}' tag, and "
                              f"even if Instagram never opens.")
+    parser.add_argument("--country", default=None,
+                        help="canonical country to rent numbers from with --apply "
+                             "(default comes from the SMS layer, currently DE -- "
+                             "the profiles are German and the challenge screen's "
+                             "country picker is +49).")
     parser.add_argument("--no-screenshots", action="store_true",
                         help="skip the per-screen screenshot. Each is ~2MB and takes "
                              "about ten seconds off an MLX cloud phone, so this makes "

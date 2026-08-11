@@ -21,7 +21,7 @@ import argparse
 import sys
 import time
 
-from adb_bot.clients.sms.base import COUNTRY_US, SERVICE_INSTAGRAM
+from adb_bot.clients.sms.base import DEFAULT_COUNTRY, SERVICE_INSTAGRAM
 from adb_bot.clients.sms.breaker import BreakerStore
 from adb_bot.clients.sms.router import build_router
 from adb_bot.core.logger import get_logger
@@ -127,7 +127,9 @@ def main(argv=None) -> int:
         description="Inspect and exercise the SMS verification providers.")
     parser.add_argument("command", choices=sorted(COMMANDS))
     parser.add_argument("--service", default=SERVICE_INSTAGRAM)
-    parser.add_argument("--country", default=COUNTRY_US)
+    parser.add_argument("--country", default=DEFAULT_COUNTRY,
+                        help=f"canonical country to rent from "
+                             f"(default {DEFAULT_COUNTRY}).")
     args = parser.parse_args(argv)
 
     try:

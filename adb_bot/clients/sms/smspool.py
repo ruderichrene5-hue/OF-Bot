@@ -33,8 +33,10 @@ from __future__ import annotations
 import requests
 
 from adb_bot.clients.sms.base import (
+    COUNTRY_DE,
     COUNTRY_US,
     PROVIDER_SMSPOOL,
+    DEFAULT_COUNTRY,
     InsufficientBalance,
     NoNumbersAvailable,
     NumberOrder,
@@ -56,6 +58,12 @@ _COUNTRY_IDS = {
     COUNTRY_US: 1,                # "United States". 22 is "United States (Virtual)";
                                   # virtuals are cheaper but Instagram rejects many of
                                   # them, so the real pool is the default.
+    COUNTRY_DE: 24,               # "Germany" (cc 49). The default -- the profiles are
+                                  # German and the challenge screen's picker is +49.
+                                  # Dearer and less reliable than the US pool here:
+                                  # $0.60 at 56% vs $0.42 at 71% (checked 2026-08-11),
+                                  # so expect the breaker to see more failures than
+                                  # the US numbers would have produced.
 }
 
 # Documented: 6 = refunded. The others are inferred -- see the module docstring.
@@ -137,7 +145,7 @@ class SmsPoolProvider:
 
     # --- provider protocol ----------------------------------------------------
     def purchase(self, service: str = SERVICE_INSTAGRAM,
-                 country: str = COUNTRY_US) -> NumberOrder:
+                 country: str = DEFAULT_COUNTRY) -> NumberOrder:
         service_id = _SERVICE_IDS.get(service)
         country_id = _COUNTRY_IDS.get(country)
         if service_id is None:
@@ -231,7 +239,7 @@ class SmsPoolProvider:
 
     # --- extras (doctor / reporting, not part of the protocol) -----------------
     def price(self, service: str = SERVICE_INSTAGRAM,
-              country: str = COUNTRY_US) -> dict:
+              country: str = DEFAULT_COUNTRY) -> dict:
         """Current price and SMSPool's advertised success rate for the pool."""
         body = self._post("/request/price",
                           country=_COUNTRY_IDS.get(country),
