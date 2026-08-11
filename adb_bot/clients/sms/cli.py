@@ -32,6 +32,22 @@ def _fmt_age(seconds: float) -> str:
     return f"{minutes}m{secs:02d}s"
 
 
+def _router_with_scratch_breaker(router):
+    """The same providers, but writing its breaker state to a temp file.
+
+    A diagnostic must not be able to bench a production provider.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from adb_bot.clients.sms.breaker import BreakerStore
+    from adb_bot.clients.sms.router import SmsRouter
+
+    scratch = Path(tempfile.mkdtemp(prefix="adbbot-sms-check-")) / "breaker.json"
+    return SmsRouter(router.providers, store=BreakerStore(path=scratch),
+                     logger=router.logger)
+
+
 def cmd_balance(router, _args) -> int:
     for provider in router.providers:
         try:
@@ -85,11 +101,22 @@ def cmd_reset(router, _args) -> int:
 def cmd_rent(router, args) -> int:
     """Rent one real number and give it back -- the live end-to-end check.
 
-    TODO 2.1: this has never been run. It is the only unverified path in the SMS
-    layer, and running it once confirms SMSPool's purchase response fields and
-    its `/sms/check` status numbers (TODO 2.2).
+    **No code can arrive during this check.** Nothing has asked Instagram to
+    send one, so the 45-second wait always times out. That is a successful run
+    of the plumbing, not a failing pool -- but the router cannot tell the
+    difference, and the first real run of this quietly left the production
+    breaker at 1/10 with SMSPool blamed for it. Ten diagnostics in a row would
+    have benched the primary provider for half an hour over nothing.
+
+    So by default this runs against a scratch breaker file and leaves the real
+    one untouched. `--count-failures` opts back in, for the rare case where you
+    want the diagnostic to feed the live counter.
     """
     logger = get_logger("adb_bot")
+    if not args.count_failures:
+        router = _router_with_scratch_breaker(router)
+        print("(using a scratch breaker file; the live failure count is "
+              "untouched -- pass --count-failures to change that)")
     print(f"renting a {args.country} {args.service} number "
           f"from {router.active_provider().name}...")
 
@@ -130,6 +157,11 @@ def main(argv=None) -> int:
     parser.add_argument("--country", default=DEFAULT_COUNTRY,
                         help=f"canonical country to rent from "
                              f"(default {DEFAULT_COUNTRY}).")
+    parser.add_argument("--count-failures", action="store_true",
+                        help="rent: let this diagnostic's inevitable timeout count "
+                             "against the live circuit breaker. Off by default -- "
+                             "no code can arrive during a bare rent, so counting it "
+                             "blames the provider for the test.")
     args = parser.parse_args(argv)
 
     try:

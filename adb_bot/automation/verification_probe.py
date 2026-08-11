@@ -96,9 +96,19 @@ def cmd_list(args) -> int:
 INSTAGRAM_PACKAGE = "com.instagram.android"
 
 # How long to give Instagram to reach the foreground before giving up on it.
-# A cold cloud phone is slow, and the first launch after a profile starts is the
-# slowest of all.
-APP_START_SECONDS = 45
+#
+# 45s was not enough: in a 14-profile sweep three phones sat on
+# `com.android.launcher3` for the whole window while `am start` kept reporting
+# `Starting: Intent{...}` quite happily. The same profiles had opened fine in an
+# earlier, smaller sweep, so this is contention -- the posting and warm-up loops
+# are launching phones at the same time -- rather than anything wrong with those
+# accounts. Waiting longer is nearly free; a false "Instagram did not open"
+# costs a profile its turn.
+APP_START_SECONDS = 75
+
+# Re-issue the start intent every so often while waiting. One `am start` that
+# lands during the phone's own boot animation can be dropped silently.
+RESTART_EVERY_SECONDS = 24
 
 
 def _foreground_app(target: str, adb_client) -> str:
@@ -165,13 +175,24 @@ def _open_instagram(target: str, adb_client, logger) -> bool:
         # top separately, or the log says nothing about what went wrong.
         logger.info("probe: after %ds Instagram is not in front; the foreground "
                     "is %s", attempt * 3, _foreground_app(target, adb_client))
-        if attempt == 4:
-            logger.warning("probe: still not in the foreground; falling back to "
-                           "monkey")
-            out = adb_client.run_command(
-                f"adb -s {target} shell monkey -p {INSTAGRAM_PACKAGE} "
-                f"-c android.intent.category.LAUNCHER 1")
-            logger.info("probe: monkey said %r", (out or "").strip()[:200])
+
+        # Re-issue the start periodically rather than once. An intent that
+        # lands while the phone is still finishing its own boot is dropped
+        # without complaint -- `am start` still prints "Starting: Intent{...}".
+        if attempt * 3 % RESTART_EVERY_SECONDS == 0:
+            if attempt * 3 % (RESTART_EVERY_SECONDS * 2) == 0:
+                logger.warning("probe: still not in the foreground; trying monkey")
+                out = adb_client.run_command(
+                    f"adb -s {target} shell monkey -p {INSTAGRAM_PACKAGE} "
+                    f"-c android.intent.category.LAUNCHER 1")
+                logger.info("probe: monkey said %r", (out or "").strip()[:200])
+            else:
+                logger.warning("probe: still not in the foreground; re-issuing "
+                               "the start intent")
+                out = adb_client.run_command(
+                    f"adb -s {target} shell am start -n "
+                    f"{INSTAGRAM_PACKAGE}/.activity.MainTabActivity")
+                logger.info("probe: am start said %r", (out or "").strip()[:200])
 
     logger.error("probe: Instagram never reached the foreground on %s within %ds. "
                  "Whatever is on screen is NOT Instagram, so any screen read "

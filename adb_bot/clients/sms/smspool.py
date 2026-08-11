@@ -73,9 +73,12 @@ STATUS_REFUNDED = 6
 
 # Orders that will never deliver a code, so polling can stop early.
 #
-# TODO 2.2: confirm this against a real order. `cli.py rent` prints what a live
-# purchase/check/cancel cycle actually returns, and this frozenset is the single
-# place to correct once the real status table is known.
+# Confirmed 2026-08-11 against a real German order (BSWODSHR): once refunded,
+# `/sms/check` answers `{"status": 6, "message": "This order has been
+# refunded"}`. `/request/history` shows the vocabulary in words -- `refunded`,
+# `expired`, `completed` -- but does not give their numbers, so only 6 is known
+# for certain. Everything else still falls through to "keep waiting", which
+# costs the remainder of the 45s at worst.
 _DEAD_STATUSES = frozenset({STATUS_REFUNDED})
 
 # Substrings SMSPool puts in `message` when the wallet is empty. Matched
@@ -211,6 +214,17 @@ class SmsPoolProvider:
                 self.name,
                 f"order {order.order_id} is closed (status {status}: "
                 f"{self._message(body) or 'refunded/expired'})")
+
+        # An order SMSPool has forgotten answers `{"success": 0, "message":
+        # "We could not find this order!"}` -- no `status` field at all.
+        # Confirmed 2026-08-11 against an order from an earlier day. Without
+        # this it falls through to "still pending" and the loop waits out the
+        # full 45 seconds on an order that can never answer.
+        if status is None and not _truthy(body.get("success")):
+            raise SmsProviderError(
+                self.name,
+                f"order {order.order_id} is gone "
+                f"({self._message(body) or 'no status returned'})")
         return None
 
     def cancel(self, order: NumberOrder) -> bool:

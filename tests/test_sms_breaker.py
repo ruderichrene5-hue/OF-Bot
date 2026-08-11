@@ -15,6 +15,7 @@ from adb_bot.clients.sms.base import (
     NumberOrder,
     PROVIDER_5SIM,
     PROVIDER_SMSPOOL,
+    SmsProviderError,
 )
 from adb_bot.clients.sms.breaker import (
     COOLDOWN_SECONDS,
@@ -23,6 +24,68 @@ from adb_bot.clients.sms.breaker import (
     BreakerStore,
 )
 from adb_bot.clients.sms.router import AllProvidersFailed, SmsRouter
+
+
+class SmsPoolStatusTest(TestCase):
+    """`/sms/check` answers, as SMSPool really returns them.
+
+    Captured 2026-08-11 from a live German order (`BSWODSHR`) and from an order
+    old enough that SMSPool had forgotten it.
+    """
+
+    class Session:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def post(self, url, data=None, timeout=None):
+            class Response:
+                status_code = 200
+                text = ""
+
+                def json(_self):
+                    return self.payload
+
+            return Response()
+
+    def _provider(self, payload):
+        from adb_bot.clients.sms.smspool import SmsPoolProvider
+        return SmsPoolProvider("key", session=self.Session(payload))
+
+    def _order(self):
+        return NumberOrder(provider="smspool", order_id="BSWODSHR",
+                           phone="491787129171", country="DE")
+
+    def test_a_refunded_order_stops_the_poll(self):
+        """Status 6 with 'This order has been refunded' -- the one documented."""
+        provider = self._provider({"status": 6,
+                                   "message": "This order has been refunded",
+                                   "resend": 0, "time_left": 1123})
+        with self.assertRaises(SmsProviderError):
+            provider.poll_code(self._order())
+
+    def test_a_forgotten_order_stops_the_poll(self):
+        """No status field at all, just success=0.
+
+        Without this it falls through to 'still pending' and the loop waits out
+        the whole 45 seconds on an order that can never answer.
+        """
+        provider = self._provider({"success": 0,
+                                   "message": "We could not find this order!"})
+        with self.assertRaises(SmsProviderError):
+            provider.poll_code(self._order())
+
+    def test_a_pending_order_keeps_waiting(self):
+        provider = self._provider({"status": 1, "time_left": 900})
+        self.assertIsNone(provider.poll_code(self._order()))
+
+    def test_an_unknown_status_keeps_waiting(self):
+        """Biased toward waiting: a wrong guess must not discard a live number."""
+        provider = self._provider({"status": 99, "time_left": 900})
+        self.assertIsNone(provider.poll_code(self._order()))
+
+    def test_a_delivered_code_beats_any_status(self):
+        provider = self._provider({"status": 3, "sms": "473611"})
+        self.assertEqual(provider.poll_code(self._order()), "473611")
 
 
 class FakeClock:
