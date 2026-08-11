@@ -14,7 +14,10 @@ Design:
   Profile (Cloning) row, linked together (and to its Model when the name
   matches an existing Models row);
 - for a profile Airtable already has but that's missing its 18-digit `MLX API
-  ID` or `Time Zone`: fill those in (never overwrite an existing value).
+  ID` or `Time Zone`: fill those in (never overwrite an existing value);
+- and keep `MLX Folder` in step with MultiLogin, which unlike the two above
+  is a mirror rather than a backfill: a profile moved from the staging
+  bucket into a model's folder should stop claiming to be in staging.
 
 The planning half (`normalize_mlx_item`, `plan_sync`) is pure and unit-tested.
 The apply half (`apply_sync`) does the Airtable writes and is guarded behind an
@@ -55,6 +58,10 @@ class NormalizedProfile:
     name: str
     status_active: bool
     model_name: str | None = None
+    # The MLX folder verbatim, staging buckets included. `model_name` above
+    # is derived from it and is None for those buckets, so the two are not
+    # interchangeable.
+    folder_name: str | None = None
     time_zone: str | None = None
     phone_model_os: str | None = None
     sim_number: str | None = None
@@ -116,6 +123,22 @@ def _model_from_serial_name(serial_name: str | None) -> str | None:
     return name or None
 
 
+def _folder_name_from(item: dict, folder_names: dict | None) -> str | None:
+    """The profile's MLX folder name, verbatim, or None if it cannot be resolved.
+
+    The difference from `_model_name_from` below is the whole point of storing
+    both: that one answers "which model is this?" and deliberately returns None
+    for a staging bucket, because a `Blank` profile in "Default folder" has no
+    model. This one answers "where does this phone live in MultiLogin?", and
+    "Default folder" is a perfectly good answer to that -- in fact it is the
+    interesting one, since it is where the 60-odd unfinished profiles sit.
+    """
+    if not folder_names:
+        return None
+    folder_id = _clean(item.get("folder_id"))
+    return _clean(folder_names.get(folder_id)) if folder_id else None
+
+
 def _model_name_from(item: dict, folder_names: dict | None) -> str | None:
     """Resolve the profile's model from its MLX *folder* name (the authoritative
     grouping the UI uses). Generic buckets -> None. When no folder map is given,
@@ -170,6 +193,7 @@ def normalize_mlx_item(item: dict, folder_names: dict | None = None) -> Normaliz
         name=serial_name or serial_no,
         status_active=(item.get("status") == MLX_STATUS_ACTIVE),
         model_name=_model_name_from(item, folder_names),
+        folder_name=_folder_name_from(item, folder_names),
         time_zone=_clean(equipment.get("time_zone")),
         phone_model_os=_phone_model_os(equipment),
         sim_number=_clean(equipment.get("phone_number")),
@@ -222,6 +246,17 @@ def plan_sync(mlx_items: list[dict], existing_by_serial: dict, folder_names: dic
             updates[at.F_PROF_MLX_API_ID] = normalized.api_id
         if not existing.get("time_zone") and normalized.time_zone:
             updates[at.F_PROF_TIME_ZONE] = normalized.time_zone
+        # The folder tracks *changes*, unlike the two above, and the difference is
+        # deliberate. Those two are fill-only because a value already in Airtable
+        # may have been put there by a person and is not ours to overwrite. The
+        # folder is not like that: it is a mirror of where the phone sits in
+        # MultiLogin, nobody maintains it by hand, and profiles genuinely move --
+        # "Default folder" -> "Nikki" is what onboarding a staging phone looks
+        # like, and a column that could show the old folder forever would be
+        # worse than no column. Only a folder we could actually resolve counts;
+        # a missing folder map must not blank a good value.
+        if normalized.folder_name and existing.get("folder") != normalized.folder_name:
+            updates[at.F_PROF_MLX_FOLDER] = normalized.folder_name
 
         if updates:
             plan.to_update.append(
@@ -281,6 +316,8 @@ def build_profile_fields(p: NormalizedProfile, device_id: str) -> dict:
     }
     if p.time_zone:
         fields[at.F_PROF_TIME_ZONE] = p.time_zone
+    if p.folder_name:
+        fields[at.F_PROF_MLX_FOLDER] = p.folder_name
     return fields
 
 

@@ -171,6 +171,12 @@ F_PROF_NAME = "Profile Name"
 F_PROF_MLX_API_ID = "MLX API ID"          # 18-digit launch/ADB key
 F_PROF_MLX_SERIAL = "MultiLogin Profile ID"  # human serial (not the launch key)
 F_PROF_TIME_ZONE = "Time Zone"            # equipment_info.time_zone, e.g. Europe/Berlin
+# The MLX folder the profile sits in, verbatim -- including the staging buckets
+# ("Default folder"). Distinct from the model on purpose: the model is *derived*
+# from this name and is empty for a staging profile, so the two answer different
+# questions. "Which folder is this phone in?" had no answer in Airtable at all
+# before this, and it is the grouping the MultiLogin UI actually shows.
+F_PROF_MLX_FOLDER = "MLX Folder"
 F_PROF_STATUS = "Status"                  # singleSelect: Active / Inactive
 F_PROF_APP_PACKAGE = "App Package Name"   # constant com.instagram.android for these
 F_PROF_DEVICE = "Device"                  # link -> Devices
@@ -694,12 +700,14 @@ class AirtableClient:
     # new rows for profiles MLX has that Airtable doesn't. See mlx_sync.py.
     # ------------------------------------------------------------------
     def profiles_by_serial(self) -> dict:
-        """MLX serial_no -> {'record_id', 'name', 'api_id', 'time_zone'} for the
-        existing Profiles (Cloning) rows. The serial is the sync's match key."""
+        """MLX serial_no -> {'record_id', 'name', 'api_id', 'time_zone', 'folder'}
+        for the existing Profiles (Cloning) rows. The serial is the sync's match
+        key."""
         out: dict = {}
         rows = self._list_table(
             TABLE_PROFILES,
-            fields=[F_PROF_NAME, F_PROF_MLX_SERIAL, F_PROF_MLX_API_ID, F_PROF_TIME_ZONE],
+            fields=[F_PROF_NAME, F_PROF_MLX_SERIAL, F_PROF_MLX_API_ID, F_PROF_TIME_ZONE,
+                    F_PROF_MLX_FOLDER],
         )
         for record in rows:
             fields = record.get("fields", {}) or {}
@@ -711,6 +719,7 @@ class AirtableClient:
                 "name": fields.get(F_PROF_NAME),
                 "api_id": (str(fields.get(F_PROF_MLX_API_ID) or "").strip() or None),
                 "time_zone": (str(fields.get(F_PROF_TIME_ZONE) or "").strip() or None),
+                "folder": (str(fields.get(F_PROF_MLX_FOLDER) or "").strip() or None),
             }
         return out
 

@@ -76,6 +76,28 @@ class NormalizeTest(TestCase):
         p = normalize_mlx_item(mlx_item(folder_id="fld-missing"), FOLDERS)
         self.assertIsNone(p.model_name)
 
+    def test_the_folder_name_is_kept_verbatim(self):
+        p = normalize_mlx_item(mlx_item(), FOLDERS)
+        self.assertEqual(p.folder_name, "NIkki")
+
+    def test_a_staging_folder_has_a_folder_name_but_no_model(self):
+        """The whole reason both are stored. "Which model?" is genuinely None
+        for a staging phone; "which folder?" is 'Default folder', and that is
+        the answer somebody looking for the unfinished phones wants."""
+        p = normalize_mlx_item(mlx_item(folder_id="fld-default", serial_name="Blank 1 (6)"), FOLDERS)
+        self.assertIsNone(p.model_name)
+        self.assertEqual(p.folder_name, "Default folder")
+
+    def test_an_unresolvable_folder_is_none_not_a_guess(self):
+        self.assertIsNone(normalize_mlx_item(mlx_item(folder_id="fld-missing"), FOLDERS).folder_name)
+        self.assertIsNone(normalize_mlx_item(mlx_item(folder_id=None), FOLDERS).folder_name)
+
+    def test_no_folder_map_means_no_folder_name(self):
+        # The model falls back to parsing serial_name; the folder must not --
+        # inventing a folder from a profile's name would be a fabrication.
+        p = normalize_mlx_item(mlx_item(), None)
+        self.assertIsNone(p.folder_name)
+
     def test_model_name_falls_back_to_serial_name_without_folder_map(self):
         # No folder map supplied -> derive from serial_name, stripping the suffix.
         self.assertEqual(normalize_mlx_item(mlx_item(serial_name="Luisa Link")).model_name, "Luisa")
@@ -150,6 +172,47 @@ class PlanSyncTest(TestCase):
         existing = {"158698": {"record_id": "recX", "api_id": None, "time_zone": "Europe/Berlin"}}
         plan = plan_sync([staging], existing, folder_names=FOLDERS, skip_staging=True)
         self.assertEqual(len(plan.to_update), 1)
+
+    def test_the_folder_is_filled_in_on_an_existing_row(self):
+        existing = {"158698": {"record_id": "recX", "api_id": "624354174112432228",
+                               "time_zone": "Europe/Berlin", "folder": None}}
+        plan = plan_sync([mlx_item()], existing, folder_names=FOLDERS)
+        self.assertEqual(plan.to_update[0].updates, {at.F_PROF_MLX_FOLDER: "NIkki"})
+
+    def test_a_profile_that_moved_folders_is_corrected(self):
+        """Unlike the launch key and time zone, the folder is a mirror. A phone
+        onboarded out of the staging bucket must stop claiming to be in it."""
+        existing = {"158698": {"record_id": "recX", "api_id": "624354174112432228",
+                               "time_zone": "Europe/Berlin", "folder": "Default folder"}}
+        plan = plan_sync([mlx_item()], existing, folder_names=FOLDERS)
+        self.assertEqual(plan.to_update[0].updates, {at.F_PROF_MLX_FOLDER: "NIkki"})
+
+    def test_an_unchanged_folder_is_not_rewritten(self):
+        existing = {"158698": {"record_id": "recX", "api_id": "624354174112432228",
+                               "time_zone": "Europe/Berlin", "folder": "NIkki"}}
+        plan = plan_sync([mlx_item()], existing, folder_names=FOLDERS)
+        self.assertEqual(plan.to_update, [])
+        self.assertEqual(len(plan.unchanged), 1)
+
+    def test_an_unresolvable_folder_never_blanks_a_good_value(self):
+        """A missing folder map or an unknown folder_id is 'we do not know',
+        not 'it has no folder' -- overwriting on that would lose real data."""
+        existing = {"158698": {"record_id": "recX", "api_id": "624354174112432228",
+                               "time_zone": "Europe/Berlin", "folder": "NIkki"}}
+        plan = plan_sync([mlx_item(folder_id="fld-missing")], existing, folder_names=FOLDERS)
+        self.assertEqual(plan.to_update, [])
+        plan = plan_sync([mlx_item()], existing, folder_names=None)
+        self.assertEqual(plan.to_update, [])
+
+    def test_a_new_row_carries_its_folder(self):
+        fields = build_profile_fields(normalize_mlx_item(mlx_item(), FOLDERS), device_id="recDev")
+        self.assertEqual(fields[at.F_PROF_MLX_FOLDER], "NIkki")
+
+    def test_a_new_staging_row_carries_the_staging_folder(self):
+        staging = normalize_mlx_item(
+            mlx_item(folder_id="fld-default", serial_name="Blank 1 (6)"), FOLDERS)
+        fields = build_profile_fields(staging, device_id="recDev")
+        self.assertEqual(fields[at.F_PROF_MLX_FOLDER], "Default folder")
 
     def test_duplicate_serial_in_response_is_skipped_once(self):
         plan = plan_sync([mlx_item(), mlx_item(id="999")], existing_by_serial={})
