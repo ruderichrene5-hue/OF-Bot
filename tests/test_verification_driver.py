@@ -415,11 +415,35 @@ class ProbeProfileLookupTest(unittest.TestCase):
         {"id": "624743063687856180", "serial_name": "Jil 2", "tags": ["Issue"]},
         {"id": "626422241281769608", "serial_name": "Jil 20", "tags": []},
         {"id": "111", "serial_name": "Blank (2)", "tags": []},
+        # Names really are duplicated in this workspace -- these two ids both
+        # answer to "Blank (10)" (seen 2026-08-11).
+        {"id": "632162578940362822", "serial_name": "Blank (10)", "tags": ["Issue"]},
+        {"id": "631357418634805297", "serial_name": "Blank (10)", "tags": ["Issue"]},
     ]
 
     def _find(self, wanted):
         from adb_bot.automation.verification_probe import _find_profile
         return _find_profile(self.ITEMS, wanted)
+
+    def test_a_duplicated_name_is_refused_not_guessed(self):
+        """Picking one silently would rent numbers against an unchosen account."""
+        from adb_bot.automation.verification_probe import AmbiguousProfile
+        with self.assertRaises(AmbiguousProfile):
+            self._find("Blank (10)")
+
+    def test_the_refusal_names_both_ids(self):
+        from adb_bot.automation.verification_probe import AmbiguousProfile
+        try:
+            self._find("Blank (10)")
+        except AmbiguousProfile as exc:
+            self.assertIn("632162578940362822", str(exc))
+            self.assertIn("631357418634805297", str(exc))
+        else:
+            self.fail("expected AmbiguousProfile")
+
+    def test_an_id_resolves_a_duplicated_name(self):
+        self.assertEqual(self._find("631357418634805297")["serial_name"],
+                         "Blank (10)")
 
     def test_an_exact_name_matches(self):
         self.assertEqual(self._find("Jil 2")["id"], "624743063687856180")

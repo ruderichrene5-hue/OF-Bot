@@ -68,16 +68,44 @@ def _profiles(token: str) -> list:
     return MultiloginMobileListClient(token).list_mobile_profiles()
 
 
+class AmbiguousProfile(LookupError):
+    """More than one MultiLogin profile answers to that name."""
+
+    def __init__(self, name: str, matches) -> None:
+        self.name = name
+        self.matches = list(matches)
+        ids = "\n".join(f"    --profile {m.get('id')}   "
+                        f"(tags={m.get('tags') or []}, "
+                        f"remark={str(m.get('remark') or '-')[:40]!r})"
+                        for m in self.matches)
+        super().__init__(
+            f"{len(self.matches)} profiles are named {name!r}. Pass the id "
+            f"instead:\n{ids}")
+
+
 def _find_profile(items, wanted: str) -> dict | None:
-    """Match on name first, then on id, so either can be passed to --profile."""
-    needle = str(wanted).strip().lower()
+    """Match on id first, then on name, so either can be passed to --profile.
+
+    Names are **not unique** in this workspace: `Blank (10)`, `Blank (11)` and
+    `Blank (13)` each name two different profiles, seen 2026-08-11. Returning
+    the first match would silently pick one of them -- which is tolerable for a
+    read-only look and not at all tolerable for `--apply`, where it means
+    renting numbers against an account nobody chose. So a duplicate name raises
+    rather than guesses, the same way the driver's field picker does.
+
+    Ids are checked first because an id is never ambiguous.
+    """
+    wanted = str(wanted).strip()
     for item in items:
-        if str(item.get("serial_name", "")).strip().lower() == needle:
+        if str(item.get("id", "")).strip() == wanted:
             return item
-    for item in items:
-        if str(item.get("id", "")).strip() == str(wanted).strip():
-            return item
-    return None
+
+    needle = wanted.lower()
+    matches = [item for item in items
+               if str(item.get("serial_name", "")).strip().lower() == needle]
+    if len(matches) > 1:
+        raise AmbiguousProfile(wanted, matches)
+    return matches[0] if matches else None
 
 
 def cmd_list(args) -> int:
@@ -85,11 +113,26 @@ def cmd_list(args) -> int:
     flagged = [i for i in items if ISSUE_TAG in (i.get("tags") or [])]
     print(f"{len(flagged)} profile(s) carrying the '{ISSUE_TAG}' tag "
           f"(of {len(items)} total)\n")
+    # Names repeat in this workspace, so say which ones do. A duplicate name
+    # cannot be passed to --profile at all, and it is better to see that here
+    # than to have the run refuse later.
+    counts: dict = {}
+    for item in flagged:
+        name = str(item.get("serial_name") or "?")
+        counts[name] = counts.get(name, 0) + 1
+
     for item in sorted(flagged, key=lambda i: str(i.get("serial_name") or "")):
+        name = str(item.get("serial_name") or "?")
         remark = str(item.get("remark") or "").strip()
-        print(f"  {str(item.get('serial_name') or '?'):18} {item.get('id')}"
-              f"{'   -- ' + remark if remark else ''}")
-    print("\nPick one and run:  --profile \"<name>\"   (add --apply to act on it)")
+        dup = "  [name shared -- use the id]" if counts.get(name, 0) > 1 else ""
+        print(f"  {name:18} {item.get('id')}"
+              f"{'   -- ' + remark if remark else ''}{dup}")
+
+    shared = sum(1 for n, c in counts.items() if c > 1)
+    if shared:
+        print(f"\n{shared} name(s) belong to more than one profile.")
+    print("\nPick one and run:  --profile \"<name or id>\"   "
+          "(add --apply to act on it)")
     return 0
 
 
@@ -261,7 +304,11 @@ def cmd_probe(args) -> int:
     token = _resolve_token(args.mlx_token)
 
     items = _profiles(token)
-    profile_item = _find_profile(items, args.profile)
+    try:
+        profile_item = _find_profile(items, args.profile)
+    except AmbiguousProfile as exc:
+        print(f"[stop] {exc}", file=sys.stderr)
+        return 2
     if profile_item is None:
         print(f"[fatal] no MultiLogin profile named or id'd {args.profile!r}. "
               f"Try --list.", file=sys.stderr)
