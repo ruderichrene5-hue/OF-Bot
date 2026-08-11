@@ -134,14 +134,34 @@ class PlanTest(TestCase):
 
 
 class RunRecoveryTest(TestCase):
-    def test_dead_rows_are_reset_and_the_issue_closed(self):
-        client = FakeRecoveryClient(profiles=[_profile()], queue_rows=[_row("pq1"), _row("pq2")])
+    def test_the_last_dead_row_is_reset_and_the_issue_closed(self):
+        client = FakeRecoveryClient(profiles=[_profile()], queue_rows=[_row("pq1")])
         report = run_recovery(client, LOG, dry_run=False)
-        self.assertEqual(sorted(client.reset_rows), ["pq1", "pq2"])
-        self.assertEqual(report.rows_reset, 2)
+        self.assertEqual(client.reset_rows, ["pq1"])
+        self.assertEqual(report.rows_reset, 1)
         self.assertEqual(report.profiles_cleared, 1)
         self.assertEqual([rid for rid, _note in client.cleared], ["recP1"])
-        self.assertIn("2 queue row(s)", client.cleared[0][1])
+        self.assertIn("1 queue row(s)", client.cleared[0][1])
+
+    def test_a_backlog_is_released_one_row_at_a_time(self):
+        """The whole point: a click used to release every dead row at once, so a
+        phone that was still broken burned the entire backlog before anything
+        found out. One row is the cheapest way to ask whether it posts again."""
+        client = FakeRecoveryClient(profiles=[_profile()], queue_rows=[_row("pq1"), _row("pq2")])
+        report = run_recovery(client, LOG, dry_run=False)
+        self.assertEqual(client.reset_rows, ["pq1"])
+        self.assertEqual(report.rows_reset, 1)
+        self.assertEqual(report.rows_held, 1)
+
+    def test_a_held_backlog_keeps_the_issue_open(self):
+        """`Issue Reason` / `Flagged At` are what bring the profile back to this
+        pass, so holding rows means deliberately not closing it -- otherwise the
+        held rows are stranded exactly as they were before recovery existed."""
+        client = FakeRecoveryClient(profiles=[_profile()], queue_rows=[_row("pq1"), _row("pq2")])
+        report = run_recovery(client, LOG, dry_run=False)
+        self.assertEqual(client.cleared, [])
+        self.assertEqual(report.profiles_cleared, 0)
+        self.assertFalse(report.errors)
 
     def test_dry_run_writes_nothing(self):
         client = FakeRecoveryClient(profiles=[_profile()], queue_rows=[_row("pq1")])
@@ -154,9 +174,10 @@ class RunRecoveryTest(TestCase):
     def test_a_partly_reset_profile_stays_flagged_for_the_next_tick(self):
         """Clearing Flagged At is what stops this profile being reconsidered.
         Doing it after a failed write would strand the row nobody reset."""
+        # The released row is the one that fails; pq2 is held back anyway.
         client = FakeRecoveryClient(profiles=[_profile()],
                                     queue_rows=[_row("pq1"), _row("pq2")],
-                                    reset_fails=["pq2"])
+                                    reset_fails=["pq1"])
         report = run_recovery(client, LOG, dry_run=False)
         self.assertEqual(client.cleared, [])
         self.assertEqual(report.profiles_cleared, 0)
@@ -205,12 +226,34 @@ class ScheduleTest(TestCase):
         self.assertIn("recovery", schedule_spec.RECOMMENDED_LOOPS)
         self.assertIn("recovery", schedule_spec.RECOMMENDED_INTERVALS)
 
-    def test_it_runs_more_often_than_the_retry_pass_it_feeds(self):
-        """A person clearing a checkbox expects the bot to notice within
-        minutes, and a revived row should not then wait a whole retry cycle."""
+    def test_a_released_row_is_considered_before_the_next_one_is_released(self):
+        """Recovery now hands rows back one at a time, and the released row is
+        supposed to be the test of whether the phone posts again. That only
+        means anything if the retry pass gets to look at it before recovery
+        releases the next one -- otherwise the backlog drains on a timer and the
+        one-at-a-time pacing proves nothing.
+
+        This used to assert the opposite inequality, back when recovery released
+        the whole backlog at once and the only worry was a revived row sitting
+        through a 30-minute retry cycle. Retry now runs every 10 minutes, so
+        that worry is smaller than it was even though the comparison flipped.
+        """
         from adb_bot.automation import schedule_spec
-        self.assertLessEqual(schedule_spec.RECOMMENDED_INTERVALS["recovery"],
-                             schedule_spec.RECOMMENDED_INTERVALS["retry"])
+        self.assertLessEqual(schedule_spec.RECOMMENDED_INTERVALS["retry"],
+                             schedule_spec.RECOMMENDED_INTERVALS["recovery"])
+
+    def test_the_retry_cadence_does_not_dominate_the_backoff_ladder(self):
+        """The ladder (15/30/60 min) is the designed spacing between attempts;
+        the retry cadence is only how late a failure is noticed, and that
+        latency is pure waste on top. Keeping it at or under the ladder's first
+        rung stops the poll interval from being the larger half of the wait --
+        which is what made a 1h45m ladder take 3h00m to exhaust on 2026-08-11.
+        """
+        from adb_bot.automation import schedule_spec
+        from adb_bot.automation import retry_runner
+        first_rung_minutes = retry_runner.retry_delay_seconds(0) / 60
+        self.assertLessEqual(schedule_spec.RECOMMENDED_INTERVALS["retry"],
+                             first_rung_minutes)
 
     def test_the_reset_matches_what_the_retry_pass_will_accept(self):
         """The handover contract: whatever reset_row_for_retry writes has to

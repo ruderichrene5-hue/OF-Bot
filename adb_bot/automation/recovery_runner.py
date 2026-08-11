@@ -42,6 +42,26 @@ from adb_bot.automation.retry_runner import DEFAULT_MAX_RETRIES
 from adb_bot.clients import airtable as at
 
 
+# How many dead rows one tick hands back per profile.
+#
+# It used to be all of them, and that turned one click into an avalanche. On
+# 2026-08-10 somebody cleared Nikki 12's checkbox; recovery reset 12 rows at
+# once, each got the full three attempts, and the phone was flagged
+# `Retries Exhausted` again 3h40m and ~36 profile launches later. The phone had
+# not been fixed -- but nothing found that out until the whole backlog was gone.
+#
+# One row is the question "is this phone working now?", and it is the cheapest
+# possible way to ask. If it posts, the next tick releases the next one. If it
+# fails its three attempts the profile flags itself again, which takes it out of
+# `profiles_awaiting_recovery` and stops the release by itself -- so a phone that
+# is still broken costs 3 launches instead of 36, with no extra bookkeeping.
+#
+# Draining a backlog now takes a tick per row (15 min). That is a feature: a
+# dozen reels fired back-to-back onto one account is its own ban risk, and these
+# rows are already late.
+RECOVERY_ROWS_PER_TICK = 1
+
+
 @dataclass
 class RecoveredProfile:
     """One un-flagged profile and the rows this pass hands back to retry."""
@@ -50,17 +70,29 @@ class RecoveredProfile:
     status: str | None = None
     reason: str | None = None
     row_ids: list = field(default_factory=list)
+    held_ids: list = field(default_factory=list)
 
     @property
     def parked(self) -> bool:
         """Un-flagged, but still switched off by hand -- it will not run."""
         return self.status is not None and self.status != at.STATUS_SELECT_ACTIVE
 
+    @property
+    def drained(self) -> bool:
+        """True when this tick releases the profile's last dead row.
+
+        Only then is the issue closed. While rows are still held the profile
+        keeps its `Issue Reason` / `Flagged At`, which is precisely what brings
+        it back to this pass on the next tick to release the next one.
+        """
+        return not self.held_ids
+
 
 @dataclass
 class RecoveryReport:
     recovered: list = field(default_factory=list)   # RecoveredProfile
     rows_reset: int = 0
+    rows_held: int = 0
     profiles_cleared: int = 0
     errors: list = field(default_factory=list)      # (name, message)
     dry_run: bool = True
@@ -69,8 +101,8 @@ class RecoveryReport:
         mode = "DRY-RUN" if self.dry_run else "APPLIED"
         parked = sum(1 for p in self.recovered if p.parked)
         return (f"[{mode}] profiles={len(self.recovered)} rows={self.rows_reset} "
-                f"cleared={self.profiles_cleared} still_parked={parked} "
-                f"errors={len(self.errors)}")
+                f"held={self.rows_held} cleared={self.profiles_cleared} "
+                f"still_parked={parked} errors={len(self.errors)}")
 
 
 def is_dead_row(fields: dict, max_retries: int = DEFAULT_MAX_RETRIES) -> bool:
@@ -117,7 +149,8 @@ def rows_for_profile(queue_rows, profile_id: str, accounts_by_profile=None) -> l
 
 
 def plan_recovery(profiles, queue_rows, accounts_by_profile=None,
-                  max_retries: int = DEFAULT_MAX_RETRIES) -> RecoveryReport:
+                  max_retries: int = DEFAULT_MAX_RETRIES,
+                  rows_per_tick: int = RECOVERY_ROWS_PER_TICK) -> RecoveryReport:
     """Which profiles to resume and which rows to hand back. Pure: no writes.
 
     - `profiles`: `AirtableClient.profiles_awaiting_recovery()` output
@@ -132,14 +165,21 @@ def plan_recovery(profiles, queue_rows, accounts_by_profile=None,
         record_id = profile.get("record_id")
         if not record_id:
             continue
-        dead = [row.get("id") for row in rows_for_profile(queue_rows, record_id, accounts_by_profile)
-                if is_dead_row(row.get("fields", {}) or {}, max_retries)]
+        dead = [rid for rid in
+                (row.get("id") for row in rows_for_profile(queue_rows, record_id, accounts_by_profile)
+                 if is_dead_row(row.get("fields", {}) or {}, max_retries))
+                if rid]
+        # Release a slice, hold the rest for later ticks. A rows_per_tick of 0
+        # or less would hold everything forever and quietly stop recovery, so
+        # treat it as "at least one" rather than honouring it.
+        cut = max(1, rows_per_tick)
         report.recovered.append(RecoveredProfile(
             record_id=record_id,
             name=profile.get("name") or record_id,
             status=profile.get("status"),
             reason=profile.get("reason"),
-            row_ids=[rid for rid in dead if rid],
+            row_ids=dead[:cut],
+            held_ids=dead[cut:],
         ))
     return report
 
@@ -180,12 +220,18 @@ def run_recovery(airtable, logger, dry_run: bool = True,
                            "every loop until that is set to %s",
                            profile.name, profile.status, at.STATUS_SELECT_ACTIVE)
 
-        note = (f"{len(profile.row_ids)} queue row(s) handed back to the retry pass"
-                if profile.row_ids else "nothing was stuck; issue closed")
+        if profile.row_ids and profile.held_ids:
+            note = (f"{len(profile.row_ids)} queue row(s) handed back to the retry pass; "
+                    f"{len(profile.held_ids)} more held until this one posts")
+        elif profile.row_ids:
+            note = f"{len(profile.row_ids)} queue row(s) handed back to the retry pass"
+        else:
+            note = "nothing was stuck; issue closed"
         if dry_run:
             logger.info("[DRY-RUN] would recover %s (was: %s) -- %s",
                         profile.name, profile.reason or "no reason recorded", note)
             report.rows_reset += len(profile.row_ids)
+            report.rows_held += len(profile.held_ids)
             continue
 
         reset = 0
@@ -195,19 +241,30 @@ def run_recovery(airtable, logger, dry_run: bool = True,
             else:
                 report.errors.append((profile.name, f"could not reset queue row {row_id}"))
         report.rows_reset += reset
+        report.rows_held += len(profile.held_ids)
 
-        # Clear the issue last. If a row reset failed, leaving Flagged At in
-        # place means the next tick tries again rather than declaring a
-        # half-recovered profile finished.
-        if reset == len(profile.row_ids):
-            if airtable.clear_profile_issue(profile.record_id, note):
-                report.profiles_cleared += 1
-                logger.info("recovery: %s resumed -- %s", profile.name, note)
-            else:
-                report.errors.append((profile.name, "could not clear the profile's issue fields"))
-        else:
+        # Clear the issue last, and only once the backlog is actually drained.
+        # Two different reasons to leave it in place, and they want the same
+        # thing: a row reset that failed means the next tick should try again
+        # rather than declare a half-recovered profile finished, and rows held
+        # back on purpose mean the next tick is where the *next* one gets its
+        # turn. `Issue Reason` / `Flagged At` are what put this profile in
+        # `profiles_awaiting_recovery`, so leaving them set is the whole
+        # mechanism -- and if the released row exhausts instead of posting, the
+        # profile re-ticks its own checkbox and drops out of the pass, which is
+        # how a still-broken phone stops the release without anyone deciding to.
+        if reset != len(profile.row_ids):
             logger.warning("recovery: %s only partly reset (%d/%d rows); leaving it flagged "
                            "for the next tick", profile.name, reset, len(profile.row_ids))
+        elif not profile.drained:
+            logger.info("recovery: %s released %d row(s), holding %d for the next tick -- "
+                        "the released row is the test of whether this phone posts again",
+                        profile.name, reset, len(profile.held_ids))
+        elif airtable.clear_profile_issue(profile.record_id, note):
+            report.profiles_cleared += 1
+            logger.info("recovery: %s resumed -- %s", profile.name, note)
+        else:
+            report.errors.append((profile.name, "could not clear the profile's issue fields"))
 
     logger.info("recovery: %s", report.summary())
     return report

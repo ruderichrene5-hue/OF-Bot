@@ -80,10 +80,24 @@ RECOMMENDED_INTERVALS = {
     # sitting there, which is the failure this schedule exists to fix.
     "recheck": 15,
     # Resets retryable Failed rows to Pending. Failures are mostly transient
-    # (device offline, MLX hiccup); half-hourly recovers them well within the
-    # posting day while still spacing out retries against a genuinely broken
-    # account instead of hammering it.
-    "retry": 30,
+    # (device offline, MLX hiccup), so the sooner a row is re-scheduled the more
+    # of the posting day it still has.
+    #
+    # This is NOT the knob that spaces retries out -- `retry_runner`'s backoff
+    # ladder is, and it is deliberate: 15, then 30, then 60 minutes before each
+    # attempt. All this cadence decides is how late we *notice* a failure, and
+    # that latency is pure waste stacked on top of the ladder. At 30 minutes it
+    # was the larger half of the wait: measured on 2026-08-11, nikki 4 / 14:07
+    # took 3h00m to exhaust its three attempts against 1h45m of designed
+    # backoff, and the Nikki 12 cohort took 3h30m. Ten minutes keeps the ladder
+    # honest (the gap between attempts stays ~15/30/60, not ~45/75/105) and
+    # brings a full exhaustion in around two hours, so a phone that breaks in
+    # the morning is not still working through its retries after lunch.
+    #
+    # It does not hammer anything: the pass only writes a *future*
+    # `Scheduled DateTime`, and the posting loop still refuses to touch the row
+    # until that time arrives.
+    "retry": 10,
     # Resumes a profile a person has un-flagged: hands its dead queue rows back
     # to the retry pass above. Paced to the person, not the machine -- somebody
     # clearing a checkbox expects the bot to notice within minutes, and the run

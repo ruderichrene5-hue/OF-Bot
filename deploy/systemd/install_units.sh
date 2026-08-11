@@ -12,7 +12,7 @@
 #   queue     every 15 min   (fills the Posting Queue)
 #   posting   every  5 min   (slots are fixed; just catch each one)
 #   recheck   every 15 min   (matches RECHECK_DELAY_SECONDS)
-#   retry     every 30 min   (retryable Failed -> Pending)
+#   retry     every 10 min   (retryable Failed -> Pending)
 #   recovery  every 15 min   (un-flagged profiles -> retryable again)
 #   warmup    hourly
 #   warmup-state every 30 min  (publishes the warm-up day to Airtable + MLX tags)
