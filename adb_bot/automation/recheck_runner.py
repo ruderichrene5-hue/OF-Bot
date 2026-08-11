@@ -55,7 +55,20 @@ MAX_UNRESOLVED_AGE_SECONDS = 24 * 3600
 # point where the answer first looks stable. Below it an unmoved count is
 # UNKNOWN, which costs one Airtable write and no phone time: the row keeps its
 # Verifying stamp and the next pass asks again ~15 min later.
-MIN_DISPROOF_AGE_SECONDS = 6 * 3600
+#
+# Two hours, measured against the 39 disproofs in the ledger that provably fired
+# on a reel which had in fact landed:
+#
+#     1h  prevents 24/39 (62%)      4h  prevents 37/39 (95%)
+#     2h  prevents 34/39 (87%)      6h  prevents 38/39 (97%)
+#     3h  prevents 37/39 (95%)     12h  prevents 39/39
+#
+# Past two hours the curve flattens hard -- 6h buys four more cases out of 39 and
+# holds 15 more genuinely-failed slots back from their retry. The five that slip
+# through at 2h were written at 129, 174, 179, 316 and 524 minutes; a clip is
+# never re-sent anyway (see retry_runner), so what they cost is a wasted slot
+# rather than a duplicate.
+MIN_DISPROOF_AGE_SECONDS = 2 * 3600
 
 OUTCOME_POSTED = "posted"
 OUTCOME_FAILED = "failed"
