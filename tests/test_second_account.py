@@ -382,6 +382,18 @@ class FakeDevice:
         self.switcher_open = False
 
 
+def _fast_switcher_rows(testcase):
+    """Shrink the switcher's row wait so a 'not listed' test does not spend the
+    real budget proving it. The behaviour under test is the refusal, not how
+    long we are willing to wait for a sheet to paint."""
+    from unittest.mock import patch
+    from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
+    patcher = patch.object(
+        InstagramReelUploadU2Flow, "ACCOUNT_SWITCHER_ROW_TIMEOUT_SECONDS", 0.2)
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+
+
 class AccountSwitchTest(TestCase):
     """The device half: prove which account is in front before posting."""
 
@@ -389,6 +401,7 @@ class AccountSwitchTest(TestCase):
         from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
         self.flow = InstagramReelUploadU2Flow()
         self.emitted = []
+        _fast_switcher_rows(self)
 
     def _emit(self, level, message, *args):
         self.emitted.append(message % args if args else message)
@@ -451,6 +464,7 @@ class ProfileTabMissIsNotAWrongAccountTest(TestCase):
         self.flow = InstagramReelUploadU2Flow()
         self.emitted = []
         self.timeouts = []
+        _fast_switcher_rows(self)
 
     def _emit(self, level, message, *args):
         self.emitted.append(message % args if args else message)
@@ -512,12 +526,61 @@ class ProfileTabMissIsNotAWrongAccountTest(TestCase):
         self.assertTrue(self._ensure(device, "jiji.ll12"))
         self.assertFalse(device.switcher_open)
 
-    def test_a_missing_account_is_still_refused_immediately(self):
-        """A phone that does not list the handle is a data problem, not a
-        timing one -- retrying the read would not change the answer."""
+    def test_a_missing_account_is_still_refused(self):
+        """A phone that really does not list the handle is a data problem, not a
+        timing one -- waiting longer cannot change the answer."""
         device = FakeDevice(handle="helenaiscutee", listed=["helenaiscutee"])
         self._script_tab([True, True, True])
         self.assertFalse(self._ensure(device, "someoneelse"))
+        self.assertTrue(any("does not list" in m for m in self.emitted))
+
+
+class SwitcherSheetPaintsLateTest(TestCase):
+    """The switcher's row list arrives after the sheet does.
+
+    `.exists` is an immediate RPC that does not honour implicitly_wait, so a
+    single probe taken as the sheet opens reports "this phone does not have that
+    account" -- the most expensive wrong answer here, because it names a data
+    problem and sends a person to reconcile Airtable against a sheet that has
+    already closed. Seen live on 2026-08-11 against Nikki 12, whose @kikittie22
+    is on the phone.
+    """
+
+    class _LateRows(FakeDevice):
+        """The account rows only resolve after `misses` probes."""
+
+        def __init__(self, misses=6, **kwargs):
+            super().__init__(**kwargs)
+            self.misses = misses
+            self.row_probes = 0
+
+        def __call__(self, **kwargs):
+            if kwargs.get("textMatches") and self.switcher_open:
+                self.row_probes += 1
+                if self.row_probes <= self.misses:
+                    return FakeNode(exists=False)
+            return super().__call__(**kwargs)
+
+    def setUp(self):
+        from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
+        self.flow = InstagramReelUploadU2Flow()
+        self.emitted = []
+
+    def _emit(self, level, message, *args):
+        self.emitted.append(message % args if args else message)
+
+    def test_a_row_that_paints_late_is_still_found(self):
+        device = self._LateRows(misses=6, handle="helenaiscutee")
+        self.assertTrue(
+            self.flow._ensure_account_u2(device, "1.2.3.4:5555", "jiji.ll12", self._emit))
+        self.assertEqual(device.handle, "jiji.ll12")
+        self.assertFalse(any("does not list" in m for m in self.emitted))
+
+    def test_a_row_that_never_paints_is_reported_as_missing(self):
+        _fast_switcher_rows(self)
+        device = self._LateRows(misses=10_000, handle="helenaiscutee")
+        self.assertFalse(
+            self.flow._ensure_account_u2(device, "1.2.3.4:5555", "jiji.ll12", self._emit))
         self.assertTrue(any("does not list" in m for m in self.emitted))
 
 

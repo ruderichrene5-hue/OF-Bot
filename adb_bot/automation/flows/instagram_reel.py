@@ -2131,6 +2131,11 @@ class InstagramReelUploadU2Flow:
     # corrected once when the probe was single-shot.
     PROFILE_TAB_AFTER_SWITCH_TIMEOUT_SECONDS = 20.0
 
+    # How long to let the account-switcher sheet paint its list before deciding
+    # an account is not on the phone. The sheet slides up and fills in, and the
+    # row we are looking for is one of the last things to arrive.
+    ACCOUNT_SWITCHER_ROW_TIMEOUT_SECONDS = 8.0
+
     def _open_profile_tab_u2(self, d, target, logger=None,
                              timeout: float | None = None) -> bool:
         """Tap the bottom-nav Profile tab (IG's own, not the launcher).
@@ -2281,13 +2286,24 @@ class InstagramReelUploadU2Flow:
             # ids differ across builds, but the row for an account always carries
             # that account's handle, with or without a leading '@'.
             pattern = rf"(?i)^\s*@?{re.escape(want)}\s*$"
+            # Wait for the row instead of probing once. The switcher is an
+            # animated bottom sheet that fills its account list as it opens, and
+            # `.exists` is an immediate RPC that does not honour
+            # implicitly_wait -- so a single probe taken the moment it is asked
+            # to open reports "the phone does not have this account" for a sheet
+            # that simply had not painted yet. That is the most expensive wrong
+            # answer in this function: it names a *data* problem, sends somebody
+            # to check Airtable against the phone by hand, and is unfalsifiable
+            # after the fact because the sheet is long gone. Seen live on
+            # 2026-08-11 against Nikki 12, whose @kikittie22 is on the phone.
+            if not waits.wait_for(
+                    waits.u2_ready(d, {"textMatches": pattern}),
+                    timeout=waits.scaled(self.ACCOUNT_SWITCHER_ROW_TIMEOUT_SECONDS)):
+                emit("warning", "The account switcher on %s does not list @%s -- Airtable "
+                                "says this phone has it, the phone disagrees", target, want)
+                return False
             try:
-                row = d(textMatches=pattern)
-                if not row.exists:
-                    emit("warning", "The account switcher on %s does not list @%s -- Airtable "
-                                    "says this phone has it, the phone disagrees", target, want)
-                    return False
-                row.click()
+                d(textMatches=pattern).click()
             except Exception as exc:
                 emit("warning", "Could not tap @%s in the account switcher on %s: %s",
                      want, target, exc)
