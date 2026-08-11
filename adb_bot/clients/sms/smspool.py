@@ -64,6 +64,10 @@ STATUS_RECEIVED = 3
 STATUS_REFUNDED = 6
 
 # Orders that will never deliver a code, so polling can stop early.
+#
+# TODO 2.2: confirm this against a real order. `cli.py rent` prints what a live
+# purchase/check/cancel cycle actually returns, and this frozenset is the single
+# place to correct once the real status table is known.
 _DEAD_STATUSES = frozenset({STATUS_REFUNDED})
 
 # Substrings SMSPool puts in `message` when the wallet is empty. Matched

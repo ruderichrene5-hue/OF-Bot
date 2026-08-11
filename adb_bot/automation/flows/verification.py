@@ -66,6 +66,13 @@ RESULT_FAILED = "failed"            # a step the driver could not perform
 # 29 profiles were once wrongly flagged as needing verification: Instagram ships
 # resource ids containing words like "confirm" and "verification" on ordinary
 # screens, so any marker below would match a perfectly healthy feed.
+#
+# TODO 3.2: these phrases come from general knowledge of Instagram's wording,
+# NOT from this fleet's own screens -- no dump of a real challenge has been seen
+# yet. Check every list against real dumps: a phrase that never appears is dead
+# weight, and a real screen that classifies as CHALLENGE_NONE is a hole the loop
+# will walk straight past. Add a fixture per confirmed screen to
+# tests/test_verification_flow.py.
 _CHOOSE_METHOD_MARKERS = (
     "how do you want to get",
     "choose how to",
@@ -190,8 +197,14 @@ def classify_challenge(text: str | None) -> str:
 class ChallengeDriver(Protocol):
     """Everything the loop needs a phone to do.
 
-    Implemented for real against uiautomator2/ADB; implemented as a fake in the
-    tests. Every method returns a bool for "did that work", never raises for an
+    Implemented as a fake in the tests. **The real implementation does not exist
+    yet** -- it is the whole remaining feature (TODO_2026-08-11.md section 3).
+    Write it against a live flagged profile, with the UI dumps in front of you:
+    the selectors here must be seen, not guessed, and the house rule from
+    `interruptions.py` applies -- tap buttons only on an EXACT label match taken
+    from a UI dump, never from OCR.
+
+    Every method returns a bool for "did that work", never raises for an
     ordinary failure, so the loop can decide what a failed step means.
     """
 
@@ -216,7 +229,14 @@ class ChallengeDriver(Protocol):
         """
 
     def upload_photo(self) -> bool:
-        """Satisfy the photo challenge by uploading a picture from the device."""
+        """Satisfy the photo challenge by uploading a picture from the device.
+
+        Open question before this can be written: *which* picture. Nothing in
+        this repo currently owns a photo of a person, the model's media folder
+        is the obvious source but a reel frame may not pass, and the wrong face
+        on the wrong account is worse than failing the step (TODO 3.4). Returning
+        False here is a legitimate outcome -- it leaves the profile to a human.
+        """
 
     def capture_captcha_image(self) -> str | None:
         """Screenshot + crop the captcha image; return a local PNG path."""
@@ -266,6 +286,12 @@ def run_verification(driver: ChallengeDriver, router, solver=None, logger=None,
     unconfigured one). Returns rather than raises for every outcome the caller
     can act on -- the caller's job is to write the result to Airtable, and an
     exception there would just lose it.
+
+    TODO 4.1: nothing calls this yet. It needs a runner that picks flagged
+    profiles, takes the profile lock, launches, runs this, and writes the result
+    back -- `recovery_runner.py` is the closest existing shape. On `solved` the
+    MLX `Issue` tag comes off (issue_tags.py); on `banned` the ban state goes on
+    (incidents.py).
     """
     if solver is None:
         from adb_bot.clients.captcha import build_solver

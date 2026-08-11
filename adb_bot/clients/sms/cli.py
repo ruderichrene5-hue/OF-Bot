@@ -83,7 +83,12 @@ def cmd_reset(router, _args) -> int:
 
 
 def cmd_rent(router, args) -> int:
-    """Rent one real number and give it back -- the live end-to-end check."""
+    """Rent one real number and give it back -- the live end-to-end check.
+
+    TODO 2.1: this has never been run. It is the only unverified path in the SMS
+    layer, and running it once confirms SMSPool's purchase response fields and
+    its `/sms/check` status numbers (TODO 2.2).
+    """
     logger = get_logger("adb_bot")
     print(f"renting a {args.country} {args.service} number "
           f"from {router.active_provider().name}...")
