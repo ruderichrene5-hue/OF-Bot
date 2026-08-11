@@ -14,6 +14,7 @@
 #   recheck   every 15 min   (matches RECHECK_DELAY_SECONDS)
 #   retry     every 30 min   (retryable Failed -> Pending)
 #   recovery  every 15 min   (un-flagged profiles -> retryable again)
+#   verify-flags daily (06:00 local)  (do the parked phones really need a person?)
 #   warmup    hourly
 #   warmup-state every 30 min  (publishes the warm-up day to Airtable + MLX tags)
 #   mlx-sync  daily (23:30 local)
@@ -48,7 +49,7 @@ SERVICE_USER="${SERVICE_USER:-}"
 # quietly leaves an armed `issue-tags` writer behind would be a worse trap than
 # the one MANUAL_ONLY exists to close. The set we *install* is asked of Python
 # below, so there is exactly one definition of that.
-LOOPS=(pipeline queue posting recheck retry recovery warmup warmup-state issue-tags mlx-sync cleanup doctor reap-phones second-accounts digest)
+LOOPS=(pipeline queue posting recheck retry recovery verify-flags warmup warmup-state issue-tags mlx-sync cleanup doctor reap-phones second-accounts digest)
 # Loops this script must never install or enable, whatever Python answers.
 # Mirrors schedule_spec.MANUAL_ONLY_LOOPS; a test keeps the two in step.
 MANUAL_ONLY=(issue-tags)

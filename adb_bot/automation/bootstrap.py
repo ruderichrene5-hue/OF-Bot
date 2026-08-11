@@ -29,6 +29,7 @@ from adb_bot.automation.flows import (
     InstagramWarmUpDay1Flow,
     PushMediaTestFlow,
     ReelPostCountProbeFlow,
+    VerificationProbeFlow,
 )
 
 
@@ -51,6 +52,9 @@ def build_automation() -> AutomationRunner:
         # Read-only. Used by the deferred recheck loop to resolve posts that
         # could not be confirmed in-run; posts nothing itself.
         ReelPostCountProbeFlow(),
+        # Read-only. The daily verification audit's eyes: reports the screen
+        # a parked phone is showing without touching it.
+        VerificationProbeFlow(),
         # Diagnostic only -- never posts. Not referenced by lifecycle or the
         # posting loop, so scheduled runs can't pick it up.
         InstagramReelIntentProbeFlow(),

@@ -2347,3 +2347,133 @@ class ReelPostCountProbeFlow(InstagramReelUploadU2Flow):
             "post_count": count.value if count else None,
             "post_count_exact": bool(count.exact) if count else False,
         }
+
+
+class VerificationProbeFlow(ReelPostCountProbeFlow):
+    """Ask a parked phone whether it is really showing a checkpoint.
+
+    The device half of the daily verification audit. Posts nothing, taps
+    nothing, dismisses nothing -- deliberately: this flow's whole job is to
+    report the screen as it found it, and a probe that clears pop-ups on its way
+    past would destroy the evidence it was sent to collect.
+
+    It reports two independent facts and lets `verification_audit` rule on them:
+
+    * the block screen the classifier sees, if any -- the reason to keep the
+      flag;
+    * whether the account's post count could be read -- the only positive proof
+      that Instagram opened, the account is signed in, and the UI is not blocked.
+
+    Both matter because neither alone is an answer. "No checkpoint markers" is
+    also what a phone that never finished booting looks like, and clearing a
+    flag on that basis puts the posting flow back into a screen it cannot pass.
+    """
+
+    name = "instagram_verification_probe"
+
+    def get_progress_total_steps(self, target: str) -> int:
+        return 2
+
+    def run(
+        self,
+        profile: Profile,
+        adb_client=None,
+        logger=None,
+        should_stop=None,
+        status_callback=None,
+        manual_continue_event=None,
+        manual_continue_callback=None,
+    ):
+        if not adb_client:
+            raise ValueError("adb_client is required")
+        if not profile.target:
+            raise ValueError("Profile target is missing")
+
+        log = logger
+        target = profile.target
+
+        def emit(level: str, message: str, *args) -> None:
+            _emit(log, level, message, *args)
+
+        def mark_step() -> None:
+            if hasattr(adb_client, "mark_progress_step"):
+                adb_client.mark_progress_step()
+
+        def unreachable(detail: str) -> dict:
+            emit("warning", "Verification probe for %s: %s", target, detail)
+            return {"profile_id": profile.id, "target": target, "aborted": False,
+                    "success": False, "reachable": False, "screen_kind": None,
+                    "post_count": None, "detail": detail}
+
+        if u2 is None:
+            return unreachable("uiautomator2 is not importable")
+        if callable(should_stop) and should_stop():
+            return {"profile_id": profile.id, "target": target, "aborted": True}
+
+        try:
+            d = u2.connect(target)
+            d.implicitly_wait(self.SELECTOR_WAIT_SECONDS)
+        except Exception as exc:
+            return unreachable(f"uiautomator2 could not connect: {exc}")
+
+        for command in self.build_launch_commands(target):
+            adb_client.run_command(command)
+        _sleep_after_instagram_launch(target, logger=log, delay_seconds=10)
+
+        # Wait for *any* Instagram UI, not for the nav bar specifically: a phone
+        # sitting on a checkpoint has no tab bar at all, and that is precisely
+        # the screen this probe exists to see. Timing out here is not a failure,
+        # it just means the classifier reads whatever is up.
+        waits.settle(
+            10,
+            ready=waits.u2_ready(
+                d,
+                {"resourceId": "com.instagram.android:id/feed_tab"},
+                {"resourceIdMatches": r"com\.instagram\.android:id/.*(tab_bar|profile_tab).*"},
+            ),
+            logger=log, what="Instagram UI loaded",
+        )
+        mark_step()
+
+        # Confirm Instagram is actually in front before believing anything on
+        # screen. A phone that booted to the launcher would otherwise report
+        # "no checkpoint", which reads as healthy and would clear the flag.
+        try:
+            foreground = (d.app_current() or {}).get("package", "") or ""
+        except Exception:
+            foreground = ""
+        if foreground != self.IG_PACKAGE:
+            return unreachable(f"Instagram is not in the foreground (saw {foreground or 'nothing'})")
+
+        screen_kind = instagram_module.account_flag_u2(d)
+        if screen_kind:
+            emit("info", "Verification probe for %s: screen reads as %s", target, screen_kind)
+            return {"profile_id": profile.id, "target": target, "aborted": False,
+                    "success": True, "reachable": True, "screen_kind": screen_kind,
+                    "post_count": None, "detail": f"screen classified as {screen_kind}"}
+
+        # No block screen. Now go and prove the account is actually usable --
+        # the post count only renders on a real profile page.
+        want_handle = getattr(profile, "target_handle", None)
+        if want_handle and not self._ensure_account_u2(d, target, want_handle, emit, logger=log):
+            return {"profile_id": profile.id, "target": target, "aborted": False,
+                    "success": False, "reachable": True, "screen_kind": None,
+                    "post_count": None,
+                    "detail": f"no checkpoint on screen, but could not switch to @{want_handle}"}
+
+        self._browse_and_refresh_profile_u2(d, target, logger=log)
+        count = self._read_post_count_u2(d, target, logger=log)
+        mark_step()
+
+        emit("info", "Verification probe for %s: no block screen, post count %s", target,
+             count.value if count else "unreadable")
+        return {
+            "profile_id": profile.id,
+            "target": target,
+            "aborted": False,
+            "success": count is not None,
+            "reachable": True,
+            "screen_kind": None,
+            "post_count": count.value if count else None,
+            "detail": "" if count else "no checkpoint on screen, but the post count did not render",
+        }

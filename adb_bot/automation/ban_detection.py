@@ -22,9 +22,16 @@ action_block (the most severe wins).
 
 from __future__ import annotations
 
+import html
+import re
 from dataclasses import dataclass
 
 from adb_bot.clients import airtable as at
+
+# The only two attributes of a uiautomator node that carry words a *person*
+# would read. Everything else in a hierarchy dump -- resource-id, class,
+# package -- is developer naming that happens to be made of English.
+_VISIBLE_ATTRS = re.compile(r'\b(?:text|content-desc)="([^"]*)"')
 
 # --- incident kinds -----------------------------------------------------------
 KIND_BANNED = "banned"
@@ -50,6 +57,15 @@ _BANNED_MARKERS = (
 )
 
 # "Confirm you're human" / suspicious-activity checkpoint a human must solve.
+#
+# Two markers were removed on 2026-08-11: a bare "we detected" and a bare
+# "we suspect". Both were already covered by the longer phrases that remain
+# ("we detected unusual activity"), so they added no real detection -- only
+# surface area. "We detected a new login", "we detected an issue" and any OCR
+# noise landing on those two words were enough to flag an account as needing a
+# human, and a flagged profile stops posting entirely until somebody clears it
+# by hand. A marker here has to be a phrase that only ever appears on a
+# checkpoint; anything shorter is a guess with a very expensive false positive.
 _HUMAN_VERIFICATION_MARKERS = (
     "confirm you're human",
     "confirm youre human",
@@ -57,11 +73,9 @@ _HUMAN_VERIFICATION_MARKERS = (
     "confirm you are human",
     "help us confirm",
     "we detected unusual activity",
-    "we detected",
     "suspicious activity",
     "verify it's you",
     "verify its you",
-    "we suspect",
     "confirm your identity",
     "enter the code we sent",
     "we need more information to confirm",
@@ -88,6 +102,37 @@ _ORDERED = (
     (KIND_HUMAN_VERIFICATION, _HUMAN_VERIFICATION_MARKERS),
     (KIND_ACTION_BLOCK, _ACTION_BLOCK_MARKERS),
 )
+
+
+def visible_text_from_dump(xml: str | None) -> str:
+    """The words actually on screen, pulled out of a uiautomator hierarchy dump.
+
+    Callers used to hand `classify_block_text` the raw XML, which meant every
+    marker was being matched against resource-ids, class names and package names
+    as well as against anything a user could read. Instagram ships thousands of
+    ids and they are written in English, so that is a large surface for an
+    accidental substring hit -- and the cost of one is not a retry, it is a
+    profile parked as `Human Verification Required` until a person looks at it.
+    On 2026-08-11, 17 of 29 flagged profiles carried that reason.
+
+    Only `text` and `content-desc` survive here. A real checkpoint puts its
+    words in exactly those two attributes -- that is what makes it readable --
+    so nothing detectable is lost, while `id/we_detected_banner_stub` stops
+    counting as a screen that says "we detected".
+
+    Not XML-parsed on purpose: a dump can be truncated or malformed and this
+    must still answer. A regex over attributes degrades to "fewer words", where
+    a parser would raise and leave the caller with nothing.
+
+    `html.unescape` rather than the XML one because the entity that matters here
+    is the apostrophe. uiautomator writes it as `&apos;` / `&#39;`, neither of
+    which the XML unescaper expands by default, and half the checkpoint phrases
+    we look for contain one -- "confirm you're human" would never have matched a
+    screen that was showing exactly that.
+    """
+    if not xml:
+        return ""
+    return html.unescape(" ".join(m.group(1) for m in _VISIBLE_ATTRS.finditer(xml) if m.group(1)))
 
 
 def classify_block_text(text: str | None) -> str | None:

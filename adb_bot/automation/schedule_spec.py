@@ -36,8 +36,8 @@ PLANNED_LOOPS = ("queue", "retry")
 # writing timer on the next routine run of the installer -- whatever that run
 # was actually for.
 RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery",
-                     "warmup", "warmup-state", "mlx-sync", "cleanup", "digest",
-                     "doctor", "reap-phones", "second-accounts")
+                     "verify-flags", "warmup", "warmup-state", "mlx-sync", "cleanup",
+                     "digest", "doctor", "reap-phones", "second-accounts")
 
 # Loops the CLI can run that are deliberately NOT scheduled: arming them has to
 # be a separate, deliberate act by a person, not a side effect of running the
@@ -91,6 +91,16 @@ RECOMMENDED_INTERVALS = {
     # ahead of `retry` in the flow, so a row it revives is picked up on retry's
     # next tick rather than waiting a whole cycle.
     "recovery": 15,
+    # Re-asks whether the phones parked as `Human Verification Required` are
+    # really showing a checkpoint. Daily, and daily is the point: nothing else
+    # ever re-asks, so before this loop a flag raised by a misfire kept an
+    # account off the air until somebody happened to work through the list by
+    # hand -- on 2026-08-11 that was 17 of 29 flagged profiles, some six days
+    # old. It opens a phone per parked profile, which is why it is not hourly:
+    # a checkpoint does not resolve itself in an hour, and the answer is only
+    # actionable at the pace a person works the list anyway. Runs at 06:00 (see
+    # DEFAULT_DAILY_START) so the morning worklist is already true.
+    "verify-flags": 1440,
     # Lifecycle day plan (Day 1-4) spreads actions across the day; hourly gives
     # the plan enough ticks to place them and to pick up a profile that only
     # became due mid-day.
@@ -154,7 +164,10 @@ FALLBACK_INTERVAL_MIN = 30
 DEFAULT_DAILY_START = {"mlx-sync": "23:30", "warmup": "08:00", "cleanup": "04:00",
                        # Before the VAs start, so the backlog is the first thing
                        # in the topic rather than something they scroll back for.
-                       "digest": "08:00"}
+                       "digest": "08:00",
+                       # Before the digest, so the backlog the VAs are sent
+                       # has already had its false flags taken out of it.
+                       "verify-flags": "06:00"}
 
 # A loop that overruns this is considered wedged and is killed, so the next
 # cycle gets a clean start. Matches the Windows ExecutionTimeLimit of PT2H.
@@ -166,6 +179,7 @@ DESCRIPTIONS = {
     "queue": "ADB bot queue loop (variants -> Posting Queue rows)",
     "retry": "ADB bot retry loop (retryable Failed -> Pending)",
     "recovery": "ADB bot recovery loop (un-flagged profiles -> retryable again)",
+    "verify-flags": "ADB bot verification audit (do the parked phones really need a person?)",
     "warmup": "ADB bot warmup loop (lifecycle Day 1-4)",
     "warmup-state": "ADB bot warm-up state publisher (Run Log -> Airtable + MLX tags)",
     "issue-tags": "ADB bot issue-tag mirror (Needs Human Check -> MLX 'Issue' tag)",
@@ -197,6 +211,7 @@ WHAT_IT_DOES = {
     "recovery": "Resumes a profile after you clear its Needs Human Check. Its "
                 "dead posts are handed back to the retry loop and their clips "
                 "freed -- without it, clearing the box changes nothing.",
+    "verify-flags": "Opens every phone parked as Human Verification Required and reads the screen, once a day. A checkpoint that is really there keeps the flag and gains a dated line saying it was seen again; a phone that opens normally and renders its profile has the box unticked, which hands it to the recovery loop. It only clears a flag it can positively disprove -- if the phone will not open, or the profile will not render, the flag stays, because 'no checkpoint found' is also what a phone that never booted looks like.",
     "retry": "Puts retryable Failed rows back to Pending. Most failures are "
              "transient — a device offline, an MLX hiccup — so they are worth "
              "one more go; after 3 attempts the row is left for a person.",

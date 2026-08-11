@@ -124,12 +124,17 @@ def account_flag_u2(d) -> str | None:
     flow's class tree, and a checkpoint stops a reel post exactly as dead as it
     stops a bio edit. Keeping one implementation means a new marker in
     ban_detection reaches every flow at once.
+
+    Classified on the screen's *visible* words, not the raw XML. Handing the
+    whole dump to the classifier matched markers against resource-ids and class
+    names too, and a false positive here parks the profile until a person clears
+    it by hand -- see `ban_detection.visible_text_from_dump`.
     """
     try:
         xml = d.dump_hierarchy()
     except Exception:
         xml = ""
-    return ban_detection.classify_block_text(xml)
+    return ban_detection.classify_block_text(ban_detection.visible_text_from_dump(xml))
 
 
 def _u2_describe(sel) -> str:

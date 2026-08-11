@@ -812,6 +812,95 @@ class AirtableClient:
             F_PROF_FLAGGED_AT: stamp,
         })
 
+    def profiles_needing_verification(self) -> list:
+        """Profiles currently parked as `Human Verification Required`.
+
+        The daily audit's work list. Filtered on the *pair* -- checkbox ticked
+        AND that specific reason -- because the audit can only speak to
+        checkpoints: a profile flagged `Banned / Blocked` or `Retries Exhausted`
+        is somebody else's question and re-deciding it from a screenshot would
+        overwrite a judgement this pass has no evidence about.
+        """
+        out: list = []
+        try:
+            rows = self._list_table(
+                TABLE_PROFILES,
+                fields=[F_PROF_NAME, F_PROF_NEEDS_HUMAN, F_PROF_ISSUE_REASON,
+                        F_PROF_FLAGGED_AT, F_PROF_STATUS, F_PROF_MLX_API_ID,
+                        F_PROF_PRIMARY_HANDLE],
+                filter_formula=(f"AND({{{F_PROF_NEEDS_HUMAN}}}=1, "
+                                f"{{{F_PROF_ISSUE_REASON}}}='{PROFILE_ISSUE_VERIFICATION}')"),
+            )
+        except Exception as exc:  # pragma: no cover - network path
+            print(f"[-] Airtable profiles_needing_verification failed: {exc}")
+            return out
+        for record in rows:
+            fields = record.get("fields", {}) or {}
+            out.append({
+                "record_id": record.get("id"),
+                "name": str(fields.get(F_PROF_NAME) or "").strip() or record.get("id"),
+                "status": _select_name(fields.get(F_PROF_STATUS)),
+                "reason": _select_name(fields.get(F_PROF_ISSUE_REASON)) or "",
+                "launch_id": str(fields.get(F_PROF_MLX_API_ID) or "").strip(),
+                "handle": _handle(fields.get(F_PROF_PRIMARY_HANDLE)),
+                "flagged_at": str(fields.get(F_PROF_FLAGGED_AT) or ""),
+            })
+        return out
+
+    def append_profile_note(self, record_id: str, note: str,
+                            when_iso: str | None = None,
+                            max_notes_chars: int = 4000) -> bool:
+        """Prepend one dated line to a profile's Issue Notes and change nothing
+        else.
+
+        Deliberately not `flag_profile_for_human`: re-flagging an
+        already-flagged profile would restamp `Flagged At`, and "how long has
+        this been waiting" is the most useful number on the record. An audit
+        that confirms yesterday's flag should add a line, not reset the clock.
+        """
+        stamp = when_iso or _now_iso()
+        entry = f"[{stamp}] {note}".strip()
+        try:
+            existing = str(self._get_field(TABLE_PROFILES, record_id, F_PROF_ISSUE_NOTES) or "")
+        except Exception:
+            existing = ""
+        combined = f"{entry}\n{existing}".strip() if existing else entry
+        if len(combined) > max_notes_chars:
+            combined = combined[:max_notes_chars].rsplit("\n", 1)[0] + "\n[older entries trimmed]"
+        return self._patch_in(TABLE_PROFILES, record_id, {F_PROF_ISSUE_NOTES: combined})
+
+    def clear_profile_verification_flag(self, record_id: str, note: str,
+                                        when_iso: str | None = None,
+                                        max_notes_chars: int = 4000) -> bool:
+        """Untick `Needs Human Check` after the audit proved the account usable,
+        and leave `Flagged At` exactly where it is.
+
+        That combination is not an oversight, it is the handover. `Flagged At`
+        still set with the checkbox clear is precisely what
+        `profiles_awaiting_recovery` looks for -- "was flagged, somebody has
+        looked, nobody has resumed it yet" -- so the recovery pass picks the
+        profile up on its next tick, hands its dead queue rows back, and clears
+        the stamp itself. Clearing the stamp here instead would un-flag the
+        profile while leaving every one of its rows dead, which is the exact
+        stranding the recovery pass exists to prevent.
+
+        `Issue Reason` stays too, for the same reason: recovery reads it to say
+        what the profile was recovered *from*.
+        """
+        stamp = when_iso or _now_iso()
+        entry = f"[{stamp}] {note}".strip()
+        try:
+            existing = str(self._get_field(TABLE_PROFILES, record_id, F_PROF_ISSUE_NOTES) or "")
+        except Exception:
+            existing = ""
+        combined = f"{entry}\n{existing}".strip() if existing else entry
+        if len(combined) > max_notes_chars:
+            combined = combined[:max_notes_chars].rsplit("\n", 1)[0] + "\n[older entries trimmed]"
+        return self._patch_in(TABLE_PROFILES, record_id, {
+            F_PROF_NEEDS_HUMAN: False,
+            F_PROF_ISSUE_NOTES: combined,
+        })
+
     def profiles_awaiting_recovery(self) -> list:
         """Profiles a person has un-flagged but the bot has not yet acted on.
 

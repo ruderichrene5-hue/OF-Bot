@@ -36,7 +36,7 @@ from adb_bot.core.logger import get_logger
 
 LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery", "warmup",
          "warmup-state", "issue-tags", "mlx-sync", "cleanup", "second-accounts",
-         "digest")
+         "verify-flags", "digest")
 # `doctor` isn't a loop -- it's the preflight check, runnable the same way.
 # `report` renders the operational page; like `doctor` it is a command rather
 # than a loop, and unlike `doctor` it is not in the recommended set, so it never
@@ -758,6 +758,83 @@ def _run_reap_phones(args, logger) -> int:
     return 0
 
 
+def _run_verify_flags(args, logger) -> int:
+    """Re-ask, once a day, whether the phones parked as `Human Verification
+    Required` are really showing a checkpoint.
+
+    Nothing else ever re-asks. A profile flagged this way stops posting until a
+    person launches the phone and looks, so a flag raised by a misfire costs the
+    same as a real checkpoint -- an account off the air, indefinitely. This
+    opens each parked phone, reads the screen, and clears only the flags it can
+    positively disprove.
+    """
+    from adb_bot.automation import verification_audit
+    airtable = _airtable(args.base_id, args.airtable_token)
+
+    if not args.apply:
+        # Plan-only still opens phones: "does this phone show a checkpoint" is
+        # not a question Airtable can answer, and a dry run that skipped the
+        # probe would only be able to re-print the flags we already have. What
+        # --apply adds is the write-back, not the looking.
+        logger.info("[DRY-RUN] verification audit: phones are still opened and read; "
+                    "nothing is written back")
+
+    from adb_bot.automation.bootstrap import build_automation, build_mlx_clients
+    from adb_bot.automation.workflow import run_profile_workflow
+    token = _mlx_token(args.mlx_token)
+    clients = build_mlx_clients(token)
+    automation = build_automation()
+
+    def probe(profile) -> verification_audit.ProbeResult:
+        """Open one parked phone and report the screen it is showing."""
+        launch_id = str(profile.get("launch_id") or "")
+        captured: dict = {}
+
+        def capture(result):
+            captured.update(result or {})
+
+        # Same global ceiling as posting, warmup and recheck: this audit is
+        # "only one profile at a time" and still one more phone on the box.
+        # Without a slot the profile is reported unknown, which leaves its flag
+        # exactly as it was -- the correct answer when nothing was read.
+        with locks.live_profile_slot(owner="verify-flags") as slot:
+            if slot is None:
+                logger.warning(
+                    "Skipping the verification probe for %s: %s phone(s) already open across "
+                    "all loops (global ceiling). Its flag is left alone.",
+                    profile.get("name"), locks.live_profile_count())
+                return verification_audit.ProbeResult(
+                    reachable=False, detail="no free phone slot on this pass")
+
+            run_profile_workflow(
+                launch_id, clients.api.bearer_token, clients.api, clients.adb_enable,
+                clients.shutdown, automation, logger,
+                readiness_wait_seconds=settings.get_saved_readiness_wait(),
+                readiness_max_attempts=settings.get_saved_readiness_attempts(),
+                flow_name="instagram_verification_probe", result_callback=capture,
+                shutdown_on_success=True, launcher_client=clients.launcher,
+                target_handle=profile.get("handle") or None,
+            )
+        return verification_audit.ProbeResult(
+            reachable=bool(captured.get("reachable")),
+            screen_kind=captured.get("screen_kind"),
+            post_count=captured.get("post_count"),
+            detail=str(captured.get("detail") or ""),
+        )
+
+    report = verification_audit.audit_verification_flags(
+        airtable, probe, logger=logger, dry_run=not args.apply,
+        limit=args.verify_limit)
+    logger.info("verify-flags result: %s", report.summary())
+    for entry in report.audited:
+        # Status is worth a column: clearing the flag on an Inactive profile
+        # tidies the worklist but changes nothing operationally -- Status is the
+        # park switch, and it stays where the person put it.
+        logger.info("  %-24s %-9s %-14s %s",
+                    entry.name, entry.status or "-", entry.verdict, entry.detail)
+    return 0
+
+
 _DISPATCH = {
     "posting": _run_posting,
     "recheck": _run_recheck,
@@ -769,6 +846,7 @@ _DISPATCH = {
     "queue": _run_queue,
     "retry": _run_retry,
     "recovery": _run_recovery,
+    "verify-flags": _run_verify_flags,
     "mlx-sync": _run_mlx_sync,
     "cleanup": _run_cleanup,
     "doctor": _run_doctor,
@@ -830,6 +908,10 @@ def main(argv=None) -> int:
                              "(default 7; Models.Reels Per Day overrides it per model).")
     parser.add_argument("--max-retries", type=int, default=3,
                         help="retry: give up on a row once Retry Count reaches this (default 3).")
+    parser.add_argument("--verify-limit", type=int, default=None,
+                        help="verify-flags: most phones to open in one pass (default: all of "
+                             "them). Each one is a real profile launch, so this is the knob "
+                             "for spreading a long backlog over several days.")
     parser.add_argument("--targets", choices=("accounts", "profiles"), default="accounts",
                         help="pipeline/queue/warmup: what to work on -- Airtable Accounts at "
                              "Lifecycle Stage Active (default), or the MLX profile inventory, "
