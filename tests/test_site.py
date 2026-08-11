@@ -77,8 +77,9 @@ class PageCacheTest(unittest.TestCase):
             self.built += 1
             return {"n": self.built}
 
-        def render(data, live=True, title="", refresh_seconds=0):
+        def render(data, live=True, title="", refresh_seconds=0, actions=False):
             self.refresh_seconds = refresh_seconds
+            self.actions = actions
             return f"page {data['n']}"
 
         return site.PageCache(ttl=ttl, collect=collect, render=render)
@@ -188,6 +189,20 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body.strip(), "ok")
 
+    def test_the_unflag_action_needs_a_session(self):
+        """The write endpoint is on the same public port as the login screen.
+        Without a session it must refuse before it ever reaches Airtable."""
+        request = urllib.request.Request(
+            self.url + "/unflag", data=b"record_id=recX",
+            headers={"Content-Type": "application/x-www-form-urlencoded"})
+        opener = urllib.request.build_opener(_NoRedirect())
+        try:
+            with opener.open(request, timeout=10) as response:
+                status = response.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+        self.assertEqual(status, 401)
+
     def test_unknown_paths_are_not_the_report(self):
         status, body, _ = self._get("/admin")
         self.assertEqual(status, 404)
@@ -201,3 +216,98 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnflagWriteTest(unittest.TestCase):
+    """The one write this site is allowed, and the reasons it stays that narrow.
+
+    `Needs Human Check` is half of a handshake: `profiles_awaiting_recovery`
+    finds profiles by the pair "unchecked but `Flagged At` still stamped", and
+    the recovery pass is what then sets Status back to Active and re-queues what
+    was stuck. A button that wrote the rest of that state itself would leave the
+    profile invisible to every loop -- the failure that needed two profiles
+    un-parked by hand on 2026-08-06.
+    """
+
+    class FakeClient:
+        def __init__(self, flagged=True, notes=""):
+            self.fields = {"Needs Human Check": flagged, "Issue Notes": notes}
+            self.patched = None
+
+        def _get_field(self, table, record_id, field):
+            return self.fields.get(field)
+
+        def _patch_in(self, table, record_id, fields, typecast=True):
+            self.patched = (table, record_id, fields)
+            return True
+
+    def _clear(self, client, note="looked"):
+        from adb_bot.clients.airtable import AirtableClient
+        return AirtableClient.clear_human_flag(client, "recX", note=note)
+
+    def test_it_unticks_the_checkbox(self):
+        client = self.FakeClient()
+        self.assertTrue(self._clear(client))
+        self.assertIs(client.patched[2]["Needs Human Check"], False)
+
+    def test_it_writes_nothing_else_that_the_recovery_pass_reads(self):
+        client = self.FakeClient()
+        self._clear(client)
+        written = set(client.patched[2])
+        self.assertNotIn("Status", written)
+        self.assertNotIn("Issue Reason", written)
+        self.assertNotIn("Flagged At", written)
+
+    def test_a_profile_nobody_flagged_is_left_alone(self):
+        """A stale page or a double click must not un-flag something that is not
+        flagged -- and this is also what makes the endpoint safe with any record
+        id at all: the worst it can do is untick a ticked box."""
+        client = self.FakeClient(flagged=False)
+        self.assertFalse(self._clear(client))
+        self.assertIsNone(client.patched)
+
+    def test_the_note_is_prepended_not_replaced(self):
+        client = self.FakeClient(notes="[old] Device Unreachable: adb offline")
+        self._clear(client, note="Cleared from the dashboard")
+        notes = client.patched[2]["Issue Notes"]
+        self.assertIn("Cleared from the dashboard", notes.splitlines()[0])
+        self.assertIn("adb offline", notes)
+
+    def test_a_read_failure_does_not_write(self):
+        class Exploding(self.FakeClient):
+            def _get_field(inner, table, record_id, field):
+                raise RuntimeError("429")
+        client = Exploding()
+        self.assertFalse(self._clear(client))
+        self.assertIsNone(client.patched)
+
+
+class UnflagButtonTest(unittest.TestCase):
+    """The button only exists where pressing it does something."""
+
+    def _page(self, actions):
+        from adb_bot.automation import report_html
+        return report_html._section_needs_human({
+            "needs_human": {"rows": [], "retrying": [], "error": "", "profiles": [
+                {"record_id": "recX", "name": "Jil 3", "reason": "Device Unreachable",
+                 "status": "Inactive", "flagged_at": "2026-08-11 09:00", "note": ["adb offline"]}]},
+            "handoff": {"profiles": [], "done": 0},
+            "queue": {"by_status": {}},
+        }, actions)
+
+    def test_the_signed_in_site_gets_a_button(self):
+        page = self._page(True)
+        self.assertIn('action="/unflag"', page)
+        self.assertIn("recX", page)
+
+    def test_a_page_that_cannot_act_gets_none(self):
+        """The same renderer makes the unauthenticated loopback report and the
+        snapshots people paste into chat. A button there would 404, or worse,
+        look like it worked."""
+        page = self._page(False)
+        self.assertNotIn("/unflag", page)
+        self.assertNotIn("recX", page)
+
+    def test_the_instructions_follow_the_button(self):
+        self.assertIn("Press <strong>Done</strong>", self._page(True))
+        self.assertIn("in Airtable", self._page(False))

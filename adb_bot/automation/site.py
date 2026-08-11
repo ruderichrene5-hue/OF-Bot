@@ -169,13 +169,26 @@ class PageCache:
             if self._page and (now - self._built) < self.ttl:
                 return self._page
             data = self._collect(airtable=self.airtable, use_cache=False)
+            # `actions` only when there is a client to act with: without one the
+            # buttons would render and every press would be refused.
             self._page = self._render(data, live=True, title=self.title,
-                                      refresh_seconds=self.ttl)
+                                      refresh_seconds=self.ttl,
+                                      actions=self.airtable is not None)
             self._built = now
             return self._page
 
     def age(self, now: float = 0.0) -> int:
         return int((now or time.time()) - self._built) if self._built else -1
+
+    def invalidate(self) -> None:
+        """Drop the cached page so the next request rebuilds it.
+
+        Without this, clearing a flag would leave the profile on the worklist
+        for up to five minutes, which reads as "the button did nothing" -- and
+        the honest response to that is to click it again.
+        """
+        with self._lock:
+            self._page, self._built = "", 0.0
 
 
 _LOGIN_PAGE = """<!doctype html>
@@ -315,8 +328,52 @@ class SiteHandler(BaseHTTPRequestHandler):
 
     do_HEAD = do_GET                                # noqa: N815
 
+    def _unflag(self, body: str) -> None:
+        """"Somebody looked at this" -- the one write this site is allowed.
+
+        It unticks `Needs Human Check` and stops. The 15-minute recovery pass
+        is what then sets Status back to Active, hands the profile's dead queue
+        rows back to the retry pass and clears the issue: it finds profiles by
+        the pair "unchecked but still stamped with Flagged At", so writing any
+        more of that state here would hide the profile from the very loop that
+        finishes the job. See `AirtableClient.clear_human_flag`.
+
+        The narrowness is also what makes a write endpoint on a public port
+        defensible: the worst a request can do, with any record id at all, is
+        untick a checkbox that was already ticked -- which is the button.
+        """
+        record_id = (parse_qs(body).get("record_id") or [""])[0].strip()
+        airtable = getattr(self.cache, "airtable", None)
+        ok = False
+        if record_id and airtable is not None:
+            try:
+                ok = airtable.clear_human_flag(
+                    record_id, note="Cleared from the dashboard: somebody looked at this.")
+            except Exception as exc:
+                sys.stderr.write(f"site: unflag {record_id} failed: "
+                                 f"{type(exc).__name__}: {exc}\n")
+                ok = False
+        sys.stderr.write(f"site: unflag {record_id or '(none)'} "
+                         f"{'ok' if ok else 'refused'} from {self._who}\n")
+        if ok:
+            self.cache.invalidate()
+        self._redirect("/")
+
     def do_POST(self) -> None:                     # noqa: N802 (stdlib API)
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        # An action, not a login: it needs a session, and the browser only sends
+        # the cookie on a same-site POST (SameSite=Lax), which is what keeps
+        # another page from clicking this button on a signed-in viewer's behalf.
+        if path == "/unflag":
+            if not self._signed_in():
+                self._html(401, login_page(self.page_title, "Please sign in again."))
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > 4096:
+                self._send(413, b"too large\n", "text/plain; charset=utf-8")
+                return
+            self._unflag(self.rfile.read(length).decode("utf-8", "replace") if length else "")
+            return
         if path not in ("/", "/login"):
             self._send(404, b"not found\n", "text/plain; charset=utf-8")
             return

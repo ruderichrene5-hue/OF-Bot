@@ -2021,6 +2021,9 @@ def needs_human(airtable, max_retries: int = DEFAULT_MAX_RETRIES) -> dict:
 
     for record in profiles:
         out["profiles"].append({
+            # Carried so the site can offer a "somebody looked at this" button.
+            # Nothing else needs it, and the page never shows it.
+            "record_id": record.get("id") or "",
             "name": field(record, at.F_PROF_NAME) or "(unnamed)",
             "reason": field(record, at.F_PROF_ISSUE_REASON) or "(none set)",
             "status": field(record, at.F_PROF_STATUS) or "Active",

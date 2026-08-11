@@ -847,6 +847,50 @@ class AirtableClient:
             F_PROF_FLAGGED_AT: stamp,
         })
 
+    def clear_human_flag(self, record_id: str, note: str = "") -> bool:
+        """Tick off "a person has looked at this" -- and nothing else.
+
+        Deliberately writes **one field**. It is tempting to have this also set
+        Status back to Active and clear Issue Reason and Flagged At, since that
+        is the state the profile ends up in -- but that state is reached by a
+        handshake, and doing it here breaks the handshake:
+        `profiles_awaiting_recovery` finds profiles by the *pair* "unchecked but
+        still stamped", and `recovery_runner` is what resumes them, hands their
+        dead queue rows back to the retry pass and closes the issue out. Clear
+        `Flagged At` here and nothing can tell "somebody fixed this" from "never
+        had a problem": the profile is left Inactive and invisible to every
+        loop, which is exactly how two profiles had to be un-parked by hand on
+        2026-08-06 (`adbbot-unpark-stranded.py`).
+
+        Returns False when the profile is not currently flagged, so a stale page
+        or a double click cannot un-flag something nobody flagged.
+        """
+        try:
+            flagged = bool(self._get_field(TABLE_PROFILES, record_id, F_PROF_NEEDS_HUMAN))
+        except Exception as exc:  # pragma: no cover - network path
+            print(f"[-] Airtable clear_human_flag read failed: {exc}")
+            return False
+        if not flagged:
+            return False
+
+        fields = {F_PROF_NEEDS_HUMAN: False}
+        if note:
+            # One shared password guards the site, so this note is the only
+            # record that the clearing happened there rather than in Airtable.
+            # Prepended, and trimmed the same way the flagger trims.
+            existing = ""
+            try:
+                existing = str(self._get_field(TABLE_PROFILES, record_id,
+                                               F_PROF_ISSUE_NOTES) or "")
+            except Exception:
+                existing = ""
+            entry = f"[{_now_iso()}] {note}"
+            combined = f"{entry}\n{existing}".strip() if existing else entry
+            if len(combined) > 4000:
+                combined = combined[:4000].rsplit("\n", 1)[0] + "\n[older entries trimmed]"
+            fields[F_PROF_ISSUE_NOTES] = combined
+        return self._patch_in(TABLE_PROFILES, record_id, fields)
+
     def profiles_awaiting_recovery(self) -> list:
         """Profiles a person has un-flagged but the bot has not yet acted on.
 

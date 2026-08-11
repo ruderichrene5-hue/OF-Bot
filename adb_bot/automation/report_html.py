@@ -71,6 +71,11 @@ h3 { font-size: .9rem; margin: 1.2rem 0 .4rem; color: var(--muted);
 .pill.warn { background: var(--warn-bg); color: var(--warn); }
 .pill.bad { background: var(--bad-bg); color: var(--bad); }
 .scroll { overflow-x: auto; }
+.rowform { margin: 0; }
+.rowform button { font: inherit; cursor: pointer; padding: .25rem .7rem;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--card);
+  color: var(--ink); white-space: nowrap; }
+.rowform button:hover { border-color: var(--accent); color: var(--accent); }
 table { border-collapse: collapse; width: 100%; font-size: .88rem; }
 th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid var(--line);
          white-space: nowrap; }
@@ -1044,7 +1049,21 @@ def _section_mlx_issues(tagged: dict) -> str:
     return "".join(parts)
 
 
-def _section_needs_human(data: dict) -> str:
+def _done_button(record_id, actions: bool) -> str:
+    """The "somebody looked at this" button, or a dash on a page that cannot act.
+
+    Only the signed-in site passes `actions`. The same renderer produces the
+    unauthenticated loopback report and the snapshots people paste into chat,
+    and a button there would either 404 or, worse, look like it worked.
+    """
+    if not actions or not record_id:
+        return "—"
+    return (f'<form method="post" action="/unflag" class="rowform">'
+            f'<input type="hidden" name="record_id" value="{_e(record_id)}">'
+            f'<button type="submit">Done</button></form>')
+
+
+def _section_needs_human(data: dict, actions: bool = False) -> str:
     """Everything waiting on a person, in one place, for the people who do it.
 
     This used to be the Profiles tab, which also had to be the place you looked
@@ -1115,19 +1134,29 @@ def _section_needs_human(data: dict) -> str:
                 f"<tr><td class='mono'>{_e(p['name'])}</td>"
                 f"<td>{_e(p['status'])}</td>"
                 f"<td class='mono'>{_e(p['flagged_at'] or '-')}</td>"
-                f"<td class='wrap-cell'>{_e(p['note'][0] if p['note'] else '')}</td></tr>"
+                f"<td class='wrap-cell'>{_e(p['note'][0] if p['note'] else '')}</td>"
+                f"<td>{_done_button(p.get('record_id'), actions)}</td></tr>"
                 for p in group)
+            fixed = (
+                'Press <strong>Done</strong> on the row. That unticks '
+                '<span class="mono">Needs Human Check</span> for you, and the recovery pass '
+                'puts the profile back to Active and re-queues whatever was stuck, within '
+                'about 15 minutes. Nothing unticks it on its own — pressing it is how you '
+                'tell everyone else you have looked.'
+                if actions else
+                'Untick <span class="mono">Needs Human Check</span> on that profile in '
+                'Airtable (Profiles (Cloning)). Nothing unticks it for you — that box is how '
+                'you tell everyone else you have looked.')
             parts.append(
                 f'<h3>{_e(reason)} — {len(group)} account(s)</h3>'
                 f'<div class="howto"><dl>'
                 f'<dt>What happened</dt><dd>{_e(what)}</dd>'
                 f'<dt>What to do</dt><dd>{_e(todo)}</dd>'
-                f'<dt>When it is fixed</dt><dd>Untick <span class="mono">Needs Human Check</span> '
-                f'on that profile in Airtable (Profiles (Cloning)). Nothing unticks it for you — '
-                f'that box is how you tell everyone else you have looked.</dd>'
+                f'<dt>When it is fixed</dt><dd>{fixed}</dd>'
                 f'</dl></div>'
                 f'<div class="scroll"><table>'
-                f'<tr><th>Account</th><th>Profile status</th><th>Flagged</th><th>Latest note</th></tr>'
+                f'<tr><th>Account</th><th>Profile status</th><th>Flagged</th><th>Latest note</th>'
+                f'<th>Looked at it?</th></tr>'
                 f'{names}</table></div>')
 
     parts.append('<h2>What the words mean</h2>')
@@ -2033,7 +2062,8 @@ def _refresh_words(seconds: int) -> str:
 
 
 def render(data: dict, *, live: bool = True, title: str = "ADB bot",
-           standalone: bool = True, refresh_seconds: int = REFRESH_SECONDS) -> str:
+           standalone: bool = True, refresh_seconds: int = REFRESH_SECONDS,
+           actions: bool = False) -> str:
     """The whole page.
 
     `live` adds the meta-refresh; a snapshot must not have one -- a shared copy
@@ -2043,6 +2073,11 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     host that rebuilds on a slower beat than the loopback server (the public
     site rebuilds every five minutes) cannot promise a freshness it does not
     deliver.
+
+    `actions` turns on the in-page buttons that write back to Airtable. Off by
+    default: only the password-gated site passes it, because the same renderer
+    produces the unauthenticated loopback report and the snapshots people
+    paste into chat, and a button on either would be a lie.
 
     `standalone=False` returns the style and body content *without* the document
     skeleton, for hosts that supply their own `<html>`/`<head>`/`<body>`. Same
@@ -2171,7 +2206,7 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     </section>
 
     <section class="panel" id="panel-human">
-      {_section_needs_human(data)}
+      {_section_needs_human(data, actions)}
     </section>
 
     <section class="panel" id="panel-posts">
