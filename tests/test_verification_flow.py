@@ -16,8 +16,10 @@ from adb_bot.automation.flows.verification import (
     CHALLENGE_NONE,
     CHALLENGE_PHONE,
     CHALLENGE_PHOTO,
+    CHALLENGE_SIGNED_OUT,
     RESULT_BANNED,
     RESULT_NEEDS_HUMAN,
+    RESULT_SIGNED_OUT,
     RESULT_SOLVED,
     RESULT_STUCK,
     classify_challenge,
@@ -35,6 +37,11 @@ SCREEN_PHOTO = "we need a photo of yourself to confirm you're a real person"
 SCREEN_CAPTCHA = "type the characters you see in the image below"
 SCREEN_FEED = "your story  reels  suggested for you  liked by"
 SCREEN_BANNED = "your account has been suspended"
+# The one screen here that is not paraphrased: this is the real text read off
+# `Jil 2` on 2026-08-11, verbatim from its UI dump.
+SCREEN_SIGNED_OUT = ("english (us) join instagram share what you're into with "
+                     "the people who get you. get started i already have a "
+                     "profile meta logo")
 
 
 class ClassifyTest(TestCase):
@@ -235,6 +242,39 @@ class OrderIndependenceTest(FlowTestCase):
         result, driver, provider = self.run_chain([SCREEN_BANNED])
         self.assertEqual(result.status, RESULT_BANNED)
         self.assertEqual(provider.purchases, 0, "a banned account must not cost a number")
+
+
+class SignedOutTest(FlowTestCase):
+    """A phone with nobody logged in must never be reported as solved.
+
+    Not hypothetical: `Jil 2` -- flagged with the MultiLogin `Issue` tag, which
+    is exactly the population this flow is meant to work through -- turned out
+    to be signed out, showing Instagram's welcome screen (captured 2026-08-11,
+    `~/.adb_bot/verification/Jil-2-20260811-221938/`). That screen carries no
+    challenge marker, so before this was handled the loop read it as "nothing
+    left to answer" and returned SOLVED. A runner acting on that would clear the
+    `Issue` tag and hand a dead profile back to the posting loop.
+    """
+
+    def test_the_real_welcome_screen_is_recognised(self):
+        self.assertEqual(classify_challenge(SCREEN_SIGNED_OUT),
+                         CHALLENGE_SIGNED_OUT)
+
+    def test_it_is_not_reported_as_solved(self):
+        result, _driver, _provider = self.run_chain([SCREEN_SIGNED_OUT])
+        self.assertEqual(result.status, RESULT_SIGNED_OUT)
+        self.assertFalse(result.ok)
+
+    def test_no_number_is_rented_for_a_signed_out_phone(self):
+        result, _driver, provider = self.run_chain([SCREEN_SIGNED_OUT])
+        self.assertEqual(result.numbers_used, 0)
+        self.assertEqual(provider.purchases, 0)
+
+    def test_a_real_challenge_still_wins_over_a_stray_password_link(self):
+        """A code screen that also offers 'forgot password' is still a code screen."""
+        self.assertEqual(
+            classify_challenge(SCREEN_CODE + " forgot password"),
+            CHALLENGE_CODE)
 
 
 class RetryTest(FlowTestCase):

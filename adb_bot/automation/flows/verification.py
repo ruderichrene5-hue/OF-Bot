@@ -52,6 +52,7 @@ CHALLENGE_CODE = "code"                     # asks for the code it just sent
 CHALLENGE_PHOTO = "photo"                   # asks for a photo to prove a human
 CHALLENGE_IMAGE_CAPTCHA = "image_captcha"   # asks for letters/digits in an image
 CHALLENGE_BANNED = "banned"                 # not a challenge; the account is gone
+CHALLENGE_SIGNED_OUT = "signed_out"         # not a challenge; nobody is logged in
 
 # --- how the run ended --------------------------------------------------------
 RESULT_SOLVED = "solved"            # the chain is cleared
@@ -59,6 +60,7 @@ RESULT_NEEDS_HUMAN = "needs_human"  # a step we cannot do (captcha, or numbers e
 RESULT_BANNED = "banned"            # account disabled -- stop, flag it
 RESULT_STUCK = "stuck"              # the same screen kept coming back
 RESULT_FAILED = "failed"            # a step the driver could not perform
+RESULT_SIGNED_OUT = "signed_out"    # nobody is logged in; there is nothing to verify
 
 # --- screen markers -----------------------------------------------------------
 # Matched against *visible* screen text only (element `text` / `content-desc`,
@@ -67,11 +69,13 @@ RESULT_FAILED = "failed"            # a step the driver could not perform
 # resource ids containing words like "confirm" and "verification" on ordinary
 # screens, so any marker below would match a perfectly healthy feed.
 #
-# TODO 3.2: these phrases come from general knowledge of Instagram's wording,
-# NOT from this fleet's own screens -- no dump of a real challenge has been seen
-# yet. Check every list against real dumps: a phrase that never appears is dead
-# weight, and a real screen that classifies as CHALLENGE_NONE is a hole the loop
-# will walk straight past. Add a fixture per confirmed screen to
+# TODO 3.2: with one exception -- the signed-out markers below, which were read
+# off a real phone -- these phrases come from general knowledge of Instagram's
+# wording, NOT from this fleet's own screens. No dump of a real *challenge* has
+# been seen yet. Check every list against real dumps: a phrase that never
+# appears is dead weight, and a real screen that classifies as CHALLENGE_NONE is
+# a hole the loop will walk straight past. `verification_probe.py --sweep`
+# collects the dumps; add a fixture per confirmed screen to
 # tests/test_verification_flow.py.
 _CHOOSE_METHOD_MARKERS = (
     "how do you want to get",
@@ -141,6 +145,39 @@ _PHOTO_MARKERS = (
     "take a selfie",
 )
 
+# Instagram's signed-out welcome screen. Confirmed from a real dump of `Jil 2`
+# on 2026-08-11 -- the only marker list here that is not a guess.
+#
+# This matters far more than it looks. A signed-out phone shows no verification
+# screen at all, so without these the loop reads it as "nothing left to answer"
+# and reports SOLVED. Wired to a runner that clears the MultiLogin `Issue` tag
+# on success, that would quietly hand every logged-out profile back to the
+# posting loop as if a person had fixed it. The `Issue` tag is applied by hand
+# and covers several different problems -- the remarks on the tagged profiles
+# include "log in again", "disable" and "no ig account" as well as "human
+# verification" -- so this flow WILL meet signed-out accounts routinely.
+#
+# Split strong/weak for the same reason the phone and code screens are: the
+# strong ones were read off a real signed-out phone and cannot appear anywhere
+# else, while the weak ones are plausible login-surface wording that a genuine
+# challenge screen might also carry ("Forgot password?" sits under plenty of
+# forms). Strong decides immediately; weak only decides when no challenge
+# marker matched at all, so a real challenge is never thrown away over a
+# stray password link. Bare "log in" is in neither: it appears on ordinary
+# screens too.
+_SIGNED_OUT_STRONG_MARKERS = (
+    "join instagram",
+    "i already have a profile",
+    "create new account",
+    "sign up with email",
+)
+
+_SIGNED_OUT_WEAK_MARKERS = (
+    "log in with facebook",
+    "log into another account",
+    "forgot password",
+)
+
 _IMAGE_CAPTCHA_MARKERS = (
     "type the characters",
     "enter the characters",
@@ -159,7 +196,12 @@ _IMAGE_CAPTCHA_MARKERS = (
 # Code beats phone within each tier: when a screen really is ambiguous, waiting
 # on the number already typed costs 45 seconds, while renting another one costs
 # money and abandons a number that may be about to receive.
+#
+# The strong signed-out markers lead: they name a surface that cannot also be a
+# challenge, and matching them early is what stops a number being rented for a
+# phone nobody is logged into. The weak ones trail everything.
 _ORDERED_MARKERS = (
+    (CHALLENGE_SIGNED_OUT, _SIGNED_OUT_STRONG_MARKERS),
     (CHALLENGE_IMAGE_CAPTCHA, _IMAGE_CAPTCHA_MARKERS),
     (CHALLENGE_PHOTO, _PHOTO_MARKERS),
     (CHALLENGE_CODE, _CODE_STRONG_MARKERS),
@@ -167,6 +209,7 @@ _ORDERED_MARKERS = (
     (CHALLENGE_CHOOSE_METHOD, _CHOOSE_METHOD_MARKERS),
     (CHALLENGE_CODE, _CODE_WEAK_MARKERS),
     (CHALLENGE_PHONE, _PHONE_WEAK_MARKERS),
+    (CHALLENGE_SIGNED_OUT, _SIGNED_OUT_WEAK_MARKERS),
 )
 
 
@@ -197,12 +240,11 @@ def classify_challenge(text: str | None) -> str:
 class ChallengeDriver(Protocol):
     """Everything the loop needs a phone to do.
 
-    Implemented as a fake in the tests. **The real implementation does not exist
-    yet** -- it is the whole remaining feature (TODO_2026-08-11.md section 3).
-    Write it against a live flagged profile, with the UI dumps in front of you:
-    the selectors here must be seen, not guessed, and the house rule from
-    `interruptions.py` applies -- tap buttons only on an EXACT label match taken
-    from a UI dump, never from OCR.
+    Implemented for real by `flows/verification_driver.AdbChallengeDriver`, and
+    as a fake in the tests. The driver exists but **its selectors have never met
+    a real challenge screen** -- confirming them is TODO_2026-08-11.md section 3.
+    The house rule from `interruptions.py` applies throughout: tap buttons only
+    on an EXACT label match taken from a UI dump, never from OCR.
 
     Every method returns a bool for "did that work", never raises for an
     ordinary failure, so the loop can decide what a failed step means.
@@ -287,11 +329,12 @@ def run_verification(driver: ChallengeDriver, router, solver=None, logger=None,
     can act on -- the caller's job is to write the result to Airtable, and an
     exception there would just lose it.
 
-    TODO 4.1: nothing calls this yet. It needs a runner that picks flagged
-    profiles, takes the profile lock, launches, runs this, and writes the result
-    back -- `recovery_runner.py` is the closest existing shape. On `solved` the
-    MLX `Issue` tag comes off (issue_tags.py); on `banned` the ban state goes on
-    (incidents.py).
+    TODO 4.1: no *loop* calls this yet -- only `verification_probe.py --apply`,
+    by hand. It needs a runner that picks flagged profiles, takes the profile
+    lock, launches, runs this, and writes the result back; `recovery_runner.py`
+    is the closest existing shape. On `solved` the MLX `Issue` tag comes off
+    (issue_tags.py); on `banned` the ban state goes on (incidents.py); on
+    `signed_out` the tag must stay exactly where it is.
     """
     if solver is None:
         from adb_bot.clients.captcha import build_solver
@@ -342,6 +385,15 @@ class _Session:
             if challenge == CHALLENGE_BANNED:
                 return self._result(RESULT_BANNED,
                                     "account is disabled, not verifiable")
+            if challenge == CHALLENGE_SIGNED_OUT:
+                # Nobody is logged in, so there is no challenge to answer and
+                # nothing this flow can do. Reported separately from
+                # `needs_human` on purpose: the fix is credentials, not a
+                # captcha, and a caller must never read this as success.
+                return self._result(
+                    RESULT_SIGNED_OUT,
+                    "nobody is logged into Instagram on this phone -- it needs "
+                    "an account signed in, not verification")
 
             if not self._note_progress(challenge):
                 return self._result(
