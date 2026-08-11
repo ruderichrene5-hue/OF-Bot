@@ -126,6 +126,50 @@ class ResolutionTest(LedgerTestBase):
         self.ledger.resolve("p1", self._hash(), STATUS_CONFIRMED)
         self.assertEqual(self.ledger.lookup("p1", self._hash()).status, STATUS_CONFIRMED)
 
+    def test_resolution_keeps_what_the_share_knew(self):
+        """Later lines win, so a resolution that left these at their defaults
+        *erased* them. The handle is the only record of which account of a
+        two-account phone posted, and the baseline is what the recheck's whole +1
+        comparison is built on."""
+        from adb_bot.automation.flows.reel_verify import Count
+        self.ledger.record_share("p1", self.clip, baseline_count=Count(137, True),
+                                 target_handle="nikki_3")
+        self.ledger.resolve("p1", self._hash(), STATUS_CONFIRMED, "post_count")
+        record = self.ledger.lookup("p1", self._hash())
+        self.assertEqual(record.target_handle, "nikki_3")
+        self.assertEqual(record.baseline_count, 137)
+        self.assertTrue(record.baseline_exact)
+
+
+class ShareAttemptsTest(LedgerTestBase):
+    """The cap that `Retry Count` cannot be. Retry Count lives on the queue row,
+    so a re-planned row starts again from zero while the clip is the same one --
+    which is how a single clip was sent to one account 13 times."""
+
+    def _hash(self):
+        return media_fingerprint(self.clip)
+
+    def test_an_unsent_clip_has_no_attempts(self):
+        self.assertEqual(self.ledger.share_attempts("p1", self._hash()), 0)
+
+    def test_each_send_counts_even_after_being_disproved(self):
+        for expected in (1, 2, 3):
+            self.ledger.record_share("p1", self.clip)
+            self.assertEqual(self.ledger.share_attempts("p1", self._hash()), expected)
+            # A disproof clears the block but must not clear the history: the
+            # folded view keeps one line per key, and that is exactly what hid
+            # the repeats.
+            self.ledger.resolve("p1", self._hash(), STATUS_DISPROVED, "count never moved")
+
+    def test_attempts_are_counted_per_account(self):
+        self.ledger.record_share("p1", self.clip)
+        self.ledger.record_share("p1", self.clip)
+        self.assertEqual(self.ledger.share_attempts("p2", self._hash()), 0)
+
+    def test_a_missing_key_is_not_an_opinion(self):
+        self.assertEqual(self.ledger.share_attempts("", self._hash()), 0)
+        self.assertEqual(self.ledger.share_attempts("p1", ""), 0)
+
 
 class DurabilityTest(LedgerTestBase):
     def test_a_torn_line_does_not_take_the_ledger_down(self):

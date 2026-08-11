@@ -1,12 +1,16 @@
 """The deferred pass exists to answer the question the run could not.
 
-The case that carries the design is `test_equal_count_is_a_real_failure`: during
-a run, "the count did not move" means nothing, because the counter lags. Fifteen
-minutes later it is proof. Everything else here is about not overreaching when
-the evidence isn't there.
+The pair that carries the design is `test_equal_count_is_not_yet_a_failure` and
+`test_equal_count_is_a_failure_once_the_wait_is_over`. A confirmation and a
+disproof run on different clocks: a +1 is trustworthy the moment it appears, but
+an unmoved count means only "not there *yet*" until enough time has passed that a
+late publish is implausible. Instagram published a Nikki 3 reel after it had been
+read as absent twice, and the premature Failed posted it a second time.
+Everything else here is about not overreaching when the evidence isn't there.
 """
 
 import tempfile
+import time
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import MagicMock
@@ -24,6 +28,8 @@ from adb_bot.automation.recheck_runner import (
 from adb_bot.clients import airtable as at
 
 FIFTEEN_MIN = 15 * 60
+# Past MIN_DISPROOF_AGE_SECONDS: old enough that an unmoved count is absence.
+WELL_AGED = recheck_runner.MIN_DISPROOF_AGE_SECONDS + 3600
 
 
 class DecideRecheckTest(TestCase):
@@ -32,14 +38,30 @@ class DecideRecheckTest(TestCase):
         self.assertEqual(outcome, OUTCOME_POSTED)
         self.assertIn("41 -> 42", detail)
 
-    def test_equal_count_is_a_real_failure(self):
-        """The whole reason for waiting. In-run this would be meaningless -- the
-        counter routinely lags a minute or more -- so the run could only ever say
-        "don't know". After the delay it is evidence, and this is the one moment
-        Failed can be said with confidence."""
+    def test_equal_count_is_not_yet_a_failure(self):
+        """Fifteen minutes of absence is not absence. The reading is correct and
+        the conclusion is still wrong: Instagram can publish hours after the phone
+        let go, and Failed here is what re-opens the clip and posts it twice."""
         outcome, detail = decide_recheck(41, True, Count(41, True), FIFTEEN_MIN)
+        self.assertEqual(outcome, OUTCOME_UNKNOWN)
+        self.assertIn("too early", detail)
+
+    def test_equal_count_is_a_failure_once_the_wait_is_over(self):
+        """The whole reason for waiting. Past the floor, an unmoved count is the
+        one moment Failed can be said with confidence."""
+        outcome, detail = decide_recheck(41, True, Count(41, True), WELL_AGED)
         self.assertEqual(outcome, OUTCOME_FAILED)
         self.assertIn("did not land", detail)
+
+    def test_a_late_publish_is_caught_by_a_later_pass(self):
+        """Nikki 3, 2026-08-11. Absent at +39 min and again at +70 min, live
+        afterwards. The early passes must stay UNKNOWN so that the pass which
+        finally sees the +1 is the one that gets to rule."""
+        for age in (39 * 60, 70 * 60):
+            self.assertEqual(decide_recheck(137, True, Count(137, True), age)[0],
+                             OUTCOME_UNKNOWN)
+        self.assertEqual(decide_recheck(137, True, Count(138, True), 3 * 3600)[0],
+                         OUTCOME_POSTED)
 
     def test_no_baseline_never_guesses(self):
         outcome, _ = decide_recheck(-1, False, Count(42, True), FIFTEEN_MIN)
@@ -137,12 +159,25 @@ class RecheckPassTest(TestCase):
         # Still blocked -- a confirmed post is the strongest reason not to resend.
         self.assertTrue(self.ledger.already_shared("p1", self.clip))
 
-    def test_a_failed_recheck_re_opens_the_clip(self):
-        """The only path that clears the ledger, and it needs positive evidence
-        of absence to get here."""
+    def test_a_fresh_unmoved_count_leaves_the_clip_blocked(self):
+        """The share is minutes old, so absence proves nothing yet. The row is
+        re-parked and the clip must still be un-sendable."""
         self._share()
         tally = recheck_runner.recheck_pending_posts(
             self.airtable, lambda pid, fields: Count(41, True), ledger=self.ledger)
+        self.assertEqual(tally["unknown"], 1)
+        self.assertEqual(tally["failed"], 0)
+        self.assertTrue(self.ledger.already_shared("p1", self.clip))
+        self.airtable.mark_post_pending_verification.assert_called_once()
+
+    def test_a_failed_recheck_re_opens_the_clip(self):
+        """The only path that clears the ledger, and it needs positive evidence
+        of absence -- which now includes having waited long enough for absence to
+        mean anything."""
+        self._share()
+        tally = recheck_runner.recheck_pending_posts(
+            self.airtable, lambda pid, fields: Count(41, True), ledger=self.ledger,
+            now=lambda: time.time() + WELL_AGED)
         self.assertEqual(tally["failed"], 1)
         record = self.ledger.lookup("p1", post_ledger.media_fingerprint(self.clip))
         self.assertEqual(record.status, STATUS_DISPROVED)
@@ -282,7 +317,8 @@ class ProfileDrivenRecheckTest(TestCase):
             at.F_PQ_TARGET_PROFILE: ["prof1"],
         })
         tally = recheck_runner.recheck_pending_posts(
-            self.airtable, lambda pid, fields: Count(41, True), ledger=self.ledger)
+            self.airtable, lambda pid, fields: Count(41, True), ledger=self.ledger,
+            now=lambda: time.time() + WELL_AGED)
         self.assertEqual(tally["failed"], 1)
         self.airtable.mark_post_result.assert_called_once_with(
             "q1", at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY)

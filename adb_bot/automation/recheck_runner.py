@@ -8,10 +8,17 @@ is what comes back for it.
 
 Why later is easier: the in-run check is racing Instagram's upload pipeline --
 the counter is a cached aggregate that routinely takes a minute or more to move,
-so a fast "no" says nothing. Fifteen minutes on, nothing is in flight. The
-counter has settled, the reel is in the grid, and the same probe that was
-guessing during the run gives a clean answer. The hard part of verification was
-never the reading, it was the timing.
+so a fast "no" says nothing. Fifteen minutes on, a *yes* is trustworthy: the
+counter has settled and the same probe that was guessing during the run gives a
+clean answer. The hard part of verification was never the reading, it was the
+timing.
+
+A *no*, though, takes far longer to earn than fifteen minutes -- Instagram will
+occasionally publish a reel hours after the phone let go of it, and until that
+window has passed "not there" and "not there yet" look identical. The two answers
+therefore run on different clocks: a confirmation is accepted as soon as it
+appears, while a failure waits out `MIN_DISPROOF_AGE_SECONDS`. Everything in
+between is UNKNOWN, and UNKNOWN is cheap -- it re-stamps the row and asks again.
 
 The comparison is exact rather than heuristic: `post_ledger` carries the post
 count captured just before Share, so this asks "is it higher than it was?" and
@@ -33,6 +40,23 @@ from adb_bot.automation import post_ledger
 # forever -- an un-resolvable row is itself a signal that something is broken.
 MAX_UNRESOLVED_AGE_SECONDS = 24 * 3600
 
+# How long a share must go unproven before an unmoved count is allowed to mean
+# "it did not post".
+#
+# The original fifteen minutes assumed the counter is merely *slow*. It can also
+# be *late*: on 2026-08-11 Nikki 3's reel was missing from an exact post count at
+# +39 min, missing again at +70 min, and went live after that -- by which point
+# this module had already written Failed, the ledger had re-opened the clip and
+# the retry had sent it a second time. Both reads were correct; the question was
+# simply asked before Instagram had answered it.
+#
+# Since a disproof here is the only thing that re-opens a clip for another send,
+# the floor belongs past the point where a late upload is plausible, not at the
+# point where the answer first looks stable. Below it an unmoved count is
+# UNKNOWN, which costs one Airtable write and no phone time: the row keeps its
+# Verifying stamp and the next pass asks again ~15 min later.
+MIN_DISPROOF_AGE_SECONDS = 6 * 3600
+
 OUTCOME_POSTED = "posted"
 OUTCOME_FAILED = "failed"
 OUTCOME_UNKNOWN = "unknown"      # still can't tell; leave it for the next pass
@@ -40,15 +64,20 @@ OUTCOME_ABANDONED = "abandoned"  # too old to keep asking
 
 
 def decide_recheck(baseline_count: int, baseline_exact: bool, current, age_seconds: float,
-                   max_age_seconds: float = MAX_UNRESOLVED_AGE_SECONDS) -> tuple:
+                   max_age_seconds: float = MAX_UNRESOLVED_AGE_SECONDS,
+                   min_disproof_age_seconds: float = MIN_DISPROOF_AGE_SECONDS) -> tuple:
     """Rule on one parked post. Returns (outcome, detail).
 
     `current` is a reel_verify.Count or None.
 
-    The reasoning that matters is the *equal* case. During a run, "the count did
-    not move" means almost nothing -- the counter lags. Fifteen minutes later it
-    means the post is not there, and that is the one moment we can say Failed
-    with confidence. Being able to say that is the entire point of waiting.
+    The reasoning that matters is the *equal* case, and it turns on time rather
+    than on the reading. During a run, "the count did not move" means almost
+    nothing -- the counter lags. An hour later it still means little, because
+    Instagram sometimes publishes hours late. Only once the share is older than
+    `min_disproof_age_seconds` does an unmoved count become evidence of absence
+    rather than evidence of waiting, and that is the one moment we can say Failed.
+    Being patient enough to say it *correctly* is the entire point of waiting: a
+    premature Failed re-opens the clip and posts it twice.
     """
     if age_seconds >= max_age_seconds:
         return (OUTCOME_ABANDONED,
@@ -67,8 +96,15 @@ def decide_recheck(baseline_count: int, baseline_exact: bool, current, age_secon
     if current.value > baseline_count:
         return (OUTCOME_POSTED, f"post count {baseline_count} -> {current.value}")
     if current.value == baseline_count:
+        if age_seconds < min_disproof_age_seconds:
+            # Absent *so far* -- which is not the same as absent. Stay UNKNOWN so
+            # the clip keeps its block and this row gets asked again.
+            return (OUTCOME_UNKNOWN,
+                    f"post count is still {baseline_count} after {age_seconds / 60:.0f} min; "
+                    f"too early to call it absent -- Instagram can publish late, so this is "
+                    f"re-checked until the share is {min_disproof_age_seconds / 3600:.0f}h old")
         return (OUTCOME_FAILED,
-                f"post count is still {baseline_count} after {age_seconds / 60:.0f} min -- "
+                f"post count is still {baseline_count} after {age_seconds / 3600:.1f}h -- "
                 "the reel did not land")
     # Fewer posts than before: something was deleted, or we're reading a
     # different account. Either way it is not proof this reel posted.

@@ -20,6 +20,13 @@ Storage is an append-only JSON-lines file. Appending is crash-safe in a way that
 rewriting a whole JSON document is not -- a torn write costs one line, not the
 ledger. Later lines for the same key win, so `resolve()` is just another append
 and two loops writing at once cannot corrupt each other's state.
+
+Append-only also means the *history* survives folding, which is what
+`share_attempts` reads. A per-clip cap is the one guard that holds when the
+evidence itself is untrustworthy: an account whose post count never moves makes
+every recheck report absence and every retry look justified, and the queue row's
+own `Retry Count` cannot see it, because a re-planned row starts again from zero
+against the same clip.
 """
 
 from __future__ import annotations
@@ -40,6 +47,12 @@ STATUS_DISPROVED = "disproved"    # proven NOT live -- safe to send again
 
 LEDGER_FILENAME = "posted_reels.jsonl"
 DEFAULT_MAX_AGE_DAYS = 30
+
+# How many times one clip may ever be sent to one account. Two means "the
+# original plus a single retry", and it is a floor under every other guard: an
+# account that cannot post (its counter frozen, so every recheck reads absence
+# and every retry looks justified) otherwise consumes the same clip forever.
+MAX_SHARE_ATTEMPTS = 2
 
 _HASH_CHUNK = 1024 * 1024
 
@@ -221,8 +234,32 @@ class PostLedger:
             caption=existing.caption if existing else "",
             queue_id=existing.queue_id if existing else "",
             detail=str(detail or "")[:300],
+            # Carried, not dropped. Later lines win, so a resolution that reset
+            # these to their defaults *erased* them: every resolved record read
+            # back `target_handle=""` -- unable to say which account of a
+            # two-account phone the post went to, the one question that field
+            # exists to answer -- and `baseline_count=-1`, losing the number the
+            # recheck's whole +1 comparison is built on.
+            target_handle=existing.target_handle if existing else "",
+            baseline_count=existing.baseline_count if existing else -1,
+            baseline_exact=existing.baseline_exact if existing else False,
         )
         return self._append(record)
+
+    def share_attempts(self, profile_id: str, media_hash: str) -> int:
+        """How many times Share has been tapped for this clip on this account.
+
+        Counts raw `shared` lines, so it deliberately does not use `load()` --
+        folding by key is what hides a repeat. A cap on this is the backstop that
+        `Retry Count` cannot be: that lives on the queue row, so a re-planned row
+        starts again from zero while the clip is the same one. That is how a
+        single Laila 3 clip was sent 13 times.
+        """
+        if not profile_id or not media_hash:
+            return 0
+        key = f"{profile_id}:{media_hash}"
+        return sum(1 for record in self._iter_records()
+                   if record.key == key and record.status == STATUS_SHARED)
 
     def pending(self, older_than_seconds: float = 0.0) -> list:
         """Shares still unresolved -- what the deferred recheck pass works

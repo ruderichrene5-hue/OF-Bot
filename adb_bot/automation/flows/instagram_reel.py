@@ -758,6 +758,25 @@ class InstagramReelUploadU2Flow:
                     "success": False, "uncertain": False, "already_shared": True,
                     "verify_method": "ledger", "verify_detail": f"already shared ({prior.status})"}
 
+        # The same clip can arrive here with a *clear* ledger -- a disproof was
+        # written, so the check above passes -- over and over, because on an
+        # account whose post count never moves every recheck reads absence and
+        # every retry looks justified. That is how one Laila 3 clip was sent 13
+        # times. The cap is the floor under all of it: a clip gets its send and at
+        # most one retry, whatever the evidence says.
+        attempts = ledger.share_attempts(str(profile.id), media_hash)
+        if attempts >= post_ledger.MAX_SHARE_ATTEMPTS:
+            emit("warning",
+                 "Refusing to post %s to profile %s: it has already been sent %d time(s) "
+                 "and the limit is %d. Something is stopping this account from posting -- "
+                 "sending the same clip again will not fix it.",
+                 Path(media_path).name, profile.id, attempts, post_ledger.MAX_SHARE_ATTEMPTS)
+            return {"profile_id": profile.id, "target": target, "aborted": False,
+                    "success": False, "uncertain": False, "already_shared": True,
+                    "verify_method": "ledger",
+                    "verify_detail": f"clip spent ({attempts} sends, limit "
+                                     f"{post_ledger.MAX_SHARE_ATTEMPTS})"}
+
         remote_media_path = self._build_remote_media_path(media_path)
         emit("info", "Preparing to push reel media for profile %s: %s -> %s", profile.id, media_path, remote_media_path)
         mark_step()

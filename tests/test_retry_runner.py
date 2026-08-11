@@ -189,6 +189,14 @@ class RetryPassTest(TestCase):
             "recProf1": {"launch_id": PROFILE_ID, "name": "Nikki 1"}}
         self.airtable.variants_by_id.return_value = {
             "recVar1": {"file_path": str(self.clip), "status": "Ready"}}
+        # A fresh clip the retry can swap in for the same account.
+        self.spare = root / "v2.mp4"
+        self.spare.write_bytes(b"a different reel")
+        self.airtable.list_ready_variants.return_value = [{
+            "id": "recVar2", "file_path": str(self.spare), "status": "Ready",
+            "account_id": "recAcc1", "profile_id": None,
+            "slot": at.SLOT_PRIMARY, "created": "2026-08-01",
+        }]
         self.airtable.requeue_post.return_value = True
 
     def _run(self, **kwargs):
@@ -233,15 +241,77 @@ class RetryPassTest(TestCase):
         self.assertEqual(tally["blocked"], 1)
         self.airtable.requeue_post.assert_not_called()
 
-    def test_a_disproved_ledger_entry_is_requeued(self):
-        # The deferred recheck proved the reel never landed, so re-sending it is
-        # exactly what should happen.
+    def test_a_disproved_ledger_entry_is_requeued_with_a_different_clip(self):
+        """The recheck says the reel never landed, so the slot is retried -- but
+        with a fresh video. "Never landed" is the best evidence available and it is
+        still not proof: if the original publishes late, the account has posted two
+        different reels instead of the same one twice."""
         digest = post_ledger.media_fingerprint(self.clip)
         self.ledger.record_share(PROFILE_ID, self.clip, queue_id="recQ1")
         self.ledger.resolve(PROFILE_ID, digest, STATUS_DISPROVED, "count never moved")
         tally = self._run()
         self.assertEqual(tally["requeued"], 1)
-        self.airtable.requeue_post.assert_called_once()
+        self.assertEqual(self.airtable.requeue_post.call_args.kwargs["variant_id"], "recVar2")
+        # The clip we swapped away from has been sent, so it must leave the Ready
+        # pool -- otherwise the planner offers it again and the ledger blocks it,
+        # costing a launch to post nothing.
+        self.airtable.mark_variant_used.assert_called_once_with("recVar1")
+
+    def test_a_clip_that_was_never_sent_is_retried_as_it_is(self):
+        """No ledger record means the run died before Share -- a failed adb push,
+        a phone that never booted. The clip is untouched, so burning a fresh
+        variant on it would waste inventory for no gain."""
+        tally = self._run()
+        self.assertEqual(tally["requeued"], 1)
+        self.assertIsNone(self.airtable.requeue_post.call_args.kwargs.get("variant_id"))
+        self.airtable.mark_variant_used.assert_not_called()
+
+    def test_a_sent_clip_with_no_replacement_is_not_requeued(self):
+        """The dead end that matters. With nothing fresh to send, the choice is
+        between losing one slot and risking the same reel twice."""
+        digest = post_ledger.media_fingerprint(self.clip)
+        self.ledger.record_share(PROFILE_ID, self.clip, queue_id="recQ1")
+        self.ledger.resolve(PROFILE_ID, digest, STATUS_DISPROVED, "count never moved")
+        self.airtable.list_ready_variants.return_value = []
+        tally = self._run()
+        self.assertEqual(tally["no_variant"], 1)
+        self.assertEqual(tally["requeued"], 0)
+        self.airtable.requeue_post.assert_not_called()
+
+    def test_a_replacement_for_the_other_account_slot_is_never_used(self):
+        """A two-account phone has one encode per account. Handing a Second-slot
+        variant to a Primary row posts one account's video from the other."""
+        digest = post_ledger.media_fingerprint(self.clip)
+        self.ledger.record_share(PROFILE_ID, self.clip, queue_id="recQ1")
+        self.ledger.resolve(PROFILE_ID, digest, STATUS_DISPROVED, "count never moved")
+        self.airtable.list_ready_variants.return_value[0]["slot"] = at.SLOT_SECOND
+        tally = self._run()
+        self.assertEqual(tally["no_variant"], 1)
+        self.airtable.requeue_post.assert_not_called()
+
+    def test_a_replacement_whose_file_is_gone_is_never_used(self):
+        digest = post_ledger.media_fingerprint(self.clip)
+        self.ledger.record_share(PROFILE_ID, self.clip, queue_id="recQ1")
+        self.ledger.resolve(PROFILE_ID, digest, STATUS_DISPROVED, "count never moved")
+        self.spare.unlink()
+        tally = self._run()
+        self.assertEqual(tally["no_variant"], 1)
+
+    def test_a_spent_clip_is_never_retried_however_clear_the_ledger(self):
+        """The backstop. On an account whose counter never moves every recheck
+        reads absence and every retry looks justified -- that is how one clip was
+        sent 13 times. Retry Count cannot catch it: it lives on the queue row, so a
+        re-planned row starts again from zero."""
+        digest = post_ledger.media_fingerprint(self.clip)
+        for _ in range(post_ledger.MAX_SHARE_ATTEMPTS):
+            self.ledger.record_share(PROFILE_ID, self.clip, queue_id="recQ1")
+            self.ledger.resolve(PROFILE_ID, digest, STATUS_DISPROVED, "count never moved")
+        tally = self._run()
+        self.assertEqual(tally["clip_spent"], 1)
+        self.assertEqual(tally["requeued"], 0)
+        self.airtable.requeue_post.assert_not_called()
+        # And the row stops advertising a retry that will never come.
+        self.airtable.mark_post_retries_exhausted.assert_called_once_with("recQ1")
 
     def test_banned_rows_are_never_requeued(self):
         self.airtable.list_failed_posts.return_value = [

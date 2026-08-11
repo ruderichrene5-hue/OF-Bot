@@ -1124,7 +1124,7 @@ class AirtableClient:
         })
 
     def requeue_post(self, queue_record_id: str, scheduled_iso: str,
-                     note: str | None = None) -> bool:
+                     note: str | None = None, variant_id: str | None = None) -> bool:
         """Put a failed row back in the queue: Pending, due at `scheduled_iso`.
 
         Retry Count is deliberately NOT touched. The posting runner bumps it when
@@ -1135,12 +1135,23 @@ class AirtableClient:
         Issue Type is cleared because the row is no longer failed -- leaving
         "Failed - Needs Retry" on a Pending row makes the queue unreadable to the
         client. The reason it was requeued goes in Notes instead.
+
+        `variant_id` re-points the row at a different clip. A retry that re-sends
+        the *same* clip is only safe if the first one is definitely not live, and
+        that is precisely what cannot be established with certainty -- so the
+        retry carries a fresh video instead, and a late-publishing original
+        becomes a second ordinary post rather than a duplicate.
         """
         fields: dict = {
             F_PQ_POST_STATUS: POST_STATUS_PENDING,
             F_PQ_SCHEDULED: scheduled_iso,
             F_PQ_ISSUE_TYPE: ISSUE_NONE,
         }
+        if variant_id:
+            # Replaces rather than appends: the link is single-valued to the
+            # planner, which reads `[0]` and would otherwise keep posting the old
+            # clip while the row claimed to carry the new one.
+            fields[F_PQ_SPOOF_VARIANT] = [variant_id]
         if note:
             fields[F_PQ_NOTES] = note[:1000]
         return self._patch_in(TABLE_POSTING_QUEUE, queue_record_id, fields)
