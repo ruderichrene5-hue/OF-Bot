@@ -2115,10 +2115,21 @@ class InstagramReelUploadU2Flow:
 
         return probe
 
-    # How long to give the Profile tab to appear. This is called right after an
-    # account switch, when Instagram is still rebuilding its nav bar, so the
-    # first probe routinely lands too early.
+    # How long to give the Profile tab to appear on a screen that is already
+    # settled -- the phone has been up for a while and Instagram is idle.
     PROFILE_TAB_TIMEOUT_SECONDS = 8.0
+
+    # And how long after an account switch, which is a different question.
+    # Switching tears Instagram down and rebuilds it against another account:
+    # the nav bar goes away entirely and comes back when the new session has
+    # loaded, which on these cloud phones is routinely slower than eight
+    # seconds. Measured 2026-08-04..11: the tab missed its 8s budget **200**
+    # times, and 112 of those became "could not prove it is signed in" -- against
+    # only 87 switches that were ever confirmed, and only 4 cases where the
+    # account genuinely was not on the phone. The switches were mostly working;
+    # the read was just early, which is the same mistake this code already
+    # corrected once when the probe was single-shot.
+    PROFILE_TAB_AFTER_SWITCH_TIMEOUT_SECONDS = 20.0
 
     def _open_profile_tab_u2(self, d, target, logger=None,
                              timeout: float | None = None) -> bool:
@@ -2237,17 +2248,28 @@ class InstagramReelUploadU2Flow:
         if not want:
             return True
 
+        switched = False
         for attempt in range(1, max_attempts + 1):
-            if not self._open_profile_tab_u2(d, target, logger=logger):
-                emit("warning", "Could not open the profile tab on %s to check which account "
-                                "is signed in", target)
-                return False
+            # A settled screen gets the short budget; one that is rebuilding
+            # itself after a switch gets the long one.
+            tab_timeout = (self.PROFILE_TAB_AFTER_SWITCH_TIMEOUT_SECONDS
+                           if switched else None)
+            if not self._open_profile_tab_u2(d, target, logger=logger, timeout=tab_timeout):
+                # Deliberately not terminal any more. Failing to *read* the
+                # account is not evidence of the wrong account -- and after a
+                # switch it usually means the app is still coming back. Bailing
+                # here spent one attempt out of two and threw the other away, so
+                # a single early read refused a post on a phone that was already
+                # on the right account. Use the attempts we have.
+                emit("info", "Could not open the profile tab on %s to read the account "
+                             "(attempt %s/%s)", target, attempt, max_attempts)
+                continue
             waits.settle(3, ready=waits.u2_ready(d, *self._ACCOUNT_TITLE_SELECTORS),
                          logger=logger, what="profile header")
 
             current = self._read_current_handle_u2(d, target, logger=logger)
             if current == want:
-                if attempt > 1:
+                if switched:
                     emit("info", "Switched %s to @%s", target, want)
                 return True
             emit("info", "%s is signed in as %s; switching to @%s",
@@ -2271,12 +2293,23 @@ class InstagramReelUploadU2Flow:
                      want, target, exc)
                 return False
 
+            switched = True
             # Switching accounts reloads the whole app; give it the same settle
             # the launch path gets before reading anything back.
             waits.settle(6, ready=waits.u2_ready(d, *self._ACCOUNT_TITLE_SELECTORS),
                          logger=logger, what="profile header after the switch")
 
-        current = self._read_current_handle_u2(d, target, logger=logger)
+        # One last look before giving up. The loop can spend every attempt on
+        # reads that never landed, and the old code then read the handle without
+        # re-opening the tab at all -- which is only correct if the tab happened
+        # to be open, and after a switch it usually is not.
+        current = None
+        if self._open_profile_tab_u2(
+                d, target, logger=logger,
+                timeout=self.PROFILE_TAB_AFTER_SWITCH_TIMEOUT_SECONDS if switched else None):
+            waits.settle(3, ready=waits.u2_ready(d, *self._ACCOUNT_TITLE_SELECTORS),
+                         logger=logger, what="profile header")
+            current = self._read_current_handle_u2(d, target, logger=logger)
         if current == want:
             emit("info", "Switched %s to @%s", target, want)
             return True

@@ -435,6 +435,92 @@ class AccountSwitchTest(TestCase):
         self.assertTrue(self._ensure(device, "@helenaiscutee"))
 
 
+class ProfileTabMissIsNotAWrongAccountTest(TestCase):
+    """A read that does not land must not be treated as the wrong account.
+
+    Switching tears Instagram down and rebuilds it, so the nav bar is genuinely
+    absent for a while afterwards. The guard used to give up the moment one read
+    missed -- spending one attempt out of two and discarding the other. Measured
+    2026-08-04..11: the tab missed its budget 200 times and 112 of those became
+    "could not prove it is signed in", against 87 confirmed switches and only 4
+    phones that genuinely did not have the account.
+    """
+
+    def setUp(self):
+        from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
+        self.flow = InstagramReelUploadU2Flow()
+        self.emitted = []
+        self.timeouts = []
+
+    def _emit(self, level, message, *args):
+        self.emitted.append(message % args if args else message)
+
+    def _script_tab(self, results):
+        """Make `_open_profile_tab_u2` return `results` in order, recording the
+        timeout each call was given."""
+        pending = list(results)
+
+        def fake(d, target, logger=None, timeout=None):
+            self.timeouts.append(timeout)
+            return pending.pop(0) if pending else False
+
+        self.flow._open_profile_tab_u2 = fake
+
+    def _ensure(self, device, want):
+        return self.flow._ensure_account_u2(device, "1.2.3.4:5555", want, self._emit)
+
+    def test_a_miss_after_the_switch_does_not_refuse_the_post(self):
+        # read ok -> switch -> read misses -> final look lands on the new account.
+        device = FakeDevice(handle="helenaiscutee")
+        self._script_tab([True, False, True])
+        self.assertTrue(self._ensure(device, "jiji.ll12"))
+        self.assertEqual(device.handle, "jiji.ll12")
+
+    def test_the_post_switch_read_gets_the_longer_budget(self):
+        from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
+        device = FakeDevice(handle="helenaiscutee")
+        self._script_tab([True, True])
+        self._ensure(device, "jiji.ll12")
+        # First read is on a settled screen (default budget); everything after a
+        # switch gets the long one.
+        self.assertIsNone(self.timeouts[0])
+        self.assertEqual(self.timeouts[1],
+                         InstagramReelUploadU2Flow.PROFILE_TAB_AFTER_SWITCH_TIMEOUT_SECONDS)
+
+    def test_the_long_budget_is_longer_than_the_settled_one(self):
+        from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
+        self.assertGreater(InstagramReelUploadU2Flow.PROFILE_TAB_AFTER_SWITCH_TIMEOUT_SECONDS,
+                           InstagramReelUploadU2Flow.PROFILE_TAB_TIMEOUT_SECONDS)
+
+    def test_a_tab_that_never_comes_back_is_still_a_refusal(self):
+        """The safety property is unchanged: unproven is still a no."""
+        device = FakeDevice(handle="helenaiscutee")
+        self._script_tab([False, False, False])
+        self.assertFalse(self._ensure(device, "jiji.ll12"))
+
+    def test_the_final_look_reopens_the_tab_rather_than_reading_blind(self):
+        """The old code fell out of the loop and read the handle without
+        re-opening the tab, which is only right if it happened to be open."""
+        device = FakeDevice(handle="helenaiscutee")
+        self._script_tab([True, False, True])
+        self._ensure(device, "jiji.ll12")
+        self.assertEqual(len(self.timeouts), 3)
+
+    def test_a_phone_already_on_the_account_is_not_refused_by_one_bad_read(self):
+        device = FakeDevice(handle="jiji.ll12")
+        self._script_tab([False, True])
+        self.assertTrue(self._ensure(device, "jiji.ll12"))
+        self.assertFalse(device.switcher_open)
+
+    def test_a_missing_account_is_still_refused_immediately(self):
+        """A phone that does not list the handle is a data problem, not a
+        timing one -- retrying the read would not change the answer."""
+        device = FakeDevice(handle="helenaiscutee", listed=["helenaiscutee"])
+        self._script_tab([True, True, True])
+        self.assertFalse(self._ensure(device, "someoneelse"))
+        self.assertTrue(any("does not list" in m for m in self.emitted))
+
+
 class ProfileTabWaitTest(TestCase):
     """The Profile tab is read right after a switch, while IG redraws its nav.
 
