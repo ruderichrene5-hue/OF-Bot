@@ -657,11 +657,26 @@ class InstagramReelUploadU2Flow:
     # The composer/gallery is open once any of these is on screen. The
     # composer's own destination tab is listed first so it wins when present:
     # it is the only one of these that *only* exists in the composer.
+    #
+    # A bare `^next$` used to be in this list and is deliberately gone. "Next"
+    # is on half the screens Instagram has, and the impostor it matched on
+    # 2026-08-11 carried no resource-id at all --
+    #   text='Next' desc=None id=None class='android.view.View' clickable=False
+    # -- so `_NOT_THE_COMPOSER_IDS` below could not reject it: a denylist can
+    # only reject something it can name. 13 of that day's 63 composer checks
+    # passed on it and every one went on to fail with "REEL tab never became
+    # visible", because the screen was never the composer.
+    #
+    # Nothing is lost by dropping it. The composer's own chrome is covered by
+    # `cam_dest_clips` and `^reels?$`, and the gallery grid by the Video/Photo
+    # cell descriptions and "Recents". A screen showing "Next" and none of
+    # those is not a screen we could pick media from anyway -- the REEL-mode
+    # guard in `_select_media_u2` refuses it a few seconds later. Failing here
+    # instead just fails honestly, and saves the 30s of doomed carousel swipes.
     _GALLERY_SELECTORS = (
         {"resourceId": "com.instagram.android:id/cam_dest_clips"},
         {"textMatches": "(?i)^reels?$"},
         {"descriptionMatches": "(?i)^reels?$"},
-        {"textMatches": "(?i)^next$"},
         {"descriptionStartsWith": "Video"},
         {"descriptionStartsWith": "Photo"},
         {"textContains": "Recents"},
@@ -689,6 +704,26 @@ class InstagramReelUploadU2Flow:
         "clips_tab",
         "profile_tab_icon_view",
     })
+
+    # How much evidence `_find_create_via_dump_u2` needs before it will tap a
+    # node as the '+'. Its scoring starts at 0 and it used to tap the best
+    # candidate whatever that was worth, so "a clickable button, somewhere on
+    # screen" -- one single point, and true of dozens of nodes on any screen --
+    # was enough to win an unopposed round. On 2026-08-11 that elected a button
+    # with desc='next' at the bottom of the screen and the run was lost before
+    # it began.
+    #
+    # 4 is the lowest score any *evidenced* candidate can have, so the floor
+    # costs nothing real:
+    #   id says creation/new_post/create ........ 10
+    #   desc says create/new post/compose/add .... 8
+    #   clickable button in the top-left corner ... 5  (1 + 4 position hint)
+    #   "camera" in the id, and a button .......... 4
+    #   a clickable button and nothing else ....... 1  <- only this is dropped
+    # Below the floor the caller falls back to a fixed top-left coordinate tap,
+    # which is where the + actually is on this build -- a known guess beats a
+    # confident wrong answer.
+    _MIN_CREATE_SCORE = 4
     _NEXT_SELECTORS = ({"text": "Next"}, {"description": "Next"},
                        {"textMatches": "(?i)^next$"}, {"descriptionMatches": "(?i)^next$"})
     _SHARE_SELECTORS = ({"text": "Share"}, {"textMatches": "(?i)^share$"}, {"description": "Share"})
@@ -1316,6 +1351,17 @@ class InstagramReelUploadU2Flow:
                               "activity feed", "search", "settings", "back")
             ):
                 continue
+            # Composer and editor controls. These sit at the *bottom* of the
+            # screen, so the top-left position hint never reaches them -- but
+            # the bare "clickable button" point below does, and on 2026-08-11
+            # that was enough to win:
+            #   create-candidate score=1 id='' desc='next'
+            #                    class='android.widget.button' center=(540,2139)
+            # The flow tapped it, landed somewhere that was not the composer,
+            # and burned the queue row. Matched exactly rather than as a
+            # substring, so "new post" and "compose" keep scoring below.
+            if desc.strip() in ("next", "share", "post", "continue", "done", "cancel"):
+                continue
 
             score = 0
             if "creation" in rid or "new_post" in rid or "create" in rid:
@@ -1330,7 +1376,7 @@ class InstagramReelUploadU2Flow:
                 # (where the + sits on this build).
                 if width and height and cx < width * 0.25 and cy < height * 0.18:
                     score += 4
-            if score <= 0:
+            if score < self._MIN_CREATE_SCORE:
                 continue
 
             if logged < 8:
@@ -1342,7 +1388,7 @@ class InstagramReelUploadU2Flow:
                 best_attrs = (rid, desc, cls, attrs.get("bounds", ""))
 
         if best is None:
-            _emit(logger, "warning", "u2: no create-looking node in the view tree for %s (will fall back to a coordinate tap)", target)
+            _emit(logger, "warning", "u2: no create-looking node scored %s+ in the view tree for %s (will fall back to a coordinate tap)", self._MIN_CREATE_SCORE, target)
         else:
             # Always log the WINNER's identity, not just its position -- the
             # capped candidate list above can scroll it off, which is how we
@@ -1377,7 +1423,44 @@ class InstagramReelUploadU2Flow:
         return {"profile_id": profile.id, "target": target, "aborted": False,
                 "success": False, "account_flag": flag}
 
-    def _open_reel_composer_u2(self, d, target, emit, logger=None) -> bool:
+    def _open_reel_composer_u2(self, d, target, emit, logger=None, attempts: int = 2) -> bool:
+        """Open the reel composer, resetting Instagram to its home feed and
+        trying again if the first attempt lands somewhere else.
+
+        The retry is the point. A run that misidentifies the composer does not
+        just lose its own post -- it *leaves Instagram on the wrong screen*, so
+        the next run starts there and fails identically. That is how four
+        profiles showed 100% failure two days running on 2026-08-06 while being
+        perfectly healthy, and it is why a phone can burn all three queue
+        retries, get flagged `Retries Exhausted`, and still be fine.
+
+        Tapping the house icon costs about a second and puts the next attempt
+        back at the one screen the '+' is reliably findable from, which breaks
+        the loop inside a single run instead of three runs and ~3 hours later.
+        """
+        for attempt in range(1, max(1, attempts) + 1):
+            if self._open_reel_composer_once_u2(d, target, emit, logger=logger):
+                if attempt > 1:
+                    _emit(logger, "info", "u2: reel composer opened on attempt %s/%s for %s",
+                          attempt, attempts, target)
+                return True
+            if attempt >= attempts:
+                break
+            _emit(logger, "warning",
+                  "u2: composer not open on attempt %s/%s for %s -- resetting to the IG home feed and retrying",
+                  attempt, attempts, target)
+            # Back to a known screen. Deliberately the in-app house icon and not
+            # a force-stop: restarting Instagram costs ~10s of cold start and can
+            # resurface the login/"save your info" interstitials this flow has
+            # already cleared earlier in the run.
+            self._recover_to_instagram_u2(d, target, emit, logger)
+            self._tap_ig_home_icon_u2(d, target, emit, logger=logger)
+            waits.settle(2, ready=waits.u2_ready(d, *self._CREATE_SELECTORS),
+                         logger=logger, what="IG home feed after composer reset")
+            self._dismiss_popups_u2(d, logger=logger)
+        return False
+
+    def _open_reel_composer_once_u2(self, d, target, emit, logger=None) -> bool:
         # Make sure Instagram is the foreground app before hunting for the + --
         # a stray nav could have dropped us to the launcher, and we must not dump
         # / tap launcher controls.

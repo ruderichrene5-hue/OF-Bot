@@ -184,3 +184,141 @@ class GallerySelectorOrderTest(TestCase):
         # it before any text match gets the chance to be wrong.
         first = InstagramReelUploadU2Flow._GALLERY_SELECTORS[0]
         self.assertEqual(first, {"resourceId": f"{IG}/cam_dest_clips"})
+
+
+class LoneNextIsNotTheComposerTest(TestCase):
+    """"Next" alone must not open the gate.
+
+    The denylist cannot help here: the impostor caught on 2026-08-11 carried no
+    resource-id at all (text='Next' desc=None id=None class='android.view.View'),
+    and you cannot deny-list something you cannot name. 13 of that day's 63
+    composer checks passed on it, and every one then failed at the REEL-mode
+    guard -- the screen was never the composer.
+    """
+
+    def setUp(self):
+        self.flow = InstagramReelUploadU2Flow()
+
+    def _check(self, screen):
+        return self.flow._first_present(
+            FakeDevice(screen), list(self.flow._GALLERY_SELECTORS), timeout=0,
+            purpose="reel composer / gallery",
+            reject_ids=self.flow._NOT_THE_COMPOSER_IDS,
+        )
+
+    def test_a_bare_next_is_not_the_composer(self):
+        self.assertIsNone(self._check({"Next": None}))
+
+    def test_next_is_not_a_gallery_selector_at_all(self):
+        self.assertNotIn({"textMatches": "(?i)^next$"},
+                         list(InstagramReelUploadU2Flow._GALLERY_SELECTORS))
+
+    def test_next_beside_a_real_gallery_still_passes(self):
+        # Dropping the selector must not cost us the genuine composer: the
+        # gallery's own cells are what prove it, and they are still listed.
+        self.assertIsNotNone(self._check({"Next": None, "Video, 12 seconds": None}))
+
+    def test_next_is_still_how_the_next_button_is_found(self):
+        # Only the *gate* stopped trusting "Next". Tapping Next must not regress.
+        self.assertIn({"textMatches": "(?i)^next$"},
+                      list(InstagramReelUploadU2Flow._NEXT_SELECTORS))
+
+
+class CreateButtonEvidenceTest(TestCase):
+    """The '+' locator must not tap a button just for being a button.
+
+    Scoring started at 0 and the best candidate won whatever it was worth, so
+    "clickable, and a button" -- one point, true of dozens of nodes on any
+    screen -- won unopposed. On 2026-08-11 it elected desc='next' at the bottom
+    of the screen and the queue row was lost before the composer ever opened.
+    """
+
+    def setUp(self):
+        self.flow = InstagramReelUploadU2Flow()
+
+    def test_a_bare_clickable_button_is_not_evidence(self):
+        # Verbatim from the 2026-08-11 logs: score=1, centre (540, 2139).
+        d = DumpDevice(dump(dnode(
+            rid="", desc="next", cls="android.widget.Button",
+            bounds="[440,2100][640,2178]")))
+        self.assertIsNone(self.flow._find_create_via_dump_u2(d, "t"))
+
+    def test_the_floor_alone_rejects_an_unlabelled_button(self):
+        # Same shape with no content-desc, so the composer-button denylist can
+        # not be what rejects it -- this is the score floor doing the work.
+        d = DumpDevice(dump(dnode(
+            rid="", desc="", cls="android.widget.Button",
+            bounds="[440,2100][640,2178]")))
+        self.assertIsNone(self.flow._find_create_via_dump_u2(d, "t"))
+
+    def test_a_composer_button_is_never_the_create_button(self):
+        for desc in ("next", "share", "post", "continue", "done", "cancel"):
+            with self.subTest(desc=desc):
+                d = DumpDevice(dump(dnode(
+                    rid="", desc=desc, cls="android.widget.Button",
+                    bounds="[40,60][200,180]")))  # top-left, so it would score 5
+                self.assertIsNone(self.flow._find_create_via_dump_u2(d, "t"))
+
+    def test_new_post_still_scores_despite_containing_post(self):
+        # The composer-button denylist matches the whole desc, not a substring,
+        # so the legitimate "New post" is untouched.
+        d = DumpDevice(dump(dnode(desc="New post", bounds="[768,72][912,240]")))
+        self.assertEqual(self.flow._find_create_via_dump_u2(d, "t"), (840, 156))
+
+    def test_a_top_left_button_still_wins_on_the_position_hint(self):
+        # 1 (clickable button) + 4 (top-left) = 5, comfortably over the floor.
+        d = DumpDevice(dump(dnode(rid="", desc="", bounds="[40,60][200,180]")))
+        self.assertEqual(self.flow._find_create_via_dump_u2(d, "t"), (120, 120))
+
+    def test_a_camera_button_still_meets_the_floor(self):
+        # 3 ("camera" in id) + 1 (clickable button) = 4, exactly the floor.
+        d = DumpDevice(dump(dnode(
+            rid=f"{IG}/camera_shutter", bounds="[900,2000][1000,2100]")))
+        self.assertEqual(self.flow._find_create_via_dump_u2(d, "t"), (950, 2050))
+
+    def test_the_floor_is_the_lowest_evidenced_score(self):
+        self.assertEqual(InstagramReelUploadU2Flow._MIN_CREATE_SCORE, 4)
+
+
+class ComposerReopenTest(TestCase):
+    """A run that lands on the wrong screen must reset and try again.
+
+    Getting this wrong costs more than the post. A failed run leaves Instagram
+    on whatever it wandered into, so the *next* run starts there and fails the
+    same way -- which is how a healthy phone burns all three queue retries and
+    ends up flagged `Retries Exhausted`.
+    """
+
+    def setUp(self):
+        self.flow = InstagramReelUploadU2Flow()
+        self.reset_calls = []
+        self.flow._recover_to_instagram_u2 = lambda *a, **k: True
+        self.flow._dismiss_popups_u2 = lambda *a, **k: None
+        self.flow._tap_ig_home_icon_u2 = (
+            lambda *a, **k: self.reset_calls.append("home") or True)
+
+    def _run(self, outcomes, attempts=2):
+        results = list(outcomes)
+        self.flow._open_reel_composer_once_u2 = lambda *a, **k: results.pop(0)
+        from unittest.mock import patch
+        with patch("adb_bot.automation.flows.instagram_reel.waits.settle"):
+            return self.flow._open_reel_composer_u2(
+                DumpDevice(dump()), "t", None, attempts=attempts)
+
+    def test_a_first_attempt_that_works_does_not_reset(self):
+        self.assertTrue(self._run([True]))
+        self.assertEqual(self.reset_calls, [])
+
+    def test_a_failed_attempt_resets_and_retries(self):
+        self.assertTrue(self._run([False, True]))
+        self.assertEqual(self.reset_calls, ["home"])
+
+    def test_giving_up_after_the_last_attempt(self):
+        self.assertFalse(self._run([False, False]))
+        # Reset between attempts only -- never after the final one, which would
+        # be a pointless extra second on a run that is already over.
+        self.assertEqual(self.reset_calls, ["home"])
+
+    def test_a_single_attempt_never_resets(self):
+        self.assertFalse(self._run([False], attempts=1))
+        self.assertEqual(self.reset_calls, [])
