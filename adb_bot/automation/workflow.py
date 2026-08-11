@@ -44,8 +44,45 @@ MAX_PROFILE_OPEN_SECONDS = 7 * 60
 # Proven 2026-08-06 by an A/B on Blank (10): 420s -> Failed, 1200s -> Done with
 # 147 swipes and 5 follows. 20 min leaves headroom over the measured run without
 # letting a genuinely wedged phone sit all afternoon.
+#
+# `instagram_scroll` is the same scroll, minus the follow pass, and it was left
+# out of this table -- so it inherited the 420s default and died the identical
+# death. It is not a corner case: it is the *only* run a warm-up day that asks
+# for scroll-without-follow ever schedules (the plan's reel is stripped -- reels
+# belong to the Posting Queue), so every such day failed. All 155 attempts across
+# 46 profiles: the watchdog closed the phone ~356s in -- barely past half the
+# scrolling -- the heartbeat then saw a dead device and aborted, and the Run Log
+# recorded "profile lost mid-run (heartbeat failed)". Not one Done row, ever.
+# That is why 41 profiles are parked at day 3 of a 4-day plan.
+#
+# The arithmetic, from `InstagramScrollFlow` in flows/instagram.py rather than
+# from a stopwatch, because the sleeps are randomised per run:
+#   - `_build_sequence(target_total_delay=600.0)` appends swipes until the
+#     accumulated per-swipe delay reaches 600s, so the sleeps ALONE are 600-606s
+#     (300 sampled builds: 600.0-606.1s over 136-159 swipes, mean 148 -- which is
+#     the 147 the live A/B logged);
+#   - each swipe is an `adb shell input swipe ... <duration>` round trip that
+#     blocks for the gesture itself, 220-650ms; over ~148 swipes that is 57-70s
+#     of device time, plus ~0.2-0.4s of adb round trip each, another 30-60s;
+#   - the preamble: 2 launch commands at 3s apiece, the 5s feed-load wait, the
+#     feed verification (one dumpsys probe on the happy path, but up to 5
+#     attempts with 5s between them when the feed is slow), and one `wm size`
+#     read to build the sequence -- ~12s typical, ~40s when verification retries;
+#   - the tail: home keyevent plus a fixed 3s.
+# End to end that is ~700s (11m40s) typical and ~800s (13m20s) when the swipes
+# run long and the feed makes it retry -- which is the right order of magnitude,
+# because `warm_up_process` measured 13m41s and is this flow PLUS the follow pass.
+#
+# And the budget is not only the flow's: `_guarantee_profile_closed` arms the
+# watchdog BEFORE it calls the workflow, so the same clock also covers the MLX
+# readiness wait (readiness_max_attempts * readiness_wait_seconds -- 8 * 10s on
+# this server) and the ADB connect retries (5 * 5s), up to ~105s before a single
+# swipe is sent. 1200s absorbs the worst case with ~5 minutes to spare; a budget
+# below `warm_up_process`'s, which is this flow's own superset, would make no
+# sense at all.
 FLOW_OPEN_SECONDS = {
     "warm_up_process": 20 * 60,
+    "instagram_scroll": 20 * 60,
 }
 
 

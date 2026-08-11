@@ -25,10 +25,10 @@ import subprocess
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from adb_bot.automation import schedule_spec
+from adb_bot.automation import schedule_spec, warmup_completion
 
 # How long a collected snapshot may be reused. Short enough that the page is
 # honest about "running now", long enough that holding the refresh key cannot
@@ -2102,15 +2102,21 @@ def handoff_queue(profiles, warmup_progress: dict) -> dict:
         pass
 
     plan_days = int((warmup_progress or {}).get("plan_days") or 0)
+    # The plan's length is for display; what admits a profile to this list is
+    # the day whose completion ends the warm-up. They differ whenever the last
+    # plan day asks for nothing the warm-up runs, and reading the wrong one is
+    # why this list was empty while the warm-up tab counted 41 finished.
+    finish_day = int((warmup_progress or {}).get("finish_day") or 0)
     by_serial = {p["serial"]: p for p in (warmup_progress or {}).get("profiles") or []}
 
-    out = {"profiles": [], "done": 0, "plan_days": plan_days}
+    out = {"profiles": [], "done": 0, "plan_days": plan_days, "finish_day": finish_day}
     for profile in profiles or []:
         entry = by_serial.get(profile.get("serial"))
         # Finished by the campaign's own reading, not by the Airtable Stage
         # alone: the Stage is written by a loop that may not have run yet, and a
         # profile that finished an hour ago should appear here at once.
-        done = bool(entry) and plan_days > 0 and int(entry.get("day_done") or 0) >= plan_days
+        done = bool(entry) and warmup_completion.is_finished(
+            int(entry.get("day_done") or 0), finish_day)
         if not done and profile.get("warmup_stage") != finished_stage:
             continue
         outstanding = _handoff_outstanding(profile)
@@ -2236,12 +2242,16 @@ def folder_breakdown(profiles, mlx_items=None, folder_names=None,
     from adb_bot.automation.mlx_sync import normalize_mlx_item
 
     progress = warmup_progress or {}
-    plan_days = int(progress.get("plan_days") or 0)
+    # The same completion test the warm-up tab and the hand-off list use:
+    # `classify_profile` files a phone under "handoff" or "ready" off this set,
+    # so a second reading of "finished" here would fix those two tabs and leave
+    # this one still counting the same phones as "warming up".
+    finish_day = int(progress.get("finish_day") or 0)
     warming, finished = set(), set()
     for row in progress.get("profiles") or []:
         serial = row.get("serial") or ""
         warming.add(serial)
-        if plan_days > 0 and int(row.get("day_done") or 0) >= plan_days:
+        if warmup_completion.is_finished(int(row.get("day_done") or 0), finish_day):
             finished.add(serial)
 
     # Serial -> folder, from MLX. Airtable has no folder column, so this is the
@@ -2731,15 +2741,11 @@ def _seconds_to_slot(times, local_now) -> float:
     return (first - local_now).total_seconds()
 
 
-def _parse_airtable_dt(value):
-    """Airtable's ISO dateTime (UTC 'Z') as an aware datetime; None if unusable."""
-    if not value:
-        return None
-    try:
-        stamp = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+# The same parse the completion rule uses, under the name a dozen callers in
+# this module already reach for. Two copies of it is how the page and the rule
+# that retires a profile end up disagreeing about a timestamp, which is exactly
+# the class of drift `warmup_completion` exists to end.
+_parse_airtable_dt = warmup_completion.parse_run_at
 
 
 def _aliased_folder(model_key: str) -> str:
@@ -2917,14 +2923,24 @@ def warmup_progress(airtable, mlx_items=None, timers=None, now=None) -> dict:
     which are different facts -- a profile advances a day at midnight whether
     or not last night's run worked, so day number alone will happily report a
     profile as "day 4" having never completed a single run.
+
+    Which is why "finished" is `warmup_completion`'s answer and not this
+    module's. Calling a profile finished because the calendar ran past the plan
+    is what left 41 phones counted `finished` here while the hand-off list that
+    asks a person for their bio and picture showed nobody and the planner had
+    already retired them. A profile out of plan days that has *not* completed
+    them is `stalled` now -- a named state at the top of the table, rather than
+    a green count nothing acts on.
     """
     from adb_bot.automation import lifecycle, warmup_targets
     from adb_bot.clients import airtable as at
 
     now = now or datetime.now()
-    out = {"profiles": [], "plan_days": 0, "next_run": "", "last_run": "",
+    out = {"profiles": [], "plan_days": 0, "finish_day": 0, "plan_warning": "",
+           "next_run": "", "last_run": "",
            "timer_stopped": True, "account_driven": False, "error": "",
-           "counts": {"ok": 0, "failed": 0, "running": 0, "never": 0, "finished": 0}}
+           "counts": {"ok": 0, "failed": 0, "running": 0, "never": 0,
+                      "stalled": 0, "finished": 0}}
 
     # The scheduled loop's own clock, not a recomputation of it: "when does this
     # next run" is a systemd question, and the timer table already answered it.
@@ -2945,7 +2961,19 @@ def warmup_progress(airtable, mlx_items=None, timers=None, now=None) -> dict:
         out["error"] = f"{type(exc).__name__}: {exc}"
         return out
 
+    # Two different questions, and conflating them is what put 41 phones in
+    # limbo. `plan_days` is how long the plan is, for display ("day 3 of 4").
+    # `finish_day` is the last day that actually has to be *completed* -- a plan
+    # whose final day asks only for a reel (which `warmup_targets` strips, since
+    # reels belong to the Posting Queue) finishes on the day before it.
     out["plan_days"] = max(plan_by_day) if plan_by_day else lifecycle.WARMUP_DAYS
+    out["finish_day"] = warmup_completion.finish_day(plan_by_day)
+    if not plan_by_day:
+        # A plan of unknown length must not retire anybody: falling back to the
+        # built-in length here would call profiles finished against a schedule
+        # nobody chose. `finish_day` is 0, so nothing is; this says why.
+        out["plan_warning"] = ("The Warmup Plan table could not be read, so no "
+                               "profile is being called finished.")
     targets, _skipped = warmup_targets.collect_warmup_targets(
         mlx_items or [], rows, today=now.date())
 
@@ -2953,18 +2981,7 @@ def warmup_progress(airtable, mlx_items=None, timers=None, now=None) -> dict:
     # only the name and cannot be pinned to one twin, so it is kept under the
     # bare name and used only when the serial-qualified history is empty --
     # showing it against every twin would invent runs none of them made.
-    by_serial: dict = defaultdict(list)
-    by_name: dict = defaultdict(list)
-    for record in log or []:
-        fields = record.get("fields", {}) or {}
-        # `create_run_log` writes "<key> / <flow> / <when>"; the key is the
-        # first segment, exactly as `todays_completed_profile_runs` reads it.
-        head = str(fields.get(at.F_RUN_NAME) or "").split(" / ")[0]
-        name, serial = warmup_targets.split_run_key(head)
-        entry = {"at": str(fields.get(at.F_RUN_AT) or ""),
-                 "result": at._select_name(fields.get(at.F_RUN_RESULT)) or "",
-                 "notes": str(fields.get(at.F_RUN_NOTES) or "")}
-        (by_serial[serial] if serial else by_name[name]).append(entry)
+    by_serial, by_name = warmup_completion.history_by_key(log)
 
     # Only a name two profiles share is ambiguous. Legacy history under a name
     # that is unique in the tagged set belongs to exactly one profile, and
@@ -2980,31 +2997,41 @@ def warmup_progress(airtable, mlx_items=None, timers=None, now=None) -> dict:
         if not history:
             history = legacy
 
-        last = history[0] if history else None
-        done = sum(1 for h in history if h["result"] == at.RESULT_DONE)
-        finished = target.day > out["plan_days"]
+        # "How is this profile's warm-up going" is a question about the warm-up
+        # *activity*, not about every row the runner has ever written for it.
+        # The plan asks for a picture on day 2 and a bio on day 3, and neither
+        # can run without a photo or a bio somebody has to supply -- the base
+        # holds 52 `update_profile_picture` rows and not one is Done. Reading
+        # `last` off the whole history would therefore show every healthy
+        # profile as "last run failed" on its day 2 and day 3, and publish
+        # `Warm-up Last Result = Skipped` for a profile whose scroll went fine.
+        # Those rows are what the hand-off tab is for; they are not this pill.
+        activity = [h for h in history
+                    if not h.get("flow")
+                    or h["flow"] in warmup_completion.WARMUP_ACTIVITY_FLOWS]
+        last = activity[0] if activity else None
+        done = sum(1 for h in activity if h["result"] == at.RESULT_DONE)
 
-        # The furthest day of the plan this profile has actually *completed*,
-        # which is what the MLX "Warmup Day N Done" tags mean and is not the
-        # same number as `day`. A profile advances a day at midnight whether or
-        # not the night's run worked, so a phone that has failed since day 1
-        # reads "day 4, day 1 done" -- and that gap is the whole signal.
-        # Counting Done rows would not do: two runs on one day (a retry after a
-        # partial) would push it a day ahead of the plan.
+        # How much of the plan this profile has actually *completed*, which is
+        # what the MLX "Warmup Day N Done" tags mean and is not the same number
+        # as `day`. A profile advances a day at midnight whether or not the
+        # night's run worked, so a phone that has failed since day 1 reads
+        # "day 4, day 1 done" -- and that gap is the whole signal.
         started = warmup_targets._parse_date(target.started)
-        days_done = {
-            # Local, not UTC: `Warm-up Started` is stamped from the server's own
-            # `date.today()`, so a run logged at 00:30 local would otherwise be
-            # counted against the previous campaign day.
-            lifecycle.day_number(started, ran.astimezone().date())
-            for ran in (_parse_airtable_dt(h["at"]) for h in history
-                        if h["result"] == at.RESULT_DONE)
-            if started and ran
-        }
-        day_done = max((d for d in days_done if d >= 1), default=0)
+        day_done = warmup_completion.day_done(history, started, plan_by_day)
+
+        finished = warmup_completion.is_finished(day_done, out["finish_day"])
+        # Past the end of the plan without having completed it. This is the
+        # state that had no name: 41 phones sat here reading "finished" on this
+        # tab and appearing on no worklist, because the calendar running out was
+        # taken for the work being done. Nothing else will move them.
+        stalled = (not finished and out["finish_day"] > 0
+                   and target.day > out["finish_day"])
 
         if finished:
             state = "finished"
+        elif stalled:
+            state = "stalled"
         elif last is None:
             state = "never"
         elif last["result"] == at.RESULT_RUNNING:
@@ -3026,7 +3053,7 @@ def warmup_progress(airtable, mlx_items=None, timers=None, now=None) -> dict:
             "day_done": day_done,
             "started": target.started or "",
             "runs_done": done,
-            "runs_logged": len(history),
+            "runs_logged": len(activity),
             "last_at": _local_stamp(last["at"]) if last else "",
             # The raw Airtable stamp as well as the display one: `warmup_state`
             # writes this into a dateTime field, which will not take the
@@ -3039,8 +3066,11 @@ def warmup_progress(airtable, mlx_items=None, timers=None, now=None) -> dict:
         })
 
     # Problems first, then the ones furthest through the plan: a page read at a
-    # glance should open on the profile that has stopped moving.
-    order = {"failed": 0, "never": 1, "running": 2, "ok": 3, "finished": 4}
+    # glance should open on the profile that has stopped moving. `stalled`
+    # outranks even `failed` -- a failed run may well succeed tonight, whereas a
+    # stalled profile is out of plan days and nothing will retry it.
+    order = {"stalled": 0, "failed": 1, "never": 2, "running": 3, "ok": 4,
+             "finished": 5}
     out["profiles"].sort(key=lambda p: (order.get(p["state"], 9), -p["day"],
                                         p["name"].lower(), p["serial"]))
     out["waiting"] = warmup_waiting(mlx_items or [], rows,
@@ -3301,7 +3331,7 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
                                          "rate": None}, "omitted": 0, "undated": 0},
         "content": {"ready": 0, "drawable": 0, "held": 0, "by_model": {}, "held_by_model": {}},
         "needs_human": {"rows": [], "retrying": [], "profiles": [], "error": ""},
-        "handoff": {"profiles": [], "done": 0, "plan_days": 0},
+        "handoff": {"profiles": [], "done": 0, "plan_days": 0, "finish_day": 0},
         "mlx_issues": {"warmup": [], "parked": [], "other": [], "error": "",
                        "counts": {"tagged": 0, "flagged": 0, "unflagged": 0}},
         "folders": {"folders": [], "totals": {}, "known_folders": 0, "error": ""},
@@ -3318,11 +3348,16 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         "warmup": {"plan": [], "accounts": [], "plan_days": 0, "error": "",
                    "counts": {"running": 0, "blocked": 0, "finished": 0,
                               "not_started": 0}},
-        "warmup_progress": {"profiles": [], "plan_days": 0, "next_run": "",
+        # Every key `warmup_progress` can return, because the renderer indexes
+        # some of them with [] rather than .get: a key missing from this
+        # fallback is a KeyError on the whole page whenever Airtable is down,
+        # which is precisely when somebody is reading it.
+        "warmup_progress": {"profiles": [], "plan_days": 0, "finish_day": 0,
+                            "plan_warning": "", "next_run": "",
                             "last_run": "", "timer_stopped": True,
                             "account_driven": False, "error": "",
                             "counts": {"ok": 0, "failed": 0, "running": 0,
-                                       "never": 0, "finished": 0}},
+                                       "never": 0, "stalled": 0, "finished": 0}},
         "airtable_error": "",
     }
 

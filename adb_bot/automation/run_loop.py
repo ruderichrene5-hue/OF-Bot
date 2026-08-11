@@ -142,7 +142,7 @@ def _profile_warmup_plan(args, airtable, logger):
     so the account-driven planner cannot see them. This reads the tag straight
     off the MLX inventory and matches it to Airtable by serial.
     """
-    from adb_bot.automation import warmup_targets
+    from adb_bot.automation import warmup_completion, warmup_targets
     from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
 
     token = _mlx_token(args.mlx_token)
@@ -161,6 +161,30 @@ def _profile_warmup_plan(args, airtable, logger):
         warmup_plan = airtable.warmup_plan_by_day() or {}
     except Exception as exc:
         logger.warning("Could not read the Warmup Plan table (%s); using the built-in schedule", exc)
+    if not warmup_plan:
+        # `warmup_plan_by_day` swallows its own failures and returns {}, so the
+        # except above can never fire and an unreadable table is indistinguishable
+        # from an empty one. Both matter here: without the plan there is no
+        # finish day, so catch-up is off and every profile past day 4 goes back
+        # to being retired with "warm-up finished -- retag it" -- the exact
+        # silence this loop was fixed to stop. Say so once per tick.
+        logger.warning("warmup: the Warmup Plan table is empty or unreadable -- "
+                       "falling back to the built-in schedule, and no profile "
+                       "will be caught up or called finished this tick")
+
+    # How many plan days each profile has actually completed, over the same Run
+    # Log rows the dashboard reads -- which is what lets the planner give a
+    # profile back a day it lost to a bug instead of walking past the end of the
+    # plan and retiring it. In its own try because it is the *extra*: a Run Log
+    # read that fails must cost this tick its catch-up, not its warm-up, and
+    # passing None plans by the calendar exactly as this loop did before.
+    day_done_by_serial = None
+    try:
+        day_done_by_serial = warmup_completion.day_done_by_serial(
+            profiles, airtable.warmup_run_log(), warmup_plan)
+    except Exception as exc:
+        logger.warning("warmup: could not read how far each profile has got (%s); "
+                       "catch-up is off this tick", exc)
 
     tag = args.warmup_tag or warmup_targets.WARMUP_TAG
     # `Warm-up Started` is stamped before the launch and never moves, so a bad
@@ -168,6 +192,10 @@ def _profile_warmup_plan(args, airtable, logger):
     # plan, a new flow or a new phone budget gets tried on three profiles
     # instead of forty-five.
     only = [p.strip() for p in (args.only or "").split(",") if p.strip()] or None
+    # `completed` and `attempted` are read for *today* and for any flow, and that
+    # stays as it is: a catch-up re-runs a plan day the calendar left behind, so
+    # nothing about the day number says "not again this hour" -- "this profile
+    # already ran today" is the only thing that does, and the timer fires hourly.
     plan = warmup_targets.plan_profile_warmup(
         mlx_items, profiles,
         tag=tag,
@@ -176,12 +204,15 @@ def _profile_warmup_plan(args, airtable, logger):
         selected_launch_ids=only,
         limit=args.limit,
         attempted=airtable.todays_attempted_profile_runs() if args.limit else None,
+        day_done_by_serial=day_done_by_serial,
     )
     deferred = sum(1 for s in plan.skipped if "capped at" in (s.reason or ""))
-    logger.info("warmup: %d MLX profile(s), %d tagged '%s', %d to run this tick%s%s",
+    catching_up = sum(1 for p in plan.plans if p.warmup_target.catchup_day)
+    logger.info("warmup: %d MLX profile(s), %d tagged '%s', %d to run this tick%s%s%s",
                 len(mlx_items), len(plan.plans) + len(plan.skipped), tag, len(plan.plans),
                 f" (restricted to {len(only)} by --only)" if only else "",
-                f", {deferred} deferred by --limit {args.limit}" if deferred else "")
+                f", {deferred} deferred by --limit {args.limit}" if deferred else "",
+                f", {catching_up} catching up a day the plan is still owed" if catching_up else "")
     return plan
 
 
@@ -240,12 +271,20 @@ def _run_warmup(args, logger) -> int:
     return 0
 
 
-def _sync_warmup_state(args, airtable, logger, token=None, dry_run: bool = False):
+def _sync_warmup_state(args, airtable, logger, token=None, dry_run: bool = False,
+                       max_stage_changes=None):
     """Write each profile's warm-up day into Airtable and onto its MLX tags.
 
     A reconciler over the Run Log rather than a callback on the run, so it is
     idempotent and fixes up history -- which is what lets it label profiles that
     did their runs before any of this existed. Safe to call after every tick.
+
+    `max_stage_changes` is the operator's override for the ceiling on how many
+    profiles one pass may move to a different warm-up stage, and it is passed on
+    only when one was actually given: the sync's own default is the number that
+    should hold on the timer, and repeating it here would be a second place to
+    change it. That is why the hourly `warmup` loop's post-tick sync passes
+    nothing at all.
     """
     from adb_bot.automation import report, warmup_state
     from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
@@ -254,16 +293,20 @@ def _sync_warmup_state(args, airtable, logger, token=None, dry_run: bool = False
     token = token or _mlx_token(args.mlx_token)
     mlx_items = MultiloginMobileListClient(token).list_mobile_profiles() if token else []
     progress = report.warmup_progress(airtable, mlx_items=mlx_items)
+    cap = {} if max_stage_changes is None else {"max_stage_changes": max_stage_changes}
     return warmup_state.sync_warmup_state(
         airtable, progress,
         tag_client=MultiloginTagClient(token) if token else None,
-        mlx_items=mlx_items, dry_run=dry_run, logger=logger)
+        mlx_items=mlx_items, dry_run=dry_run, logger=logger, **cap)
 
 
 def _run_warmup_state(args, logger) -> int:
     """`warmup-state`: the publish step on its own, for a timer or by hand."""
     airtable = _airtable(args.base_id, args.airtable_token)
-    result = _sync_warmup_state(args, airtable, logger, dry_run=not args.apply)
+    # Read off `args` here and nowhere else: the flag belongs to this command,
+    # and the post-tick sync inside the `warmup` loop keeps the default.
+    result = _sync_warmup_state(args, airtable, logger, dry_run=not args.apply,
+                                max_stage_changes=args.max_stage_changes)
     if not args.apply:
         logger.info("[DRY-RUN] warm-up state: %s", result.summary())
         for line in result.changes:
@@ -847,6 +890,11 @@ def main(argv=None) -> int:
     parser.add_argument("--warmup-tag", default=None,
                         help="warmup --targets profiles: the MultiLogin tag that marks a profile "
                              "as ready to warm up (default 'Created').")
+    parser.add_argument("--max-stage-changes", type=int, default=None,
+                        help="warmup-state: most profiles one pass may move to a different "
+                             "warm-up stage. Left alone the sync's own default holds, which is "
+                             "what the timer runs on; raise it by hand for the one pass that "
+                             "relabels a backlog after a rule change, having read the dry run.")
     parser.add_argument("--adopt-existing", action="store_true",
                         help="issue-tags: treat every profile already carrying the MLX 'Issue' "
                              "tag as one the bot put there, so an unflagged one has it "

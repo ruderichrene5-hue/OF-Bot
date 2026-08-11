@@ -25,8 +25,17 @@ def _profile(name="Blank (5)", serial="262894", status="Active", needs_human=Fal
                         at.F_PROF_FIRST_POST_DONE: first_post}}
 
 
-def _progress(*serials, plan_days=4, day_done=4, day=5):
+def _progress(*serials, plan_days=4, day_done=4, day=5, finish_day=None):
+    """A `warmup_progress` dict as the tabs below consume it.
+
+    `finish_day` is the key everything downstream tests completion against, and
+    it defaults to the plan's length only because these plans end on a day the
+    warm-up actually runs. Leaving it out of this helper would give every case
+    finish_day 0 -- "the plan could not be read" -- and each of them would then
+    pass by listing nobody, which is what they exist to catch.
+    """
     return {"plan_days": plan_days,
+            "finish_day": plan_days if finish_day is None else finish_day,
             "profiles": [{"serial": s, "name": f"p{s}", "day": day, "day_done": day_done,
                           "last_at": "2026-08-08 08:50"} for s in serials]}
 
@@ -77,7 +86,7 @@ class HandoffQueueTest(unittest.TestCase):
         self.assertEqual(len(out["profiles"]), 1)
 
     def test_an_unreadable_plan_lists_nobody(self):
-        """plan_days 0 means the Warmup Plan table would not read. Telling a VA
+        """finish_day 0 means the Warmup Plan table would not read. Telling a VA
         twenty profiles are ready off a plan of unknown length is worse than
         telling them nothing."""
         out = report.handoff_queue([_profile()], _progress("262894", plan_days=0))

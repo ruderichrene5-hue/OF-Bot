@@ -912,8 +912,17 @@ def _section_handoff(handoff: dict) -> str:
             return (f'<p class="empty">Nothing waiting. All {done} profile(s) that have '
                     f'finished their warm-up have had their bio, picture and first post '
                     f'done.</p>')
-        return ('<p class="empty">No profile has finished its warm-up yet. They appear here '
-                'the day the last day of the plan completes.</p>')
+        # Not "the day the plan ends". That reading is what put 41 profiles on
+        # the Warm-up tab as finished and none of them here: reaching the end of
+        # the calendar is not the same as doing the work, and this list is for
+        # profiles that did it.
+        finish = int(handoff.get("finish_day") or 0)
+        gate = (f' — day {finish} is the last one that asks for any' if finish else "")
+        return (f'<p class="empty">No profile has finished its warm-up yet. A profile '
+                f'appears here once it has <strong>completed</strong> every run its plan '
+                f'asks for{gate}. Running past the last day is not finishing: a profile '
+                f'that did is on the Warm-up tab as <span class="mono">past the plan, not '
+                f'finished</span>.</p>')
 
     lead = (f'<p class="sub">{len(profiles)} profile(s) have finished the warm-up and are '
             f'waiting on you. Each needs a <strong>bio</strong>, a <strong>profile '
@@ -1614,6 +1623,13 @@ _PROGRESS_PILL = {
     "failed": ("bad", "last run failed"),
     "running": ("warn", "running now"),
     "never": ("warn", "never run"),
+    # Red, and never merged into "finished". This is the profile the page used
+    # to call plan complete purely because the calendar had run past the plan:
+    # on 2026-08-11 that was 41 phones reading "plan complete" with a day of the
+    # plan they had never once completed, nothing scheduling them and nobody
+    # asked to finish them. Without a pill of its own the state renders as the
+    # neutral "unknown" and the blindness survives the fix.
+    "stalled": ("bad", "past the plan, not finished"),
     "finished": ("", "plan complete"),
 }
 
@@ -1627,6 +1643,12 @@ def _section_warmup_progress(progress: dict) -> str:
     profiles = progress.get("profiles") or []
     counts = progress.get("counts") or {}
     days = progress.get("plan_days") or 0
+    # Two different numbers, deliberately kept apart: `plan_days` is how long the
+    # plan table is, `finish_day` is the last day of it that asks for warm-up
+    # activity and so the day whose completion finishes a profile. They are both
+    # 4 on the live plan and would only diverge on a plan whose tail asks for a
+    # picture or a reel -- work the warm-up does not gate on.
+    finish = int(progress.get("finish_day") or 0)
 
     banner = ""
     # Loudest thing on the section, because it is the failure that looks like
@@ -1639,18 +1661,43 @@ def _section_warmup_progress(progress: dict) -> str:
     if progress.get("timer_stopped"):
         banner += ('<p><span class="pill bad">timer not active</span> '
                    'Nothing is firing the warm-up loop at all.</p>')
+    # Said out loud rather than absorbed: without the plan there is no day that
+    # finishes a warm-up, so every count below reads "nobody is finished" and
+    # nothing reaches the hand-off list. That is the safe answer, but only if
+    # the reader knows it is an answer about the plan table and not about the
+    # phones.
+    if progress.get("plan_warning"):
+        banner += (f'<p><span class="pill bad">plan not read</span> '
+                   f'<span class="mono">{_e(progress["plan_warning"])}</span> — '
+                   f'until the Warmup Plan table reads, no profile can be called '
+                   f'finished and none will reach the hand-off list.</p>')
     if not profiles:
         return banner + ('<p class="empty">No MultiLogin profile carries the '
                          '<span class="mono">Created</span> tag — that tag is what puts '
                          'a profile on warm-up.</p>')
 
+    # "The plan is N days long" was the whole sentence, and it let a reader take
+    # "past day N" for "done". Naming the day that *finishes* a profile is what
+    # makes the stalled count above readable as the problem it is.
+    if not finish:
+        plan_sentence = f'The plan is {days} day(s) long.'
+    elif finish == days:
+        plan_sentence = (f'The plan is {days} day(s) long, and a profile is finished '
+                         f'when it has <em>completed</em> day {finish} — not when the '
+                         f'calendar runs past it.')
+    else:
+        plan_sentence = (f'The plan is {days} day(s) long, and a profile is finished '
+                         f'when it has <em>completed</em> day {finish} — the days after '
+                         f'that ask for nothing the warm-up runs.')
     lead = (f'<p class="sub">{len(profiles)} profile(s) on warm-up · '
             f'{counts.get("ok", 0)} on track · '
             f'{counts.get("failed", 0)} last run failed · '
+            f'{counts.get("stalled", 0)} past the plan, not finished · '
             f'{counts.get("running", 0)} running now · '
             f'{counts.get("never", 0)} never run · '
             f'{counts.get("finished", 0)} finished. '
-            f'The plan is {days} day(s) long. Day 1 is <strong>Warm-up Started</strong>, '
+            + plan_sentence
+            + f' Day 1 is <strong>Warm-up Started</strong>, '
             f'stamped on the first run and never moved.</p>')
     when = (f'<p class="sub">Next run <strong>{_e(progress.get("next_run") or "—")}</strong>'
             f' · last fired {_e(progress.get("last_run") or "—")}. '
@@ -1665,10 +1712,17 @@ def _section_warmup_progress(progress: dict) -> str:
                 "Airtable's Warm-up Stage and to the profile's MultiLogin tag.")
             + "</th><th class='num'>Runs done</th><th>Last run</th><th>Result</th>"
             "<th>State</th></tr>")
+    # The denominator is the day that finishes a profile, not the length of the
+    # plan table, so this column and the State pill next to it are judged
+    # against the same number: "day 5 of 6" beside "past the plan, not finished"
+    # would look like a contradiction on a plan whose last days ask for nothing.
+    # They are the same number on the live plan; `plan_days` is spelled out in
+    # the lead above when it differs.
+    gate = finish or days
     rows = []
     for p in profiles:
         tone, label = _PROGRESS_PILL.get(p["state"], ("warn", "unknown"))
-        day = (f'{p["day"]} of {days}' if p["day"] <= days else f'{p["day"]} (past {days})')
+        day = (f'{p["day"]} of {gate}' if p["day"] <= gate else f'{p["day"]} (past {gate})')
         result = _e(p["last_result"] or "—")
         if p["last_notes"]:
             result += _hint(p["last_notes"])
@@ -1691,15 +1745,35 @@ def _section_warmup_progress(progress: dict) -> str:
             f"<td><span class='pill {tone}'>{_e(label)}</span></td></tr>")
 
     note = ""
+    if counts.get("stalled"):
+        # First of the notes because it is the state that had no name: these
+        # are the profiles that read "finished" here while appearing on no
+        # worklist at all. They clear on their own now -- the planner hands a
+        # profile back the day it lost instead of retiring it on the calendar --
+        # so the note says "wait", not "act". Saying otherwise is worse than
+        # saying nothing: re-stamping `Warm-up Started` makes the Run Log rows
+        # before that date invisible, which throws away every day these phones
+        # have already completed and starts all of them over.
+        note += (f'<p class="sub">{counts["stalled"]} profile(s) are '
+                 f'<strong>past the plan and not finished</strong> — the calendar ran '
+                 f'out while a day the plan asks for was never completed. The next '
+                 f'ticks re-run the days they still owe, a few profiles an hour, so '
+                 f'this number should fall on its own; they reach the '
+                 f'<strong>Needs human</strong> tab as each one finishes. Nothing to '
+                 f'do unless a profile is still here tomorrow. Do <em>not</em> re-stamp '
+                 f'<span class="mono">Warm-up Started</span> — that hides the days they '
+                 f'have already done and starts them again from day 1.</p>')
     if counts.get("never"):
-        note = (f'<p class="sub">"Never run" is not the same as broken: a profile tagged '
+        note += (f'<p class="sub">"Never run" is not the same as broken: a profile tagged '
                 f'today has simply not had its first tick yet. It becomes a problem when '
                 f'it is still there after the next run above.</p>')
     if counts.get("failed"):
-        note += ('<p class="sub">A failed run does not stall the plan — the day advances on '
-                 'the calendar either way, so a profile can reach the end of its plan having '
-                 'completed none of it. That is what "runs done" is for: compare it against '
-                 'the day.</p>')
+        note += ('<p class="sub">A failed run does not stop the calendar — the day advances '
+                 'either way, so a profile can reach the end of its plan having completed '
+                 'none of it. That is what the <strong>Completed</strong> column is for: '
+                 'compare it against the day. A profile whose calendar runs out before that '
+                 'number reaches the last day is the <span class="mono">past the plan, not '
+                 'finished</span> state above.</p>')
     return (banner + lead + when + f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>'
             + note)
 
@@ -2038,7 +2112,13 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     # it outranks the account-side blockers the badge used to carry: those are
     # about a population the profile-driven loop no longer runs from.
     progress = data.get("warmup_progress") or {}
-    stuck = (progress.get("counts") or {}).get("failed", 0) or stuck
+    # Failed *and* stalled. A stalled profile is the worse of the two -- a
+    # failed run gets another tick tomorrow, a profile past its plan gets none
+    # ever -- and counting only failures is exactly how 41 of them sat behind a
+    # badge reading 0 for two days while the tab called them finished.
+    progress_counts = progress.get("counts") or {}
+    unattended = int(progress_counts.get("failed", 0)) + int(progress_counts.get("stalled", 0))
+    stuck = unattended or stuck
     if progress.get("account_driven") and progress.get("profiles"):
         # Not "a number of profiles need a person" -- one switch does, and every
         # profile is stalled behind it.

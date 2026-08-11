@@ -29,13 +29,28 @@ from __future__ import annotations
 from dataclasses import dataclass, field as dc_field
 from datetime import date, timedelta
 
-from adb_bot.automation import lifecycle
+from adb_bot.automation import lifecycle, warmup_completion
 from adb_bot.automation.airtable_planner import AccountPlan, AirtablePlan, FlowRun, SkippedAccount
 from adb_bot.automation.mlx_sync import normalize_mlx_item
 
 # The MultiLogin tag that means "this account exists and is ready to be warmed
 # up". Matched case-insensitively: it is typed by a person in the MLX UI.
 WARMUP_TAG = "Created"
+
+# How long past the end of the plan an unfinished profile still gets the days it
+# owes re-run. A plan is days of *work*, not days of calendar: the calendar walks
+# on at midnight whether or not the night's run landed, so without a catch-up a
+# day lost to a bug is lost for good -- the profile falls off the end of the plan
+# and is retired "finished" having never done it. That is not hypothetical: on
+# 2026-08-11 every one of 155 day-4 runs across 46 profiles had died on a
+# watchdog timeout, and 41 profiles were sitting retired at day 3 with nothing
+# downstream able to reach them.
+#
+# The window is what keeps the recovery from being unbounded. A batch abandoned a
+# month ago was abandoned for a reason nobody has looked at yet, and a deploy that
+# quietly put forty phones back on the feed for it would be a worse surprise than
+# the stall. Past this, the profile is reported for a person to decide about.
+CATCHUP_DAYS = 14
 
 
 @dataclass
@@ -48,11 +63,29 @@ class WarmupTarget:
     day: int                     # campaign day, 1-based
     started: str | None = None   # Warm-up Started, ISO; None = starts today
     actions: list = dc_field(default_factory=list)
+    # The plan day this run is actually doing, when that is not the calendar day
+    # -- i.e. a catch-up (see CATCHUP_DAYS). Left None on an ordinary run so the
+    # caller can tell the two apart without re-deriving the decision; `day` keeps
+    # meaning the calendar day, which is what `Warm-up Day` publishes.
+    catchup_day: int | None = None
 
     @property
     def needs_start_date(self) -> bool:
         """True when this run is day 1 and the date still has to be stamped."""
         return not self.started
+
+
+def _ran_today(target, completed) -> bool:
+    """Has this profile already done a day's warm-up activity today?
+
+    `completed` is keyed `(run key, flow)`, so asking it about one flow answers
+    "did this exact run happen", not "has this phone already had its day". A
+    catch-up needs the second question -- see the note at the call site.
+    """
+    keys = (_run_key(target), target.name)
+    return any((key, flow) in (completed or set())
+               for key in keys
+               for flow in warmup_completion.WARMUP_ACTIVITY_FLOWS)
 
 
 def _run_key(target) -> str:
@@ -153,7 +186,8 @@ def plan_profile_warmup(mlx_items, profiles_by_serial, today: date | None = None
                         tag: str = WARMUP_TAG, warmup_plan: dict | None = None,
                         completed: set | None = None,
                         selected_launch_ids=None, limit: int | None = None,
-                        attempted: set | None = None) -> AirtablePlan:
+                        attempted: set | None = None,
+                        day_done_by_serial: dict | None = None) -> AirtablePlan:
     """The warm-up run plan for tagged profiles, in the shape the runner takes.
 
     Deliberately returns an :class:`AirtablePlan` of :class:`AccountPlan`s with
@@ -179,10 +213,26 @@ def plan_profile_warmup(mlx_items, profiles_by_serial, today: date | None = None
     profiles every tick: a failure does not count as completed, and the order is
     stable, so three profiles failing at the head of the list would consume the
     whole cap all day and the tail would never run at all.
+
+    `day_done_by_serial` is ``{serial: plan days actually completed}``, from
+    `warmup_completion.day_done_by_serial`, and it is what turns catch-up on: a
+    profile whose calendar has run past the plan while it still owes a gating day
+    is planned that owed day instead of the calendar day, until CATCHUP_DAYS runs
+    out. Passing None (the default) is not "assume nothing is done" but "do not
+    ask": the planner then behaves exactly as it did before catch-up existed --
+    calendar day only, and past the end of the plan the profile is retired. That
+    is deliberate, because catch-up needs the whole Run Log to decide anything,
+    and a caller that cannot read it must not plan as if every day were owed.
     """
     today = today or date.today()
     completed = completed or set()
     plan = AirtablePlan()
+
+    # The day whose completion ends the warm-up -- 0 when the plan is unreadable
+    # or was not supplied, which `warmup_completion` treats as "nobody is
+    # finished" and which here means "no catch-up", for the same reason: a plan
+    # nobody could read is not grounds for re-running days against it.
+    finish = warmup_completion.finish_day(warmup_plan) if day_done_by_serial is not None else 0
 
     targets, skipped = collect_warmup_targets(mlx_items, profiles_by_serial, today=today, tag=tag)
     plan.skipped.extend(skipped)
@@ -191,19 +241,58 @@ def plan_profile_warmup(mlx_items, profiles_by_serial, today: date | None = None
         if selected_launch_ids and target.launch_id not in selected_launch_ids:
             continue
 
+        # Past the end of the plan with days still owed, the day of *work* is
+        # what gets planned, not the day of the calendar. The lowest owed day
+        # first: the plan is an order, and a profile that missed days 3 and 4
+        # does day 3 next, not the day it happens to have arrived at.
+        plan_day = target.day
+        if finish and target.day > finish:
+            done_days = int((day_done_by_serial or {}).get(target.serial_no) or 0)
+            if not warmup_completion.is_finished(done_days, finish):
+                if target.day - finish > CATCHUP_DAYS:
+                    plan.skipped.append(SkippedAccount(
+                        target.name,
+                        f"day {target.day}: stopped at day {done_days} of {finish} and is more "
+                        f"than {CATCHUP_DAYS} days past the plan -- needs a human"))
+                    continue
+                owed = [d for d in warmup_completion.gating_days(warmup_plan) if d > done_days]
+                # One owed day per calendar day, like every other day of the
+                # plan. The "already run today" guard further down is keyed on
+                # (profile, flow), which is right for an ordinary day but not
+                # here: consecutive owed days can want different flows, so a
+                # profile that caught up day 3 with `warm_up_process` at 10:00
+                # would be handed day 4's `instagram_scroll` at 11:00 and scroll
+                # the same warming account twice in an hour. `day_done` credits
+                # at most one plan day per date anyway, so the second run's Done
+                # row would be discarded and the day re-run tomorrow regardless.
+                if owed and not _ran_today(target, completed):
+                    plan_day = target.catchup_day = owed[0]
+                elif owed:
+                    plan.skipped.append(SkippedAccount(
+                        target.name,
+                        f"catching up day {owed[0]} of the plan: already ran today"))
+                    continue
+
         if warmup_plan:
-            actions, _warnings = lifecycle.plan_actions_from_table(target.day, warmup_plan)
+            actions, _warnings = lifecycle.plan_actions_from_table(plan_day, warmup_plan)
         else:
             # The built-in plan, through lifecycle's own day arithmetic: hand it
             # a start date that puts `today` on this target's day number.
             actions = lifecycle.plan_actions_for_day(
-                today - timedelta(days=target.day - 1), today)
+                today - timedelta(days=plan_day - 1), today)
 
         # Is this day still inside the warm-up at all? Past the end, the built-in
         # plan answers with the posting day's reels rather than with nothing, so
         # "no warm-up actions" alone cannot tell "finished" from "a reel day".
         last_day = max(warmup_plan) if warmup_plan else lifecycle.WARMUP_DAYS
-        within_warmup = target.day <= last_day
+        within_warmup = plan_day <= last_day
+
+        # Every skip below names the day it is talking about, and on a catch-up
+        # that is the plan day, not the calendar day -- a note reading "day 6"
+        # for a run doing day 4's scroll is how the two got confused in the first
+        # place.
+        day_note = (f"catching up day {plan_day} of the plan" if target.catchup_day
+                    else f"day {plan_day}")
 
         # Reels are not part of a profile warm-up, whichever plan asked for one.
         # A reel needs a spoofed variant, and a variant needs a model -- which is
@@ -215,13 +304,13 @@ def plan_profile_warmup(mlx_items, profiles_by_serial, today: date | None = None
         actions = [a for a in actions if a.flow != lifecycle.FLOW_REEL]
         if reels and within_warmup:
             plan.skipped.append(SkippedAccount(
-                target.name, f"day {target.day}: the plan's reel is left to the Posting Queue"))
+                target.name, f"{day_note}: the plan's reel is left to the Posting Queue"))
 
         if not actions:
             if not (reels and within_warmup):
                 plan.skipped.append(SkippedAccount(
                     target.name,
-                    f"day {target.day}: warm-up finished -- retag it in MultiLogin"))
+                    f"{day_note}: warm-up finished -- retag it in MultiLogin"))
             continue
 
         # MLX names are not unique -- this workspace has three profiles called
@@ -241,7 +330,7 @@ def plan_profile_warmup(mlx_items, profiles_by_serial, today: date | None = None
         runs = [FlowRun(a.flow, f"{a.label} [{target.name}]") for a in actions
                 if not any((key, a.flow) in completed for key in done)]
         if not runs:
-            plan.skipped.append(SkippedAccount(target.name, f"day {target.day}: already run today"))
+            plan.skipped.append(SkippedAccount(target.name, f"{day_note}: already run today"))
             continue
 
         entry = AccountPlan(None, run_key, target.launch_id, target.name, runs)

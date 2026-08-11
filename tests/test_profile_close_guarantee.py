@@ -61,6 +61,27 @@ class FlowBudgetT(unittest.TestCase):
     def test_the_warm_up_gets_the_time_it_actually_needs(self):
         self.assertGreater(workflow.open_budget_for("warm_up_process"), 13 * 60 + 41)
 
+    def test_the_bare_scroll_gets_the_same_budget_as_its_own_superset(self):
+        """`warm_up_process` IS `instagram_scroll` plus a follow pass.
+
+        Whatever ceiling the longer flow needs, the shorter one cannot need
+        more -- so pinning them equal is the only relationship that can't be
+        wrong. It was the *absence* of instagram_scroll from the table, not a
+        too-low number in it, that killed all 155 day-4 attempts.
+        """
+        self.assertEqual(workflow.open_budget_for("instagram_scroll"),
+                         workflow.open_budget_for("warm_up_process"))
+
+    def test_the_bare_scroll_clears_its_own_scroll_target_with_room(self):
+        """600s is only what `_build_sequence(target_total_delay=600.0)` SLEEPS
+        for. On top of it the flow pays ~148 blocking swipe round trips, the two
+        launch commands, the 5s feed-load wait and a 3s tail -- ~800s in the
+        worst plausible run -- and the watchdog is armed before the workflow
+        even starts, so it is also timing the MLX readiness wait (8 * 10s here)
+        and the ADB connect retries (5 * 5s). A budget merely above 600 would be
+        the same 356s death with extra steps."""
+        self.assertGreater(workflow.open_budget_for("instagram_scroll"), 800 + 105)
+
     def test_a_post_is_unchanged(self):
         self.assertEqual(workflow.open_budget_for("instagram_reel_upload_u2"),
                          MAX_PROFILE_OPEN_SECONDS)
@@ -82,7 +103,8 @@ class FlowBudgetT(unittest.TestCase):
             def run(self, *a, **k): return {"success": True}
         class A:
             def __init__(self): self.flows = {"warm_up_process": Flow(),
-                                              "instagram_scroll": Flow()}
+                                              "instagram_scroll": Flow(),
+                                              "instagram_reel_upload_u2": Flow()}
         with patch("adb_bot.automation.workflow.threading.Timer", side_effect=spy), \
              patch("adb_bot.automation.workflow.prepare_profile_for_adb",
                    return_value=Profile(id="p", status="ready")), \
@@ -99,14 +121,29 @@ class FlowBudgetT(unittest.TestCase):
         self.assertEqual(self._budget_seen_by(flow_name="warm_up_process"), 20 * 60)
 
     def test_posting_still_gets_seven_minutes(self):
-        self.assertEqual(self._budget_seen_by(flow_name="instagram_scroll"), 420.0)
+        """This used to arm on `instagram_scroll` as its stand-in for "a short
+        flow". That was only ever true by accident -- the scroll is a 10-minute
+        warm-up run that had been left out of FLOW_OPEN_SECONDS -- so the
+        assertion was pinning the bug rather than the posting budget. Arm on an
+        actual post, which is what the 420s default is dimensioned for."""
+        self.assertEqual(self._budget_seen_by(flow_name="instagram_reel_upload_u2"), 420.0)
+
+    def test_the_bare_scroll_flow_arms_the_watchdog_with_its_own_budget(self):
+        """Same wiring check as the warm-up's: the warm-up runner passes no
+        `max_open_seconds`, so a right number in the table that never reaches
+        the Timer would leave day 4 dying exactly as before."""
+        self.assertEqual(self._budget_seen_by(flow_name="instagram_scroll"), 20 * 60)
 
     def test_an_explicit_budget_still_wins(self):
         self.assertEqual(self._budget_seen_by(flow_name="warm_up_process",
                                               max_open_seconds=99), 99.0)
+        self.assertEqual(self._budget_seen_by(flow_name="instagram_scroll",
+                                              max_open_seconds=99), 99.0)
 
     def test_zero_still_means_no_watchdog(self):
         self.assertIsNone(self._budget_seen_by(flow_name="warm_up_process",
+                                               max_open_seconds=0))
+        self.assertIsNone(self._budget_seen_by(flow_name="instagram_scroll",
                                                max_open_seconds=0))
 
 

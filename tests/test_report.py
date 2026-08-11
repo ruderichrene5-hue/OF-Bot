@@ -1492,6 +1492,132 @@ class TabsTest(RenderTest):
         self.assertIn("1 finished warm-up", page)
 
 
+class WarmupBadgeTest(RenderTest):
+    """The number on the Warm-up tab -- the only thing about the campaign a
+    person sees without opening the tab.
+
+    It counted failures alone, and a profile that ran out of plan owing a day is
+    not a failure: its last run can be a clean Done on day 3. On 2026-08-11 that
+    badge read 0 while 41 phones sat past their plan, unscheduled and unclaimed,
+    for two days.
+    """
+
+    def _progress(self, **counts):
+        totals = {"ok": 0, "failed": 0, "running": 0, "never": 0, "finished": 0,
+                  "stalled": 0}
+        totals.update(counts)
+        return {"profiles": [], "plan_days": 4, "finish_day": 4, "next_run": "",
+                "last_run": "", "timer_stopped": False, "account_driven": False,
+                "error": "", "plan_warning": "", "counts": totals}
+
+    def _badge(self, page):
+        return page.split('for="tab-warmup">Warm-up')[1].split("</label>")[0]
+
+    def test_a_stalled_profile_is_work_and_is_counted(self):
+        page = report_html.render(self._data(warmup_progress=self._progress(stalled=41)))
+        self.assertIn('<span class="count">41</span>', self._badge(page))
+
+    def test_failed_and_stalled_are_added_not_chosen_between(self):
+        page = report_html.render(
+            self._data(warmup_progress=self._progress(failed=2, stalled=3)))
+        self.assertIn('<span class="count">5</span>', self._badge(page))
+
+    def test_a_healthy_campaign_carries_no_badge(self):
+        page = report_html.render(self._data(warmup_progress=self._progress(ok=4)))
+        self.assertEqual(self._badge(page), "")
+
+    def test_the_account_side_blockers_are_still_the_fallback(self):
+        """Unchanged: with nothing wrong on the profile-driven side, the badge
+        falls back to the accounts that cannot run."""
+        page = report_html.render(self._data(
+            warmup_progress=self._progress(ok=1),
+            warmup={"plan": [], "accounts": [], "plan_days": 4, "error": "",
+                    "counts": {"blocked": 2}}))
+        self.assertIn('<span class="count">2</span>', self._badge(page))
+
+
+class WarmupStalledRenderTest(unittest.TestCase):
+    """What the warm-up section says about a profile that ran out of plan.
+
+    Every string here is the difference between "41 finished" and "41 nobody is
+    running" -- the page said the first for two days.
+    """
+
+    def _render(self, **overrides):
+        data = {"profiles": [], "plan_days": 4, "finish_day": 4,
+                "next_run": "2026-08-11 16:00", "last_run": "2026-08-11 15:00",
+                "timer_stopped": False, "account_driven": False, "error": "",
+                "plan_warning": "",
+                "counts": {"ok": 0, "failed": 0, "running": 0, "never": 0,
+                           "finished": 0, "stalled": 0}}
+        data.update(overrides)
+        return report_html._section_warmup_progress(data)
+
+    def _row(self, **overrides):
+        row = {"name": "Blank (5)", "serial": "262894", "launch_id": "L1", "day": 7,
+               "started": "2026-08-05", "runs_done": 3, "runs_logged": 5,
+               "last_at": "2026-08-09 09:00", "last_result": "Done", "last_notes": "",
+               "state": "stalled", "ambiguous": False, "day_done": 3}
+        row.update(overrides)
+        return row
+
+    def test_a_stalled_profile_is_red_and_says_what_it_is(self):
+        """Without an entry of its own the state falls through to the neutral
+        "unknown" pill, which is how it stayed invisible."""
+        page = self._render(profiles=[self._row()], counts={"stalled": 1})
+        self.assertIn("past the plan, not finished", page)
+        self.assertNotIn(">unknown<", page)
+        self.assertIn("pill bad", page)
+
+    def test_the_stalled_count_says_they_are_being_caught_up(self):
+        """The note used to tell whoever read it to re-stamp `Warm-up Started`
+        and warm these profiles again, which was true only while the planner
+        retired a profile the moment its calendar ran out. It catches them up
+        now, and following the old advice would be expensive: `day_done` ignores
+        Run Log rows dated before the start date, so re-stamping throws away
+        every day these phones have already completed and starts all 41 over."""
+        page = self._render(profiles=[self._row()], counts={"stalled": 41})
+        self.assertIn("41 profile(s) are", page)
+        self.assertIn("Needs human", page)
+        self.assertNotIn("re-stamp\n", page)
+        self.assertIn("Do <em>not</em> re-stamp", page)
+
+    def test_the_finishing_day_is_named_not_just_the_plan_length(self):
+        page = self._render(profiles=[self._row()])
+        self.assertIn("completed</em> day 4", page)
+
+    def test_a_plan_that_did_not_read_says_so_and_says_what_it_costs(self):
+        page = self._render(profiles=[self._row()], finish_day=0,
+                            plan_warning="RuntimeError: 422")
+        self.assertIn("plan not read", page)
+        self.assertIn("RuntimeError: 422", page)
+        self.assertIn("hand-off", page)
+
+    def test_a_plan_warning_survives_an_empty_fleet(self):
+        """The warning is about the plan table, not the phones -- a page with no
+        tagged profiles must not swallow it."""
+        self.assertIn("plan not read", self._render(plan_warning="RuntimeError: 422"))
+
+
+class HandoffEmptyStateTest(unittest.TestCase):
+    def _render(self, **overrides):
+        data = {"profiles": [], "done": 0, "plan_days": 4, "finish_day": 4}
+        data.update(overrides)
+        return report_html._section_handoff(data)
+
+    def test_it_promises_completion_not_a_date_on_the_calendar(self):
+        """The old wording ("the day the last day of the plan completes") is the
+        reading that put 41 profiles on the Warm-up tab as finished and none of
+        them here."""
+        page = self._render()
+        self.assertIn("completed</strong> every run its plan asks for", page)
+        self.assertIn("day 4 is the last one", page)
+        self.assertNotIn("the day the last day of the plan completes", page)
+
+    def test_an_unreadable_plan_does_not_promise_a_day_number(self):
+        self.assertNotIn("day 0", self._render(finish_day=0))
+
+
 class ProfilesViewTest(RenderTest):
     def _with(self, reason, **kw):
         profile = {"name": "Jil 1", "reason": reason, "status": "Active",

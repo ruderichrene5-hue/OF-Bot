@@ -157,6 +157,99 @@ class PlanTest(TestCase):
         self.assertEqual(plan.plans, [])
 
 
+class CatchUpTest(TestCase):
+    """A plan is days of work, not days of calendar.
+
+    The calendar advances at midnight whether or not the night's run landed, so
+    without catch-up a day lost to a bug is lost for good: the profile walks off
+    the end of the plan and is retired "finished" having never done the day. On
+    2026-08-11 that was 41 phones, every one of them stopped at day 3 because
+    every day-4 scroll in the base had died on a watchdog timeout, and no
+    downstream fix could reach them -- the planner had already stopped
+    scheduling them. This is the only edit that does.
+    """
+
+    # The client's live Warmup Plan: three days of scroll + follow, then a
+    # scroll-and-a-reel day. The reel is the Posting Queue's, so day 4's warm-up
+    # is the scroll alone -- which is exactly the run that was dying.
+    PLAN = {
+        1: {"scroll": True, "follow": True, "reel": False},
+        2: {"scroll": True, "follow": True, "reel": False},
+        3: {"scroll": True, "follow": True, "reel": False},
+        4: {"scroll": True, "follow": False, "reel": True},
+    }
+
+    def _plan(self, day, day_done=None, **kwargs):
+        """A plan for one profile sitting on calendar `day` of the 4-day plan."""
+        from datetime import timedelta
+        started = (TODAY - timedelta(days=day - 1)).isoformat()
+        if day_done is not None:
+            kwargs["day_done_by_serial"] = {"254765": day_done}
+        return plan_profile_warmup([_mlx()], {"254765": _row(started=started)},
+                                   today=TODAY, warmup_plan=self.PLAN, **kwargs)
+
+    def test_a_day_the_profile_still_owes_is_planned_past_the_end_of_the_plan(self):
+        plan = self._plan(day=6, day_done=3)
+        self.assertEqual([r.flow for r in plan.plans[0].runs], [lifecycle.FLOW_SCROLL_ONLY])
+        # The label is what the Run Log will carry, and it has to say which day
+        # of the *plan* was run -- "day 6" of a four-day plan is not a day.
+        self.assertIn("day 4", plan.plans[0].runs[0].label)
+        for skip in plan.skipped:
+            self.assertIn("day 4", skip.reason)
+
+    def test_the_reel_is_still_left_to_the_posting_queue(self):
+        """Day 4 asks for a reel too, and a `Created` profile has no model and so
+        no spoofed variant -- catching up must not start posting."""
+        plan = self._plan(day=6, day_done=3)
+        self.assertNotIn(lifecycle.FLOW_REEL, [r.flow for r in plan.plans[0].runs])
+        self.assertIn("left to the Posting Queue", plan.skipped[0].reason)
+
+    def test_the_lowest_owed_day_is_taken_first(self):
+        """The plan is an order. Seven profiles on the live base owe day 3 *and*
+        day 4; jumping them to day 4 would call the warm-up done having skipped a
+        day of it."""
+        plan = self._plan(day=6, day_done=2)
+        self.assertEqual([r.flow for r in plan.plans[0].runs], [lifecycle.FLOW_WARMUP])
+        self.assertIn("day 3", plan.plans[0].runs[0].label)
+
+    def test_a_profile_that_finished_the_plan_is_still_retired(self):
+        plan = self._plan(day=6, day_done=4)
+        self.assertEqual(plan.plans, [])
+        self.assertIn("warm-up finished", plan.skipped[0].reason)
+
+    def test_a_day_inside_the_plan_is_still_the_calendar_day(self):
+        """Catch-up starts past the end of the plan and nowhere earlier: inside
+        it, a missed day is simply the next day's problem, and re-planning day 1
+        on day 2 would hold a profile at the start of the plan forever."""
+        plan = self._plan(day=2, day_done=0)
+        self.assertIn("day 2", plan.plans[0].runs[0].label)
+
+    def test_the_last_day_of_the_window_is_still_caught_up(self):
+        finish = 4
+        plan = self._plan(day=finish + warmup_targets.CATCHUP_DAYS, day_done=3)
+        self.assertIn("day 4", plan.plans[0].runs[0].label)
+
+    def test_past_the_window_it_is_left_for_a_person(self):
+        """A batch abandoned a month ago was abandoned for a reason nobody has
+        looked at, and a deploy must not silently put it back on the phones."""
+        plan = self._plan(day=4 + warmup_targets.CATCHUP_DAYS + 1, day_done=3)
+        self.assertEqual(plan.plans, [])
+        self.assertEqual(len(plan.skipped), 1)
+        self.assertIn("stopped at day 3", plan.skipped[0].reason)
+        self.assertIn("needs a human", plan.skipped[0].reason)
+
+    def test_without_the_day_counts_the_planner_behaves_exactly_as_before(self):
+        """Catch-up is opt-in. Every caller that cannot read the Run Log -- and
+        every existing test -- must get the old answer, because planning owed
+        days off a count nobody supplied would re-run the whole plan."""
+        as_before = self._plan(day=6)
+        explicit_none = self._plan(day=6, day_done_by_serial=None)
+        for plan in (as_before, explicit_none):
+            self.assertEqual(plan.plans, [])
+            self.assertEqual([(s.account_name, s.reason) for s in plan.skipped],
+                             [("Blank (1)", "day 6: warm-up finished -- retag it in MultiLogin")])
+
+
 class StampStartedTest(TestCase):
     class _Airtable:
         def __init__(self, ok=True):
@@ -262,3 +355,58 @@ class PerTickLimitTest(TestCase):
     def test_once_everyone_has_had_a_turn_the_cap_still_holds(self):
         attempted = {(f"Blank ({i}) [{100 + i}]", lifecycle.FLOW_WARMUP) for i in range(10)}
         self.assertEqual(len(self._plan(10, limit=3, attempted=attempted).plans), 3)
+
+
+class CatchUpPacingTest(CatchUpTest):
+    """One owed day per calendar day, the same as every other day of the plan.
+
+    The "already run today" guard further down is keyed on (profile, flow),
+    which is the right key for an ordinary day: it is what stops the hourly
+    timer re-running the same flow. It is the wrong key here, because
+    consecutive owed days can want different flows -- a profile that caught up
+    day 3 with `warm_up_process` at 10:00 is owed day 4's `instagram_scroll` at
+    11:00, which no (profile, flow) entry covers. It would then scroll the same
+    warming Instagram account twice inside an hour, which is the opposite of
+    what four days of warm-up are for; and `day_done` credits at most one plan
+    day per date anyway, so the second run's Done row would be thrown away and
+    the day re-run tomorrow regardless.
+    """
+
+    def _key(self, flow):
+        """The Run Log key the runner writes: name *and* serial, because the
+        names in this workspace are not unique."""
+        return ("Blank (1) [254765]", flow)
+
+    def test_a_profile_that_already_caught_up_today_is_left_alone(self):
+        plan = self._plan(day=6, day_done=2,
+                          completed={self._key(lifecycle.FLOW_WARMUP)})
+        self.assertEqual(plan.plans, [])
+        self.assertTrue(any("already ran today" in s.reason for s in plan.skipped))
+
+    def test_the_owed_day_is_planned_again_tomorrow(self):
+        """Nothing is lost by waiting: with today's run out of `completed`, the
+        next day's tick picks the same owed day straight back up."""
+        plan = self._plan(day=6, day_done=2, completed=set())
+        self.assertEqual([r.flow for r in plan.plans[0].runs], [lifecycle.FLOW_WARMUP])
+        self.assertIn("day 3", plan.plans[0].runs[0].label)
+
+    def test_a_scroll_earlier_today_also_counts_as_the_day_being_used(self):
+        """The two activity flows are interchangeable for this question: which
+        one ran does not change that the phone has had its day."""
+        plan = self._plan(day=6, day_done=3,
+                          completed={self._key(lifecycle.FLOW_SCROLL_ONLY)})
+        self.assertEqual(plan.plans, [])
+
+    def test_a_skipped_picture_earlier_today_does_not_use_up_the_day(self):
+        """A picture the bot could not set is not a warm-up run. Counting it
+        would park the profile for a day on the strength of a row that says
+        nothing happened."""
+        plan = self._plan(day=6, day_done=3,
+                          completed={self._key(lifecycle.FLOW_UPDATE_PICTURE)})
+        self.assertEqual([r.flow for r in plan.plans[0].runs], [lifecycle.FLOW_SCROLL_ONLY])
+
+    def test_an_ordinary_in_plan_day_is_untouched_by_this(self):
+        """The guard is inside the catch-up branch only: a profile still inside
+        its plan keeps the per-flow behaviour it has always had."""
+        plan = self._plan(day=2, completed=set())
+        self.assertEqual([r.flow for r in plan.plans[0].runs], [lifecycle.FLOW_WARMUP])

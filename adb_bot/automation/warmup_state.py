@@ -32,12 +32,18 @@ picks profiles by it -- and it is a human's field: dropping it because the bot
 believes a profile is finished would remove that profile from the warm-up for
 good if the belief were ever wrong. A finished profile gets `Warmup ready, need
 Bio and Pic` added alongside, and a person retires `Created` when they act on it.
+
+That last sentence is why this pass can refuse to run. Retiring `Created` is
+irreversible from here, and the finished tag is what asks for it, so a sweep
+that would move more than `MAX_STAGE_CHANGES_DEFAULT` stages at once writes
+nothing and reports the diff instead of relabelling the workspace unattended.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dc_field
 
+from adb_bot.automation import warmup_completion
 from adb_bot.clients import airtable as at
 
 # The tags already in the workspace, with the colours they were given there.
@@ -63,6 +69,24 @@ TAG_COLORS = {
 # back to the day tags it does have and reports the shortfall.
 MAX_DAY_TAG = 4
 
+# How many profiles may have their **stage** moved by one unattended sweep
+# before the pass refuses to write at all.
+#
+# `Warmup ready, need Bio and Pic` is an instruction to a person: do the bio,
+# the picture and the first post, then drop `Created`. Once `Created` is gone
+# `warmup_targets.collect_warmup_targets` never sees that profile again and no
+# loop puts it back -- it is the one step here the bot cannot undo, and this
+# runs on a 30-minute timer with nobody watching. A changed definition of
+# "finished", or one bad read of the Warmup Plan table, could otherwise relabel
+# the whole workspace before anyone opened it.
+#
+# 10 is measured, not round: the first sweep after the day-4 fix wants to move
+# nine stages (seven profiles from `Warmup Day 3 Done` back to day 2, two back
+# to day 1 -- profiles that genuinely missed days, which the old calendar
+# attribution flattered). So the real correction goes through unattended and
+# anything an order of magnitude larger stops and asks.
+MAX_STAGE_CHANGES_DEFAULT = 10
+
 
 def day_tag(day: int) -> str:
     return TAG_DAY_DONE.format(day=day)
@@ -79,16 +103,27 @@ def owned_tags(plan_days: int = MAX_DAY_TAG) -> list:
     return [TAG_NOT_STARTED] + [day_tag(d) for d in range(1, days + 1)] + [TAG_FINISHED]
 
 
-def stage_for(day: int, day_done: int, plan_days: int) -> str:
+def stage_for(day: int, day_done: int, plan_days: int, finish_day=None) -> str:
     """The one warm-up tag a profile should be carrying.
 
     Off `day_done`, never `day`. A profile whose calendar day has run past the
     plan without the runs landing is not ready for a bio and a picture -- it is
     the profile someone needs to look at, and labelling it finished is how it
-    would stop being found. `plan_days` of 0 means the Warmup Plan table could
-    not be read, and nothing is called finished on a plan of unknown length.
+    would stop being found.
+
+    Two different questions hide in the plan's length, and they used to share
+    one number. *Which day finishes the warm-up* is `finish_day` -- the last
+    plan day that asks for warm-up activity, per `warmup_completion`; it can be
+    shorter than the plan when the trailing days ask only for a picture, a bio
+    or a reel, none of which the bot can finish on its own. *Which tags the
+    workspace has* is `plan_days` against `MAX_DAY_TAG`, and that stays where it
+    is: it decides what a day tag may be called, not whether anything is done.
+    `finish_day` of None keeps the old reading for callers that have not been
+    given the plan's shape, and 0 -- an unreadable Warmup Plan -- calls nobody
+    finished rather than retagging a fleet against a plan nobody chose.
     """
-    if plan_days > 0 and day_done >= plan_days:
+    finish = plan_days if finish_day is None else int(finish_day)
+    if warmup_completion.is_finished(day_done, finish):
         return TAG_FINISHED
     if day_done <= 0:
         return TAG_NOT_STARTED
@@ -170,8 +205,15 @@ class SyncReport:
 
 
 def build_states(progress: dict, tags_by_launch_id: dict | None = None) -> list:
-    """`report.warmup_progress` output -> one :class:`ProfileState` per profile."""
+    """`report.warmup_progress` output -> one :class:`ProfileState` per profile.
+
+    `finish_day` is carried separately from `plan_days` and passed straight
+    through, so the tag a profile gets and the number the dashboard shows come
+    from one reading of the plan. A progress dict from before that key existed
+    leaves it None, which is the old behaviour rather than "nobody is finished".
+    """
     plan_days = int(progress.get("plan_days") or 0)
+    finish_day = progress.get("finish_day")
     tags_by_launch_id = tags_by_launch_id or {}
     states = []
     for row in progress.get("profiles") or []:
@@ -186,7 +228,7 @@ def build_states(progress: dict, tags_by_launch_id: dict | None = None) -> list:
             serial=str(row.get("serial") or ""),
             day=day,
             day_done=day_done,
-            stage=stage_for(day, day_done, plan_days),
+            stage=stage_for(day, day_done, plan_days, finish_day),
             last_run=str(row.get("last_at_iso") or ""),
             last_result=str(row.get("last_result") or ""),
             runs_done=int(row.get("runs_done") or 0),
@@ -212,12 +254,45 @@ def tags_by_launch_id(mlx_items) -> dict:
     return out
 
 
+def stage_moves(states, snapshot: dict | None) -> list:
+    """`[(state, current_stage), ...]` -- the profiles whose stage would *move*.
+
+    Deliberately narrower than `airtable_differs`. The run metadata (Runs Done,
+    Last Run, Last Result) changes on nearly every row of the first sweep after
+    the Run Log filter widens, and that is the sweep that fixes things: counting
+    it would trip the breaker on exactly the pass it exists to let through. Only
+    `Warm-up Stage` says "this profile is somewhere else in its warm-up now",
+    and only that is counted.
+
+    A row Airtable cannot state a stage for -- no snapshot at all, no row in it,
+    or the field still blank because this is the first write -- is not a move.
+    "No current stage" is not "the stage changed": the first sweep on a fresh
+    column would otherwise read as the whole fleet moving and refuse to write
+    the column it is there to fill.
+    """
+    moves = []
+    for state in states:
+        current = (snapshot or {}).get(state.record_id) or {}
+        was = str(current.get(at.F_PROF_WARMUP_STAGE) or "").strip()
+        if not was or was.lower() == str(state.stage).strip().lower():
+            continue
+        moves.append((state, was))
+    return moves
+
+
 def sync_warmup_state(airtable, progress: dict, tag_client=None, mlx_items=None,
-                      dry_run: bool = False, logger=None) -> SyncReport:
+                      dry_run: bool = False, logger=None,
+                      max_stage_changes: int = MAX_STAGE_CHANGES_DEFAULT) -> SyncReport:
     """Make Airtable and MultiLogin agree with the Run Log. Idempotent.
 
     `tag_client` is optional: without one the Airtable half still runs, which is
     what keeps a MultiLogin outage from also costing the day numbers.
+
+    `max_stage_changes` is the circuit breaker described at
+    :data:`MAX_STAGE_CHANGES_DEFAULT`: past it this pass writes nothing at all
+    -- no Airtable patch and no retag -- and reports what it would have done, so
+    a person reads the diff before the workspace is relabelled. A dry run never
+    trips, because a dry run *is* how you read the diff.
     """
     report = SyncReport()
     plan_days = int(progress.get("plan_days") or 0)
@@ -231,11 +306,53 @@ def sync_warmup_state(airtable, progress: dict, tag_client=None, mlx_items=None,
     # One list call for what Airtable already says. `None` means the fields are
     # missing, and then every row "differs" -- which is the right answer: the
     # first patch is what creates them via typecast.
+    snapshot_failed = False
     try:
         snapshot = airtable.warmup_state_snapshot()
     except Exception as exc:
         report.errors.append(f"warm-up state snapshot: {type(exc).__name__}: {exc}")
         snapshot = None
+        snapshot_failed = True
+
+    # A snapshot that could not be *read* is not the same as a base that has no
+    # stage to read, and the difference decides whether this pass may write.
+    # Without it, every row "differs" (which is correct when the fields are
+    # merely missing -- the first patch creates them) while `stage_moves` sees
+    # no current stage anywhere and reports no moves: the breaker would go
+    # quiet on precisely the pass it cannot measure, and one Airtable 429 would
+    # relabel the whole fleet and strip its MultiLogin day tags unattended.
+    if snapshot_failed and not dry_run:
+        report.checked = len(states)
+        report.errors.append(
+            "refused to write: could not read the current warm-up state from "
+            "Airtable, so there is no way to tell how many profiles this pass "
+            "would move. Nothing was written; the next sweep will retry.")
+        if logger:
+            logger.error("warmup state: %s", report.errors[-1])
+        return report
+
+    # The breaker, before the first write of either kind: a refusal that had
+    # already patched half the fleet would not be a refusal.
+    moves = stage_moves(states, snapshot)
+    limit = int(max_stage_changes)
+    if not dry_run and len(moves) > limit:
+        report.checked = len(states)
+        for state, was in moves:
+            report.changes.append(
+                f"{state.name} [{state.serial}] {was} -> {state.stage}")
+        report.errors.append(
+            f"refused to write: {len(moves)} profiles would change warm-up stage "
+            f"(limit {limit}). Nothing was written. Read the list with "
+            f"`python -m adb_bot.automation.run_loop warmup-state`, then let it "
+            f"through with `python -m adb_bot.automation.run_loop warmup-state "
+            f"--apply --max-stage-changes {len(moves)}`")
+        if logger:
+            logger.error("warmup state: %s", report.errors[-1])
+            # Every one of them, not the usual first 20: the list is the thing
+            # the person has to read before deciding.
+            for line in report.changes:
+                logger.info("  would set %s", line)
+        return report
 
     for state in states:
         report.checked += 1

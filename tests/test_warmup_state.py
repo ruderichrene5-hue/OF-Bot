@@ -24,8 +24,11 @@ def _row(name="Blank (5)", serial="262894", launch_id="111", record_id="recP1",
             "last_at": "2026-08-08 08:50", "last_result": last_result}
 
 
-def _progress(*rows, plan_days=PLAN_DAYS, error=""):
-    return {"profiles": list(rows) or [_row()], "plan_days": plan_days, "error": error}
+def _progress(*rows, plan_days=PLAN_DAYS, error="", finish_day=None):
+    out = {"profiles": list(rows) or [_row()], "plan_days": plan_days, "error": error}
+    if finish_day is not None:
+        out["finish_day"] = finish_day
+    return out
 
 
 class StageTest(unittest.TestCase):
@@ -53,6 +56,47 @@ class StageTest(unittest.TestCase):
 
     def test_a_plan_longer_than_the_tags_stops_at_the_last_tag(self):
         self.assertEqual(warmup_state.stage_for(6, 6, 8), "Warmup Day 4 Done")
+
+
+class FinishDayStageTest(unittest.TestCase):
+    """The day that *finishes* the warm-up is not always the length of the plan.
+
+    Only the days asking for warm-up activity gate; a trailing picture/bio day
+    cannot, because the bot has no picture to set until a person supplies one.
+    `stage_for` therefore takes the finish day separately, and keeps treating
+    `plan_days` as the answer to a different question -- which day tags the
+    workspace actually has.
+    """
+
+    def test_short_of_the_finish_day_is_still_a_day_tag(self):
+        self.assertEqual(warmup_state.stage_for(6, 3, 4, 4), "Warmup Day 3 Done")
+
+    def test_reaching_the_finish_day_is_finished(self):
+        self.assertEqual(warmup_state.stage_for(6, 4, 4, 4),
+                         warmup_state.TAG_FINISHED)
+
+    def test_an_unreadable_plan_finishes_nobody_however_high_day_done_is(self):
+        """finish_day 0 is `warmup_completion`'s "the Warmup Plan would not
+        read". Tagging off it would tell a VA to retire `Created`, and nothing
+        puts a profile back into the campaign after that."""
+        self.assertNotEqual(warmup_state.stage_for(6, 4, 5, 0),
+                            warmup_state.TAG_FINISHED)
+
+    def test_a_finish_day_before_the_end_of_the_plan_still_finishes(self):
+        """A 5-day plan whose day 5 asks only for a bio finishes on day 4."""
+        self.assertEqual(warmup_state.stage_for(5, 4, 5, 4),
+                         warmup_state.TAG_FINISHED)
+
+    def test_build_states_carries_the_finish_day_through(self):
+        state = warmup_state.build_states(
+            _progress(_row(day=9, day_done=4), plan_days=5, finish_day=4))[0]
+        self.assertEqual(state.stage, warmup_state.TAG_FINISHED)
+
+    def test_without_a_finish_day_the_plan_length_still_decides(self):
+        """Progress dicts written before the key existed must not suddenly
+        declare nobody finished."""
+        state = warmup_state.build_states(_progress(_row(day=5, day_done=4)))[0]
+        self.assertEqual(state.stage, warmup_state.TAG_FINISHED)
 
 
 class TagChangeTest(unittest.TestCase):
@@ -230,6 +274,134 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(tags.ensured, [("Warmup Day 1 Done", "green")])
 
 
+def _fleet(count, snapshot_stage="Warmup Day 3 Done"):
+    """`(progress, snapshot, mlx_items)` for `count` profiles Airtable already
+    has a stage for -- a different one, so every row is a stage *move*."""
+    rows = [_row(name=f"Blank ({i})", serial=str(i), launch_id=str(i),
+                 record_id=f"rec{i}") for i in range(count)]
+    progress = _progress(*rows)
+    snapshot = {}
+    for state in warmup_state.build_states(progress):
+        snapshot[state.record_id] = dict(
+            state.airtable_fields(),
+            **{at.F_PROF_WARMUP_STAGE: snapshot_stage})
+    items = [{"id": str(i), "serial_no": str(i), "serial_name": f"Blank ({i})",
+              "status": "ACTIVE", "tags": ["Created", snapshot_stage]}
+             for i in range(count)]
+    return progress, snapshot, items
+
+
+class StageBreakerTest(unittest.TestCase):
+    """The one guard on a pass that runs every 30 minutes with nobody watching.
+
+    `Warmup ready, need Bio and Pic` is an instruction to a VA to do the bio and
+    the picture and then retire `Created` -- and once `Created` is gone,
+    `collect_warmup_targets` never picks that profile up again. A wrong
+    definition of "finished", or a Warmup Plan table that read oddly, would
+    otherwise mass-relabel the workspace before anybody saw it. So a sweep that
+    moves more stages than expected writes nothing and shows its work.
+    """
+
+    def test_above_the_limit_it_writes_nothing_at_all(self):
+        progress, snapshot, items = _fleet(11)
+        air, tags = FakeAirtable(snapshot), FakeTags()
+        result = warmup_state.sync_warmup_state(
+            air, progress, tag_client=tags, mlx_items=items, max_stage_changes=10)
+        self.assertEqual((air.patched, tags.calls, tags.ensured), ([], [], []))
+        self.assertEqual((result.airtable_written, result.tags_written), (0, 0))
+
+    def test_it_still_lists_every_pending_change(self):
+        """The refusal is only useful if it hands over the diff it refused."""
+        progress, snapshot, items = _fleet(11)
+        result = warmup_state.sync_warmup_state(
+            FakeAirtable(snapshot), progress, tag_client=FakeTags(),
+            mlx_items=items, max_stage_changes=10)
+        self.assertEqual(len(result.changes), 11)
+        self.assertIn("Warmup Day 3 Done -> Warmup Day 1 Done", result.changes[0])
+
+    def test_the_error_names_the_count_the_limit_and_the_way_out(self):
+        progress, snapshot, _items = _fleet(11)
+        result = warmup_state.sync_warmup_state(
+            FakeAirtable(snapshot), progress, max_stage_changes=10)
+        self.assertEqual(len(result.errors), 1)
+        message = result.errors[0]
+        self.assertIn("11", message)
+        self.assertIn("limit 10", message)
+        self.assertIn("--max-stage-changes 11", message)
+
+    def test_at_exactly_the_limit_it_goes_through(self):
+        """The correction this release exists to make moves nine stages on the
+        live base. A guard that blocked it would just be an outage."""
+        progress, snapshot, items = _fleet(10)
+        air, tags = FakeAirtable(snapshot), FakeTags()
+        result = warmup_state.sync_warmup_state(
+            air, progress, tag_client=tags, mlx_items=items, max_stage_changes=10)
+        self.assertEqual(result.airtable_written, 10)
+        self.assertEqual(len(tags.calls), 10)
+        self.assertEqual(result.errors, [])
+
+    def test_a_dry_run_never_trips(self):
+        """A dry run is how a person reads the diff, so it has to produce one
+        however large it is."""
+        progress, snapshot, items = _fleet(40)
+        air, tags = FakeAirtable(snapshot), FakeTags()
+        result = warmup_state.sync_warmup_state(
+            air, progress, tag_client=tags, mlx_items=items, dry_run=True,
+            max_stage_changes=10)
+        self.assertEqual((air.patched, tags.calls), ([], []))
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.changes), 40)
+
+    def test_an_unreadable_snapshot_does_not_trip(self):
+        """`warmup_state_snapshot` answers None when the columns do not exist.
+        "No current stage" is not "the stage moved" -- reading it as one would
+        block the very first sweep, the one that creates the column."""
+        progress, _snapshot, items = _fleet(40)
+        air = FakeAirtable(None)
+        result = warmup_state.sync_warmup_state(
+            air, progress, tag_client=FakeTags(), mlx_items=items,
+            max_stage_changes=10)
+        self.assertEqual(len(air.patched), 40)
+        self.assertEqual(result.errors, [])
+
+    def test_a_blank_stage_is_not_a_move_either(self):
+        """First sweep on a fresh column: the rows are there, the field is
+        empty. Every one of them "differs", none of them moved."""
+        progress, snapshot, _items = _fleet(40, snapshot_stage="")
+        air = FakeAirtable(snapshot)
+        result = warmup_state.sync_warmup_state(air, progress, max_stage_changes=10)
+        self.assertEqual(len(air.patched), 40)
+        self.assertEqual(result.errors, [])
+
+    def test_run_metadata_churn_does_not_trip_it(self):
+        """The first sweep after the Run Log filter widens rewrites Runs Done /
+        Last Run / Last Result on nearly every row. That is expected, harmless
+        and undoable -- counting it would block exactly the sweep that fixes
+        the fleet. Only the stage is counted."""
+        rows = [_row(name=f"Blank ({i})", serial=str(i), launch_id=str(i),
+                     record_id=f"rec{i}") for i in range(40)]
+        progress = _progress(*rows)
+        snapshot = {}
+        for state in warmup_state.build_states(progress):
+            snapshot[state.record_id] = dict(
+                state.airtable_fields(),
+                **{at.F_PROF_WARMUP_RUNS_DONE: 0,
+                   at.F_PROF_WARMUP_LAST_RUN: "2026-07-01T00:00:00.000Z",
+                   at.F_PROF_WARMUP_LAST_RESULT: "Failed"})
+        air = FakeAirtable(snapshot)
+        result = warmup_state.sync_warmup_state(air, progress, max_stage_changes=10)
+        self.assertEqual(len(air.patched), 40)
+        self.assertEqual(result.errors, [])
+
+    def test_the_default_limit_is_the_measured_one(self):
+        """Nine real stage corrections on the live base; ten lets them through
+        without a flag and stops anything an order of magnitude larger."""
+        self.assertEqual(warmup_state.MAX_STAGE_CHANGES_DEFAULT, 10)
+        progress, snapshot, _items = _fleet(11)
+        result = warmup_state.sync_warmup_state(FakeAirtable(snapshot), progress)
+        self.assertEqual(len(result.errors), 1)
+
+
 class OwnedTagsTest(unittest.TestCase):
     def test_the_owned_set_is_exactly_what_the_workspace_already_has(self):
         self.assertEqual(warmup_state.owned_tags(4), [
@@ -242,3 +414,46 @@ class OwnedTagsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnreadableSnapshotTest(unittest.TestCase):
+    """A snapshot that could not be *read* is not a base with nothing to read.
+
+    Both end up as `None`, and the difference decides whether this pass may
+    write. Every row "differs" from a missing snapshot -- correct when the
+    columns merely do not exist yet, since the first patch is what creates them
+    -- while the breaker, which counts stages that move, sees no current stage
+    anywhere and reports nothing moving. So on a snapshot read that *failed*,
+    the guard would go quiet on exactly the pass it cannot measure: one Airtable
+    429 would relabel the whole fleet and strip its MultiLogin day tags on an
+    unattended 30-minute timer, and the next sweep would then refuse to put them
+    back because 46 stages want to move at once.
+    """
+
+    class Exploding(FakeAirtable):
+        def warmup_state_snapshot(inner):
+            raise RuntimeError("429 Too Many Requests")
+
+    def test_a_failed_snapshot_read_writes_nothing(self):
+        progress, _snapshot, items = _fleet(40)
+        air, tags = self.Exploding(), FakeTags()
+        result = warmup_state.sync_warmup_state(
+            air, progress, tag_client=tags, mlx_items=items)
+        self.assertEqual((air.patched, tags.calls), ([], []))
+        self.assertEqual(result.airtable_written, 0)
+
+    def test_it_says_why_it_refused(self):
+        progress, _snapshot, items = _fleet(40)
+        result = warmup_state.sync_warmup_state(
+            self.Exploding(), progress, tag_client=FakeTags(), mlx_items=items)
+        self.assertTrue(any("refused to write" in e for e in result.errors))
+        self.assertTrue(any("429" in e for e in result.errors))
+
+    def test_a_dry_run_still_reports(self):
+        """A dry run writes nothing anyway, and refusing to *report* would take
+        away the one thing that says what is wrong."""
+        progress, _snapshot, items = _fleet(40)
+        result = warmup_state.sync_warmup_state(
+            self.Exploding(), progress, tag_client=FakeTags(), mlx_items=items,
+            dry_run=True)
+        self.assertEqual(len(result.changes), 40)

@@ -206,3 +206,80 @@ class DoctorAirtableProbeTest(TestCase):
         self.assertTrue(seen, "probe read no tables at all")
         for table, cap in seen:
             self.assertEqual(cap, 1, f"{table} probe was unbounded")
+
+
+class WarmupRunLogTest(TestCase):
+    """The filter that decides which runs the warm-up is allowed to know about.
+
+    This read used to name `warm_up_process` alone, and the client's plan ends
+    with a scroll-only day that runs as `instagram_scroll`. Every day-4 row --
+    155 attempts across 46 profiles -- was filtered out before the dashboard
+    ever saw it, so the tab could neither show the failures nor ever credit a
+    success. The filter is the whole bug, so these tests pin the formula itself
+    rather than the rows that come back.
+    """
+
+    def _formula(self, client, *args):
+        page = Mock()
+        page.json.return_value = {"records": []}
+        page.raise_for_status.return_value = None
+        with patch("adb_bot.clients.airtable.requests.get", return_value=page) as mock_get:
+            client.warmup_run_log(*args)
+        return mock_get.call_args.kwargs["params"]["filterByFormula"]
+
+    def test_default_asks_for_every_warm_up_flow(self):
+        client = AirtableClient("tok", "app123", "Profiles")
+        self.assertEqual(
+            self._formula(client),
+            "OR({Flow}='warm_up_process',{Flow}='instagram_scroll',"
+            "{Flow}='update_profile_picture',{Flow}='update_bio_u2')",
+        )
+
+    def test_one_flow_is_a_bare_equality(self):
+        # A one-armed OR() is valid Airtable but noise in the request log, and
+        # the string is what a person compares against the base's own view.
+        client = AirtableClient("tok", "app123", "Profiles")
+        self.assertEqual(self._formula(client, "instagram_scroll"),
+                         "{Flow}='instagram_scroll'")
+        self.assertEqual(self._formula(client, ["instagram_scroll"]),
+                         "{Flow}='instagram_scroll'")
+
+    def test_blank_flow_names_are_dropped(self):
+        client = AirtableClient("tok", "app123", "Profiles")
+        self.assertEqual(self._formula(client, ["  warm_up_process ", "", "  "]),
+                         "{Flow}='warm_up_process'")
+
+    def test_apostrophe_raises_instead_of_corrupting_the_formula(self):
+        # Unescaped interpolation: a stray quote does not narrow the result, it
+        # 422s the listing, which `report.warmup_progress` reports as an error
+        # and the dashboard draws as an empty warm-up tab.
+        client = AirtableClient("tok", "app123", "Profiles")
+        with self.assertRaises(ValueError):
+            client.warmup_run_log("it's_a_flow")
+        with self.assertRaises(ValueError):
+            client.warmup_run_log(["warm_up_process", "it's_a_flow"])
+
+    def test_no_flows_at_all_raises_rather_than_reading_the_whole_table(self):
+        client = AirtableClient("tok", "app123", "Profiles")
+        with self.assertRaises(ValueError):
+            client.warmup_run_log([])
+
+    def test_rows_come_back_newest_first(self):
+        client = AirtableClient("tok", "app123", "Profiles")
+        rows = [{"id": "old", "fields": {"Run At": "2026-08-01T10:00:00.000Z"}},
+                {"id": "new", "fields": {"Run At": "2026-08-09T10:00:00.000Z"}}]
+        with patch.object(AirtableClient, "_list_table", return_value=rows):
+            self.assertEqual([r["id"] for r in client.warmup_run_log()], ["new", "old"])
+
+    def test_flow_names_match_the_automation_definition(self):
+        """The guard for the literals `clients` cannot import.
+
+        `clients` is underneath `automation` and must not import it back, so the
+        four flow names live twice. Nothing but this test stops a rename landing
+        in `lifecycle` alone -- and the failure mode of that drift is silent:
+        the Run Log read simply stops matching the rows the runner writes.
+        """
+        from adb_bot.automation import warmup_completion
+        from adb_bot.clients import airtable as at
+
+        self.assertEqual(at.WARMUP_RUN_FLOWS, warmup_completion.WARMUP_RUN_FLOWS)

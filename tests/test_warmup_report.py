@@ -155,8 +155,15 @@ class WarmupProgressTest(unittest.TestCase):
     and which of them have stopped moving."""
 
     NOW = datetime(2026, 8, 9, 15, 0, 0)
-    PLAN = {1: {"Day": 1, "Scroll": True}, 2: {"Day": 2, "Scroll": True},
-            3: {"Day": 3, "Scroll": True}}
+    # The shape `warmup_plan_by_day` actually returns: lower-case normalised
+    # keys, not the raw Airtable column names. This fixture used to carry
+    # {"Day": 1, "Scroll": True}, which `lifecycle.plan_actions_from_row` reads
+    # as a day asking for nothing at all -- so every test below was measured
+    # against an empty plan, and the day-4 shape that broke 46 profiles in
+    # production could never have been covered here.
+    PLAN = {1: {"scroll": True, "follow": True},
+            2: {"scroll": True, "follow": True},
+            3: {"scroll": True, "follow": True}}
 
     def _mlx(self, *names):
         return [{"serial_no": s, "serial_name": n, "id": f"L{s}",
@@ -169,10 +176,19 @@ class WarmupProgressTest(unittest.TestCase):
                 for n, s, started in specs}
 
     def _log(self, *entries):
-        return [{"id": f"r{i}", "fields": {"Name": f"{key} / warm_up_process / x",
-                                           "Flow": "warm_up_process", "Result": result,
-                                           "Run At": at, "Notes": notes}}
-                for i, (key, result, at, notes) in enumerate(entries)]
+        """Run Log rows. An entry may name its flow as a fifth element.
+
+        The flow is not decoration any more: completion is per-flow, so a plan
+        day asking for a scroll is not settled by a `warm_up_process` row.
+        """
+        rows = []
+        for i, entry in enumerate(entries):
+            key, result, at, notes = entry[:4]
+            flow = entry[4] if len(entry) > 4 else "warm_up_process"
+            rows.append({"id": f"r{i}",
+                         "fields": {"Name": f"{key} / {flow} / x", "Flow": flow,
+                                    "Result": result, "Run At": at, "Notes": notes}})
+        return rows
 
     def _progress(self, mlx, rows, log, timers=None, plan=None):
         class Fake:
@@ -297,19 +313,27 @@ class WarmupProgressTest(unittest.TestCase):
 
 
 class DayDoneTest(WarmupProgressTest):
-    """`day_done` -- the furthest day of the plan a profile has actually
-    finished. What MultiLogin's "Warmup Day N Done" tags mean, and the number
-    that stops the calendar from flattering a profile that has stalled."""
+    """`day_done` -- how many of the plan's days a profile has actually
+    completed. What MultiLogin's "Warmup Day N Done" tags mean, and the number
+    that stops the calendar from flattering a profile that has stalled.
+
+    It counts plan days *completed*, not the campaign day a run landed on. The
+    two agree only for a profile that never missed a night, and where they part
+    is where the bug lived: crediting a run to the calendar day it happened on
+    called profiles finished for days they had skipped entirely.
+    """
 
     def _row(self, started, *entries):
         return self._progress(self._mlx(("Blank (1)", "100")),
                               self._rows(("Blank (1)", "100", started)),
                               self._log(*entries))["profiles"][0]
 
-    def test_it_is_the_campaign_day_the_run_landed_on(self):
+    def test_a_run_credits_the_next_plan_day_owed_not_the_calendar_day(self):
+        """One Done run on campaign day 2 has completed day *one* of the plan.
+        Day 1 was never run, and it is still owed."""
         row = self._row("2026-08-07",
                         ("Blank (1) [100]", "Done", "2026-08-08T10:00:00.000Z", ""))
-        self.assertEqual((row["day"], row["day_done"]), (3, 2))
+        self.assertEqual((row["day"], row["day_done"]), (3, 1))
 
     def test_only_a_done_run_counts(self):
         row = self._row("2026-08-07",
@@ -322,13 +346,17 @@ class DayDoneTest(WarmupProgressTest):
         row = self._row("2026-08-07",
                         ("Blank (1) [100]", "Done", "2026-08-08T16:00:00.000Z", ""),
                         ("Blank (1) [100]", "Done", "2026-08-08T10:00:00.000Z", ""))
-        self.assertEqual((row["runs_done"], row["day_done"]), (2, 2))
+        self.assertEqual((row["runs_done"], row["day_done"]), (2, 1))
 
-    def test_a_gap_does_not_stop_it_reporting_the_furthest_day(self):
+    def test_a_skipped_night_is_not_credited_by_the_run_that_follows_it(self):
+        """Two runs, three calendar days apart: two days of the plan are done,
+        not three. The old reading took the furthest campaign day a run landed
+        on, so this profile read "day 3 done" having run twice -- and a plan of
+        three days then called it finished."""
         row = self._row("2026-08-07",
                         ("Blank (1) [100]", "Done", "2026-08-09T10:00:00.000Z", ""),
                         ("Blank (1) [100]", "Done", "2026-08-07T10:00:00.000Z", ""))
-        self.assertEqual(row["day_done"], 3)
+        self.assertEqual(row["day_done"], 2)
 
     def test_a_profile_that_has_not_started_has_no_day_done(self):
         self.assertEqual(self._row(None)["day_done"], 0)
@@ -341,12 +369,134 @@ class DayDoneTest(WarmupProgressTest):
         self.assertEqual(row["day_done"], 0)
 
 
+class DayFourScrollTest(WarmupProgressTest):
+    """The client's actual plan, and the day that finished nothing.
+
+    Days 1-3 ask for scroll + follow (`warm_up_process`); day 4 asks for a
+    scroll and a reel, and `warmup_targets` strips the reel because reels belong
+    to the Posting Queue -- so day 4's whole job is one `instagram_scroll` run.
+    On 2026-08-11 not one of the 155 day-4 attempts had ever finished (the flow
+    was missing from `FLOW_OPEN_SECONDS`, so the watchdog shut the phone at
+    seven minutes), yet 41 profiles read `finished` here on the strength of the
+    calendar alone and appeared on no worklist. These pin both halves: a day-4
+    scroll finishes the profile, and its absence stalls it in public.
+    """
+
+    PLAN = {1: {"scroll": True, "follow": True},
+            2: {"scroll": True, "follow": True},
+            3: {"scroll": True, "follow": True},
+            4: {"scroll": True, "reel": True}}
+
+    DAYS_1_3 = (("Blank (1) [100]", "Done", "2026-08-06T10:00:00.000Z", ""),
+                ("Blank (1) [100]", "Done", "2026-08-07T10:00:00.000Z", ""),
+                ("Blank (1) [100]", "Done", "2026-08-08T10:00:00.000Z", ""))
+
+    def _out(self, started, *entries):
+        return self._progress(self._mlx(("Blank (1)", "100")),
+                              self._rows(("Blank (1)", "100", started)),
+                              self._log(*entries))
+
+    @staticmethod
+    def _profile():
+        """A Profiles row for the same phone, with none of the three hand-off
+        tasks ticked and no Stage written yet -- so what puts it on the hand-off
+        list can only be the campaign's own reading of the Run Log."""
+        return [{"record_id": "rec100", "name": "Blank (1)", "serial": "100",
+                 "launch_id": "L100", "status": "Active", "warmup_stage": "",
+                 "warmup_day": 4, "warmup_last_run": "", "handoff": {}}]
+
+    def test_the_day_four_scroll_is_what_finishes_the_warm_up(self):
+        out = self._out("2026-08-06", *self.DAYS_1_3,
+                        ("Blank (1) [100]", "Done", "2026-08-09T10:00:00.000Z", "",
+                         "instagram_scroll"))
+        row = out["profiles"][0]
+        self.assertEqual(out["finish_day"], 4)
+        self.assertEqual((row["day"], row["day_done"], row["state"]), (4, 4, "finished"))
+
+    def test_a_finished_profile_reaches_the_hand_off_list(self):
+        out = self._out("2026-08-06", *self.DAYS_1_3,
+                        ("Blank (1) [100]", "Done", "2026-08-09T10:00:00.000Z", "",
+                         "instagram_scroll"))
+        handoff = report.handoff_queue(self._profile(), out)
+        self.assertEqual([p["serial"] for p in handoff["profiles"]], ["100"])
+        self.assertEqual(handoff["finish_day"], 4)
+
+    def test_without_the_day_four_scroll_it_is_stalled_not_finished(self):
+        """Three days done, day five on the calendar, and nothing left to run
+        it. This is the state 41 phones were in while the tab called them
+        finished."""
+        out = self._out("2026-08-05",
+                        ("Blank (1) [100]", "Done", "2026-08-05T10:00:00.000Z", ""),
+                        ("Blank (1) [100]", "Done", "2026-08-06T10:00:00.000Z", ""),
+                        ("Blank (1) [100]", "Done", "2026-08-07T10:00:00.000Z", ""))
+        row = out["profiles"][0]
+        self.assertEqual((row["day"], row["day_done"], row["state"]), (5, 3, "stalled"))
+        self.assertEqual(out["counts"]["stalled"], 1)
+        self.assertEqual(out["counts"]["finished"], 0)
+
+    def test_a_stalled_profile_is_not_offered_as_a_hand_off(self):
+        """It has not finished. Putting it in front of a VA as ready for a bio
+        and a picture is how the missing day-4 run stayed invisible."""
+        out = self._out("2026-08-05",
+                        ("Blank (1) [100]", "Done", "2026-08-05T10:00:00.000Z", ""),
+                        ("Blank (1) [100]", "Done", "2026-08-06T10:00:00.000Z", ""),
+                        ("Blank (1) [100]", "Done", "2026-08-07T10:00:00.000Z", ""))
+        self.assertEqual(report.handoff_queue(self._profile(), out)["profiles"], [])
+
+    def test_a_warm_up_process_row_does_not_settle_a_scroll_day(self):
+        """Day 4 asks for `instagram_scroll`. A `warm_up_process` row on day 4
+        is a different flow doing different work, and crediting it would hide
+        exactly the failure this whole change is about."""
+        out = self._out("2026-08-06", *self.DAYS_1_3,
+                        ("Blank (1) [100]", "Done", "2026-08-09T10:00:00.000Z", ""))
+        self.assertEqual(out["profiles"][0]["day_done"], 3)
+
+    def test_the_stalled_profile_sorts_above_the_failures(self):
+        """A failed run may well succeed tonight. A stalled profile is out of
+        plan days, so nothing will retry it and somebody has to."""
+        out = self._progress(
+            self._mlx(("Stuck", "100"), ("Broken", "200")),
+            self._rows(("Stuck", "100", "2026-08-04"), ("Broken", "200", "2026-08-08")),
+            self._log(("Broken [200]", "Failed", "2026-08-09T10:00:00.000Z", "")))
+        self.assertEqual([p["name"] for p in out["profiles"]], ["Stuck", "Broken"])
+
+    def test_a_trailing_day_the_warm_up_never_runs_does_not_hold_it_open(self):
+        """`plan_days` is how long the plan is; `finish_day` is the last day
+        that has to be completed. A day asking only for a profile picture is a
+        person's job -- gating on it would mean nobody ever finishes, and the
+        list that asks that person for the picture would stay empty."""
+        plan = {**{d: {"scroll": True, "follow": True} for d in (1, 2, 3)},
+                4: {"picture": True}}
+        out = self._progress(self._mlx(("Blank (1)", "100")),
+                             self._rows(("Blank (1)", "100", "2026-08-07")),
+                             self._log(("Blank (1) [100]", "Done", "2026-08-07T10:00:00.000Z", ""),
+                                       ("Blank (1) [100]", "Done", "2026-08-08T10:00:00.000Z", ""),
+                                       ("Blank (1) [100]", "Done", "2026-08-09T10:00:00.000Z", "")),
+                             plan=plan)
+        self.assertEqual((out["plan_days"], out["finish_day"]), (4, 3))
+        self.assertEqual(out["profiles"][0]["state"], "finished")
+
+    def test_an_unreadable_plan_calls_nobody_finished_and_says_why(self):
+        """Falling back to a built-in length here would retire a fleet against a
+        schedule nobody chose."""
+        out = self._progress(self._mlx(("Blank (1)", "100")),
+                             self._rows(("Blank (1)", "100", "2026-08-01")),
+                             self._log(("Blank (1) [100]", "Done", "2026-08-08T10:00:00.000Z", "")),
+                             plan={})
+        self.assertEqual(out["finish_day"], 0)
+        self.assertIn("Warmup Plan", out["plan_warning"])
+        self.assertEqual(out["counts"]["finished"], 0)
+        self.assertEqual(out["counts"]["stalled"], 0)
+
+
 class WarmupProgressRenderTest(unittest.TestCase):
     def _render(self, **overrides):
-        data = {"profiles": [], "plan_days": 3, "next_run": "2026-08-09 16:00",
+        data = {"profiles": [], "plan_days": 3, "finish_day": 3, "plan_warning": "",
+                "next_run": "2026-08-09 16:00",
                 "last_run": "2026-08-09 15:00", "timer_stopped": False,
                 "account_driven": False, "error": "",
-                "counts": {"ok": 0, "failed": 0, "running": 0, "never": 0, "finished": 0}}
+                "counts": {"ok": 0, "failed": 0, "running": 0, "never": 0,
+                           "stalled": 0, "finished": 0}}
         data.update(overrides)
         return report_html._section_warmup_progress(data)
 
@@ -498,3 +648,65 @@ class WarmupWaitingRenderTest(unittest.TestCase):
     def test_a_profile_name_is_escaped(self):
         page = self._render([self._row(name="<script>x</script>")])
         self.assertNotIn("<script>x</script>", page)
+
+
+class ActivityOnlyReadingTest(WarmupProgressTest):
+    """The pill says how the *warm-up* is going, not how the hand-off is going.
+
+    The client's plan asks for a profile picture on day 2 and a bio on day 3,
+    and the bot cannot do either without a photo or a bio somebody has to
+    supply: on 2026-08-11 the base held 52 `update_profile_picture` rows and not
+    one was Done -- every one skipped `no profile picture`. Reading the newest
+    row of the whole warm-up history would therefore show every healthy profile
+    as "last run failed" on its day 2 and its day 3, and publish
+    `Warm-up Last Result = Skipped` for a phone whose scroll went fine. That is
+    the same blindness this tab was fixed to remove, pointing the other way.
+    Those rows belong to the Needs human tab; they are not this pill.
+    """
+
+    PLAN = {1: {"scroll": True, "follow": True},
+            2: {"scroll": True, "follow": True, "picture": True},
+            3: {"scroll": True, "follow": True, "bio": True},
+            4: {"scroll": True, "reel": True}}
+
+    def _out(self, *entries):
+        return self._progress(self._mlx(("Blank (1)", "100")),
+                              self._rows(("Blank (1)", "100", "2026-08-08")),
+                              self._log(*entries))["profiles"][0]
+
+    def test_a_skipped_picture_does_not_make_a_good_scroll_look_failed(self):
+        row = self._out(
+            ("Blank (1) [100]", "Skipped", "2026-08-09T12:00:00.000Z",
+             "no profile picture (tick 'Use UI flow' and pick a photo)",
+             "update_profile_picture"),
+            ("Blank (1) [100]", "Done", "2026-08-09T11:00:00.000Z", ""))
+        self.assertEqual(row["state"], "ok")
+        self.assertEqual(row["last_result"], "Done")
+
+    def test_a_skipped_picture_is_not_counted_as_a_warm_up_run(self):
+        row = self._out(
+            ("Blank (1) [100]", "Skipped", "2026-08-09T12:00:00.000Z", "",
+             "update_profile_picture"),
+            ("Blank (1) [100]", "Done", "2026-08-09T11:00:00.000Z", ""))
+        self.assertEqual((row["runs_done"], row["runs_logged"]), (1, 1))
+
+    def test_a_failed_scroll_is_still_a_failure(self):
+        """The filter is about which flows answer the question, not about
+        hiding bad news: the activity flow's own result still decides."""
+        row = self._out(
+            ("Blank (1) [100]", "Skipped", "2026-08-09T12:00:00.000Z", "",
+             "update_profile_picture"),
+            ("Blank (1) [100]", "Failed", "2026-08-09T11:00:00.000Z", "device offline"))
+        self.assertEqual(row["state"], "failed")
+        self.assertEqual(row["last_result"], "Failed")
+
+    def test_a_day_the_picture_never_ran_still_completes(self):
+        """Day 2 asks for a picture the bot cannot set. If that gated the day,
+        no profile could ever finish and the tab that asks a person for the
+        picture would sit empty waiting for the picture."""
+        row = self._out(
+            ("Blank (1) [100]", "Done", "2026-08-08T10:00:00.000Z", ""),
+            ("Blank (1) [100]", "Done", "2026-08-09T10:00:00.000Z", ""),
+            ("Blank (1) [100]", "Skipped", "2026-08-09T10:30:00.000Z", "",
+             "update_profile_picture"))
+        self.assertEqual(row["day_done"], 2)

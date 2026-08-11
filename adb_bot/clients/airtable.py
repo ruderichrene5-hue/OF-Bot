@@ -298,6 +298,20 @@ F_RUN_RESULT = "Result"
 F_RUN_AT = "Run At"
 F_RUN_NOTES = "Notes"
 
+# Every flow the warm-up runner can schedule, which is the set `warmup_run_log`
+# has to read the Run Log for. The names are duplicated as literals from
+# `automation.lifecycle` on purpose: `clients` sits underneath `automation` and
+# is imported by it, so importing back the other way would be a cycle. The
+# duplication is kept honest by a guard test that asserts this tuple still
+# equals `automation.warmup_completion.WARMUP_RUN_FLOWS` -- rename a flow on one
+# side and that test fails rather than the warm-up tab quietly going blank.
+WARMUP_RUN_FLOWS = (
+    "warm_up_process",
+    "instagram_scroll",
+    "update_profile_picture",
+    "update_bio_u2",
+)
+
 # Guard values
 MODE_PAUSED = "Paused"
 STAGE_PAUSED = "Paused"
@@ -612,15 +626,36 @@ class AirtableClient:
         """
         return self._patch_in(TABLE_PROFILES, record_id, dict(fields))
 
-    def warmup_run_log(self, flow: str = "warm_up_process") -> list:
-        """Every Run Log row for the warm-up flow, newest first.
+    def warmup_run_log(self, flows=WARMUP_RUN_FLOWS) -> list:
+        """The whole warm-up history, newest first: every flow the warm-up
+        runner schedules, not just `warm_up_process`.
 
         The whole history, not just today's: the dashboard reports which run of
         the plan each profile is on and whether the last one worked, and both
-        are counts over the past, not a snapshot. One flow only -- the Run Log
-        also carries posting and bio runs, which are nobody's warm-up.
+        are counts over the past, not a snapshot.
+
+        It used to read one flow, and that is how the client's day 4 stayed
+        invisible: their plan's last day asks for scroll-only, which runs as
+        `instagram_scroll`, so 155 attempts across 46 profiles never appeared in
+        the warm-up tab at all -- neither their failures nor, had any worked,
+        their successes. Posting and reel rows are still nobody's warm-up and
+        stay out; they belong to the Posting Queue.
         """
-        formula = f"{{{F_RUN_FLOW}}}='{flow}'"
+        if isinstance(flows, str):
+            flows = [flows]
+        names = [str(name).strip() for name in (flows or []) if str(name).strip()]
+        if not names:
+            raise ValueError("warmup_run_log needs at least one flow name")
+        # The formula is interpolated, not escaped -- and a malformed one does
+        # not degrade, it 422s the entire listing, which `report.warmup_progress`
+        # turns into an `error` key and the dashboard renders as an empty
+        # warm-up tab. A flow name with an apostrophe in it is a bug in the
+        # caller either way, so say so here instead of shipping a broken filter.
+        for name in names:
+            if "'" in name:
+                raise ValueError(f"flow name would corrupt the Airtable formula: {name!r}")
+        clauses = [f"{{{F_RUN_FLOW}}}='{name}'" for name in names]
+        formula = clauses[0] if len(clauses) == 1 else f"OR({','.join(clauses)})"
         rows = self._list_table(
             TABLE_RUN_LOG,
             fields=[F_RUN_NAME, F_RUN_FLOW, F_RUN_RESULT, F_RUN_AT, F_RUN_NOTES],
