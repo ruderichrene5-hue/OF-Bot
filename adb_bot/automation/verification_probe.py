@@ -13,7 +13,7 @@ UI dump, a screenshot and the extracted text into `~/.adb_bot/verification/`,
 and printing what the real flow *would* have done. No number is rented, no
 captcha is bought, nothing is tapped or typed. That is the intended first run
 against any profile, and it is how the marker lists in `verification.py` get
-corrected from real screens rather than guesses (TODO 3.1 / 3.2).
+corrected from real screens rather than guesses (TODO_2026-08-12 §3).
 
 **With `--apply`** the same driver runs for real through `run_verification`:
 numbers get rented, codes typed, captchas bought. It spends money.
@@ -283,7 +283,7 @@ def _observe(driver, logger, seconds: int, interval: int, target=None) -> dict:
             logger.warning(
                 "probe: this screen classified as NONE. If it is in fact a "
                 "verification screen, its wording is missing from the marker "
-                "lists in flows/verification.py (TODO 3.2). Text was: %r",
+                "lists in flows/verification.py (TODO_2026-08-12 §3). Text was: %r",
                 (text or "")[:600])
         else:
             logger.info("probe: screen looks like %s", challenge)
@@ -406,7 +406,7 @@ def _run_on_phone(args, clients, adb_client, recorder, logger,
         if set(seen) <= {verification.CHALLENGE_NONE}:
             print("No verification screen was recognised in the whole window.\n"
                   "Either this profile is not actually showing one, or its "
-                  "wording is missing from the marker lists (TODO 3.2) --\n"
+                  "wording is missing from the marker lists (TODO_2026-08-12 §3) --\n"
                   "read the saved .txt files to tell which.")
         return 0
 
@@ -427,7 +427,7 @@ def _run_on_phone(args, clients, adb_client, recorder, logger,
 
     # Deliberately NOT clearing the Issue tag here. This is the probe; a solved
     # profile still wants a person to confirm before it goes back into posting,
-    # and the tag is the only thing keeping it out (TODO 4.2 / 4.3).
+    # and the tag is the only thing keeping it out (TODO_2026-08-12 §4.2 / 4.3).
     if result.ok:
         print(f"{name} cleared its verification chain. The '{ISSUE_TAG}' tag was "
               f"left on: check the account by hand, then remove the tag to put "

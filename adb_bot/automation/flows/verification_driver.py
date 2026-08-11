@@ -15,7 +15,7 @@ per-run folder under `~/.adb_bot/verification/`, alongside a `screens.jsonl`
 giving the classification of each one. When a run ends as `stuck` or
 `needs_human`, that folder is the answer to "what was it actually looking at?" --
 and it is also how the marker lists in `verification.py` get corrected from real
-screens instead of guesses (TODO 3.2).
+screens instead of guesses (TODO_2026-08-12 §3).
 
 **Observation mode.** Constructed with `act=False` the driver reads and records
 but never taps, types or rents anything: every action logs what it *would* have
@@ -613,7 +613,7 @@ class AdbChallengeDriver:
         return True
 
     def upload_photo(self) -> bool:
-        """Not implemented, on purpose -- see TODO 3.4.
+        """Not implemented, on purpose -- see TODO_2026-08-12 §5.1.
 
         The photo challenge wants a picture of a person. Nothing in this repo
         owns one: the model's media folder holds reel clips, and a frame from a
@@ -624,7 +624,7 @@ class AdbChallengeDriver:
         """
         self._log("warning",
                   "photo challenge: no picture source is configured, so this "
-                  "profile needs a person (TODO 3.4)")
+                  "profile needs a person (TODO_2026-08-12 §5.1)")
         return False
 
     def capture_captcha_image(self) -> str | None:

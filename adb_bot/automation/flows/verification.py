@@ -33,8 +33,14 @@ which is the state the profile was already in.
 **The device half is a seam.** Everything below drives a `ChallengeDriver` --
 read the screen, type in a field, tap the button, upload a photo. The
 orchestration in this module is pure logic and is unit-tested with a fake
-driver; the real implementation is what has to be written against a live flagged
-phone, where the actual selectors can be seen.
+driver; the real one is `flows/verification_driver.AdbChallengeDriver`, and
+`automation/verification_probe.py` is how it gets pointed at a live profile.
+
+**What has actually been seen.** The phone, code, banned and signed-out screens
+have been read off real flagged phones and are pinned as fixtures in the tests.
+The photo, image-captcha and method-chooser markers below are still general
+knowledge of Instagram's wording rather than this fleet's screens. Nothing has
+yet *solved* a challenge end to end -- see TODO_2026-08-12.md.
 """
 
 from __future__ import annotations
@@ -69,14 +75,15 @@ RESULT_SIGNED_OUT = "signed_out"    # nobody is logged in; there is nothing to v
 # resource ids containing words like "confirm" and "verification" on ordinary
 # screens, so any marker below would match a perfectly healthy feed.
 #
-# TODO 3.2: with one exception -- the signed-out markers below, which were read
-# off a real phone -- these phrases come from general knowledge of Instagram's
-# wording, NOT from this fleet's own screens. No dump of a real *challenge* has
-# been seen yet. Check every list against real dumps: a phrase that never
-# appears is dead weight, and a real screen that classifies as CHALLENGE_NONE is
-# a hole the loop will walk straight past. `verification_probe.py --sweep`
-# collects the dumps; add a fixture per confirmed screen to
-# tests/test_verification_flow.py.
+# TODO_2026-08-12 §3: **confirmed** against real dumps -- the phone, code and
+# signed-out lists, plus the ban path. **Still guesses** -- `_PHOTO_MARKERS`,
+# `_IMAGE_CAPTCHA_MARKERS` and `_CHOOSE_METHOD_MARKERS`, which no real screen
+# has yet exercised. The captcha one matters most: it is reportedly the first
+# screen a flagged account shows, so a hole there gates everything behind it.
+# A phrase that never appears is dead weight; a real screen that classifies as
+# CHALLENGE_NONE is a hole the loop walks straight past.
+# `verification_probe.py --sweep` collects the dumps; add a fixture per
+# confirmed screen to tests/test_verification_flow.py (see `RealScreenTest`).
 _CHOOSE_METHOD_MARKERS = (
     "how do you want to get",
     "choose how to",
@@ -242,7 +249,7 @@ class ChallengeDriver(Protocol):
 
     Implemented for real by `flows/verification_driver.AdbChallengeDriver`, and
     as a fake in the tests. The driver exists but **its selectors have never met
-    a real challenge screen** -- confirming them is TODO_2026-08-11.md section 3.
+    a real challenge screen** -- confirming them is TODO_2026-08-12.md section 3.
     The house rule from `interruptions.py` applies throughout: tap buttons only
     on an EXACT label match taken from a UI dump, never from OCR.
 
@@ -276,7 +283,8 @@ class ChallengeDriver(Protocol):
         Open question before this can be written: *which* picture. Nothing in
         this repo currently owns a photo of a person, the model's media folder
         is the obvious source but a reel frame may not pass, and the wrong face
-        on the wrong account is worse than failing the step (TODO 3.4). Returning
+        on the wrong account is worse than failing the step
+        (TODO_2026-08-12 §5.1). Returning
         False here is a legitimate outcome -- it leaves the profile to a human.
         """
 
@@ -329,7 +337,7 @@ def run_verification(driver: ChallengeDriver, router, solver=None, logger=None,
     can act on -- the caller's job is to write the result to Airtable, and an
     exception there would just lose it.
 
-    TODO 4.1: no *loop* calls this yet -- only `verification_probe.py --apply`,
+    TODO_2026-08-12 §4.1: no *loop* calls this yet -- only `verification_probe.py --apply`,
     by hand. It needs a runner that picks flagged profiles, takes the profile
     lock, launches, runs this, and writes the result back; `recovery_runner.py`
     is the closest existing shape. On `solved` the MLX `Issue` tag comes off
