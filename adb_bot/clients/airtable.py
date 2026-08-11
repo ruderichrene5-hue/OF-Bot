@@ -128,6 +128,8 @@ RECHECK_DELAY_SECONDS = 15 * 60
 # Caption Pool
 TABLE_CAPTION_POOL = "Caption Pool"
 F_CAP_TEXT = "Caption Text"
+F_CAP_ID = "Caption ID"          # CAP-001 .. CAP-500, the rotation order
+F_CAP_ACTIVE = "Active"          # unticked = withdrawn from rotation
 
 # Spoof Variants (one spoofed video per source content + target account)
 TABLE_SPOOF_VARIANTS = "Spoof Variants"
@@ -1252,6 +1254,41 @@ class AirtableClient:
             text = (record.get("fields", {}) or {}).get(F_CAP_TEXT)
             out[record.get("id")] = (str(text).strip() if text else None)
         return out
+
+    def caption_pool(self) -> list:
+        """Active captions in rotation order: [{'record_id', 'caption_id', 'text'}].
+
+        Ordered by `Caption ID` (CAP-001..CAP-500) rather than by Airtable's row
+        order, so the rotation is stable no matter how the table is sorted or
+        re-sorted in the UI -- someone dragging rows in the base must not
+        silently re-point every account at a different caption.
+
+        Unticking `Active` withdraws a caption from rotation; that is the
+        intended way to pull a line that is causing trouble, and it is why the
+        rotation is keyed on position-in-this-list rather than on the number in
+        the id (which would leave a hole when one is withdrawn).
+        """
+        rows = []
+        for record in self._list_table(
+                TABLE_CAPTION_POOL, fields=[F_CAP_TEXT, F_CAP_ID, F_CAP_ACTIVE]):
+            fields = record.get("fields", {}) or {}
+            text = str(fields.get(F_CAP_TEXT) or "").strip()
+            # A blank caption is not a caption. Sending one would make the post
+            # indistinguishable from a suppressed one and quietly corrupt the
+            # experiment this rotation feeds.
+            if not text:
+                continue
+            # Absent Active field = active. A base that never added the column
+            # should rotate through everything rather than through nothing.
+            if F_CAP_ACTIVE in fields and not fields.get(F_CAP_ACTIVE):
+                continue
+            rows.append({
+                "record_id": record.get("id"),
+                "caption_id": str(fields.get(F_CAP_ID) or "").strip(),
+                "text": text,
+            })
+        rows.sort(key=lambda r: (r["caption_id"] == "", r["caption_id"], r["record_id"]))
+        return rows
 
     def variants_by_id(self) -> dict:
         """Spoof Variants record_id -> {'file_path', 'status'}."""

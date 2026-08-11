@@ -17,6 +17,7 @@ from dataclasses import dataclass, field as dc_field
 from datetime import datetime
 
 from adb_bot.clients import airtable as at
+from adb_bot.automation.caption_probe import target_key as caption_probe_key
 
 
 @dataclass
@@ -35,6 +36,11 @@ class PostingItem:
     # account switcher is on this handle before it touches the composer.
     target_handle: str | None = None
     account_slot: str | None = None
+    # Set when the caption probe withheld a caption this row actually carries.
+    # The text is dropped from `caption` (so the flow cannot type it) but kept
+    # here, so the write-back can say which caption was skipped rather than
+    # leaving a bare post that looks like a row someone forgot to fill in.
+    caption_withheld: str | None = None
 
 
 @dataclass
@@ -90,6 +96,7 @@ def plan_posting_queue(
     captions_by_id: dict,
     now: datetime | None = None,
     selected_launch_ids=None,
+    caption_probe=None,
 ) -> PostingPlan:
     """Build the list of due posts.
 
@@ -98,6 +105,11 @@ def plan_posting_queue(
     - `variants_by_id`: variant record_id -> {'file_path', 'status'}
     - `captions_by_id`: caption record_id -> text
     - `selected_launch_ids`: restrict to these launch ids (None = all)
+    - `caption_probe`: optional `CaptionProbe`. When an account owes bare
+      attempts (three caption-bearing failures in a row), the caption is dropped
+      from the item here rather than at the flow, so exactly one place decides
+      it and the plan itself shows what will be sent. None disables the
+      experiment entirely and posts behave as they always did.
     """
     now = now or datetime.now()
     plan = PostingPlan()
@@ -221,6 +233,19 @@ def plan_posting_queue(
         if target_handle and direct_profile_id and not account_id:
             account_name = target_handle
 
+        # --- the caption experiment ---
+        # An account that has just failed three caption-bearing posts in a row
+        # owes two attempts with the text withheld, to show whether the caption
+        # was the cause. Decided here, on the same identity the write-back will
+        # use, so the plan and the result cannot disagree about which account
+        # was being probed.
+        caption_withheld = None
+        if caption and caption_probe is not None:
+            probe_key = caption_probe_key(
+                account_id=account_id, target_handle=target_handle, launch_id=launch_id)
+            if caption_probe.should_drop_caption(probe_key):
+                caption_withheld, caption = caption, None
+
         plan.to_post.append(PostingItem(
             queue_id=queue_id,
             account_id=account_id,
@@ -233,6 +258,7 @@ def plan_posting_queue(
             retry_count=retry,
             target_handle=target_handle,
             account_slot=at._select_name(fields.get(at.F_PQ_ACCOUNT_SLOT)),
+            caption_withheld=caption_withheld,
         ))
 
     return plan

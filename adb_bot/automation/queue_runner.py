@@ -31,6 +31,7 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from adb_bot.automation.posting_planner import _first_link, _parse_dt
+from adb_bot.automation.caption_rotation import CaptionRotation
 from adb_bot.clients import airtable as at
 
 # The daily slots. Every eligible target gets one row per slot, so this grid is
@@ -596,7 +597,8 @@ def run_queue_slots(airtable, logger, slot_times=DEFAULT_SLOT_TIMES,
                     dry_run: bool = True, include_profiles: bool = True,
                     use_model_times: bool = True,
                     anytime_gap_minutes: int = DEFAULT_ANYTIME_GAP_MINUTES,
-                    anytime_max_per_day: int = DEFAULT_ANYTIME_MAX_PER_DAY) -> QueueReport:
+                    anytime_max_per_day: int = DEFAULT_ANYTIME_MAX_PER_DAY,
+                    caption_rotation=None) -> QueueReport:
     """Create the Posting Queue rows for today's slots that have come round.
 
     Entry point for the loop (`run_loop` wires the CLI). Dry-run is the default
@@ -607,13 +609,24 @@ def run_queue_slots(airtable, logger, slot_times=DEFAULT_SLOT_TIMES,
     command line. `slot_times` is the fallback for a base that has no such field,
     and `use_model_times=False` forces that fallback for one run.
 
-    Caption is deliberately left unset: the posting planner treats it as
-    optional, and inventing a caption rotation here would put text on posts that
-    nobody chose. Rows carry Post Status Pending, the slot's Scheduled DateTime,
-    the Spoof Variant, and whichever ONE target link the variant carries.
+    Each row gets a Caption from the Caption Pool, rotating per target so an
+    account walks the whole pool before repeating and no two accounts are in
+    step (see `caption_rotation`). This replaces the never-deployed "Caption
+    Rotation" Airtable automation, which could only ever have served
+    account-targeted rows -- it reads `Accounts.Next Caption ID`, and a
+    profile-targeted row has no Accounts record to read it from.
+
+    Pass `caption_rotation=False` to go back to captionless rows. Rows carry
+    Post Status Pending, the slot's Scheduled DateTime, the Spoof Variant, and
+    whichever ONE target link the variant carries.
     """
     tz = _zone(timezone_name, logger)
     now = now or datetime.now(tz)
+
+    if caption_rotation is None:
+        caption_rotation = CaptionRotation()
+    elif caption_rotation is False:
+        caption_rotation = None
 
     try:
         targets = collect_targets(airtable, include_profiles=include_profiles)
@@ -652,11 +665,36 @@ def run_queue_slots(airtable, logger, slot_times=DEFAULT_SLOT_TIMES,
     for skip in report.skipped:
         logger.info("queue: skipping %s: %s", skip[0], skip[1])
 
+    # One read for the whole run. An empty or unreadable pool is not fatal: rows
+    # go out captionless, exactly as they did before this existed.
+    pool = []
+    if caption_rotation is not None:
+        # getattr, like the per-model schedules above: a client (or a base)
+        # without a Caption Pool queues captionless rather than failing.
+        reader = getattr(airtable, "caption_pool", None)
+        try:
+            pool = reader() if reader else []
+        except Exception as exc:
+            logger.warning("queue: could not read the Caption Pool (%s); "
+                           "queueing without captions", exc)
+        if not pool:
+            logger.warning("queue: no active captions in the pool; "
+                           "queueing without captions")
+        else:
+            logger.info("queue: rotating %d active caption(s) across targets", len(pool))
+
     for row in report.planned:
+        caption = None
+        if pool:
+            rotation_key = ":".join(str(part) for part in row.target.key)
+            caption = (caption_rotation.peek_for(rotation_key, pool) if dry_run
+                       else caption_rotation.next_for(rotation_key, pool))
+
         if dry_run:
             report.rows_created += 1
-            logger.info("[DRY-RUN] would queue %s at %s (variant %s)",
-                        row.name, row.scheduled, row.variant_id)
+            logger.info("[DRY-RUN] would queue %s at %s (variant %s, caption %s)",
+                        row.name, row.scheduled, row.variant_id,
+                        (caption or {}).get("caption_id") or "none")
             continue
         record_id = airtable.create_posting_queue(
             row.scheduled,
@@ -668,12 +706,21 @@ def run_queue_slots(airtable, logger, slot_times=DEFAULT_SLOT_TIMES,
             # every single-account phone, which is what the flow already assumes.
             target_handle=row.target.ig_handle,
             account_slot=row.target.slot,
+            caption_id=(caption or {}).get("record_id"),
         )
         if not record_id:
+            # The rotation advanced for a row that was never created. Rewinding
+            # is not worth it: the cost is one skipped caption out of 500, and a
+            # rewind that raced another loop would hand the same caption twice.
             report.errors.append((row.name, "failed to create the Posting Queue row"))
             continue
         report.rows_created += 1
-        logger.info("queue: %s at %s -> %s", row.name, row.scheduled, record_id)
+        # Persist per row, not once at the end: a crash mid-run would otherwise
+        # replay the same captions onto rows that already exist.
+        if caption and caption_rotation is not None:
+            caption_rotation.save()
+        logger.info("queue: %s at %s -> %s (caption %s)", row.name, row.scheduled,
+                    record_id, (caption or {}).get("caption_id") or "none")
 
     logger.info("queue: %s", report.summary())
     return report

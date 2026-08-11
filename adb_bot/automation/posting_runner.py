@@ -21,6 +21,8 @@ from adb_bot.core.locks import ProfileLocks, live_profile_count, live_profile_sl
 from adb_bot.core.batching import LaunchGate, resolve_concurrency, run_rolling
 from adb_bot.automation import incidents
 from adb_bot.automation.posting_planner import plan_posting_queue
+from adb_bot.automation.caption_probe import (
+    CaptionProbe, CAPTION_RELEVANT_FAILURES, target_key as caption_probe_key)
 from adb_bot.automation.workflow import run_profile_workflow
 
 # The flow that actually uploads a reel. u2 is the reliable path being standardized.
@@ -98,7 +100,54 @@ def consumes_retry_budget(status: str) -> bool:
     return not incident and status != "already_shared"
 
 
-def apply_post_result(airtable, item, status, flow=POST_FLOW, logger=None, detail="") -> bool:
+def _record_caption_probe(item, status, caption_probe, logger=None) -> str:
+    """Advance the caption experiment for this post; return a Run Log note.
+
+    Best-effort in the strict sense: the experiment must never be the reason a
+    result fails to get written, so every error here is swallowed. Losing a data
+    point costs the investigation one sample; losing the write-back costs a post.
+    """
+    if caption_probe is None:
+        return ""
+    try:
+        key = caption_probe_key(
+            account_id=item.account_id, target_handle=item.target_handle,
+            launch_id=item.launch_id)
+        if not key:
+            return ""
+        withheld = bool(getattr(item, "caption_withheld", None))
+        had_caption = bool(item.caption)
+        # The bare attempt we asked for is the one the probe is spending; a row
+        # that simply never had a caption is not part of the experiment and is
+        # recorded as the neutral event it is.
+        was_probe = withheld and not had_caption
+        before = caption_probe.state_for(key)
+        state = caption_probe.record(key, status, had_caption=had_caption)
+
+        if was_probe:
+            spent = caption_probe.probe_attempts - state.probes_left
+            if state.probing:
+                return (f"caption probe {spent}/{caption_probe.probe_attempts}: "
+                        f"posted WITHOUT caption after "
+                        f"{before.probe_opened_at_streak} captioned failures")
+            landed = sum(1 for r in state.probe_results if r == "done")
+            return (f"caption probe complete ({landed}/{len(state.probe_results)} "
+                    f"bare attempts posted) after "
+                    f"{before.probe_opened_at_streak} captioned failures; "
+                    f"captions resume")
+        if state.probing and not before.probing:
+            return (f"caption probe opened: {state.streak} captioned failures in a "
+                    f"row -- next {state.probes_left} attempts go out with no caption")
+        if had_caption and state.streak and status in CAPTION_RELEVANT_FAILURES:
+            return f"captioned failure {state.streak}/{caption_probe.failures_before_probe}"
+    except Exception as exc:  # never let instrumentation break a write-back
+        if logger:
+            logger.warning("caption probe: could not record %s: %s", status, exc)
+    return ""
+
+
+def apply_post_result(airtable, item, status, flow=POST_FLOW, logger=None, detail="",
+                      caption_probe=None) -> bool:
     """Write one post's outcome back to Airtable. Returns True if it was a
     terminal status that produced a write-back, False for intermediate statuses.
 
@@ -118,6 +167,14 @@ def apply_post_result(airtable, item, status, flow=POST_FLOW, logger=None, detai
     # not see -- which is the difference between "retry" and "go look".
     if detail:
         note = f"{note} ({detail})" if note else detail
+
+    # Fold this outcome into the caption experiment and say, in the Run Log,
+    # what it decided. Without the note a bare post is indistinguishable from a
+    # row nobody filled in, and the three failures that caused it are invisible
+    # to whoever is reading the log wondering why the text vanished.
+    probe_note = _record_caption_probe(item, status, caption_probe, logger)
+    if probe_note:
+        note = f"{note} [{probe_note}]" if note else probe_note
 
     airtable.create_run_log(item.account_id, item.account_name, flow, run_result, note)
     airtable.set_account_result(item.account_id, f"{run_result}: {flow} ({note})")
@@ -176,9 +233,20 @@ def run_posting_queue(
     confirm_callback=None,
     flow: str = POST_FLOW,
     max_concurrent_profiles=None,
+    caption_probe=None,
 ) -> dict:
     """Plan the due posts, launch their profiles, run the reel-upload flow with
-    each post's video + caption, and write results back."""
+    each post's video + caption, and write results back.
+
+    `caption_probe` runs the "is the caption what's breaking these posts?"
+    experiment: an account that fails three caption-bearing posts in a row gets
+    its next two attempts sent with no caption. Defaults to a `CaptionProbe` on
+    the app data dir; pass `False` to switch it off for a run.
+    """
+    if caption_probe is None:
+        caption_probe = CaptionProbe()
+    elif caption_probe is False:
+        caption_probe = None
 
     def aborted() -> bool:
         return callable(should_stop) and should_stop()
@@ -206,6 +274,7 @@ def run_posting_queue(
             captions_by_id=airtable.captions_by_id(),
             now=now,
             selected_launch_ids=selected_launch_ids,
+            caption_probe=caption_probe,
         )
     except Exception as exc:
         logger.error("Failed to build the posting-queue plan: %s", exc)
@@ -244,6 +313,7 @@ def run_posting_queue(
             api_client, automation, logger, readiness_wait_seconds, readiness_max_attempts,
             batch_launch_delay_seconds, should_stop, status_callback, progress_callback, flow,
             busy_count=len(locks.busy), max_concurrent_profiles=max_concurrent_profiles,
+            caption_probe=caption_probe,
         )
 
 
@@ -251,7 +321,7 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
                      adb_enable_client, api_client, automation, logger,
                      readiness_wait_seconds, readiness_max_attempts, batch_launch_delay_seconds,
                      should_stop, status_callback, progress_callback, flow, busy_count=0,
-                     max_concurrent_profiles=None) -> dict:
+                     max_concurrent_profiles=None, caption_probe=None) -> dict:
     """Launch the locked profiles and post on each. Split out so the lock in
     run_posting_queue wraps the whole launch->post->shutdown lifetime."""
 
@@ -289,7 +359,8 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
                             item.account_name, item.launch_id, status,
                             f" -- {detail}" if detail else "")
             try:
-                apply_post_result(airtable, item, status, flow=flow, logger=logger, detail=detail)
+                apply_post_result(airtable, item, status, flow=flow, logger=logger,
+                                  detail=detail, caption_probe=caption_probe)
                 # If this row just spent a retry and its profile's launch 500ed
                 # on MultiLogin's side, that retry was burned by their cloud,
                 # not by anything the bot did. That is the number which explains
