@@ -196,9 +196,14 @@ class FlowTestCase(TestCase):
         return SmsRouter(providers, store=store, clock=self.clock.time,
                          sleep=self.clock.sleep)
 
-    def run_chain(self, screens, provider=None, solver=None, **kwargs):
+    def run_chain(self, screens, provider=None, solver=None, driver=None, **kwargs):
         provider = provider or FakeProvider("smspool", code="885485")
-        driver = FakeDriver(screens)
+        driver = driver if driver is not None else FakeDriver(screens)
+        # The fake clock, not the real one: every chain ends on a clear screen,
+        # and `_confirm_clear` deliberately doubts that for fifteen seconds.
+        # Left real, each case here would pay that in wall-clock.
+        kwargs.setdefault("sleep", self.clock.sleep)
+        kwargs.setdefault("clock", self.clock.time)
         result = run_verification(driver, self.router(provider),
                                   solver=solver or FakeSolver(), **kwargs)
         return result, driver, provider
@@ -367,7 +372,8 @@ class CountryPickerTest(FlowTestCase):
                                    on_screen)
         provider = FakeProvider("smspool", code="885485")
         run_verification(driver, self.router(provider), solver=FakeSolver(),
-                         logger=Logger())
+                         logger=Logger(), sleep=self.clock.sleep,
+                         clock=self.clock.time)
         return " | ".join(logged)
 
     def test_a_mismatched_picker_is_called_out(self):
@@ -428,7 +434,8 @@ class RetryTest(FlowTestCase):
         with router.store.mutate() as state:
             state.cooldowns["smspool"] = self.clock.now + 1_800
 
-        result = run_verification(driver, router, solver=FakeSolver())
+        result = run_verification(driver, router, solver=FakeSolver(),
+                                  sleep=self.clock.sleep, clock=self.clock.time)
         self.assertEqual(result.status, RESULT_SOLVED)
         self.assertEqual(alive.purchases, 1)
         self.assertEqual(dead.purchases, 0)
@@ -530,3 +537,93 @@ class LeakTest(FlowTestCase):
             run_verification(driver, self.router(provider), solver=FakeSolver())
         self.assertEqual(provider.cancelled + provider.finished, ["smspool-1"],
                          "the rented number must be settled even on a crash")
+
+
+class LateChallengeDriver(FakeDriver):
+    """Shows a clean feed for the first N reads, then walks the scripted chain.
+
+    The behaviour that matters on this fleet: Instagram opens on the feed and
+    drops the challenge in a few seconds later, so the first read of a flagged
+    account looks exactly like a healthy one.
+
+    With `refresh_reveals`, the chain stays hidden until the feed is pulled
+    down -- the case the second round of doubt exists for.
+    """
+
+    def __init__(self, screens=(), clean_reads=0, refresh_reveals=False):
+        super().__init__(list(screens))
+        self.clean_reads = clean_reads
+        self.refresh_reveals = refresh_reveals
+        self.reads = 0
+        self.refreshes = 0
+
+    def read_screen(self):
+        self.reads += 1
+        if self.refresh_reveals:
+            return SCREEN_FEED if not self.refreshes else super().read_screen()
+        return SCREEN_FEED if self.reads <= self.clean_reads else super().read_screen()
+
+    def refresh_feed(self):
+        self.refreshes += 1
+        return True
+
+
+class LateChallengeTest(FlowTestCase):
+    """A clear screen is the one reading that must not be taken at face value.
+
+    It is the reading that ends the run as *success*, and the account we were
+    sent to look at is by definition one somebody flagged. Believing the first
+    look would report "solved" on an account nobody ever really looked at --
+    the same shape as the feed check that counted any Instagram activity as a
+    healthy feed, and as `Blank (24)`, whose "we disabled your account" screen
+    only appeared on the second look.
+    """
+
+    def test_a_challenge_arriving_after_the_first_read_is_still_worked(self):
+        driver = LateChallengeDriver([SCREEN_PHONE, SCREEN_CODE], clean_reads=2)
+        result, _, provider = self.run_chain(None, driver=driver)
+
+        self.assertEqual([a[0] for a in driver.actions], ["phone", "code"])
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertEqual(provider.finished, ["smspool-1"],
+                         "the number must be settled on a chain that started late")
+
+    def test_a_genuinely_clear_screen_is_still_solved(self):
+        """Patience must not turn a healthy profile into a failure -- a flagged
+        account whose challenge is already gone is real and common."""
+        driver = LateChallengeDriver([], clean_reads=99)
+        result, _, _ = self.run_chain(None, driver=driver)
+
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertEqual(driver.actions, [])
+
+    def test_the_feed_is_pulled_down_before_a_clear_screen_is_believed(self):
+        driver = LateChallengeDriver([], clean_reads=99)
+        self.run_chain(None, driver=driver)
+        self.assertEqual(driver.refreshes, 1)
+
+    def test_a_challenge_that_only_the_refresh_reveals_is_worked(self):
+        """The second round of doubt earning its place: Instagram served the
+        challenge on the refresh when it withheld it on the open."""
+        driver = LateChallengeDriver([SCREEN_PHONE, SCREEN_CODE],
+                                     refresh_reveals=True)
+        result, _, _ = self.run_chain(None, driver=driver)
+
+        self.assertEqual([a[0] for a in driver.actions], ["phone", "code"])
+        self.assertEqual(result.status, RESULT_SOLVED)
+
+    def test_the_feed_is_not_pulled_down_mid_chain(self):
+        """Once a step has been answered, a clear screen means that step
+        worked. Swiping on a screen we have not recognised could dismiss it,
+        and buys nothing patience has not already bought."""
+        driver = LateChallengeDriver([SCREEN_PHONE, SCREEN_CODE], clean_reads=0)
+        self.run_chain(None, driver=driver)
+        self.assertEqual(driver.refreshes, 0)
+
+    def test_a_driver_without_a_refresh_still_finishes(self):
+        """`refresh_feed` is optional on the protocol; a driver lacking one
+        must not turn a working run into an AttributeError."""
+        driver = FakeDriver([SCREEN_FEED])
+        self.assertFalse(hasattr(driver, "refresh_feed"))
+        result, _, _ = self.run_chain(None, driver=driver)
+        self.assertEqual(result.status, RESULT_SOLVED)

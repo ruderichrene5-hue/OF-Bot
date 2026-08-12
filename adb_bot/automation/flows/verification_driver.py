@@ -41,7 +41,7 @@ from pathlib import Path
 
 from adb_bot.automation.flows import verification
 from adb_bot.automation.flows.interruptions import _dump_text
-from adb_bot.core.adb_commands import back, tap, write_text
+from adb_bot.core.adb_commands import back, swipe, tap, write_text
 from adb_bot.core.proc import run as run_hidden
 
 # Where a run's screens are kept. One folder per run, never cleaned up
@@ -610,6 +610,45 @@ class AdbChallengeDriver:
             return self._refuse("press Back to reach the phone screen")
         self.adb_client.run_command(f"adb -s {self.target} shell {back()}")
         time.sleep(self.settle_seconds)
+        return True
+
+    def refresh_feed(self) -> bool:
+        """Pull the feed down, so Instagram serves a challenge it withheld.
+
+        The observed behaviour on this fleet is that a flagged account opens on
+        an ordinary-looking feed and the challenge arrives a moment later --
+        sometimes only once the feed is refreshed. Waiting covers the first
+        case; this covers the second.
+
+        A swipe, not a tap, so it needs the screen size: a fixed coordinate
+        would be a pull-to-refresh on one phone model and a stray drag across a
+        story tray on another. If the size cannot be read there is no safe
+        gesture to make, so it returns False and the caller keeps whatever it
+        already had rather than acting blind.
+        """
+        from adb_bot.automation.flows import instagram as ig
+
+        if not self.act:
+            return self._refuse("pull the feed down to refresh it")
+
+        size = ig._adb_get_screen_size(self.target, logger=self.logger)
+        if not size:
+            self._log("warning", "could not read the screen size; not refreshing")
+            return False
+
+        width, height = size
+        x = width // 2
+        # From a third of the way down to four fifths: comfortably below the
+        # status bar and the header, and a long enough travel that Instagram
+        # reads it as a refresh rather than a scroll. 600ms because a fast
+        # flick scrolls the feed instead of triggering the spinner.
+        self._log("info", "pulling the feed down to refresh (%dx%d)", width, height)
+        self.adb_client.run_command(
+            f"adb -s {self.target} shell "
+            f"{swipe(x, int(height * 0.33), x, int(height * 0.8), 600)}")
+        # Longer than the usual settle: the refresh has to round-trip to
+        # Instagram before whatever it returns can be on screen.
+        time.sleep(max(self.settle_seconds, 3.0))
         return True
 
     def upload_photo(self) -> bool:

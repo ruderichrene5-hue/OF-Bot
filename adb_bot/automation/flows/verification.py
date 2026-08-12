@@ -45,6 +45,7 @@ yet *solved* a challenge end to end -- see TODO_2026-08-12.md.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -260,6 +261,15 @@ class ChallengeDriver(Protocol):
     def read_screen(self) -> str:
         """Lowercased visible text of the current screen ('' if unreadable)."""
 
+    def refresh_feed(self) -> bool:
+        """Pull the feed down, to make Instagram serve a challenge it withheld.
+
+        Optional: `_confirm_clear` calls it through `getattr` so a caller can
+        supply a driver without one. False means it was not done (a dry run, or
+        the screen size could not be read), and the caller must not then treat
+        the next read as a post-refresh answer.
+        """
+
     def choose_sms_method(self) -> bool:
         """On the chooser, pick the SMS/text-message option."""
 
@@ -324,12 +334,25 @@ MAX_NUMBER_ATTEMPTS = 3
 # time, means the step is not actually advancing anything.
 MAX_REPEATS = 3
 
+# How long a clear screen is doubted before it is believed, and how often it is
+# re-read in that window.
+#
+# Instagram opens on the feed and drops the challenge in afterwards -- often
+# several seconds afterwards. A single read taken in that gap says "none", and
+# `run` reads "none" as *solved*, so the run would report success on an account
+# it never looked at. That is the same shape as the two false-clear bugs this
+# fleet has already paid for: a feed check that counted any Instagram activity
+# as a healthy feed, and `Blank (24)`, whose "we disabled your account" screen
+# only appeared on the second look a few seconds later.
+CLEAR_SCREEN_PATIENCE_SECONDS = 15.0
+CLEAR_SCREEN_POLL_SECONDS = 3.0
+
 
 def run_verification(driver: ChallengeDriver, router, solver=None, logger=None,
                      max_steps: int = MAX_STEPS,
                      max_number_attempts: int = MAX_NUMBER_ATTEMPTS,
-                     service: str = "instagram", country: str | None = None
-                     ) -> VerificationResult:
+                     service: str = "instagram", country: str | None = None,
+                     sleep=None, clock=None) -> VerificationResult:
     """Drive one account through whatever verification screens it shows.
 
     `router` is an `SmsRouter`; `solver` a `CaptchaSolver` (defaults to the
@@ -354,7 +377,7 @@ def run_verification(driver: ChallengeDriver, router, solver=None, logger=None,
         country = DEFAULT_COUNTRY
 
     session = _Session(driver, router, solver, logger, max_number_attempts,
-                       service, country)
+                       service, country, sleep=sleep, clock=clock)
     try:
         return session.run(max_steps)
     finally:
@@ -367,7 +390,7 @@ class _Session:
     """The loop's mutable state. Split out so `run_verification` stays readable."""
 
     def __init__(self, driver, router, solver, logger, max_number_attempts,
-                 service, country) -> None:
+                 service, country, sleep=None, clock=None) -> None:
         self.driver = driver
         self.router = router
         self.solver = solver
@@ -375,6 +398,11 @@ class _Session:
         self.max_number_attempts = max_number_attempts
         self.service = service
         self.country = country
+        # Injected so the waiting in `_confirm_clear` is testable. A test that
+        # really slept through it would add half a minute per case, which is
+        # how waits end up untested.
+        self.sleep = sleep or time.sleep
+        self.sleep_clock = clock or time.monotonic
 
         self.lease = None            # the number currently typed into Instagram
         self.numbers_used = 0
@@ -389,6 +417,11 @@ class _Session:
         for _ in range(max_steps):
             challenge = classify_challenge(self.driver.read_screen())
 
+            if challenge == CHALLENGE_NONE:
+                # Never believed on the first read -- see `_confirm_clear`. If a
+                # challenge is merely late, this is where it is caught; if the
+                # screen is genuinely clear, this returns none and we are done.
+                challenge = self._confirm_clear()
             if challenge == CHALLENGE_NONE:
                 # Nothing left to answer. If we were mid-chain this is success;
                 # if we never saw a challenge at all, it is also success -- the
@@ -419,6 +452,58 @@ class _Session:
 
         return self._result(RESULT_STUCK,
                             f"gave up after {max_steps} screens")
+
+    def _confirm_clear(self) -> str:
+        """Re-read a screen that looked clear. Returns what it settled on.
+
+        A clear screen is the one classification we must not take at face
+        value, because it is the one that ends the run as *success*. Instagram
+        opens on the feed and the challenge arrives after it, so a read taken
+        in that gap is indistinguishable from a healthy account -- and the
+        account we were sent to look at is, by definition, one somebody flagged.
+
+        Two rounds of doubt, in increasing order of intrusiveness:
+
+        1. Wait, re-reading, for `CLEAR_SCREEN_PATIENCE_SECONDS`. Costs nothing
+           but time and catches a challenge that is merely slow.
+        2. Pull the feed down and look again. Instagram serves the challenge on
+           a refresh when it did not serve it on the open.
+
+        The refresh is only tried when nothing has been answered yet. Mid-chain
+        a clear screen means the step we just completed worked, and a swipe on
+        a challenge screen we have not recognised could dismiss or scroll it --
+        buying nothing, since patience alone already covers a slow redraw.
+        """
+        deadline = self.sleep_clock() + CLEAR_SCREEN_PATIENCE_SECONDS
+        while self.sleep_clock() < deadline:
+            self.sleep(CLEAR_SCREEN_POLL_SECONDS)
+            challenge = classify_challenge(self.driver.read_screen())
+            if challenge != CHALLENGE_NONE:
+                self._log("info", "a %s screen appeared after the first read looked "
+                                  "clear -- this is why a clear screen is not believed "
+                                  "immediately", challenge)
+                return challenge
+
+        if self.steps:
+            return CHALLENGE_NONE
+
+        # `refresh_feed` is optional on the driver: a caller may supply a
+        # simpler one, and a missing refresh must not turn a working run into
+        # an AttributeError.
+        refresh = getattr(self.driver, "refresh_feed", None)
+        if not callable(refresh) or not refresh():
+            return CHALLENGE_NONE
+
+        self._log("info", "screen still looked clear after %.0fs; pulled the feed "
+                          "down and looking again", CLEAR_SCREEN_PATIENCE_SECONDS)
+        deadline = self.sleep_clock() + CLEAR_SCREEN_PATIENCE_SECONDS
+        while self.sleep_clock() < deadline:
+            challenge = classify_challenge(self.driver.read_screen())
+            if challenge != CHALLENGE_NONE:
+                self._log("info", "a %s screen appeared after the refresh", challenge)
+                return challenge
+            self.sleep(CLEAR_SCREEN_POLL_SECONDS)
+        return CHALLENGE_NONE
 
     def _handle(self, challenge: str):
         """Do the one thing this screen needs. Return a result to stop, or None."""

@@ -302,9 +302,9 @@ class ProtocolTest(unittest.TestCase):
 
     def test_every_protocol_method_exists(self):
         driver = _driver(_root())
-        for name in ("read_screen", "choose_sms_method", "enter_phone",
-                     "enter_code", "request_new_number", "upload_photo",
-                     "capture_captcha_image", "enter_captcha"):
+        for name in ("read_screen", "refresh_feed", "choose_sms_method",
+                     "enter_phone", "enter_code", "request_new_number",
+                     "upload_photo", "capture_captcha_image", "enter_captcha"):
             self.assertTrue(callable(getattr(driver, name, None)), name)
 
 
@@ -464,3 +464,49 @@ class ProbeProfileLookupTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RefreshFeedTest(unittest.TestCase):
+    """Pulling the feed down, for the challenge Instagram withholds on the open.
+
+    The gesture is derived from the screen size on purpose: a hard-coded
+    coordinate is a pull-to-refresh on one phone model and a drag across the
+    story tray on another, and this fleet is not one model.
+    """
+
+    def _sized(self, adb, size, act=True):
+        driver = _driver(_root(), act=act, adb=adb)
+        import adb_bot.automation.flows.instagram as ig
+        self._saved = ig._adb_get_screen_size
+        ig._adb_get_screen_size = lambda target, logger=None: size
+        self.addCleanup(lambda: setattr(ig, "_adb_get_screen_size", self._saved))
+        return driver
+
+    def test_it_swipes_down_the_middle_of_the_screen(self):
+        adb = FakeAdb()
+        driver = self._sized(adb, (1080, 2340))
+
+        self.assertTrue(driver.refresh_feed())
+        swipes = [c for c in adb.commands if "input swipe" in c]
+        self.assertEqual(len(swipes), 1)
+        x1, y1, x2, y2, duration = (int(n) for n in swipes[0].split()[-5:])
+        self.assertEqual((x1, x2), (540, 540), "the swipe must be down the middle")
+        self.assertLess(y1, y2, "a refresh pulls downward")
+        self.assertGreater(y1, 0, "starting at the very top grabs the status bar")
+        self.assertGreaterEqual(duration, 500,
+                                "a fast flick scrolls the feed instead of refreshing")
+
+    def test_an_unreadable_screen_size_refuses_rather_than_guessing(self):
+        adb = FakeAdb()
+        driver = self._sized(adb, None)
+
+        self.assertFalse(driver.refresh_feed())
+        self.assertEqual([c for c in adb.commands if "input swipe" in c], [],
+                         "with no size there is no safe gesture to make")
+
+    def test_observe_mode_does_not_touch_the_phone(self):
+        adb = FakeAdb()
+        driver = self._sized(adb, (1080, 2340), act=False)
+
+        self.assertFalse(driver.refresh_feed())
+        self.assertEqual(adb.commands, [])
