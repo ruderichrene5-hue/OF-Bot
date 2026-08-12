@@ -437,3 +437,35 @@ class OnlyListTest(unittest.TestCase):
             now=NOW, only=["blank (10)"], limit=10)
         self.assertTrue(any("matches 2" in m for m in plan.not_found),
                         plan.not_found)
+
+
+class ConnectSettingsTest(unittest.TestCase):
+    """The ADB connection is a separate failure from readiness.
+
+    MultiLogin can report a phone ready while adb sits in `error: device
+    offline`. `Luisa 3` (2026-08-12) did exactly that: readiness passed on
+    attempt 4, then three connection attempts all found the device offline and
+    the profile was lost. The probe has always used 5 attempts.
+    """
+
+    def test_the_runner_matches_the_probe(self):
+        self.assertGreaterEqual(vr.CONNECT_ATTEMPTS, 5)
+
+    def test_the_connect_settings_reach_the_call(self):
+        import inspect
+        source = inspect.getsource(vr._work_one)
+        self.assertIn("max_attempts=CONNECT_ATTEMPTS", source)
+
+    def test_an_unreachable_phone_says_which_failure_it_was(self):
+        """"Never became ADB-ready" is a slow boot; this is a phone MultiLogin
+        called ready that adb cannot use. Same abort behaviour, different fix."""
+        import inspect
+        source = inspect.getsource(vr._work_one)
+        self.assertIn("adb never saw a usable device", source)
+
+    def test_both_launch_failures_still_abort_the_pass(self):
+        for error in ("never became ADB-ready",
+                      "could not reach it over ADB (MultiLogin reported it "
+                      "ready, but adb never saw a usable device)"):
+            self.assertTrue(vr.is_fleet_level_failure(
+                vr.ProfileOutcome(name="x", launch_id="L1", error=error)), error)

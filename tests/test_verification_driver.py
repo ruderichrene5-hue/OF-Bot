@@ -474,12 +474,16 @@ class RefreshFeedTest(unittest.TestCase):
     story tray on another, and this fleet is not one model.
     """
 
-    def _sized(self, adb, size, act=True):
+    def _sized(self, adb, size, act=True, foreground="com.instagram.android/.X"):
         driver = _driver(_root(), act=act, adb=adb)
         import adb_bot.automation.flows.instagram as ig
         self._saved = ig._adb_get_screen_size
+        self._saved_fg = ig._adb_get_foreground_activity
         ig._adb_get_screen_size = lambda target, logger=None: size
+        ig._adb_get_foreground_activity = lambda target, logger=None: foreground
         self.addCleanup(lambda: setattr(ig, "_adb_get_screen_size", self._saved))
+        self.addCleanup(
+            lambda: setattr(ig, "_adb_get_foreground_activity", self._saved_fg))
         return driver
 
     def test_it_swipes_down_the_middle_of_the_screen(self):
@@ -510,6 +514,17 @@ class RefreshFeedTest(unittest.TestCase):
 
         self.assertFalse(driver.refresh_feed())
         self.assertEqual(adb.commands, [])
+
+    def test_it_will_not_swipe_when_instagram_is_not_in_front(self):
+        """A downward swipe on the Android launcher pulls the notification
+        shade down. `Luisa 7` ended a run with the shade open over a phone
+        Instagram had quietly dropped out of, because this fired blind."""
+        adb = FakeAdb()
+        driver = self._sized(adb, (1080, 2340), foreground=None)
+
+        self.assertFalse(driver.refresh_feed())
+        self.assertEqual([c for c in adb.commands if "input swipe" in c], [],
+                         "no gesture on a screen we have not identified")
 
 
 class BlankCaptchaTest(unittest.TestCase):

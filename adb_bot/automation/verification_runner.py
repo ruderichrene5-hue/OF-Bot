@@ -134,6 +134,14 @@ def is_terminal_outcome(outcome) -> bool:
 READINESS_ATTEMPTS = 8
 READINESS_WAIT_SECONDS = 15
 
+# ...and how many times to retry the ADB connection itself, which is a separate
+# failure from readiness: MultiLogin can report a phone ready while adb sits in
+# `error: device offline`. `Luisa 3` (2026-08-12) did exactly that and was lost
+# after the default 3 tries. The probe has always used 5; matched here for the
+# same reason the readiness settings were.
+CONNECT_ATTEMPTS = 5
+CONNECT_RETRY_SECONDS = 5
+
 # Failure texts that are about the fleet or the wallet rather than this account.
 # Matched on the message because that is where the reason actually is: the
 # router raises one exception type for an empty wallet, a refusing provider and
@@ -435,6 +443,14 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
                           max_seconds=max_seconds,
                           readiness_attempts=readiness_attempts,
                           readiness_wait=readiness_wait)
+                if outcome.error:
+                    # `_work_one` only logs a line when the chain actually ran.
+                    # Without this an infrastructure failure -- a phone stuck
+                    # `offline`, Instagram refusing to open -- passes through
+                    # leaving no per-profile line at all, so reading the log
+                    # cannot tell you what happened to `Luisa 3`.
+                    logger.warning("verification pass: %s -> could not be worked "
+                                   "(%s)", planned.name, outcome.error)
             except Exception as exc:
                 # One phone's failure must not end the pass: the next profile is
                 # a different phone with a different problem.
@@ -506,9 +522,15 @@ def _work_one(clients, adb_client, logger, planned, outcome, country,
         outcome.error = "never became ADB-ready"
         return
 
-    target = connect_with_retries(adb_client, profile, logger, planned.launch_id)
+    target = connect_with_retries(adb_client, profile, logger, planned.launch_id,
+                                  max_attempts=CONNECT_ATTEMPTS,
+                                  retry_delay_seconds=CONNECT_RETRY_SECONDS)
     if not target:
-        outcome.error = "could not reach it over ADB"
+        # Distinguished from "never became ADB-ready" on purpose: this one means
+        # MultiLogin said the phone was ready and adb still could not use it,
+        # which is the stale-`offline` case rather than a slow boot.
+        outcome.error = ("could not reach it over ADB (MultiLogin reported it "
+                         "ready, but adb never saw a usable device)")
         return
 
     if not _open_instagram(target, adb_client, logger):

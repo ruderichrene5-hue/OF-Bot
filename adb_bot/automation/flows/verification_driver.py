@@ -685,6 +685,19 @@ class AdbChallengeDriver:
         if not self.act:
             return self._refuse("pull the feed down to refresh it")
 
+        # Only ever on Instagram's own screen. A downward swipe on the Android
+        # launcher opens the notification shade instead -- `Luisa 7`
+        # (2026-08-12) ended its run with the shade pulled down over a phone
+        # Instagram had quietly dropped out of, because this fired blind. It
+        # also breaks the house rule the rest of this module keeps: never act
+        # on a screen you have not identified.
+        activity = ig._adb_get_foreground_activity(self.target, logger=self.logger)
+        if not activity:
+            self._log("info", "not refreshing: Instagram is not in the foreground, "
+                              "so a downward swipe would pull the notification "
+                              "shade down instead")
+            return False
+
         size = ig._adb_get_screen_size(self.target, logger=self.logger)
         if not size:
             self._log("warning", "could not read the screen size; not refreshing")
