@@ -247,7 +247,8 @@ def _wanted_key(name: str) -> str:
 def plan_verification(mlx_items, attempts=None, now=None,
                       limit: int = DEFAULT_LIMIT,
                       cooloff_hours: float = DEFAULT_COOLOFF_HOURS,
-                      only=None, respect_diagnosis: bool = True) -> VerificationPlan:
+                      only=None, respect_diagnosis: bool = True,
+                      match: str | None = None) -> VerificationPlan:
     """Which flagged profiles this pass should work, and which it should not.
 
     Ordering matters more than it looks: profiles whose MultiLogin remark
@@ -260,6 +261,7 @@ def plan_verification(mlx_items, attempts=None, now=None,
     attempts = attempts or {}
     plan = VerificationPlan()
     wanted = {_wanted_key(n) for n in only} if only else None
+    needle = _wanted_key(match) if match else None
     seen_names: dict = {}
 
     candidates = []
@@ -277,6 +279,15 @@ def plan_verification(mlx_items, attempts=None, now=None,
             seen_names.setdefault(name_key, 0)
             seen_names[name_key] += 1
         elif ISSUE_TAG not in tags:
+            continue
+
+        # A substring of the name, for working a family of profiles at once
+        # ("blank"). Applied on top of the tag filter, not instead of it, and
+        # deliberately a *substring* rather than an exact name: the families on
+        # this workspace share a prefix and differ by a number, and several of
+        # those numbers are duplicated across two profiles -- so an exact-name
+        # selection could not address them at all.
+        if needle and needle not in name_key:
             continue
         launch_id = str(item.get("id") or "").strip()
         if not launch_id:
@@ -392,8 +403,8 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
                           max_seconds: float = verification.MAX_RUN_SECONDS,
                           readiness_attempts: int = READINESS_ATTEMPTS,
                           readiness_wait: int = READINESS_WAIT_SECONDS,
-                          only=None, respect_diagnosis: bool = True
-                          ) -> VerificationReport:
+                          only=None, respect_diagnosis: bool = True,
+                          match: str | None = None) -> VerificationReport:
     """Work up to `limit` flagged profiles. Returns what happened to each.
 
     `dry_run` names the profiles it would work and rents nothing -- the money is
@@ -404,7 +415,7 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
     attempts = load_attempts(app_dir)
     plan = plan_verification(mlx_items, attempts=attempts, limit=limit,
                              cooloff_hours=cooloff_hours, only=only,
-                             respect_diagnosis=respect_diagnosis)
+                             respect_diagnosis=respect_diagnosis, match=match)
     report = VerificationReport(plan=plan, dry_run=dry_run)
     logger.info("verification pass: %s", plan.summary())
     for name, tag in plan.diagnosed:
@@ -637,6 +648,9 @@ def main(argv=None) -> int:
                              "the whole flagged population (e.g. "
                              "'luisa 2,luisa 3'). Overrides the Issue-tag "
                              "filter, but not the diagnosis check.")
+    parser.add_argument("--match", default=None,
+                        help="only work flagged profiles whose name contains "
+                             "this (e.g. 'blank'). Combines with --limit.")
     parser.add_argument("--ignore-diagnosis", action="store_true",
                         help=f"work profiles even when a person has tagged them "
                              f"{sorted(DIAGNOSED_ELSEWHERE_TAGS)}. Use when a "
@@ -682,7 +696,8 @@ def main(argv=None) -> int:
         profile_records=profile_records,
         readiness_attempts=args.readiness_attempts,
         readiness_wait=args.readiness_wait,
-        only=only, respect_diagnosis=not args.ignore_diagnosis)
+        only=only, respect_diagnosis=not args.ignore_diagnosis,
+        match=args.match)
 
     plan = report.plan
     print(f"\n{'=' * 70}")

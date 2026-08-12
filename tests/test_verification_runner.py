@@ -469,3 +469,54 @@ class ConnectSettingsTest(unittest.TestCase):
                       "ready, but adb never saw a usable device)"):
             self.assertTrue(vr.is_fleet_level_failure(
                 vr.ProfileOutcome(name="x", launch_id="L1", error=error)), error)
+
+
+class MatchFilterTest(unittest.TestCase):
+    """Working a family of profiles by name -- 'every blank with an Issue tag'.
+
+    A substring rather than an exact name on purpose: the families here share a
+    prefix and differ by a number, and several of those numbers name *two*
+    profiles ('Blank (10)' and 'Blank (8)' each do), so exact-name selection
+    could not address them at all.
+    """
+
+    def test_it_narrows_to_matching_names(self):
+        plan = vr.plan_verification(
+            [_item("Blank (6)"), _item("Blank (7)"), _item("Luisa 2")],
+            now=NOW, match="blank", limit=10)
+        self.assertEqual({p.name for p in plan.to_run}, {"Blank (6)", "Blank (7)"})
+
+    def test_it_is_case_insensitive(self):
+        plan = vr.plan_verification([_item("Blank (6)")], now=NOW,
+                                    match="BLANK", limit=10)
+        self.assertEqual(len(plan.to_run), 1)
+
+    def test_it_reaches_profiles_whose_names_are_duplicated(self):
+        """The case that makes a substring necessary."""
+        plan = vr.plan_verification(
+            [_item("Blank (10)", launch_id="L1"),
+             _item("Blank (10)", launch_id="L2")],
+            now=NOW, match="blank", limit=10)
+        self.assertEqual({p.launch_id for p in plan.to_run}, {"L1", "L2"})
+
+    def test_it_still_requires_the_issue_tag(self):
+        """A filter on top of the population, not instead of it."""
+        plan = vr.plan_verification(
+            [_item("Blank (6)", tags=("Created",)), _item("Blank (7)")],
+            now=NOW, match="blank", limit=10)
+        self.assertEqual([p.name for p in plan.to_run], ["Blank (7)"])
+
+    def test_it_still_honours_a_persons_diagnosis(self):
+        plan = vr.plan_verification(
+            [_item("Blank (19)", tags=("Issue", "logged out")), _item("Blank (7)")],
+            now=NOW, match="blank", limit=10)
+        self.assertEqual([p.name for p in plan.to_run], ["Blank (7)"])
+        self.assertEqual(len(plan.diagnosed), 1)
+
+    def test_it_still_honours_the_cooloff(self):
+        attempts = {"LBlank (7)": {"at": (NOW - timedelta(hours=1)).isoformat(),
+                                   "result": "needs_human"}}
+        plan = vr.plan_verification([_item("Blank (7)"), _item("Blank (9)")],
+                                    attempts=attempts, now=NOW, match="blank",
+                                    limit=10)
+        self.assertEqual([p.name for p in plan.to_run], ["Blank (9)"])
