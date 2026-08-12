@@ -318,6 +318,7 @@ class AdbChallengeDriver:
         # dump renders as word salad -- but switchable off when the cadence
         # matters more than the pictures.
         self.screenshots = screenshots
+        self._ocr_default = None   # lazily-built OCR provider, see _ocr_provider
         self._root = None          # the dump behind the last read_screen()
         self._text = ""
         self._source = "none"
@@ -388,6 +389,34 @@ class AdbChallengeDriver:
         time.sleep(self.settle_seconds)
         return True
 
+    def _ocr_provider(self):
+        """Whatever can read a screen that produces no UI dump.
+
+        The fallback existed but was unreachable: it is gated on a `flow` being
+        passed in, and neither `verification_probe` nor `verification_runner`
+        passes one -- so every screen that would not dump was read as empty,
+        classified as "not a working Instagram", and handed to a person. Three
+        profiles went that way on 2026-08-12 alone (`Luisa 9`, `Jasmin 6`, and
+        `Jil 20` before them).
+
+        So a caller that supplies no flow now gets the default one rather than
+        no OCR at all. Built lazily, because it is only ever needed on a screen
+        that did not dump, and returning None if it cannot be built keeps a
+        missing dependency from costing the read.
+        """
+        if self.flow is not None:
+            return self.flow
+        if self._ocr_default is None:
+            try:
+                from adb_bot.automation.flows.instagram import (
+                    InstagramNotificationsFlow,
+                )
+                self._ocr_default = InstagramNotificationsFlow()
+            except Exception as exc:
+                self._log("info", "no OCR fallback available (%s)", exc)
+                self._ocr_default = False
+        return self._ocr_default or None
+
     # --- reading --------------------------------------------------------------
     def read_screen(self) -> str:
         """Lowercased visible text, recording the dump and a screenshot.
@@ -402,10 +431,14 @@ class AdbChallengeDriver:
         text = _dump_text(root)
         source = "ui-dump"
 
-        if not text and self.flow is not None and hasattr(self.flow, "_ocr_screen_text"):
+        provider = self._ocr_provider() if not text else None
+        if provider is not None and hasattr(provider, "_ocr_screen_text"):
             try:
-                text = (self.flow._ocr_screen_text(self.target, logger=self.logger) or "")
+                text = (provider._ocr_screen_text(self.target, logger=self.logger) or "")
                 source = "ocr"
+                if text:
+                    self._log("info", "the screen produced no UI dump; read it "
+                                      "with OCR instead")
             except Exception as exc:
                 self._log("warning", "OCR fallback raised (%s)", exc)
         if not text:

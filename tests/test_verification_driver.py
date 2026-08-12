@@ -807,3 +807,67 @@ class CaptchaWordmarkTest(unittest.TestCase):
 
     def test_the_wordmark_does_not(self):
         self.assertLess(330 / 1080, vd._CAPTCHA_MIN_WIDTH_FRACTION)
+
+
+class OcrFallbackTest(unittest.TestCase):
+    """The fallback for screens that produce no UI dump, which never once ran.
+
+    It is gated on a `flow` being passed in, and neither the probe nor the
+    runner passes one -- so every such screen was read as empty, classified as
+    "not a working Instagram", and handed to a person. `Luisa 9` and
+    `Jasmin 6` both went that way on 2026-08-12.
+    """
+
+    def _driver_with_empty_dump(self, flow=None):
+        driver = vd.AdbChallengeDriver("dev:1", FakeAdb(), logger=None,
+                                       flow=flow, act=True, settle_seconds=0,
+                                       screenshots=False)
+        driver._dump = lambda: (None, None)
+        return driver
+
+    def test_a_caller_that_supplies_no_flow_still_gets_ocr(self):
+        driver = self._driver_with_empty_dump()
+        provider = driver._ocr_provider()
+        self.assertIsNotNone(provider)
+        self.assertTrue(hasattr(provider, "_ocr_screen_text"))
+
+    def test_an_explicit_flow_still_wins(self):
+        class Explicit:
+            def _ocr_screen_text(self, target, logger=None):
+                return "from the caller's flow"
+
+        flow = Explicit()
+        self.assertIs(self._driver_with_empty_dump(flow)._ocr_provider(), flow)
+
+    def test_ocr_text_is_used_when_the_dump_is_empty(self):
+        class Explicit:
+            def _ocr_screen_text(self, target, logger=None):
+                return "confirm you're human enter the code from the image"
+
+        driver = self._driver_with_empty_dump(Explicit())
+        self.assertIn("confirm you're human", driver.read_screen())
+        self.assertEqual(driver._source, "ocr")
+
+    def test_a_dump_that_worked_is_never_replaced_by_ocr(self):
+        """OCR is the fallback, not a second opinion -- it is slower and less
+        exact, and the dump is what every tap is taken from."""
+        class Explicit:
+            called = False
+
+            def _ocr_screen_text(self, target, logger=None):
+                Explicit.called = True
+                return "ocr text"
+
+        driver = _driver(_root(_button("Send code")), act=True, adb=FakeAdb())
+        driver.flow = Explicit()
+        driver._dump = lambda: (_root(_button("Send code")), b"<xml/>")
+        driver.read_screen()
+        self.assertFalse(Explicit.called)
+
+    def test_a_broken_ocr_provider_does_not_cost_the_read(self):
+        class Exploding:
+            def _ocr_screen_text(self, target, logger=None):
+                raise RuntimeError("tesseract is gone")
+
+        driver = self._driver_with_empty_dump(Exploding())
+        self.assertEqual(driver.read_screen(), "")
