@@ -90,6 +90,16 @@ _NEW_NUMBER_LABELS = (
     "try another way", "use another method",
 )
 
+# The captcha screen's own "give me a different image" link. `Get a new code`
+# is confirmed (`Laila 3`, 2026-08-12); the rest are the usual variants.
+# Deliberately separate from `_NEW_NUMBER_LABELS`: both mean "try again" but on
+# different screens, and merging them would let a captcha failure tap a
+# change-number link and abandon a number that is about to receive.
+_NEW_CAPTCHA_LABELS = (
+    "get a new code", "get a new image", "new image", "refresh",
+    "try a different image", "reload",
+)
+
 # Hints/labels that identify the field a phone number goes in.
 _PHONE_FIELD_HINTS = ("phone", "mobile", "number")
 
@@ -119,6 +129,45 @@ def looks_like_captcha(width: int, height: int) -> bool:
     if width < _CAPTCHA_MIN_WIDTH or height < _CAPTCHA_MIN_HEIGHT:
         return False
     return width >= height * _CAPTCHA_MIN_ASPECT
+
+
+# Below this much pixel variation, the crop carries no characters. A real
+# captcha strip is dark glyphs on a light ground and scores in the tens; an
+# image that never loaded is one flat colour and scores 0.
+_CAPTCHA_MIN_STDDEV = 3.0
+
+# Instagram loads the captcha image *after* drawing the screen around it, so the
+# first look is routinely blank. `Laila 3` on 2026-08-12 was blank at t=0 and
+# readable by t=15s from the same node. Four looks five seconds apart covers
+# that with room to spare, and costs nothing when the image is already there.
+_CAPTCHA_RENDER_WAIT_SECONDS = 5.0
+_CAPTCHA_RENDER_ATTEMPTS = 4
+
+
+def image_is_blank(png_path, min_stddev: float = _CAPTCHA_MIN_STDDEV):
+    """True when this image has nothing on it. None when it cannot be judged.
+
+    Instagram's captcha image does not always render. `Laila 3` on 2026-08-12
+    held the challenge for 90 seconds with the image node present, correctly
+    sized (900x225) and **pure white** -- one colour, zero variance, on every
+    look. Cropping that and sending it to 2captcha buys a solve of a blank
+    rectangle, gets nonsense back, types the nonsense in, and burns one of the
+    account's captcha attempts on a screen nobody could ever have read.
+
+    None rather than False when cv2 is missing or the file will not open: not
+    knowing must not be worth money either way, so the caller decides.
+    """
+    try:
+        import cv2
+    except Exception:
+        return None
+    try:
+        image = cv2.imread(str(png_path))
+    except Exception:
+        return None
+    if image is None or image.size == 0:
+        return None
+    return float(image.std()) < min_stddev
 
 
 def _now_stamp() -> str:
@@ -666,12 +715,54 @@ class AdbChallengeDriver:
                   "profile needs a person (TODO_2026-08-12 §5.1)")
         return False
 
-    def capture_captcha_image(self) -> str | None:
-        """Save the captcha image for the solver. Returns a local PNG path."""
+    def capture_captcha_image(self, attempts: int = _CAPTCHA_RENDER_ATTEMPTS
+                              ) -> str | None:
+        """Save the captcha image for the solver. Returns a local PNG path.
+
+        Retries while the image is still blank, because on this fleet it
+        usually is on the first look and fills in a few seconds later:
+        `Laila 3` on 2026-08-12 was blank at t=0 and had a readable six-digit
+        strip by t=15s, from the same node at the same bounds. A single
+        screencap here would have called that unreadable and asked Instagram
+        for a replacement image it did not need.
+
+        None means every attempt came back blank -- there is genuinely nothing
+        for a solver to read, and paying to have a white rectangle
+        "transcribed" is worse than saying so.
+        """
+        blank_seen = 0
+        for attempt in range(1, max(1, attempts) + 1):
+            path, blank = self._capture_captcha_once()
+            if path is not None and not blank:
+                return path
+            if blank:
+                blank_seen += 1
+                if attempt < attempts:
+                    self._log("info",
+                              "captcha: the image has not rendered yet (look %d of "
+                              "%d); waiting %.0fs", attempt, attempts,
+                              _CAPTCHA_RENDER_WAIT_SECONDS)
+                    time.sleep(_CAPTCHA_RENDER_WAIT_SECONDS)
+                continue
+            # Not blank and no path: the screenshot or the crop failed, and
+            # retrying a broken screencap just spends time.
+            return path
+
+        self._log("warning",
+                  "captcha: the challenge image was still blank after %d look(s) "
+                  "-- it is not rendering, so there is nothing for a solver to "
+                  "read. Not spending a solve on it.", blank_seen)
+        return None
+
+    def _capture_captcha_once(self):
+        """`(path, blank)` for one screencap. `blank` is only ever True when the
+        crop was definitely empty -- `image_is_blank` returning None (no cv2,
+        unreadable file) counts as "cannot tell", and cannot cost a solve or a
+        retry either way."""
         png = self._screencap(force=True)
         if not png:
             self._log("warning", "captcha: could not screenshot the challenge")
-            return None
+            return (None, False)
 
         full = None
         if self.recorder is not None:
@@ -688,8 +779,13 @@ class AdbChallengeDriver:
 
         cropped = self._crop_captcha(full)
         if cropped is not None:
+            # Checked on the crop, not the screenshot: the page around it is
+            # full of text, so a whole-screen check would call every blank
+            # captcha "fine".
+            if image_is_blank(cropped) is True:
+                return (None, True)
             self._log("info", "captcha: cropped the challenge image to %s", cropped)
-            return str(cropped)
+            return (str(cropped), False)
 
         # An uncropped screenshot still reaches a human solver at 2captcha, who
         # can see which characters are being asked for -- worse odds than a
@@ -698,7 +794,27 @@ class AdbChallengeDriver:
         self._log("warning",
                   "captcha: could not isolate the image; sending the whole "
                   "screenshot (%s), which is less accurate", full)
-        return str(full)
+        return (str(full), False)
+
+    def request_new_captcha(self) -> bool:
+        """Ask Instagram for a different captcha image.
+
+        The screen offers this itself -- `Get a new code`, confirmed on
+        `Laila 3` -- and it is the only recovery available when the image did
+        not render: there is nothing to re-read, so waiting achieves nothing
+        and a person cannot read it either.
+        """
+        center = self._find_exact(_NEW_CAPTCHA_LABELS)
+        if center is None:
+            self._log("info", "captcha: no new-image link (labels were %s)",
+                      self._clickable_labels(self._root)[:20])
+            return False
+        if not self._tap(center, "the new-captcha link"):
+            return False
+        # The replacement has to come back from Instagram before it can be on
+        # screen; the usual settle is tuned for a local redraw.
+        time.sleep(max(self.settle_seconds, 3.0))
+        return True
 
     def _crop_captcha(self, png_path: Path):
         """Crop to the captcha image node from the dump, if it can be found."""

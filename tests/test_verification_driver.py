@@ -510,3 +510,131 @@ class RefreshFeedTest(unittest.TestCase):
 
         self.assertFalse(driver.refresh_feed())
         self.assertEqual(adb.commands, [])
+
+
+class BlankCaptchaTest(unittest.TestCase):
+    """Instagram's captcha image does not always render.
+
+    `Laila 3`, 2026-08-12: the image node was present and correctly sized
+    (900x225) and **pure white** on every look across 90 seconds. Cropping that
+    and sending it to 2captcha buys a solve of a blank rectangle, gets nonsense
+    back, types it in, and burns one of the account's captcha attempts on a
+    screen nobody could ever have read.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="adbbot-captcha-"))
+        try:
+            import cv2  # noqa: F401
+        except Exception:
+            self.skipTest("cv2 unavailable")
+
+    def _write(self, name, array):
+        import cv2
+        path = self.tmp / name
+        cv2.imwrite(str(path), array)
+        return path
+
+    def test_a_flat_image_is_blank(self):
+        import numpy as np
+        white = np.full((225, 900, 3), 255, dtype=np.uint8)
+        self.assertIs(vd.image_is_blank(self._write("white.png", white)), True)
+
+    def test_an_image_with_marks_on_it_is_not_blank(self):
+        import cv2
+        import numpy as np
+        strip = np.full((225, 900, 3), 255, dtype=np.uint8)
+        cv2.putText(strip, "A7K2QX", (60, 150), cv2.FONT_HERSHEY_SIMPLEX,
+                    4.0, (0, 0, 0), 8)
+        self.assertIs(vd.image_is_blank(self._write("code.png", strip)), False)
+
+    def test_an_unreadable_file_is_undecidable_not_blank(self):
+        """None, not True: refusing on "could not judge" would ground the flow
+        on any box where the screenshot did not write."""
+        self.assertIsNone(vd.image_is_blank(self.tmp / "does-not-exist.png"))
+
+
+class NewCaptchaTest(unittest.TestCase):
+    """`Get a new code` -- the screen's own way out when the image is blank.
+
+    Deliberately its own label list. Both this and the change-number link mean
+    "try again", but on different screens: sharing them would let a captcha
+    failure tap a change-number link and abandon a number about to receive.
+    """
+
+    def test_it_taps_the_new_image_link(self):
+        adb = FakeAdb()
+        driver = _driver(_root(_button("Get a new code")), act=True, adb=adb)
+        self.assertTrue(driver.request_new_captcha())
+        self.assertTrue(adb.taps)
+
+    def test_it_reports_when_the_screen_offers_no_such_link(self):
+        driver = _driver(_root(_button("Next")), act=True, adb=FakeAdb())
+        self.assertFalse(driver.request_new_captcha())
+
+    def test_it_does_not_borrow_the_change_number_link(self):
+        """`Update mobile number` belongs to the code screen. Tapping it here
+        would abandon a rented number that may be seconds from receiving."""
+        adb = FakeAdb()
+        driver = _driver(_root(_button("Update mobile number")), act=True, adb=adb)
+        self.assertFalse(driver.request_new_captcha())
+        self.assertEqual(adb.taps, [])
+
+    def test_observe_mode_does_not_tap(self):
+        adb = FakeAdb()
+        driver = _driver(_root(_button("Get a new code")), act=False, adb=adb)
+        self.assertFalse(driver.request_new_captcha())
+        self.assertEqual(adb.commands, [])
+
+
+class LateRenderingCaptchaTest(unittest.TestCase):
+    """Instagram draws the captcha screen before the image arrives.
+
+    `Laila 3`, 2026-08-12: blank at t=0, a readable six-digit strip by t=15s,
+    from the same node at the same bounds. A single screencap would have called
+    that unreadable and asked for a replacement image it did not need.
+    """
+
+    def setUp(self):
+        self.slept = []
+        self._saved = vd.time.sleep
+        vd.time.sleep = self.slept.append
+        self.addCleanup(lambda: setattr(vd.time, "sleep", self._saved))
+
+    def _driver_returning(self, sequence):
+        """A driver whose crop is blank/readable per `sequence`."""
+        driver = _driver(_root(), act=True, adb=FakeAdb())
+        self.calls = []
+
+        def fake_once():
+            blank = sequence[min(len(self.calls), len(sequence) - 1)]
+            self.calls.append(blank)
+            return (None, True) if blank else ("/tmp/captcha.png", False)
+
+        driver._capture_captcha_once = fake_once
+        return driver
+
+    def test_it_waits_for_an_image_that_has_not_rendered_yet(self):
+        driver = self._driver_returning([True, True, False])
+        self.assertEqual(driver.capture_captcha_image(), "/tmp/captcha.png")
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(len(self.slept), 2, "one wait between each look")
+
+    def test_an_image_already_there_is_returned_without_waiting(self):
+        driver = self._driver_returning([False])
+        self.assertEqual(driver.capture_captcha_image(), "/tmp/captcha.png")
+        self.assertEqual(self.slept, [])
+
+    def test_it_gives_up_when_the_image_never_renders(self):
+        driver = self._driver_returning([True])
+        self.assertIsNone(driver.capture_captcha_image(attempts=3))
+        self.assertEqual(len(self.calls), 3)
+
+    def test_a_failed_screencap_is_not_retried(self):
+        """Blank means "wait, it may arrive". A broken screencap will not fix
+        itself, and retrying it just spends the run's time."""
+        driver = _driver(_root(), act=True, adb=FakeAdb())
+        calls = []
+        driver._capture_captcha_once = lambda: (calls.append(1), (None, False))[1]
+        self.assertIsNone(driver.capture_captcha_image())
+        self.assertEqual(len(calls), 1)

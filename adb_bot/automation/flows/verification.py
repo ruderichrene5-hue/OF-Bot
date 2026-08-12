@@ -22,13 +22,19 @@ the code screen after it. A code that never arrives inside 45 seconds refunds th
 number, counts a failure toward the provider circuit breaker, and the loop asks
 for another number -- from the other provider once the breaker has tripped.
 
-**The image captcha.** "Type the characters you see" is usually the *first*
-screen a flagged account shows, so it gates everything else. `clients/captcha.py`
-sends it to 2captcha and types the answer back. When an answer is rejected --
-which shows up as the captcha screen simply coming round again -- the run
-reports it back to the service (refunding that solve) before trying once more.
-With no captcha key configured the challenge ends the run as `needs_human`,
-which is the state the profile was already in.
+**The image captcha.** "Confirm you're human" is usually the *first* screen a
+flagged account shows, so it gates everything else. `clients/captcha.py` sends
+it to 2captcha and types the answer back. When an answer is rejected -- which
+shows up as the captcha screen simply coming round again -- the run reports it
+back to the service (refunding that solve) before trying once more. With no
+captcha key configured the challenge ends the run as `needs_human`, which is
+the state the profile was already in.
+
+The image itself does not always render: `Laila 3` held this screen for 90
+seconds with the image node present, correctly sized and pure white. There is
+nothing to re-read in that case, so the run taps the screen's own `Get a new
+code` link for a fresh image, and gives up as `needs_human` rather than paying
+for a solve of a blank rectangle.
 
 **The device half is a seam.** Everything below drives a `ChallengeDriver` --
 read the screen, type in a field, tap the button, upload a photo. The
@@ -36,11 +42,13 @@ orchestration in this module is pure logic and is unit-tested with a fake
 driver; the real one is `flows/verification_driver.AdbChallengeDriver`, and
 `automation/verification_probe.py` is how it gets pointed at a live profile.
 
-**What has actually been seen.** The phone, code, banned and signed-out screens
-have been read off real flagged phones and are pinned as fixtures in the tests.
-The photo, image-captcha and method-chooser markers below are still general
-knowledge of Instagram's wording rather than this fleet's screens. Nothing has
-yet *solved* a challenge end to end -- see TODO_2026-08-12.md.
+**What has actually been seen.** The phone, code, image-captcha, banned and
+signed-out screens have been read off real flagged phones and are pinned as
+fixtures in the tests. The photo and method-chooser markers below are still
+general knowledge of Instagram's wording rather than this fleet's screens.
+
+The chain **has** been solved end to end -- `Laila 4`, 2026-08-12, phone ->
+code -> un-suspended. See TODO_2026-08-12.md for that run's numbers.
 """
 
 from __future__ import annotations
@@ -76,13 +84,14 @@ RESULT_SIGNED_OUT = "signed_out"    # nobody is logged in; there is nothing to v
 # resource ids containing words like "confirm" and "verification" on ordinary
 # screens, so any marker below would match a perfectly healthy feed.
 #
-# TODO_2026-08-12 §3: **confirmed** against real dumps -- the phone, code and
-# signed-out lists, plus the ban path. **Still guesses** -- `_PHOTO_MARKERS`,
-# `_IMAGE_CAPTCHA_MARKERS` and `_CHOOSE_METHOD_MARKERS`, which no real screen
-# has yet exercised. The captcha one matters most: it is reportedly the first
-# screen a flagged account shows, so a hole there gates everything behind it.
-# A phrase that never appears is dead weight; a real screen that classifies as
-# CHALLENGE_NONE is a hole the loop walks straight past.
+# TODO_2026-08-12 §3: **confirmed** against real dumps -- the phone, code,
+# image-captcha and signed-out lists, plus the ban path. **Still guesses** --
+# `_PHOTO_MARKERS` and `_CHOOSE_METHOD_MARKERS`, which no real screen has yet
+# exercised. A phrase that never appears is dead weight; a real screen that
+# classifies as the *wrong* challenge is worse than one that classifies as
+# none, and the captcha proved it: its real wording ("enter the code from the
+# image") matched the SMS code markers, so the loop would have waited for a
+# text nobody asked for.
 # `verification_probe.py --sweep` collects the dumps; add a fixture per
 # confirmed screen to tests/test_verification_flow.py (see `RealScreenTest`).
 _CHOOSE_METHOD_MARKERS = (
@@ -187,6 +196,21 @@ _SIGNED_OUT_WEAK_MARKERS = (
 )
 
 _IMAGE_CAPTCHA_MARKERS = (
+    # Confirmed off a real screen -- `Laila 3`, 2026-08-12. Instagram's wording
+    # here is nothing like the general knowledge below it, and the difference
+    # was not cosmetic: this screen says **"enter the code from the image"**,
+    # which contains `_CODE_STRONG_MARKERS`' "enter the code", so with none of
+    # these matching it classified as the *SMS code* screen. The loop would
+    # then have sat waiting for a text nobody had asked for, on a screen with
+    # no phone number anywhere in the chain.
+    "confirm you're human",
+    "code from the image",
+    "can't read this text",
+    "hear this code",
+    # General knowledge, still unconfirmed on this fleet. Kept because
+    # Instagram words this screen differently across surfaces and a phrase that
+    # never appears costs nothing, while a missing one is a hole the loop walks
+    # straight past.
     "type the characters",
     "enter the characters",
     "characters you see",
@@ -334,6 +358,13 @@ MAX_NUMBER_ATTEMPTS = 3
 # time, means the step is not actually advancing anything.
 MAX_REPEATS = 3
 
+# How many times one run will ask Instagram for a different captcha image. The
+# blank-image case is a real one (`Laila 3`, 2026-08-12: correctly sized node,
+# pure white, for 90 seconds), and asking costs nothing but a tap -- but a
+# phone that renders no images will render none of these either, and each round
+# also spends one of `MAX_REPEATS` on the same screen.
+MAX_CAPTCHA_IMAGES = 2
+
 # How long a clear screen is doubted before it is believed, and how often it is
 # re-read in that window.
 #
@@ -411,6 +442,7 @@ class _Session:
         self._last_challenge = None
         self._repeats = 0
         self._captcha_answered = False
+        self._captcha_images = 0
 
     # --- main loop ------------------------------------------------------------
     def run(self, max_steps: int) -> VerificationResult:
@@ -629,8 +661,26 @@ class _Session:
 
         image = self.driver.capture_captcha_image()
         if not image:
-            return self._result(RESULT_NEEDS_HUMAN,
-                                "the captcha image could not be captured")
+            # Usually the image did not render (see `image_is_blank`). The
+            # screen offers its own way out -- `Get a new code` -- and asking
+            # for a fresh image is the only recovery that exists: there is
+            # nothing to re-read, so waiting achieves nothing.
+            if self._captcha_images < MAX_CAPTCHA_IMAGES:
+                self._captcha_images += 1
+                refresh = getattr(self.driver, "request_new_captcha", None)
+                if callable(refresh) and refresh():
+                    self._log("info", "verification: asked for a new captcha image "
+                                      "(%d of %d)",
+                              self._captcha_images, MAX_CAPTCHA_IMAGES)
+                    # Return to the loop rather than re-reading here, so the
+                    # replacement goes through `classify_challenge` like any
+                    # other screen -- it may not be a captcha at all.
+                    return None
+            return self._result(
+                RESULT_NEEDS_HUMAN,
+                f"the captcha image could not be read after "
+                f"{self._captcha_images} attempt(s) -- it is most likely not "
+                f"rendering on this phone")
 
         solved = self.solver.solve_text(image)
         if not solved:

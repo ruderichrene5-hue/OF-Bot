@@ -25,6 +25,7 @@ from adb_bot.automation.flows.verification import (
     classify_challenge,
     run_verification,
 )
+from adb_bot.automation.flows import verification as verification_module
 from adb_bot.clients.sms.base import NumberOrder
 from adb_bot.clients.sms.breaker import BreakerStore
 from adb_bot.clients.sms.router import SmsRouter
@@ -270,6 +271,34 @@ class RealScreenTest(FlowTestCase):
     FEED = ("reels tray container jil_456xx's story, 0 of 1, unseen. add to "
             "story your story for you home reels message search and explore "
             "profile")
+
+    # `Laila 3`, 2026-08-12 -- the first real image captcha, verbatim. The one
+    # that mattered most to get wrong: Instagram words it "enter the code from
+    # the image", which contains `_CODE_STRONG_MARKERS`' "enter the code", so
+    # before its real markers existed this classified as the *SMS code* screen
+    # and the loop would have waited 45 seconds for a text nobody asked for.
+    CAPTCHA = ("get support menu confirm you're human confirm you're human "
+               "can't read this text? hear this code or get a new code can't "
+               "read this text? hear this code or get a new code hear this code "
+               "get a new code enter the code from the image next next")
+
+    def test_the_real_image_captcha_is_recognised(self):
+        self.assertEqual(classify_challenge(self.CAPTCHA), CHALLENGE_IMAGE_CAPTCHA)
+
+    def test_the_captcha_is_not_mistaken_for_the_sms_code_screen(self):
+        """The exact regression: `enter the code from the image` is a captcha,
+        and treating it as the code screen waits on an SMS that was never
+        requested -- on a chain where no number has been rented at all."""
+        self.assertNotEqual(classify_challenge(self.CAPTCHA), CHALLENGE_CODE)
+
+    def test_the_real_sms_code_screen_still_wins_its_own_markers(self):
+        """The other direction: adding captcha wording must not swallow the
+        code screen, whose text also mentions codes throughout."""
+        code = ("get support menu enter confirmation code enter the 6-digit "
+                "confirmation code we sent via sms to +491787298035. it may "
+                "take up to a minute for you to receive this code. 6-digit "
+                "code request new code next next update mobile number")
+        self.assertEqual(classify_challenge(code), CHALLENGE_CODE)
 
     def test_the_real_phone_challenge_is_recognised(self):
         self.assertEqual(classify_challenge(self.PHONE), CHALLENGE_PHONE)
@@ -627,3 +656,80 @@ class LateChallengeTest(FlowTestCase):
         self.assertFalse(hasattr(driver, "refresh_feed"))
         result, _, _ = self.run_chain(None, driver=driver)
         self.assertEqual(result.status, RESULT_SOLVED)
+
+
+class BlankCaptchaImageDriver(FakeDriver):
+    """A captcha screen whose image never renders.
+
+    `capture_captcha_image` returns None for that (the driver refuses to hand a
+    blank crop to a paid solver), and `request_new_captcha` is the screen's own
+    way out. `renders_after` is how many refreshes it takes before a readable
+    image appears -- None means never.
+    """
+
+    def __init__(self, screens, renders_after=None, can_refresh=True):
+        super().__init__(screens)
+        self.renders_after = renders_after
+        self.can_refresh = can_refresh
+        self.refreshes = 0
+
+    def capture_captcha_image(self):
+        if self.renders_after is not None and self.refreshes >= self.renders_after:
+            return self.captcha_image
+        return None
+
+    def request_new_captcha(self):
+        self.refreshes += 1
+        self.actions.append(("new_captcha", None))
+        return self.can_refresh
+
+
+class BlankCaptchaFlowTest(FlowTestCase):
+    """A captcha nobody could read must not cost a solve.
+
+    Confirmed on `Laila 3`, 2026-08-12: the image node was present, correctly
+    sized and pure white for 90 seconds. There is nothing to re-read in that
+    state, so the only recovery is asking Instagram for a different image.
+    """
+
+    def test_a_blank_image_asks_for_a_new_one_instead_of_solving_it(self):
+        driver = BlankCaptchaImageDriver([SCREEN_CAPTCHA, SCREEN_FEED],
+                                         renders_after=1)
+        solver = FakeSolver(answer="A7K2QX")
+        result, _, _ = self.run_chain(None, driver=driver, solver=solver)
+
+        self.assertEqual([a[0] for a in driver.actions], ["new_captcha", "captcha"])
+        self.assertEqual(result.status, RESULT_SOLVED)
+
+    def test_a_solve_is_never_spent_on_an_image_that_did_not_render(self):
+        driver = BlankCaptchaImageDriver([SCREEN_CAPTCHA], renders_after=None)
+        solver = FakeSolver(answer="A7K2QX")
+        result, _, _ = self.run_chain(None, driver=driver, solver=solver)
+
+        self.assertEqual(solver.calls, 0,
+                         "2captcha must never be paid to read a blank rectangle")
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+
+    def test_it_gives_up_rather_than_refreshing_for_ever(self):
+        """A phone that renders no images will render none of the replacements
+        either, and each round also spends one of MAX_REPEATS."""
+        driver = BlankCaptchaImageDriver([SCREEN_CAPTCHA], renders_after=None)
+        result, _, _ = self.run_chain(None, driver=driver, solver=FakeSolver())
+
+        self.assertEqual(driver.refreshes, verification_module.MAX_CAPTCHA_IMAGES)
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+        self.assertIn("not rendering", result.detail)
+
+    def test_a_screen_with_no_new_image_link_needs_a_person_at_once(self):
+        driver = BlankCaptchaImageDriver([SCREEN_CAPTCHA], renders_after=None,
+                                         can_refresh=False)
+        result, _, _ = self.run_chain(None, driver=driver, solver=FakeSolver())
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+
+    def test_a_driver_with_no_refresh_at_all_still_ends_cleanly(self):
+        """`request_new_captcha` is optional on the protocol, like refresh_feed."""
+        driver = FakeDriver([SCREEN_CAPTCHA])
+        driver.capture_captcha_image = lambda: None
+        self.assertFalse(hasattr(driver, "request_new_captcha"))
+        result, _, _ = self.run_chain(None, driver=driver, solver=FakeSolver())
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
