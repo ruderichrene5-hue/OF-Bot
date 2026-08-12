@@ -67,6 +67,7 @@ CHALLENGE_CODE = "code"                     # asks for the code it just sent
 CHALLENGE_PHOTO = "photo"                   # asks for a photo to prove a human
 CHALLENGE_IMAGE_CAPTCHA = "image_captcha"   # asks for letters/digits in an image
 CHALLENGE_CONSENT = "consent"               # Meta consent / onboarding gate
+CHALLENGE_VERIFY_INTRO = "verify_intro"     # "confirm you're human" -- press Continue
 CHALLENGE_BANNED = "banned"                 # not a challenge; the account is gone
 CHALLENGE_SIGNED_OUT = "signed_out"         # not a challenge; nobody is logged in
 
@@ -214,7 +215,12 @@ _IMAGE_CAPTCHA_MARKERS = (
     # these matching it classified as the *SMS code* screen. The loop would
     # then have sat waiting for a text nobody had asked for, on a screen with
     # no phone number anywhere in the chain.
-    "confirm you're human",
+    # NOT "confirm you're human" on its own -- see `_VERIFY_INTRO_MARKERS`.
+    # `Katherine 8` (2026-08-12) showed a screen headed exactly that with no
+    # image and no answer box, only a Continue button, and this list matched
+    # it: the run cropped the whole screenshot, paid 2captcha to read it (it
+    # said "jkhgkjughu"), and then failed with nowhere to type the answer.
+    # Every marker here now names the *code-entry* captcha specifically.
     "code from the image",
     "can't read this text",
     "hear this code",
@@ -278,6 +284,16 @@ _APP_HEALTHY_MARKERS = (
 #
 # Kept as a list here as well as in `interruptions` because this module has to
 # *recognise* the screen to route it; that one knows how to *tap* it.
+# The screen that introduces a challenge rather than being one: "Confirm you're
+# human to use your account, <handle>" over a Continue button, and a promise
+# that it "takes about 30 seconds". Nothing to answer -- press Continue and the
+# real step is behind it. Read off `Katherine 8`, 2026-08-12.
+_VERIFY_INTRO_MARKERS = (
+    "confirm you're human to use your account",
+    "confirm youre human to use your account",
+    "takes about 30 seconds",
+)
+
 _CONSENT_GATE_MARKERS = (
     "choose if we process your data for ads",
     "consent to us processing your personal data",
@@ -328,6 +344,9 @@ def looks_like_consent_gate(text: str | None) -> bool:
 # phone nobody is logged into. The weak ones trail everything.
 _ORDERED_MARKERS = (
     (CHALLENGE_SIGNED_OUT, _SIGNED_OUT_STRONG_MARKERS),
+    # Ahead of the captcha: this screen says "confirm you're human" too, and
+    # the difference is that it has nothing on it to answer.
+    (CHALLENGE_VERIFY_INTRO, _VERIFY_INTRO_MARKERS),
     (CHALLENGE_IMAGE_CAPTCHA, _IMAGE_CAPTCHA_MARKERS),
     (CHALLENGE_PHOTO, _PHOTO_MARKERS),
     (CHALLENGE_CODE, _CODE_STRONG_MARKERS),
@@ -796,6 +815,9 @@ class _Session:
                                     "the photo challenge could not be completed")
             return None
 
+        if challenge == CHALLENGE_VERIFY_INTRO:
+            return self._handle_verify_intro()
+
         if challenge == CHALLENGE_CONSENT:
             return self._handle_consent()
 
@@ -803,6 +825,21 @@ class _Session:
             return self._handle_image_captcha()
 
         return self._result(RESULT_FAILED, f"unhandled challenge {challenge!r}")
+
+    def _handle_verify_intro(self):
+        """Press Continue on the screen that only introduces a challenge.
+
+        There is nothing to answer here, so the one thing that must not happen
+        is treating it as the step it introduces -- which is what cost a
+        2captcha solve and a failed run on `Katherine 8`. Whatever is behind it
+        comes back round the loop and is classified on its own terms.
+        """
+        advance = getattr(self.driver, "advance_intro", None)
+        if not callable(advance) or not advance():
+            return self._result(
+                RESULT_NEEDS_HUMAN,
+                "could not get past the screen introducing the challenge")
+        return None
 
     def _handle_consent(self):
         """Tap through Meta's consent / onboarding chain.

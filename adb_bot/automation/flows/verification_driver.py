@@ -100,6 +100,11 @@ _NEW_NUMBER_LABELS = (
 # it untapped.
 _CONFIRMATION_LABELS = ("done", "ok", "continue", "got it")
 
+# The button on the screen that only introduces a challenge. Kept apart from
+# the submit labels: those press a form that has been filled in, this one opens
+# a step that has not started.
+_INTRO_ADVANCE_LABELS = ("continue", "start", "begin", "get started", "next")
+
 _NEW_CAPTCHA_LABELS = (
     "get a new code", "get a new image", "new image", "refresh",
     "try a different image", "reload",
@@ -875,6 +880,20 @@ class AdbChallengeDriver:
             return False
         # The replacement has to come back from Instagram before it can be on
         # screen; the usual settle is tuned for a local redraw.
+        time.sleep(max(self.settle_seconds, 3.0))
+        return True
+
+    def advance_intro(self) -> bool:
+        """Press Continue on the screen that introduces a challenge."""
+        center = self._find_exact(_INTRO_ADVANCE_LABELS)
+        if center is None:
+            self._log("info", "no continue button on the intro screen "
+                              "(labels were %s)",
+                      self._clickable_labels(self._root)[:20])
+            return False
+        if not self._tap(center, "the intro screen's continue button"):
+            return False
+        # The step behind it has to load before it can be read.
         time.sleep(max(self.settle_seconds, 3.0))
         return True
 

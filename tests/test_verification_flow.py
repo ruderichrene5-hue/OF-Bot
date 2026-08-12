@@ -17,6 +17,7 @@ from adb_bot.automation.flows.verification import (
     CHALLENGE_NONE,
     CHALLENGE_PHONE,
     CHALLENGE_PHOTO,
+    CHALLENGE_VERIFY_INTRO,
     CHALLENGE_SIGNED_OUT,
     RESULT_BANNED,
     RESULT_NEEDS_HUMAN,
@@ -1122,3 +1123,65 @@ class ConsentMarkersDoNotShadowAFeedTest(FlowTestCase):
         self.assertEqual(
             classify_challenge(SCREEN_FEED + " " + SCREEN_PHONE),
             CHALLENGE_PHONE)
+
+
+class ChallengeIntroTest(FlowTestCase):
+    """The screen that *introduces* a challenge, which is not the challenge.
+
+    `Katherine 8`, 2026-08-12, verbatim: a heading, a Continue button and a
+    promise that it takes about 30 seconds. No image, no answer box. It matched
+    `confirm you're human` in the captcha markers, so the run cropped the whole
+    screenshot, paid 2captcha to read it (it said "jkhgkjughu") and then failed
+    with nowhere to type the answer.
+    """
+
+    INTRO = ("get support menu confirm you're human to use your account, "
+             "lianawilson57 confirm you're human to use your account, "
+             "lianawilson57 continue continue takes about 30 seconds")
+
+    class IntroDriver(FakeDriver):
+        def __init__(self, screens, can_advance=True):
+            super().__init__(screens)
+            self.can_advance = can_advance
+
+        def advance_intro(self):
+            self.actions.append(("intro", None))
+            return self._advance() if self.can_advance else False
+
+    def test_the_intro_is_not_read_as_a_captcha(self):
+        self.assertEqual(classify_challenge(self.INTRO), CHALLENGE_VERIFY_INTRO)
+
+    def test_the_real_captcha_is_still_a_captcha(self):
+        """Narrowing the markers must not cost the screen they were for."""
+        real = ("get support menu confirm you're human can't read this text? "
+                "hear this code or get a new code enter the code from the image "
+                "next next")
+        self.assertEqual(classify_challenge(real), CHALLENGE_IMAGE_CAPTCHA)
+
+    def test_no_solver_is_paid_for_an_intro_screen(self):
+        solver = FakeSolver(answer="whatever")
+        driver = self.IntroDriver([self.INTRO, SCREEN_FEED])
+        result, _, _ = self.run_chain(None, driver=driver, solver=solver)
+
+        self.assertEqual(solver.calls, 0,
+                         "there is nothing on this screen to read")
+        self.assertEqual(result.status, RESULT_SOLVED)
+
+    def test_it_presses_continue_and_works_what_is_behind_it(self):
+        driver = self.IntroDriver([self.INTRO, SCREEN_PHONE, SCREEN_CODE,
+                                   SCREEN_FEED])
+        result, _, _ = self.run_chain(None, driver=driver)
+        self.assertEqual([a[0] for a in driver.actions],
+                         ["intro", "phone", "code"])
+        self.assertEqual(result.status, RESULT_SOLVED)
+
+    def test_an_intro_it_cannot_pass_goes_to_a_person(self):
+        driver = self.IntroDriver([self.INTRO], can_advance=False)
+        result, _, _ = self.run_chain(None, driver=driver)
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+
+    def test_a_driver_without_the_method_still_ends_cleanly(self):
+        driver = FakeDriver([self.INTRO])
+        self.assertFalse(hasattr(driver, "advance_intro"))
+        result, _, _ = self.run_chain(None, driver=driver)
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)

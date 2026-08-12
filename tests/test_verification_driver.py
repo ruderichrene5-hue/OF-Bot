@@ -871,3 +871,23 @@ class OcrFallbackTest(unittest.TestCase):
 
         driver = self._driver_with_empty_dump(Exploding())
         self.assertEqual(driver.read_screen(), "")
+
+
+class AdvanceIntroTest(unittest.TestCase):
+    """Continue on the screen that introduces a challenge."""
+
+    def test_it_presses_continue(self):
+        adb = FakeAdb()
+        driver = _driver(_root(_button("Continue")), act=True, adb=adb)
+        self.assertTrue(driver.advance_intro())
+        self.assertTrue(adb.taps)
+
+    def test_no_button_is_reported_not_guessed_at(self):
+        driver = _driver(_root(_button("Send code")), act=True, adb=FakeAdb())
+        self.assertFalse(driver.advance_intro())
+
+    def test_observe_mode_does_not_tap(self):
+        adb = FakeAdb()
+        driver = _driver(_root(_button("Continue")), act=False, adb=adb)
+        self.assertFalse(driver.advance_intro())
+        self.assertEqual(adb.commands, [])
