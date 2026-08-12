@@ -269,8 +269,17 @@ class NumberLease:
                              "sms: %s was not cancelled on request; the provider "
                              "will refund it when it expires", self.order)
 
-    def release(self) -> None:
-        """Settle the lease: finish it if its code was used, refund it if not."""
+    def release(self, count_failure: bool = True) -> None:
+        """Settle the lease: finish it if its code was used, refund it if not.
+
+        `count_failure=False` refunds the number **without** counting it against
+        the provider's circuit breaker. For the case the breaker must never see:
+        Instagram declining to send at all ("code not sent: try again later or
+        use a different mobile number"). The provider delivered a working
+        number; nothing about that is its fault, and on 2026-08-12 two such
+        refusals in one run pushed the breaker from 4/10 to 6/10 -- two-thirds
+        of the way to switching providers over Instagram's behaviour.
+        """
         if self._settled:
             return
         self._settled = True
@@ -280,6 +289,13 @@ class NumberLease:
             except Exception as exc:
                 self.router._log("warning", "sms: finish of %s raised (%s)",
                                  self.order, exc)
+            return
+        if not count_failure:
+            self._cancel_quietly()
+            self.router._log("info", "sms: gave %s back without counting it "
+                                     "against %s -- the number was fine, the "
+                                     "send was refused", self.order,
+                             self.provider.name)
             return
         # Rented but never waited on (the flow gave up, or raised). Give it back;
         # this is an abandoned attempt, so it counts like any other failure.

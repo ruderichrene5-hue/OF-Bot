@@ -193,6 +193,16 @@ _SIGNED_OUT_WEAK_MARKERS = (
     "log in with facebook",
     "log into another account",
     "forgot password",
+    # `Jil 3`, 2026-08-12 -- an in-app error dialog rather than the signed-out
+    # welcome screen, and the reason it is here at all: it matched no marker,
+    # so it would have classified as `none` and been reported as SOLVED,
+    # untagging a logged-out account back into the posting loop. The
+    # positive-health check caught it and handed over the text; these markers
+    # are that text. Same result as the welcome screen -- it needs credentials,
+    # not verification -- which is also why it is terminal for the runner.
+    "you've been logged out",
+    "youve been logged out",
+    "the account owner may have changed the password",
 )
 
 _IMAGE_CAPTCHA_MARKERS = (
@@ -437,6 +447,29 @@ MAX_REPEATS = 3
 # also spends one of `MAX_REPEATS` on the same screen.
 MAX_CAPTCHA_IMAGES = 2
 
+# Consecutive "code not sent" refusals before the run gives up on this account.
+# Instagram's own wording offers both readings -- "try again later **or** use a
+# different mobile number" -- so one more number is worth trying. Two identical
+# refusals back to back is Instagram declining to send at all, and a third
+# number buys nothing: on `Jil 10` (2026-08-12) numbers 2 and 3 were refused
+# within 27 seconds of each other, the second rented purely to learn that.
+MAX_PHONE_REFUSALS = 2
+
+# Instagram's inline error on the phone screen when it will not text the number
+# that was just submitted. Read off `Jil 10`, 2026-08-12.
+_PHONE_REFUSED_MARKERS = (
+    "code not sent",
+    "use a different mobile number",
+)
+
+
+def phone_number_refused(text: str | None) -> bool:
+    """True when the phone screen is showing Instagram's send-refused error."""
+    if not text:
+        return False
+    haystack = text.lower()
+    return any(marker in haystack for marker in _PHONE_REFUSED_MARKERS)
+
 # The longest one account may take before the run gives up on it. MAX_STEPS
 # bounds how many *screens* are worked, but not how long each takes: a chain
 # that spends 45s waiting for each of three numbers, 20s on captcha images and
@@ -528,6 +561,7 @@ class _Session:
         self._repeats = 0
         self._captcha_answered = False
         self._captcha_images = 0
+        self._refusals = 0
 
     # --- main loop ------------------------------------------------------------
     def run(self, max_steps: int) -> VerificationResult:
@@ -578,7 +612,7 @@ class _Session:
                     RESULT_STUCK,
                     f"the {challenge} screen kept coming back unchanged")
 
-            outcome = self._handle(challenge)
+            outcome = self._handle(challenge, text)
             if outcome is not None:
                 return outcome
 
@@ -702,7 +736,7 @@ class _Session:
             self.sleep(CLEAR_SCREEN_POLL_SECONDS)
         return (CHALLENGE_NONE, text)
 
-    def _handle(self, challenge: str):
+    def _handle(self, challenge: str, text=None):
         """Do the one thing this screen needs. Return a result to stop, or None."""
         if challenge == CHALLENGE_CHOOSE_METHOD:
             if not self.driver.choose_sms_method():
@@ -711,7 +745,7 @@ class _Session:
             return None
 
         if challenge == CHALLENGE_PHONE:
-            return self._handle_phone()
+            return self._handle_phone(text)
 
         if challenge == CHALLENGE_CODE:
             return self._handle_code()
@@ -728,7 +762,31 @@ class _Session:
         return self._result(RESULT_FAILED, f"unhandled challenge {challenge!r}")
 
     # --- individual screens ---------------------------------------------------
-    def _handle_phone(self):
+    def _handle_phone(self, text=None):
+        # Instagram declining to send is not the provider's fault, and the
+        # breaker must not learn it as one. Checked before the lease is
+        # released, because releasing is what would count it.
+        refused = phone_number_refused(text) and self.lease is not None
+        if refused:
+            self._refusals += 1
+            self._log("warning",
+                      "verification: Instagram refused to text %s (\"code not "
+                      "sent\"). That is not the provider's fault, so it is not "
+                      "counted against it. Refusal %d of %d.",
+                      getattr(self.lease.order, "phone", "the number"),
+                      self._refusals, MAX_PHONE_REFUSALS)
+            self.release_lease(count_failure=False)
+            if self._refusals >= MAX_PHONE_REFUSALS:
+                # Renting a third is buying the same answer again. "Try again
+                # later" is about this account, not about the numbers.
+                return self._result(
+                    RESULT_NEEDS_HUMAN,
+                    f"Instagram refused to send a code to {self._refusals} "
+                    f"different numbers -- it is not accepting new numbers for "
+                    f"this account right now")
+        else:
+            self._refusals = 0
+
         if self.numbers_used >= self.max_number_attempts:
             return self._result(
                 RESULT_NEEDS_HUMAN,
@@ -882,13 +940,17 @@ class _Session:
         self.steps.append(challenge)
         return self._repeats < MAX_REPEATS
 
-    def release_lease(self) -> None:
-        """Settle any held number: finished if its code was used, refunded if not."""
+    def release_lease(self, count_failure: bool = True) -> None:
+        """Settle any held number: finished if its code was used, refunded if not.
+
+        `count_failure=False` refunds it without blaming the provider -- see
+        `NumberLease.release`.
+        """
         if self.lease is None:
             return
         lease, self.lease = self.lease, None
         try:
-            lease.release()
+            lease.release(count_failure=count_failure)
         except Exception as exc:
             self._log("warning", "verification: releasing %s raised (%s)",
                       lease.order, exc)

@@ -211,8 +211,12 @@ class FlowTestCase(TestCase):
         # Left real, each case here would pay that in wall-clock.
         kwargs.setdefault("sleep", self.clock.sleep)
         kwargs.setdefault("clock", self.clock.time)
-        result = run_verification(driver, self.router(provider),
+        router = self.router(provider)
+        result = run_verification(driver, router,
                                   solver=solver or FakeSolver(), **kwargs)
+        # Kept so a test can assert on what the breaker learned -- the router is
+        # built in here, so callers have no other handle on it.
+        self.breaker_failures = router.store.load().consecutive_failures
         return result, driver, provider
 
 
@@ -911,3 +915,99 @@ class RunBudgetTest(FlowTestCase):
         self.assertEqual(len(provider.cancelled) + len(provider.finished),
                          provider.purchases,
                          "every rented number must be settled")
+
+
+class InstagramRefusedTheNumberTest(FlowTestCase):
+    """Instagram declining to send is not the SMS provider's fault.
+
+    Read off `Jil 10`, 2026-08-12: the phone screen came back carrying
+    "code not sent: try again later or use a different mobile number". The
+    provider had delivered a perfectly good number; Instagram simply would not
+    text it. Two of those in one run took the breaker from 4/10 to 6/10 --
+    two-thirds of the way to switching providers over Instagram's behaviour.
+    """
+
+    REFUSED = ("get support menu enter your mobile number you'll need to confirm "
+               "this mobile number with a code via sms or whatsapp. de +49 phone "
+               "number code not sent: try again later or use a different mobile "
+               "number. we use phone numbers added here to help you log in")
+
+    def test_the_refusal_is_recognised(self):
+        from adb_bot.automation.flows.verification import phone_number_refused
+        self.assertTrue(phone_number_refused(self.REFUSED))
+
+    def test_an_ordinary_phone_screen_is_not_a_refusal(self):
+        from adb_bot.automation.flows.verification import phone_number_refused
+        self.assertFalse(phone_number_refused(SCREEN_PHONE))
+
+    def test_a_refusal_is_not_counted_against_the_provider(self):
+        provider = FakeProvider("smspool", code=None)
+        driver = FakeDriver([SCREEN_PHONE, self.REFUSED, self.REFUSED])
+        result, _, provider = self.run_chain(None, driver=driver, provider=provider)
+
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+        self.assertEqual(len(provider.cancelled), provider.purchases,
+                         "every number must still be given back")
+        self.assertEqual(self.breaker_failures, 0,
+                         "Instagram's refusal must not reach the breaker")
+
+    def test_it_stops_rather_than_renting_a_third(self):
+        """"Try again later" is about the account, not the numbers. Jil 10 paid
+        for a third number purely to be told the same thing."""
+        provider = FakeProvider("smspool", code=None)
+        driver = FakeDriver([SCREEN_PHONE, self.REFUSED, self.REFUSED, self.REFUSED])
+        result, _, provider = self.run_chain(None, driver=driver, provider=provider)
+
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+        self.assertIn("not accepting new numbers", result.detail)
+        self.assertLessEqual(provider.purchases, 2,
+                             "one retry is fair; a third is buying the same answer")
+
+    def test_one_refusal_still_gets_another_number(self):
+        """Instagram's own wording offers both readings, so a single refusal is
+        worth one more number."""
+        provider = FakeProvider("smspool", code="885485")
+        driver = FakeDriver([SCREEN_PHONE, self.REFUSED, SCREEN_PHONE,
+                             SCREEN_CODE, SCREEN_FEED])
+        result, _, provider = self.run_chain(None, driver=driver, provider=provider)
+
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertGreaterEqual(provider.purchases, 2)
+
+    def test_a_genuine_timeout_is_still_the_providers_failure(self):
+        """The distinction has to cut both ways, or the breaker stops working."""
+        provider = FakeProvider("smspool", code=None)
+        router = self.router(provider)
+        driver = FakeDriver([SCREEN_PHONE, SCREEN_CODE])
+        run_verification(driver, router, solver=FakeSolver(),
+                         sleep=self.clock.sleep, clock=self.clock.time)
+        self.assertGreaterEqual(router.store.load().consecutive_failures, 1)
+
+
+class LoggedOutErrorDialogTest(FlowTestCase):
+    """`Jil 3`, 2026-08-12 -- found by the safety net rather than by guessing.
+
+    An in-app error dialog, not the signed-out welcome screen. It matched no
+    marker at all, so before the positive-health check it would have been
+    reported as SOLVED and would have untagged a logged-out account straight
+    back into the posting loop. It stopped instead and handed over its text,
+    which is what these markers were written from.
+    """
+
+    DIALOG = ("error you've been logged out of helenaisdaaa. the account owner "
+              "may have changed the password. ok")
+
+    def test_it_is_recognised_as_signed_out(self):
+        self.assertEqual(classify_challenge(self.DIALOG), CHALLENGE_SIGNED_OUT)
+
+    def test_the_run_says_it_needs_credentials_not_verification(self):
+        result, _, provider = self.run_chain([self.DIALOG])
+        self.assertEqual(result.status, RESULT_SIGNED_OUT)
+        self.assertEqual(provider.purchases, 0,
+                         "a logged-out phone must never cost a number")
+
+    def test_a_healthy_feed_mentioning_a_password_is_not_signed_out(self):
+        """The markers name the *event*, not the topic."""
+        self.assertEqual(
+            classify_challenge(SCREEN_FEED + " change password settings"),
+            CHALLENGE_NONE)
