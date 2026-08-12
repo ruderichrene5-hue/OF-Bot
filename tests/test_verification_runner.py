@@ -290,3 +290,150 @@ class ReadinessSettingsTest(unittest.TestCase):
         self.assertTrue(vr.is_fleet_level_failure(
             vr.ProfileOutcome(name="x", launch_id="L1",
                               error="never became ADB-ready")))
+
+
+class DiagnosedElsewhereTest(unittest.TestCase):
+    """Tags a person wrote that already say verification will not help.
+
+    On the live workspace these cover 14 of the 69 flagged profiles --
+    `logged out` x10, `unable to verify` x3, `Banned / Dead` x1. Each one the
+    runner works costs a two-minute launch, and sometimes a rented number, to
+    rediscover what the tag already says.
+    """
+
+    def test_a_logged_out_profile_is_not_worked(self):
+        plan = vr.plan_verification(
+            [_item("jil 2", tags=("Issue", "logged out"))], now=NOW)
+        self.assertEqual(plan.to_run, [])
+        self.assertEqual(plan.diagnosed, [("jil 2", "logged out")])
+
+    def test_unable_to_verify_is_not_worked(self):
+        """Somebody already tried this one by hand and could not do it."""
+        plan = vr.plan_verification(
+            [_item("x", tags=("Issue", "unable to verify"))], now=NOW)
+        self.assertEqual(plan.to_run, [])
+
+    def test_a_dead_account_is_not_worked(self):
+        plan = vr.plan_verification(
+            [_item("x", tags=("Issue", "Banned / Dead"))], now=NOW)
+        self.assertEqual(plan.to_run, [])
+
+    def test_the_match_survives_hand_typed_casing(self):
+        plan = vr.plan_verification(
+            [_item("x", tags=("Issue", "Logged Out"))], now=NOW)
+        self.assertEqual(plan.to_run, [])
+
+    def test_ordinary_tags_do_not_skip_a_profile(self):
+        """`Second Account`, `Task B` and the warm-up tags say nothing about
+        whether a challenge can be answered."""
+        plan = vr.plan_verification(
+            [_item("a", tags=("Issue", "Second Account", "Task B", "Created"))],
+            now=NOW)
+        self.assertEqual([p.name for p in plan.to_run], ["a"])
+
+    def test_the_check_can_be_overridden_for_a_stale_tag(self):
+        plan = vr.plan_verification(
+            [_item("x", tags=("Issue", "logged out"))], now=NOW,
+            respect_diagnosis=False)
+        self.assertEqual([p.name for p in plan.to_run], ["x"])
+
+
+class TerminalOutcomeTest(unittest.TestCase):
+    """Results that will read the same tomorrow do not deserve a six-hour retry.
+
+    `Blank (10)` is what pays for this: it rented a number, received the code,
+    and *then* hit a video-selfie request -- so every retry costs a launch and
+    a number to reach the same wall.
+    """
+
+    # Not `_outcome` -- `unittest.TestCase` owns that name for its own
+    # bookkeeping (see the note in FleetLevelFailureTest).
+    def _result(self, status="needs_human", detail=""):
+        return vr.ProfileOutcome(name="x", launch_id="L1", status=status,
+                                 detail=detail)
+
+    def test_the_video_selfie_is_terminal(self):
+        self.assertTrue(vr.is_terminal_outcome(self._result(
+            detail="the photo challenge could not be completed")))
+
+    def test_a_code_for_someone_elses_number_is_terminal(self):
+        self.assertTrue(vr.is_terminal_outcome(self._result(
+            detail="a code was requested for a number the bot does not control")))
+
+    def test_signed_out_and_banned_are_terminal(self):
+        self.assertTrue(vr.is_terminal_outcome(
+            self._result(status=verification.RESULT_SIGNED_OUT)))
+        self.assertTrue(vr.is_terminal_outcome(
+            self._result(status=verification.RESULT_BANNED)))
+
+    def test_a_bad_sms_pool_is_not_terminal(self):
+        """Pool luck varies by the hour -- this one is worth another go."""
+        self.assertFalse(vr.is_terminal_outcome(self._result(
+            detail="no code arrived for 3 numbers")))
+
+    def test_an_unrecognised_screen_is_not_terminal(self):
+        """It may be a marker gap, but it is cheap to look again and the screen
+        may simply have moved on."""
+        self.assertFalse(vr.is_terminal_outcome(self._result(
+            detail="the screen shows no verification challenge, but does not "
+                   "look like a working Instagram either")))
+
+    def test_a_terminal_result_benches_a_profile_for_far_longer(self):
+        attempts = {"La": {"at": (NOW - timedelta(hours=12)).isoformat(),
+                           "result": "needs_human", "terminal": True}}
+        plan = vr.plan_verification([_item("a")], attempts=attempts, now=NOW,
+                                    cooloff_hours=6)
+        self.assertEqual(plan.to_run, [], "12h later, a week-long bench holds")
+
+    def test_a_transient_result_comes_back_after_the_short_cooloff(self):
+        attempts = {"La": {"at": (NOW - timedelta(hours=12)).isoformat(),
+                           "result": "needs_human", "terminal": False}}
+        plan = vr.plan_verification([_item("a")], attempts=attempts, now=NOW,
+                                    cooloff_hours=6)
+        self.assertEqual([p.name for p in plan.to_run], ["a"])
+
+
+class OnlyListTest(unittest.TestCase):
+    """Working a named list instead of the whole flagged population."""
+
+    def test_it_works_only_the_named_profiles(self):
+        plan = vr.plan_verification(
+            [_item("luisa 2"), _item("luisa 3"), _item("jil 1")],
+            now=NOW, only=["luisa 2", "jil 1"], limit=10)
+        self.assertEqual({p.name for p in plan.to_run}, {"luisa 2", "jil 1"})
+
+    def test_names_match_regardless_of_casing_and_spacing(self):
+        plan = vr.plan_verification([_item("Luisa 2")], now=NOW,
+                                    only=["luisa  2"], limit=10)
+        self.assertEqual([p.name for p in plan.to_run], ["Luisa 2"])
+
+    def test_an_explicit_name_overrides_the_issue_tag_filter(self):
+        """Somebody asking for a profile by name has a reason; refusing because
+        the tag is missing would just be unhelpful."""
+        plan = vr.plan_verification([_item("luisa 9", tags=("Created",))],
+                                    now=NOW, only=["luisa 9"], limit=10)
+        self.assertEqual([p.name for p in plan.to_run], ["luisa 9"])
+
+    def test_an_explicit_name_does_not_override_a_persons_diagnosis(self):
+        """That is another person's finding, not a filter."""
+        plan = vr.plan_verification(
+            [_item("jil 2", tags=("Issue", "logged out"))],
+            now=NOW, only=["jil 2"], limit=10)
+        self.assertEqual(plan.to_run, [])
+        self.assertEqual(len(plan.diagnosed), 1)
+
+    def test_a_name_that_matches_nothing_is_reported(self):
+        plan = vr.plan_verification([_item("luisa 2")], now=NOW,
+                                    only=["luisa 2", "nobody"], limit=10)
+        self.assertEqual(len(plan.not_found), 1)
+        self.assertIn("nobody", plan.not_found[0])
+
+    def test_a_duplicated_name_is_refused_not_guessed(self):
+        """Profile names on this workspace are not unique -- `Blank (10)`,
+        `(11)` and `(13)` each name two different profiles."""
+        plan = vr.plan_verification(
+            [_item("blank (10)", launch_id="L1"),
+             _item("blank (10)", launch_id="L2")],
+            now=NOW, only=["blank (10)"], limit=10)
+        self.assertTrue(any("matches 2" in m for m in plan.not_found),
+                        plan.not_found)

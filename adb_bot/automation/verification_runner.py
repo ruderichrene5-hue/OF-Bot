@@ -52,6 +52,24 @@ from adb_bot.clients import airtable as at
 
 ISSUE_TAG = "Issue"
 
+# Tags a person applies in MultiLogin that already say what is wrong -- and say
+# it is not something this flow can fix. Read them: a VA who has looked at a
+# phone knows more than a run that has not started yet, and launching one costs
+# two minutes and possibly a rented number to rediscover what the tag says.
+#
+# On the live workspace these cover **14 of the 69 flagged profiles**:
+#   'logged out'       x10  -- needs credentials, not verification
+#   'unable to verify' x3   -- somebody already tried this and failed
+#   'Banned / Dead'    x1   -- the account is gone
+#
+# Matched lowercased, because they are typed by hand and the casing varies.
+DIAGNOSED_ELSEWHERE_TAGS = {
+    "logged out",
+    "unable to verify",
+    "banned / dead",
+    "banned/dead",
+}
+
 # How long a profile is left alone after this pass has worked it. Long enough
 # that a re-flag has to be a fresh problem rather than the same one still
 # settling, short enough that a genuinely fixable phone is retried the same day.
@@ -71,6 +89,39 @@ LEDGER_FILENAME = "verification_attempts.json"
 # the whole limit against an empty wallet or a MultiLogin outage spends half an
 # hour to learn the same thing twice.
 MAX_CONSECUTIVE_FLEET_FAILURES = 2
+
+# A profile whose result cannot change without a person is not worth retrying
+# every six hours. `Blank (10)` is the case that pays for this: it rented a
+# number, received the code, and *then* hit a video-selfie request -- so every
+# retry costs a launch and a number to reach the same wall. A week is long
+# enough to stop paying for it and short enough that the profile comes back on
+# its own if Instagram changes its mind.
+TERMINAL_COOLOFF_HOURS = 24.0 * 7
+
+# Result details that will read the same way tomorrow. Matched on the detail
+# text because that is where the reason lives -- `needs_human` covers both "no
+# code arrived" (worth another go when the pool is kinder) and "Instagram wants
+# a video selfie" (never worth another go).
+_TERMINAL_MARKERS = (
+    "photo challenge could not be completed",   # the video-selfie request
+    "number the bot does not control",          # IG texts an owner's own phone
+    "ads-consent gate",                         # needs a consent decision
+    "nobody is logged into instagram",          # needs credentials
+    "account is disabled",                      # banned
+)
+
+
+def is_terminal_outcome(outcome) -> bool:
+    """Whether re-running this profile could plausibly give a different answer.
+
+    Transient by default. Getting this wrong in the cautious direction costs
+    one wasted retry; getting it wrong the other way hides a profile for a
+    week, so only reasons that are demonstrably about the *account* count.
+    """
+    if outcome.status in (verification.RESULT_BANNED, verification.RESULT_SIGNED_OUT):
+        return True
+    detail = str(outcome.detail or "").lower()
+    return any(marker in detail for marker in _TERMINAL_MARKERS)
 
 # How long to wait for a launched phone to answer over ADB. NOT the shipped
 # defaults of `prepare_profile_for_adb` (2 attempts, 10s), which are far too
@@ -164,17 +215,31 @@ class PlannedProfile:
 class VerificationPlan:
     to_run: list = field(default_factory=list)      # PlannedProfile
     cooling_off: list = field(default_factory=list)  # (name, hours remaining)
+    diagnosed: list = field(default_factory=list)    # (name, the tag that says so)
+    not_found: list = field(default_factory=list)    # names asked for that do not exist
     over_limit: int = 0
     flagged: int = 0
 
     def summary(self) -> str:
-        return (f"{self.flagged} flagged, {len(self.to_run)} to run, "
-                f"{len(self.cooling_off)} cooling off, {self.over_limit} over the limit")
+        parts = [f"{self.flagged} flagged", f"{len(self.to_run)} to run",
+                 f"{len(self.cooling_off)} cooling off",
+                 f"{len(self.diagnosed)} already diagnosed by a person",
+                 f"{self.over_limit} over the limit"]
+        if self.not_found:
+            parts.append(f"{len(self.not_found)} not found")
+        return ", ".join(parts)
+
+
+def _wanted_key(name: str) -> str:
+    """Normalise a profile name for matching: hand-typed, so casing and spacing
+    both vary ('Luisa 2', 'luisa  2')."""
+    return " ".join(str(name or "").split()).lower()
 
 
 def plan_verification(mlx_items, attempts=None, now=None,
                       limit: int = DEFAULT_LIMIT,
-                      cooloff_hours: float = DEFAULT_COOLOFF_HOURS) -> VerificationPlan:
+                      cooloff_hours: float = DEFAULT_COOLOFF_HOURS,
+                      only=None, respect_diagnosis: bool = True) -> VerificationPlan:
     """Which flagged profiles this pass should work, and which it should not.
 
     Ordering matters more than it looks: profiles whose MultiLogin remark
@@ -186,10 +251,24 @@ def plan_verification(mlx_items, attempts=None, now=None,
     now = now or _now()
     attempts = attempts or {}
     plan = VerificationPlan()
+    wanted = {_wanted_key(n) for n in only} if only else None
+    seen_names: dict = {}
 
     candidates = []
     for item in mlx_items or []:
-        if ISSUE_TAG not in (item.get("tags") or []):
+        tags = item.get("tags") or []
+        name_key = _wanted_key(item.get("serial_name") or "")
+
+        # An explicit list overrides the tag filter -- somebody asking for a
+        # named profile has a reason, and refusing because the tag is missing
+        # would just be unhelpful. It does NOT override the diagnosis check
+        # below: that one is another person's finding, not a filter.
+        if wanted is not None:
+            if name_key not in wanted:
+                continue
+            seen_names.setdefault(name_key, 0)
+            seen_names[name_key] += 1
+        elif ISSUE_TAG not in tags:
             continue
         launch_id = str(item.get("id") or "").strip()
         if not launch_id:
@@ -201,9 +280,23 @@ def plan_verification(mlx_items, attempts=None, now=None,
         name = str(item.get("serial_name") or launch_id)
         remark = str(item.get("remark") or "")
 
-        last = _parse((attempts.get(launch_id) or {}).get("at"))
+        # A person has already looked and said what is wrong. Believe them:
+        # `logged out` needs credentials and `unable to verify` means somebody
+        # tried. Launching either costs two minutes to rediscover the tag.
+        if respect_diagnosis:
+            diagnosis = next((tag for tag in tags
+                              if _wanted_key(tag) in DIAGNOSED_ELSEWHERE_TAGS), None)
+            if diagnosis:
+                plan.diagnosed.append((name, diagnosis))
+                continue
+
+        entry = attempts.get(launch_id) or {}
+        last = _parse(entry.get("at"))
         if last is not None:
-            ready_at = last + timedelta(hours=cooloff_hours)
+            # A result that cannot change without a person waits far longer --
+            # see `is_terminal_outcome`.
+            hours = TERMINAL_COOLOFF_HOURS if entry.get("terminal") else cooloff_hours
+            ready_at = last + timedelta(hours=hours)
             if now < ready_at:
                 plan.cooling_off.append(
                     (name, (ready_at - now).total_seconds() / 3600.0))
@@ -214,6 +307,17 @@ def plan_verification(mlx_items, attempts=None, now=None,
                                    p.name.lower()))
     plan.to_run = candidates[:limit]
     plan.over_limit = max(0, len(candidates) - limit)
+
+    if wanted is not None:
+        # Names that matched nothing, and names that matched more than one
+        # profile -- both are reported rather than guessed at. Profile names on
+        # this workspace are NOT unique.
+        for key in sorted(wanted):
+            count = seen_names.get(key, 0)
+            if count == 0:
+                plan.not_found.append(f"{key} (no such profile)")
+            elif count > 1:
+                plan.not_found.append(f"{key} (matches {count} profiles -- use the id)")
     return plan
 
 
@@ -279,7 +383,8 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
                           profile_records=None,
                           max_seconds: float = verification.MAX_RUN_SECONDS,
                           readiness_attempts: int = READINESS_ATTEMPTS,
-                          readiness_wait: int = READINESS_WAIT_SECONDS
+                          readiness_wait: int = READINESS_WAIT_SECONDS,
+                          only=None, respect_diagnosis: bool = True
                           ) -> VerificationReport:
     """Work up to `limit` flagged profiles. Returns what happened to each.
 
@@ -290,9 +395,15 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
 
     attempts = load_attempts(app_dir)
     plan = plan_verification(mlx_items, attempts=attempts, limit=limit,
-                             cooloff_hours=cooloff_hours)
+                             cooloff_hours=cooloff_hours, only=only,
+                             respect_diagnosis=respect_diagnosis)
     report = VerificationReport(plan=plan, dry_run=dry_run)
     logger.info("verification pass: %s", plan.summary())
+    for name, tag in plan.diagnosed:
+        logger.info("verification pass: skipping %s -- somebody tagged it %r, "
+                    "which verification cannot fix", name, tag)
+    for missing in plan.not_found:
+        logger.warning("verification pass: asked for %s", missing)
 
     if dry_run:
         for planned in plan.to_run:
@@ -342,6 +453,10 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
             "at": _now().isoformat(),
             "result": outcome.error or outcome.status or "unknown",
             "name": planned.name,
+            # The detail, not just the status: "needs_human" alone cannot tell
+            # anyone later whether this was a bad SMS pool or a video selfie.
+            "detail": outcome.detail or "",
+            "terminal": is_terminal_outcome(outcome),
         }
         _write_back(airtable, tag_client, logger, planned, outcome,
                     by_launch.get(planned.launch_id))
@@ -488,12 +603,22 @@ def main(argv=None) -> int:
                         help="actually rent numbers and drive the phones "
                              "(without this, only says what it would work).")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
-                        help=f"profiles per pass (default {DEFAULT_LIMIT}).")
+                        help=f"profiles per pass (default {DEFAULT_LIMIT}). "
+                             f"With --only, defaults to the length of that list.")
     parser.add_argument("--cooloff-hours", type=float, default=DEFAULT_COOLOFF_HOURS,
                         help=f"leave a worked profile alone this long "
                              f"(default {DEFAULT_COOLOFF_HOURS}).")
     parser.add_argument("--country", default=None,
                         help="override the country numbers are rented from.")
+    parser.add_argument("--only", default=None,
+                        help="comma-separated profile names to work instead of "
+                             "the whole flagged population (e.g. "
+                             "'luisa 2,luisa 3'). Overrides the Issue-tag "
+                             "filter, but not the diagnosis check.")
+    parser.add_argument("--ignore-diagnosis", action="store_true",
+                        help=f"work profiles even when a person has tagged them "
+                             f"{sorted(DIAGNOSED_ELSEWHERE_TAGS)}. Use when a "
+                             f"tag is stale.")
     parser.add_argument("--readiness-attempts", type=int, default=READINESS_ATTEMPTS,
                         help=f"tries for a phone to answer over ADB "
                              f"(default {READINESS_ATTEMPTS}).")
@@ -520,22 +645,35 @@ def main(argv=None) -> int:
             logger.warning("verification pass: no Airtable (%s); a banned profile "
                            "will be reported but not flagged", exc)
 
+    only = [n for n in (args.only or "").split(",") if n.strip()] or None
+    # An explicit list is a request for those profiles, so the default limit
+    # must not quietly drop the tail of it.
+    limit = args.limit
+    if only and limit == DEFAULT_LIMIT:
+        limit = len(only)
+
     report = run_verification_pass(
         build_mlx_clients(token), ADBClient(), airtable, logger, items,
         tag_client=MultiloginTagClient(token) if args.apply else None,
-        dry_run=not args.apply, limit=args.limit,
+        dry_run=not args.apply, limit=limit,
         cooloff_hours=args.cooloff_hours, country=args.country,
         profile_records=profile_records,
         readiness_attempts=args.readiness_attempts,
-        readiness_wait=args.readiness_wait)
+        readiness_wait=args.readiness_wait,
+        only=only, respect_diagnosis=not args.ignore_diagnosis)
 
     plan = report.plan
     print(f"\n{'=' * 70}")
     print(f"{'APPLY (spends money, taps phones)' if args.apply else 'DRY RUN'}")
     print(f"flagged     : {plan.flagged}")
     print(f"cooling off : {len(plan.cooling_off)}")
+    print(f"diagnosed   : {len(plan.diagnosed)}  (a person already said what is wrong)")
     print(f"over limit  : {plan.over_limit}")
     print(f"{'=' * 70}")
+    for name, tag in plan.diagnosed:
+        print(f"  {name:24} skipped -- tagged {tag!r}")
+    for missing in plan.not_found:
+        print(f"  {missing:24} NOT RUN")
     for outcome in report.outcomes:
         note = outcome.error or f"{outcome.status} -- {outcome.detail}"
         marks = []
