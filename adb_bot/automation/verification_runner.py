@@ -422,17 +422,33 @@ def _write_back(airtable, tag_client, logger, planned, outcome, record) -> None:
             logger.warning("verification pass: untagging %s failed (%s)",
                            planned.name, exc)
 
-    if flag_banned and record and record.get("record_id"):
-        try:
-            airtable.flag_profile_for_human(
-                record["record_id"], at.PROFILE_ISSUE_BANNED,
-                f"verification pass: {outcome.detail}")
-            outcome.flagged_banned = True
-            logger.warning("verification pass: %s is banned; flagged and left tagged",
-                           planned.name)
-        except Exception as exc:
-            logger.warning("verification pass: flagging %s as banned failed (%s)",
-                           planned.name, exc)
+    if not flag_banned:
+        return
+
+    # Not every MultiLogin profile has an Airtable row. The staging ones
+    # ("Default profile name (NN)") are tagged and launchable but unmanaged --
+    # `632451306307322212` is exactly this -- so there is nothing to flag and no
+    # record of the ban anywhere except the log. Said out loud rather than
+    # skipped quietly: a banned account nobody hears about is the whole reason
+    # the incident write-back exists.
+    if not (record and record.get("record_id")):
+        logger.warning(
+            "verification pass: %s [%s] is BANNED, but has no Profiles (Cloning) "
+            "row, so the ban could not be recorded in Airtable. The MultiLogin "
+            "'%s' tag has been left on, which is the only thing now marking it.",
+            planned.name, planned.launch_id, ISSUE_TAG)
+        return
+
+    try:
+        airtable.flag_profile_for_human(
+            record["record_id"], at.PROFILE_ISSUE_BANNED,
+            f"verification pass: {outcome.detail}")
+        outcome.flagged_banned = True
+        logger.warning("verification pass: %s is banned; flagged and left tagged",
+                       planned.name)
+    except Exception as exc:
+        logger.warning("verification pass: flagging %s as banned failed (%s)",
+                       planned.name, exc)
 
 
 # --- CLI ----------------------------------------------------------------------

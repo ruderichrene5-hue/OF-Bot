@@ -201,3 +201,58 @@ class FleetLevelFailureTest(unittest.TestCase):
     def test_a_banned_account_is_not_fleet_level(self):
         self.assertFalse(vr.is_fleet_level_failure(
             self._failed(status="banned", detail="account is disabled, not verifiable")))
+
+
+class UnmanagedProfileTest(unittest.TestCase):
+    """MultiLogin profiles Airtable has never heard of.
+
+    The staging ones -- "Default profile name (NN)" -- carry the `Issue` tag and
+    launch fine, but have no Profiles (Cloning) row. `632451306307322212` is one.
+    A ban on such a profile can be written nowhere, and the danger is that it is
+    written nowhere *quietly*.
+    """
+
+    class _Logger:
+        def __init__(self):
+            self.warnings = []
+
+        def info(self, message, *args):
+            pass
+
+        def warning(self, message, *args):
+            self.warnings.append(message % args if args else message)
+
+        error = warning
+
+    def _planned(self):
+        return vr.PlannedProfile(launch_id="L1", name="Default profile name (47)")
+
+    def test_a_ban_with_no_airtable_row_is_announced_not_swallowed(self):
+        logger = self._Logger()
+        outcome = vr.ProfileOutcome(name="x", launch_id="L1",
+                                    status=verification.RESULT_BANNED,
+                                    detail="account is disabled")
+        vr._write_back(None, None, logger, self._planned(), outcome, None)
+
+        self.assertFalse(outcome.flagged_banned)
+        self.assertTrue(any("BANNED" in w and "no Profiles" in w
+                            for w in logger.warnings), logger.warnings)
+
+    def test_a_ban_with_a_row_is_written(self):
+        class FakeAirtable:
+            def __init__(self):
+                self.flagged = []
+
+            def flag_profile_for_human(self, record_id, reason, note):
+                self.flagged.append((record_id, reason))
+                return True
+
+        airtable = FakeAirtable()
+        outcome = vr.ProfileOutcome(name="x", launch_id="L1",
+                                    status=verification.RESULT_BANNED,
+                                    detail="account is disabled")
+        vr._write_back(airtable, None, self._Logger(), self._planned(), outcome,
+                       {"record_id": "rec1"})
+
+        self.assertTrue(outcome.flagged_banned)
+        self.assertEqual(len(airtable.flagged), 1)
