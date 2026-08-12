@@ -160,3 +160,44 @@ class DryRunTest(unittest.TestCase):
         vr.run_verification_pass(object(), None, None, self._Logger(),
                                  [_item("a")], dry_run=True, app_dir=app_dir)
         self.assertEqual(vr.load_attempts(app_dir), {})
+
+
+class FleetLevelFailureTest(unittest.TestCase):
+    """Knowing when to stop, rather than proving the same point five times.
+
+    Every profile costs a launch and about four minutes. An empty wallet or a
+    MultiLogin outage gives the same answer for every phone, so grinding
+    through the whole limit spends half an hour to learn it twice.
+    """
+
+    # Not `_outcome`: `unittest.TestCase` already owns that name for its own
+    # `_Outcome` bookkeeping, and shadowing it makes every call here fail with
+    # "'_Outcome' object is not callable".
+    def _failed(self, error="", detail="", status=""):
+        return vr.ProfileOutcome(name="x", launch_id="L1", error=error,
+                                 detail=detail, status=status)
+
+    def test_an_empty_wallet_is_fleet_level(self):
+        self.assertTrue(vr.is_fleet_level_failure(self._failed(
+            status="needs_human",
+            detail="could not rent a number: no provider has stock")))
+
+    def test_multilogin_not_starting_phones_is_fleet_level(self):
+        self.assertTrue(vr.is_fleet_level_failure(
+            self._failed(error="never became ADB-ready")))
+        self.assertTrue(vr.is_fleet_level_failure(
+            self._failed(error="could not reach it over ADB")))
+
+    def test_a_challenge_this_account_cannot_pass_is_not_fleet_level(self):
+        """The next profile deserves its turn: this one is about this account."""
+        self.assertFalse(vr.is_fleet_level_failure(self._failed(
+            status="needs_human",
+            detail="the photo challenge could not be completed")))
+
+    def test_a_solve_is_not_a_failure_at_all(self):
+        self.assertFalse(vr.is_fleet_level_failure(
+            self._failed(status="solved", detail="no verification screen remaining")))
+
+    def test_a_banned_account_is_not_fleet_level(self):
+        self.assertFalse(vr.is_fleet_level_failure(
+            self._failed(status="banned", detail="account is disabled, not verifiable")))

@@ -638,3 +638,25 @@ class LateRenderingCaptchaTest(unittest.TestCase):
         driver._capture_captcha_once = lambda: (calls.append(1), (None, False))[1]
         self.assertIsNone(driver.capture_captcha_image())
         self.assertEqual(len(calls), 1)
+
+
+class DismissConfirmationTest(unittest.TestCase):
+    """`Done` on the "You're back on Instagram" screen a cleared chain ends on."""
+
+    def test_it_taps_done(self):
+        adb = FakeAdb()
+        driver = _driver(_root(_button("Done")), act=True, adb=adb)
+        self.assertTrue(driver.dismiss_confirmation())
+        self.assertTrue(adb.taps)
+
+    def test_no_such_button_is_not_an_error(self):
+        """The chain is already solved when this runs; nothing about the result
+        depends on it."""
+        driver = _driver(_root(_button("Next")), act=True, adb=FakeAdb())
+        self.assertFalse(driver.dismiss_confirmation())
+
+    def test_observe_mode_does_not_tap(self):
+        adb = FakeAdb()
+        driver = _driver(_root(_button("Done")), act=False, adb=adb)
+        self.assertFalse(driver.dismiss_confirmation())
+        self.assertEqual(adb.commands, [])

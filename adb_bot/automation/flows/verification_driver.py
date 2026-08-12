@@ -95,6 +95,11 @@ _NEW_NUMBER_LABELS = (
 # Deliberately separate from `_NEW_NUMBER_LABELS`: both mean "try again" but on
 # different screens, and merging them would let a captcha failure tap a
 # change-number link and abandon a number that is about to receive.
+# The button on the "You're back on Instagram" screen a cleared chain ends on.
+# Confirmed on `Laila 4` and `Laila 3`, 2026-08-12 -- both were left sitting on
+# it untapped.
+_CONFIRMATION_LABELS = ("done", "ok", "continue", "got it")
+
 _NEW_CAPTCHA_LABELS = (
     "get a new code", "get a new image", "new image", "refresh",
     "try a different image", "reload",
@@ -815,6 +820,18 @@ class AdbChallengeDriver:
         # screen; the usual settle is tuned for a local redraw.
         time.sleep(max(self.settle_seconds, 3.0))
         return True
+
+    def dismiss_confirmation(self) -> bool:
+        """Tap `Done` on the screen a cleared chain ends on. Best effort.
+
+        The chain is already solved by the time this runs, so a failure here
+        changes nothing about the result -- it only leaves the phone parked on
+        a confirmation screen, which is where both 2026-08-12 solves were left.
+        """
+        center = self._find_exact(_CONFIRMATION_LABELS)
+        if center is None:
+            return False
+        return self._tap(center, "the confirmation button")
 
     def _crop_captcha(self, png_path: Path):
         """Crop to the captcha image node from the dump, if it can be found."""

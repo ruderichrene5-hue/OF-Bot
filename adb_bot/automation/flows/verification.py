@@ -220,6 +220,78 @@ _IMAGE_CAPTCHA_MARKERS = (
     "solve the puzzle",
 )
 
+# --- what a *working* Instagram looks like ------------------------------------
+# The counterpart to every marker list above, and the one that decides whether a
+# run reports success. Everything above answers "which challenge is this?"; a
+# screen matching none of them was, until now, taken as "no challenge, so we are
+# through" -- and `run` returned SOLVED.
+#
+# The recordings say that is three different screens, not one. Of the runs saved
+# under ~/.adb_bot/verification, screens carrying no challenge marker included:
+#
+#   * a healthy feed -- genuinely fine;
+#   * the **Android launcher** ("search gallery play store home telephone
+#     messaging music chrome camera") -- Instagram was not even running, and
+#     `Jil 2` sat there for two minutes;
+#   * Meta's **ads-consent gate** -- a real blocker, whose only button is
+#     `Get started`, seen on `Jil 20`;
+#   * an **empty read** -- the dump returned nothing at all.
+#
+# Reported as SOLVED and wired to a runner that untags on success, each of those
+# hands a profile that nobody fixed back to the posting loop. So success now
+# needs *positive* evidence, and anything unrecognised is a person's problem
+# rather than a silent pass. The markers are taken verbatim from real dumps.
+_APP_HEALTHY_MARKERS = (
+    # Instagram's bottom navigation bar, in `content-desc`. Present on the feed,
+    # reels, search and profile, so it covers wherever the app happens to be.
+    "search and explore",
+    "home reels message",
+    # The feed's story tray, on every healthy feed dump we have.
+    "add to story",
+    "reels tray container",
+    # The screen Instagram shows once a challenge is cleared -- confirmed twice
+    # (`Laila 4` and `Laila 3`, 2026-08-12). This is what success actually looks
+    # like at the end of a chain, and it is not a feed.
+    "you're back on instagram",
+    "no longer suspended",
+)
+
+# Meta's "choose if we process your data for ads" gate. Not a verification
+# challenge and not a healthy screen: it blocks the app until somebody answers
+# it, and its only control is `Get started`, which leads to a *consent choice*.
+# Deliberately not automated -- what an account consents to on its owner's
+# behalf is not this bot's decision to make. Named so a VA is told which screen
+# to go and clear, instead of being handed a paragraph of raw text.
+_CONSENT_GATE_MARKERS = (
+    "choose if we process your data for ads",
+    "consent to us processing your personal data",
+)
+
+
+def screen_is_healthy(text: str | None) -> bool:
+    """True when the screen positively shows Instagram working normally.
+
+    Deliberately a whitelist. A blacklist of "screens that are not the feed"
+    cannot be written, because the whole problem is the screens nobody has seen
+    yet -- and every one of those should stop the run, not pass it.
+    """
+    if not text:
+        # An unreadable screen is not a clear screen. It was reported as one:
+        # `Jil 20`'s first look returned an empty string and classified as
+        # "nothing wrong".
+        return False
+    haystack = text.lower()
+    return any(marker in haystack for marker in _APP_HEALTHY_MARKERS)
+
+
+def looks_like_consent_gate(text: str | None) -> bool:
+    """True for Meta's ads-consent interstitial (see `_CONSENT_GATE_MARKERS`)."""
+    if not text:
+        return False
+    haystack = text.lower()
+    return any(marker in haystack for marker in _CONSENT_GATE_MARKERS)
+
+
 # Most specific first. The captcha and photo screens are unambiguous, so they
 # lead; then the two strong sets; then the chooser, whose wording ("get a code")
 # is broad enough to match a code screen if it were checked earlier; then the
@@ -365,6 +437,14 @@ MAX_REPEATS = 3
 # also spends one of `MAX_REPEATS` on the same screen.
 MAX_CAPTCHA_IMAGES = 2
 
+# The longest one account may take before the run gives up on it. MAX_STEPS
+# bounds how many *screens* are worked, but not how long each takes: a chain
+# that spends 45s waiting for each of three numbers, 20s on captcha images and
+# 15s doubting a clear screen adds up, and an unattended pass needs to be
+# predictable enough to put on a timer. Reaching this is reported as `stuck`,
+# which changes nothing about the profile -- the same as running out of steps.
+MAX_RUN_SECONDS = 900.0
+
 # How long a clear screen is doubted before it is believed, and how often it is
 # re-read in that window.
 #
@@ -383,7 +463,8 @@ def run_verification(driver: ChallengeDriver, router, solver=None, logger=None,
                      max_steps: int = MAX_STEPS,
                      max_number_attempts: int = MAX_NUMBER_ATTEMPTS,
                      service: str = "instagram", country: str | None = None,
-                     sleep=None, clock=None) -> VerificationResult:
+                     sleep=None, clock=None,
+                     max_seconds: float = MAX_RUN_SECONDS) -> VerificationResult:
     """Drive one account through whatever verification screens it shows.
 
     `router` is an `SmsRouter`; `solver` a `CaptchaSolver` (defaults to the
@@ -408,7 +489,8 @@ def run_verification(driver: ChallengeDriver, router, solver=None, logger=None,
         country = DEFAULT_COUNTRY
 
     session = _Session(driver, router, solver, logger, max_number_attempts,
-                       service, country, sleep=sleep, clock=clock)
+                       service, country, sleep=sleep, clock=clock,
+                       max_seconds=max_seconds)
     try:
         return session.run(max_steps)
     finally:
@@ -421,7 +503,8 @@ class _Session:
     """The loop's mutable state. Split out so `run_verification` stays readable."""
 
     def __init__(self, driver, router, solver, logger, max_number_attempts,
-                 service, country, sleep=None, clock=None) -> None:
+                 service, country, sleep=None, clock=None,
+                 max_seconds: float = MAX_RUN_SECONDS) -> None:
         self.driver = driver
         self.router = router
         self.solver = solver
@@ -434,6 +517,8 @@ class _Session:
         # how waits end up untested.
         self.sleep = sleep or time.sleep
         self.sleep_clock = clock or time.monotonic
+        self.max_seconds = max_seconds
+        self._started_at = self.sleep_clock()
 
         self.lease = None            # the number currently typed into Instagram
         self.numbers_used = 0
@@ -447,19 +532,26 @@ class _Session:
     # --- main loop ------------------------------------------------------------
     def run(self, max_steps: int) -> VerificationResult:
         for _ in range(max_steps):
-            challenge = classify_challenge(self.driver.read_screen())
+            # Checked before the screen is read, not after the work is done, so
+            # the run cannot start a step it has no time to finish -- renting a
+            # number and then abandoning it is the one thing this must not do.
+            # `release_lease` in the caller settles anything already held.
+            elapsed = self.sleep_clock() - self._started_at
+            if self.max_seconds and elapsed >= self.max_seconds:
+                return self._result(
+                    RESULT_STUCK,
+                    f"gave up after {elapsed / 60:.0f} minutes on this account")
+
+            text = self.driver.read_screen()
+            challenge = classify_challenge(text)
 
             if challenge == CHALLENGE_NONE:
                 # Never believed on the first read -- see `_confirm_clear`. If a
                 # challenge is merely late, this is where it is caught; if the
                 # screen is genuinely clear, this returns none and we are done.
-                challenge = self._confirm_clear()
+                challenge, text = self._confirm_clear(text)
             if challenge == CHALLENGE_NONE:
-                # Nothing left to answer. If we were mid-chain this is success;
-                # if we never saw a challenge at all, it is also success -- the
-                # profile was flagged but the screen is clear now.
-                return self._result(RESULT_SOLVED,
-                                    "no verification screen remaining")
+                return self._clear_screen_result(text)
             if challenge == CHALLENGE_BANNED:
                 return self._result(RESULT_BANNED,
                                     "account is disabled, not verifiable")
@@ -473,6 +565,14 @@ class _Session:
                     "nobody is logged into Instagram on this phone -- it needs "
                     "an account signed in, not verification")
 
+            # A captcha we answered is only "the last one" until something else
+            # comes up. Without this, a chain that returns to a captcha later
+            # (Instagram does re-ask) would report the *earlier*, correct answer
+            # to 2captcha as wrong -- refunding a solve we should have paid for
+            # and feeding the service bad accuracy data.
+            if challenge != CHALLENGE_IMAGE_CAPTCHA:
+                self._captcha_answered = False
+
             if not self._note_progress(challenge):
                 return self._result(
                     RESULT_STUCK,
@@ -485,8 +585,71 @@ class _Session:
         return self._result(RESULT_STUCK,
                             f"gave up after {max_steps} screens")
 
-    def _confirm_clear(self) -> str:
-        """Re-read a screen that looked clear. Returns what it settled on.
+    def _clear_screen_result(self, text):
+        """Decide what a screen carrying no challenge marker actually means.
+
+        The one place a run is allowed to report success, and the reason it is
+        not simply `return SOLVED`: "no challenge marker" and "the account is
+        fine" are different claims, and the recordings show the gap between
+        them is three real screens -- the Android launcher, Meta's ads-consent
+        gate, and an empty read. See `_APP_HEALTHY_MARKERS`.
+
+        Erring towards `needs_human` is deliberate and cheap: the profile keeps
+        the `Issue` tag it already had and somebody glances at it. Erring the
+        other way hands a profile nobody fixed back to the posting loop, which
+        is how a phone spends launches for days achieving nothing.
+        """
+        if screen_is_healthy(text):
+            self._dismiss_confirmation()
+            return self._result(RESULT_SOLVED, "no verification screen remaining")
+
+        if looks_like_consent_gate(text):
+            return self._result(
+                RESULT_NEEDS_HUMAN,
+                "Instagram is showing Meta's ads-consent gate, which blocks the "
+                "app until somebody answers it. What an account consents to is "
+                "not the bot's decision, so this needs a person")
+
+        # Everything else: name it as unrecognised and hand over the text, which
+        # is the only way the marker lists ever grow. A screen that lands here
+        # twice is a marker list waiting to be written.
+        snippet = " ".join(str(text or "").split())[:200] or "(the screen read as empty)"
+        self._log("warning",
+                  "verification: no challenge marker, but the screen does not look "
+                  "like a working Instagram either. Not reporting this as solved. "
+                  "Screen was: %r", snippet)
+        return self._result(
+            RESULT_NEEDS_HUMAN,
+            f"the screen shows no verification challenge, but does not look like "
+            f"a working Instagram either -- so this cannot be called solved. "
+            f"Screen text: {snippet}")
+
+    def _dismiss_confirmation(self) -> None:
+        """Best-effort tap on the `Done` of the un-suspension screen.
+
+        Both accounts solved on 2026-08-12 were left sitting on *"You're back on
+        Instagram"* with its button untapped. Harmless as far as anyone can
+        tell, but leaving a phone parked mid-screen is untidy and nobody has
+        checked whether Instagram wants the acknowledgement. Optional on the
+        driver, and a failure is not a failure of the run: the chain is already
+        cleared by the time this is reached.
+        """
+        dismiss = getattr(self.driver, "dismiss_confirmation", None)
+        if not callable(dismiss):
+            return
+        try:
+            if dismiss():
+                self._log("info", "verification: acknowledged the confirmation screen")
+        except Exception as exc:
+            self._log("warning", "verification: dismissing the confirmation raised (%s)",
+                      exc)
+
+    def _confirm_clear(self, text) -> tuple:
+        """Re-read a screen that looked clear. Returns `(challenge, text)`.
+
+        The text comes back with the verdict because the caller has to judge it
+        further -- "no challenge marker" is not "the account is fine", and
+        `_clear_screen_result` needs the *last* text read, not the first.
 
         A clear screen is the one classification we must not take at face
         value, because it is the one that ends the run as *success*. Instagram
@@ -509,33 +672,35 @@ class _Session:
         deadline = self.sleep_clock() + CLEAR_SCREEN_PATIENCE_SECONDS
         while self.sleep_clock() < deadline:
             self.sleep(CLEAR_SCREEN_POLL_SECONDS)
-            challenge = classify_challenge(self.driver.read_screen())
+            text = self.driver.read_screen()
+            challenge = classify_challenge(text)
             if challenge != CHALLENGE_NONE:
                 self._log("info", "a %s screen appeared after the first read looked "
                                   "clear -- this is why a clear screen is not believed "
                                   "immediately", challenge)
-                return challenge
+                return (challenge, text)
 
         if self.steps:
-            return CHALLENGE_NONE
+            return (CHALLENGE_NONE, text)
 
         # `refresh_feed` is optional on the driver: a caller may supply a
         # simpler one, and a missing refresh must not turn a working run into
         # an AttributeError.
         refresh = getattr(self.driver, "refresh_feed", None)
         if not callable(refresh) or not refresh():
-            return CHALLENGE_NONE
+            return (CHALLENGE_NONE, text)
 
         self._log("info", "screen still looked clear after %.0fs; pulled the feed "
                           "down and looking again", CLEAR_SCREEN_PATIENCE_SECONDS)
         deadline = self.sleep_clock() + CLEAR_SCREEN_PATIENCE_SECONDS
         while self.sleep_clock() < deadline:
-            challenge = classify_challenge(self.driver.read_screen())
+            text = self.driver.read_screen()
+            challenge = classify_challenge(text)
             if challenge != CHALLENGE_NONE:
                 self._log("info", "a %s screen appeared after the refresh", challenge)
-                return challenge
+                return (challenge, text)
             self.sleep(CLEAR_SCREEN_POLL_SECONDS)
-        return CHALLENGE_NONE
+        return (CHALLENGE_NONE, text)
 
     def _handle(self, challenge: str):
         """Do the one thing this screen needs. Return a result to stop, or None."""

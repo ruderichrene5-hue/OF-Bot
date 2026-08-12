@@ -66,6 +66,35 @@ DEFAULT_LIMIT = 5
 
 LEDGER_FILENAME = "verification_attempts.json"
 
+# Stop the pass after this many failures in a row that another phone will not
+# fix. Every profile costs a launch and about four minutes, so grinding through
+# the whole limit against an empty wallet or a MultiLogin outage spends half an
+# hour to learn the same thing twice.
+MAX_CONSECUTIVE_FLEET_FAILURES = 2
+
+# Failure texts that are about the fleet or the wallet rather than this account.
+# Matched on the message because that is where the reason actually is: the
+# router raises one exception type for an empty wallet, a refusing provider and
+# a tripped breaker alike, and all three mean "the next profile will fail too".
+_FLEET_LEVEL_MARKERS = (
+    "could not rent a number",
+    "never became adb-ready",
+    "could not reach it over adb",
+    "instagram would not open",
+)
+
+
+def is_fleet_level_failure(outcome) -> bool:
+    """Whether this failure says something about the fleet, not the account.
+
+    A challenge the flow cannot answer is this profile's problem and the next
+    one deserves its turn. An empty wallet, a provider refusing, MultiLogin not
+    starting phones -- those are the same answer for everybody, and the only
+    useful response is to stop and say so.
+    """
+    text = f"{outcome.error} {outcome.detail}".lower()
+    return any(marker in text for marker in _FLEET_LEVEL_MARKERS)
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -195,6 +224,7 @@ class VerificationReport:
     outcomes: list = field(default_factory=list)    # ProfileOutcome
     plan: VerificationPlan | None = None
     dry_run: bool = True
+    aborted: str = ""      # why the pass stopped early, if it did
 
     def counts(self) -> dict:
         out: dict = {}
@@ -207,8 +237,9 @@ class VerificationReport:
         mode = "DRY-RUN" if self.dry_run else "APPLIED"
         counts = ", ".join(f"{k}={v}" for k, v in sorted(self.counts().items())) or "nothing"
         spent = sum(o.numbers_used for o in self.outcomes)
-        return (f"[{mode}] verification: {counts}; {spent} number(s) rented, "
-                f"{sum(1 for o in self.outcomes if o.untagged)} profile(s) handed back")
+        summary = (f"[{mode}] verification: {counts}; {spent} number(s) rented, "
+                   f"{sum(1 for o in self.outcomes if o.untagged)} profile(s) handed back")
+        return f"{summary} -- ABORTED: {self.aborted}" if self.aborted else summary
 
 
 def route_result(status: str) -> tuple:
@@ -234,7 +265,9 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
                           limit: int = DEFAULT_LIMIT,
                           cooloff_hours: float = DEFAULT_COOLOFF_HOURS,
                           app_dir=None, country: str | None = None,
-                          profile_records=None) -> VerificationReport:
+                          profile_records=None,
+                          max_seconds: float = verification.MAX_RUN_SECONDS
+                          ) -> VerificationReport:
     """Work up to `limit` flagged profiles. Returns what happened to each.
 
     `dry_run` names the profiles it would work and rents nothing -- the money is
@@ -259,6 +292,7 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
 
     by_launch = {str(r.get("launch_id") or ""): r for r in (profile_records or [])}
 
+    consecutive_fleet_failures = 0
     for planned in plan.to_run:
         outcome = ProfileOutcome(name=planned.name, launch_id=planned.launch_id)
         report.outcomes.append(outcome)
@@ -273,7 +307,8 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
                             planned.name)
                 continue
             try:
-                _work_one(clients, adb_client, logger, planned, outcome, country)
+                _work_one(clients, adb_client, logger, planned, outcome, country,
+                          max_seconds=max_seconds)
             except Exception as exc:
                 # One phone's failure must not end the pass: the next profile is
                 # a different phone with a different problem.
@@ -296,12 +331,29 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
         _write_back(airtable, tag_client, logger, planned, outcome,
                     by_launch.get(planned.launch_id))
 
+        # Stop while it still means something. The cool-off above is already
+        # written for every profile touched, so nothing is retried in a tight
+        # loop either way -- this only saves the launches.
+        if is_fleet_level_failure(outcome):
+            consecutive_fleet_failures += 1
+            if consecutive_fleet_failures >= MAX_CONSECUTIVE_FLEET_FAILURES:
+                report.aborted = (
+                    f"stopped after {consecutive_fleet_failures} failures in a row "
+                    f"that another phone will not fix (last: "
+                    f"{outcome.error or outcome.detail}). Check the provider "
+                    f"balances and that MultiLogin is starting phones.")
+                logger.warning("verification pass: %s", report.aborted)
+                break
+        else:
+            consecutive_fleet_failures = 0
+
     save_attempts(attempts, app_dir)
     logger.info("verification pass: %s", report.summary())
     return report
 
 
-def _work_one(clients, adb_client, logger, planned, outcome, country) -> None:
+def _work_one(clients, adb_client, logger, planned, outcome, country,
+              max_seconds: float = verification.MAX_RUN_SECONDS) -> None:
     """Launch one phone and run the chain on it. Fills `outcome` in place."""
     from adb_bot.automation.flows.verification_driver import (
         AdbChallengeDriver, VerificationRecorder,
@@ -338,7 +390,7 @@ def _work_one(clients, adb_client, logger, planned, outcome, country) -> None:
                                 recorder=recorder, act=True)
     result = verification.run_verification(
         driver, build_router(logger=logger), logger=logger,
-        country=country or DEFAULT_COUNTRY)
+        country=country or DEFAULT_COUNTRY, max_seconds=max_seconds)
 
     outcome.status = result.status
     outcome.detail = result.detail
@@ -454,8 +506,13 @@ def main(argv=None) -> int:
         suffix = f"  [{', '.join(marks)}]" if marks else ""
         print(f"  {outcome.name:24} {note}{suffix}")
     print(f"{'=' * 70}")
+    if report.aborted:
+        print(f"STOPPED EARLY: {report.aborted}")
     print(report.summary())
-    return 0
+    # Non-zero when the pass gave up on a fleet-level problem, so a timer or a
+    # watchdog can tell "worked through five profiles" from "could not rent a
+    # number and stopped". An ordinary needs_human is not an error.
+    return 1 if report.aborted else 0
 
 
 if __name__ == "__main__":

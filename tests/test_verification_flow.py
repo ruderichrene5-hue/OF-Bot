@@ -36,7 +36,13 @@ SCREEN_PHONE = "enter your mobile number to get a confirmation code"
 SCREEN_CODE = "enter the code we sent to +1 555 010 0001"
 SCREEN_PHOTO = "we need a photo of yourself to confirm you're a real person"
 SCREEN_CAPTCHA = "type the characters you see in the image below"
-SCREEN_FEED = "your story  reels  suggested for you  liked by"
+# Verbatim from a real healthy feed (`Jil 23`, 2026-08-11). Not a paraphrase,
+# because the flow now requires *positive* evidence that Instagram is working
+# before it will report success -- a made-up feed string would pass the tests
+# and fail on a phone, which is exactly backwards.
+SCREEN_FEED = ("reels tray container jil_456xx's story, 0 of 1, unseen. add to "
+               "story your story for you home reels message search and explore "
+               "profile")
 SCREEN_BANNED = "your account has been suspended"
 # The one screen here that is not paraphrased: this is the real text read off
 # `Jil 2` on 2026-08-11, verbatim from its UI dump.
@@ -733,3 +739,175 @@ class BlankCaptchaFlowTest(FlowTestCase):
         self.assertFalse(hasattr(driver, "request_new_captcha"))
         result, _, _ = self.run_chain(None, driver=driver, solver=FakeSolver())
         self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+
+
+class ClearScreenIsNotAutomaticallySuccessTest(FlowTestCase):
+    """"No challenge marker" and "the account is fine" are different claims.
+
+    Every screen in this class was recorded off a real phone under
+    ~/.adb_bot/verification and classified as `none`, and every one of them
+    would have been reported as **solved** -- untagging a profile nobody fixed
+    and handing it back to the posting loop.
+    """
+
+    # `Jil 2`, 2026-08-11: Instagram was never in the foreground at all. The
+    # probe watched the Android launcher for two minutes.
+    LAUNCHER = ("search gallery gallery play store play store home telephone "
+                "telephone messaging messaging music music chrome chrome "
+                "camera camera")
+
+    # `Jil 20`, 2026-08-11: Meta's ads-consent gate. Its only control is
+    # `Get started`, and what lies behind it is a consent choice.
+    CONSENT = ("choose if we process your data for ads choose if we process "
+               "your data for ads as part of laws in your region, you can "
+               "choose whether you consent to us processing your personal data "
+               "for personalised ads on meta company products.")
+
+    # `Laila 4` / `Laila 3`, 2026-08-12: what a *cleared* chain really ends on.
+    BACK_ON_INSTAGRAM = ("get support menu you're back on instagram your account "
+                         "is no longer suspended. what this means we reviewed "
+                         "your account and found that it does follow our "
+                         "community standards.")
+
+    def _run_ending_on(self, screen):
+        return self.run_chain([screen])[0]
+
+    def test_a_healthy_feed_is_solved(self):
+        self.assertEqual(self._run_ending_on(SCREEN_FEED).status, RESULT_SOLVED)
+
+    def test_the_un_suspension_screen_is_solved(self):
+        """The real end of a cleared chain, and it is not a feed."""
+        self.assertEqual(self._run_ending_on(self.BACK_ON_INSTAGRAM).status,
+                         RESULT_SOLVED)
+
+    def test_the_android_launcher_is_never_solved(self):
+        """Instagram was not even running. `Jil 2` sat here for two minutes and
+        the run would have called the account fixed."""
+        result = self._run_ending_on(self.LAUNCHER)
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+
+    def test_the_ads_consent_gate_is_named_not_guessed_at(self):
+        """A VA should be told which screen to clear, not handed raw text -- and
+        the bot must not answer a consent question on the account's behalf."""
+        result = self._run_ending_on(self.CONSENT)
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+        self.assertIn("consent", result.detail.lower())
+
+    def test_an_unreadable_screen_is_never_solved(self):
+        """`Jil 20`'s first look returned an empty string and classified as
+        "nothing wrong". An unreadable screen is not a clear screen."""
+        result = self._run_ending_on("")
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+
+    def test_an_unrecognised_screen_hands_over_its_text(self):
+        """The only way the marker lists ever grow."""
+        result = self._run_ending_on("some screen nobody has ever written down")
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+        self.assertIn("some screen nobody has ever written down", result.detail)
+
+    def test_a_solved_chain_still_solves_through_the_health_check(self):
+        """The check must not break the ordinary path: a real chain that ends on
+        a real feed is still a success."""
+        result, driver, _ = self.run_chain(
+            [SCREEN_CAPTCHA, SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED],
+            solver=FakeSolver(answer="106653"))
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertEqual([a[0] for a in driver.actions], ["captcha", "phone", "code"])
+
+
+class ConfirmationDismissedTest(FlowTestCase):
+    def test_the_confirmation_screen_is_acknowledged(self):
+        driver = FakeDriver(["get support menu you're back on instagram your "
+                             "account is no longer suspended."])
+        tapped = []
+        driver.dismiss_confirmation = lambda: (tapped.append(1), True)[1]
+        result, _, _ = self.run_chain(None, driver=driver)
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertEqual(len(tapped), 1)
+
+    def test_a_driver_without_one_still_solves(self):
+        driver = FakeDriver([SCREEN_FEED])
+        self.assertFalse(hasattr(driver, "dismiss_confirmation"))
+        self.assertEqual(self.run_chain(None, driver=driver)[0].status, RESULT_SOLVED)
+
+    def test_a_dismiss_that_raises_does_not_lose_the_solve(self):
+        driver = FakeDriver([SCREEN_FEED])
+
+        def boom():
+            raise RuntimeError("phone went away")
+        driver.dismiss_confirmation = boom
+        self.assertEqual(self.run_chain(None, driver=driver)[0].status, RESULT_SOLVED)
+
+
+class CaptchaAnsweredResetTest(FlowTestCase):
+    """A captcha we answered is only "the last one" until something else comes up.
+
+    Instagram does re-ask. Without the reset, a second captcha later in the
+    chain reports the *earlier, correct* answer to 2captcha as wrong -- which
+    refunds a solve we should have paid for and feeds the service bad accuracy
+    data about its own solvers.
+    """
+
+    def test_a_later_captcha_does_not_blame_the_earlier_correct_one(self):
+        solver = FakeSolver(answers=["106653", "884412"])
+        result, _, _ = self.run_chain(
+            [SCREEN_CAPTCHA, SCREEN_PHONE, SCREEN_CODE, SCREEN_CAPTCHA, SCREEN_FEED],
+            solver=solver)
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertEqual(solver.reported, 0,
+                         "the first captcha was accepted -- nothing to report")
+
+    def test_a_genuinely_repeated_captcha_is_still_reported(self):
+        solver = FakeSolver(answers=["wrong1", "right2"])
+        self.run_chain([SCREEN_CAPTCHA, SCREEN_CAPTCHA, SCREEN_FEED], solver=solver)
+        self.assertEqual(solver.reported, 1)
+
+
+class RunBudgetTest(FlowTestCase):
+    """One account cannot hold an unattended pass for ever.
+
+    MAX_STEPS bounds how many screens are worked but not how long each takes:
+    three numbers at 45s, captcha images at 20s and a clear screen doubted for
+    15s add up, and a pass that goes on a timer has to be predictable.
+    """
+
+    def test_a_run_that_overruns_stops_as_stuck(self):
+        """A phone that answers, but slowly. Reading the screen costs fake-clock
+        time here the way a dump costs real time on a cloud phone."""
+        driver = FakeDriver([SCREEN_PHONE, SCREEN_CODE] * 6)
+        slow_clock = self.clock
+
+        def slow_read(_inner=driver.read_screen):
+            slow_clock.sleep(120)
+            return _inner()
+
+        driver.read_screen = slow_read
+        result, _, _ = self.run_chain(None, driver=driver, solver=FakeSolver(),
+                                      max_seconds=300.0)
+        self.assertEqual(result.status, RESULT_STUCK)
+        self.assertIn("gave up after", result.detail)
+
+    def test_the_budget_does_not_cut_short_an_ordinary_chain(self):
+        result, driver, _ = self.run_chain(
+            [SCREEN_CAPTCHA, SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED],
+            solver=FakeSolver(answer="106653"))
+        self.assertEqual(result.status, RESULT_SOLVED)
+
+    def test_a_number_is_still_settled_when_the_budget_runs_out(self):
+        """The one thing an expiring run must not do is walk away from a rented
+        number: that is money gone and a provider failure nobody caused."""
+        driver = FakeDriver([SCREEN_PHONE, SCREEN_CODE] * 6)
+        slow_clock = self.clock
+
+        def slow_read(_inner=driver.read_screen):
+            slow_clock.sleep(120)
+            return _inner()
+
+        driver.read_screen = slow_read
+        provider = FakeProvider("smspool", code=None)
+        result, _, provider = self.run_chain(None, driver=driver, provider=provider,
+                                             max_seconds=300.0)
+        self.assertEqual(result.status, RESULT_STUCK)
+        self.assertEqual(len(provider.cancelled) + len(provider.finished),
+                         provider.purchases,
+                         "every rented number must be settled")
