@@ -72,6 +72,17 @@ LEDGER_FILENAME = "verification_attempts.json"
 # hour to learn the same thing twice.
 MAX_CONSECUTIVE_FLEET_FAILURES = 2
 
+# How long to wait for a launched phone to answer over ADB. NOT the shipped
+# defaults of `prepare_profile_for_adb` (2 attempts, 10s), which are far too
+# short for these MultiLogin cloud phones: a cold launch takes 50-65 seconds
+# and MultiLogin 500s on the first try often enough to matter. With the
+# defaults this pass gave up on `Blank (10)` after 49 seconds and called it
+# "never became ADB-ready" -- which is a *fleet-level* failure, so two of them
+# in a row would abort the whole run over phones that were merely still
+# booting. The probe has used 8 x 15s all along; this is the same.
+READINESS_ATTEMPTS = 8
+READINESS_WAIT_SECONDS = 15
+
 # Failure texts that are about the fleet or the wallet rather than this account.
 # Matched on the message because that is where the reason actually is: the
 # router raises one exception type for an empty wallet, a refusing provider and
@@ -266,7 +277,9 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
                           cooloff_hours: float = DEFAULT_COOLOFF_HOURS,
                           app_dir=None, country: str | None = None,
                           profile_records=None,
-                          max_seconds: float = verification.MAX_RUN_SECONDS
+                          max_seconds: float = verification.MAX_RUN_SECONDS,
+                          readiness_attempts: int = READINESS_ATTEMPTS,
+                          readiness_wait: int = READINESS_WAIT_SECONDS
                           ) -> VerificationReport:
     """Work up to `limit` flagged profiles. Returns what happened to each.
 
@@ -308,7 +321,9 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
                 continue
             try:
                 _work_one(clients, adb_client, logger, planned, outcome, country,
-                          max_seconds=max_seconds)
+                          max_seconds=max_seconds,
+                          readiness_attempts=readiness_attempts,
+                          readiness_wait=readiness_wait)
             except Exception as exc:
                 # One phone's failure must not end the pass: the next profile is
                 # a different phone with a different problem.
@@ -353,7 +368,9 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
 
 
 def _work_one(clients, adb_client, logger, planned, outcome, country,
-              max_seconds: float = verification.MAX_RUN_SECONDS) -> None:
+              max_seconds: float = verification.MAX_RUN_SECONDS,
+              readiness_attempts: int = READINESS_ATTEMPTS,
+              readiness_wait: int = READINESS_WAIT_SECONDS) -> None:
     """Launch one phone and run the chain on it. Fills `outcome` in place."""
     from adb_bot.automation.flows.verification_driver import (
         AdbChallengeDriver, VerificationRecorder,
@@ -368,6 +385,7 @@ def _work_one(clients, adb_client, logger, planned, outcome, country,
 
     profile = prepare_profile_for_adb(
         planned.launch_id, clients.api, clients.adb_enable, logger,
+        max_attempts=readiness_attempts, wait_seconds=readiness_wait,
         launcher_client=clients.launcher)
     if not profile:
         outcome.error = "never became ADB-ready"
@@ -476,6 +494,12 @@ def main(argv=None) -> int:
                              f"(default {DEFAULT_COOLOFF_HOURS}).")
     parser.add_argument("--country", default=None,
                         help="override the country numbers are rented from.")
+    parser.add_argument("--readiness-attempts", type=int, default=READINESS_ATTEMPTS,
+                        help=f"tries for a phone to answer over ADB "
+                             f"(default {READINESS_ATTEMPTS}).")
+    parser.add_argument("--readiness-wait", type=int, default=READINESS_WAIT_SECONDS,
+                        help=f"seconds per readiness attempt "
+                             f"(default {READINESS_WAIT_SECONDS}).")
     parser.add_argument("--mlx-token", default=None)
     args = parser.parse_args(argv)
 
@@ -501,7 +525,9 @@ def main(argv=None) -> int:
         tag_client=MultiloginTagClient(token) if args.apply else None,
         dry_run=not args.apply, limit=args.limit,
         cooloff_hours=args.cooloff_hours, country=args.country,
-        profile_records=profile_records)
+        profile_records=profile_records,
+        readiness_attempts=args.readiness_attempts,
+        readiness_wait=args.readiness_wait)
 
     plan = report.plan
     print(f"\n{'=' * 70}")

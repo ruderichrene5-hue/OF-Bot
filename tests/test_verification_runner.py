@@ -256,3 +256,37 @@ class UnmanagedProfileTest(unittest.TestCase):
 
         self.assertTrue(outcome.flagged_banned)
         self.assertEqual(len(airtable.flagged), 1)
+
+
+class ReadinessSettingsTest(unittest.TestCase):
+    """How long a launched phone gets to answer over ADB.
+
+    `prepare_profile_for_adb` ships with 2 attempts x 10s. These MultiLogin
+    cloud phones take 50-65 seconds to cold-launch and MultiLogin 500s on the
+    first try often enough to matter, so the shipped default gives up while the
+    phone is still booting. On 2026-08-12 that failed `Blank (10)` after 49
+    seconds as "never became ADB-ready" -- which `is_fleet_level_failure` reads
+    as a fleet problem, so two in a row abort a whole pass over phones that
+    were merely slow.
+    """
+
+    def test_the_runner_waits_longer_than_a_cold_launch_takes(self):
+        budget = vr.READINESS_ATTEMPTS * vr.READINESS_WAIT_SECONDS
+        self.assertGreaterEqual(
+            budget, 90,
+            "a cold MLX launch is 50-65s; the budget must clear it with room "
+            "for a 500 on the first try")
+
+    def test_the_readiness_settings_reach_the_launch_call(self):
+        """The regression itself: the runner called `prepare_profile_for_adb`
+        without these, silently inheriting the 20-second default."""
+        import inspect
+        source = inspect.getsource(vr._work_one)
+        self.assertIn("max_attempts=readiness_attempts", source)
+        self.assertIn("wait_seconds=readiness_wait", source)
+
+    def test_a_slow_launch_is_read_as_a_fleet_problem(self):
+        """Which is why the budget matters: this outcome aborts the pass."""
+        self.assertTrue(vr.is_fleet_level_failure(
+            vr.ProfileOutcome(name="x", launch_id="L1",
+                              error="never became ADB-ready")))
