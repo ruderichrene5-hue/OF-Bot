@@ -520,3 +520,36 @@ class MatchFilterTest(unittest.TestCase):
                                     attempts=attempts, now=NOW, match="blank",
                                     limit=10)
         self.assertEqual([p.name for p in plan.to_run], ["Blank (9)"])
+
+
+class NotInstalledTest(unittest.TestCase):
+    """A phone with no Instagram on it is not evidence about any other phone.
+
+    `Blank (9)` (2026-08-12) reported as "Instagram would not open", which
+    `is_fleet_level_failure` reads as a fleet problem -- so two unprovisioned
+    phones in a row would abort a whole pass. The app simply was not there.
+    """
+
+    def test_a_missing_app_is_not_a_fleet_problem(self):
+        self.assertFalse(vr.is_fleet_level_failure(vr.ProfileOutcome(
+            name="x", launch_id="L1", status=verification.RESULT_NEEDS_HUMAN,
+            detail="Instagram is not installed on this phone, so there is "
+                   "nothing to verify -- it needs provisioning, not a "
+                   "verification run")))
+
+    def test_a_missing_app_is_terminal(self):
+        """It will not install itself, so a six-hour retry is a wasted launch."""
+        self.assertTrue(vr.is_terminal_outcome(vr.ProfileOutcome(
+            name="x", launch_id="L1", status=verification.RESULT_NEEDS_HUMAN,
+            detail="Instagram is not installed on this phone")))
+
+    def test_a_genuine_failure_to_start_is_still_fleet_level(self):
+        """The distinction has to cut both ways."""
+        self.assertTrue(vr.is_fleet_level_failure(vr.ProfileOutcome(
+            name="x", launch_id="L1", error="Instagram would not open")))
+
+    def test_the_check_runs_before_the_start_attempt(self):
+        import inspect
+        source = inspect.getsource(vr._work_one)
+        self.assertLess(source.index("instagram_installed"),
+                        source.index("_open_instagram(target"))

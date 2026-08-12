@@ -110,6 +110,7 @@ _TERMINAL_MARKERS = (
     "photo challenge could not be completed",   # the video-selfie request
     "number the bot does not control",          # IG texts an owner's own phone
     "nobody is logged into instagram",          # needs credentials
+    "instagram is not installed",               # needs provisioning, not a run
     "account is disabled",                      # banned
 )
 
@@ -520,7 +521,9 @@ def _work_one(clients, adb_client, logger, planned, outcome, country,
     from adb_bot.automation.flows.verification_driver import (
         AdbChallengeDriver, VerificationRecorder,
     )
-    from adb_bot.automation.verification_probe import _open_instagram
+    from adb_bot.automation.verification_probe import (
+        _open_instagram, instagram_installed,
+    )
     from adb_bot.automation.workflow import connect_with_retries, prepare_profile_for_adb
     from adb_bot.clients.sms.base import DEFAULT_COUNTRY
     from adb_bot.clients.sms.router import build_router
@@ -545,6 +548,18 @@ def _work_one(clients, adb_client, logger, planned, outcome, country,
         # which is the stale-`offline` case rather than a slow boot.
         outcome.error = ("could not reach it over ADB (MultiLogin reported it "
                          "ready, but adb never saw a usable device)")
+        return
+
+    # Asked before trying to start it, because the two failures want different
+    # answers. A phone with no Instagram on it is not evidence about any other
+    # phone, and `Blank (9)` (2026-08-12) reported as "would not open" -- a
+    # fleet-level failure -- when the app simply was not there. Two of those in
+    # a row would have aborted a pass over one unprovisioned phone.
+    if not instagram_installed(target, adb_client, logger=logger):
+        outcome.status = verification.RESULT_NEEDS_HUMAN
+        outcome.detail = ("Instagram is not installed on this phone, so there is "
+                          "nothing to verify -- it needs provisioning, not a "
+                          "verification run")
         return
 
     if not _open_instagram(target, adb_client, logger):

@@ -176,6 +176,25 @@ def _foreground_app(target: str, adb_client) -> str:
     return text[:200] or "<could not read the foreground>"
 
 
+def instagram_installed(target: str, adb_client, logger=None) -> bool:
+    """Whether Instagram is on this phone at all.
+
+    Its own function because "not installed" and "would not start" need
+    different answers: the first is about this one phone and will not change
+    until somebody installs the app, the second can be the whole fleet having a
+    bad minute.
+    """
+    installed = adb_client.run_command(
+        f"adb -s {target} shell pm list packages {INSTAGRAM_PACKAGE}") or ""
+    if INSTAGRAM_PACKAGE in installed:
+        return True
+    if logger is not None:
+        logger.error("Instagram is NOT INSTALLED on %s (pm list packages "
+                     "returned %r). Nothing to verify on this phone.",
+                     target, installed.strip())
+    return False
+
+
 def _clear_permission_dialog(target, adb_client, logger) -> bool:
     """Grant an Android runtime-permission dialog sitting on top of Instagram.
 
@@ -218,12 +237,7 @@ def _open_instagram(target: str, adb_client, logger) -> bool:
     """
     from adb_bot.automation.flows import instagram as ig
 
-    installed = adb_client.run_command(
-        f"adb -s {target} shell pm list packages {INSTAGRAM_PACKAGE}") or ""
-    if INSTAGRAM_PACKAGE not in installed:
-        logger.error("probe: Instagram is NOT INSTALLED on %s (pm list packages "
-                     "returned %r). Nothing to verify on this phone.",
-                     target, installed.strip())
+    if not instagram_installed(target, adb_client, logger=logger):
         return False
     logger.info("probe: Instagram is installed on %s", target)
 
