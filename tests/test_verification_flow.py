@@ -1086,3 +1086,39 @@ class ConsentGateTest(FlowTestCase):
         self.assertFalse(hasattr(driver, "clear_blocking_prompts"))
         result, _, _ = self.run_chain(None, driver=driver)
         self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+
+
+class ConsentMarkersDoNotShadowAFeedTest(FlowTestCase):
+    """A working Instagram is never a consent gate, whatever words are on it.
+
+    `Blank (23)` came out of its consent chain onto a feed whose dump still
+    carried "free of charge with ads". Read as a gate, that would have tapped
+    at a healthy account until the run gave up on it -- turning a solve into a
+    needs_human.
+    """
+
+    FEED_WITH_CONSENT_WORDS = (SCREEN_FEED + " to use our products free of "
+                               "charge with ads sponsored")
+
+    def test_a_feed_carrying_consent_words_is_not_a_gate(self):
+        self.assertEqual(classify_challenge(self.FEED_WITH_CONSENT_WORDS),
+                         CHALLENGE_NONE)
+
+    def test_such_a_screen_still_solves(self):
+        result, driver, _ = self.run_chain([self.FEED_WITH_CONSENT_WORDS])
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertEqual(driver.actions, [])
+
+    def test_a_real_gate_is_still_a_gate(self):
+        """The guard must not cost the feature it protects."""
+        gate = ("choose if we process your data for ads as part of laws in your "
+                "region, you can choose whether you consent to us processing "
+                "your personal data get started")
+        self.assertEqual(classify_challenge(gate), CHALLENGE_CONSENT)
+
+    def test_a_real_challenge_on_a_feed_still_wins(self):
+        """The qualification is only for consent -- every other marker names
+        something the account is being asked, which a feed cannot show."""
+        self.assertEqual(
+            classify_challenge(SCREEN_FEED + " " + SCREEN_PHONE),
+            CHALLENGE_PHONE)

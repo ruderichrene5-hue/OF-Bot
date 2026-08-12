@@ -361,8 +361,19 @@ def classify_challenge(text: str | None) -> str:
         return CHALLENGE_BANNED
 
     for kind, markers in _ORDERED_MARKERS:
-        if any(marker in haystack for marker in markers):
-            return kind
+        if not any(marker in haystack for marker in markers):
+            continue
+        # A screen that positively shows a working Instagram is not a consent
+        # gate, whatever words are on it. The consent markers are broad enough
+        # to appear on an ordinary feed -- `Blank (23)` (2026-08-12) came out
+        # of its consent chain onto a feed whose dump still carried "free of
+        # charge with ads" -- and reading that as a gate would tap at a healthy
+        # account until the run gave up on it. Only consent is qualified this
+        # way: every other marker set names something the account is being
+        # *asked*, which a feed cannot be showing.
+        if kind == CHALLENGE_CONSENT and screen_is_healthy(haystack):
+            return CHALLENGE_NONE
+        return kind
     return CHALLENGE_NONE
 
 
