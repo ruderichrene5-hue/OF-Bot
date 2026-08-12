@@ -553,3 +553,87 @@ class NotInstalledTest(unittest.TestCase):
         source = inspect.getsource(vr._work_one)
         self.assertLess(source.index("instagram_installed"),
                         source.index("_open_instagram(target"))
+
+
+class DiagnosisTagTest(unittest.TestCase):
+    """Writing what a run found back where the VAs actually work.
+
+    The runner learns things -- this account is logged out, this one is gone,
+    this one wants a video selfie -- and until now they reached a log file and
+    a local JSON nobody opens. Written back as a tag, the finding is visible in
+    the workspace *and* skipped by the next pass, because
+    DIAGNOSED_ELSEWHERE_TAGS already covers exactly these names.
+    """
+
+    class FakeTags:
+        def __init__(self, known=("logged out", "unable to verify", "banned / dead")):
+            self.known = {n.lower(): f"id-{n}" for n in known}
+            self.assigned = []
+
+        def tag_ids_by_name(self, refresh=False):
+            return dict(self.known)
+
+        def assign(self, profile_id, tag_ids):
+            self.assigned.append((profile_id, tuple(tag_ids)))
+            return True
+
+    class _Logger:
+        def info(self, *a):
+            pass
+        warning = error = info
+
+    def _apply(self, outcome, tags=None):
+        tags = tags if tags is not None else self.FakeTags()
+        vr._record_diagnosis_tag(tags, self._Logger(),
+                                 vr.PlannedProfile(launch_id="L1", name="x"),
+                                 outcome)
+        return tags
+
+    def _outcome_for(self, status="needs_human", detail=""):
+        return vr.ProfileOutcome(name="x", launch_id="L1", status=status,
+                                 detail=detail)
+
+    def test_a_signed_out_profile_is_tagged_logged_out(self):
+        out = self._outcome_for(status=verification.RESULT_SIGNED_OUT)
+        tags = self._apply(out)
+        self.assertEqual(tags.assigned, [("L1", ("id-logged out",))])
+        self.assertEqual(out.diagnosis_tag, "logged out")
+
+    def test_a_banned_profile_is_tagged_dead(self):
+        tags = self._apply(self._outcome_for(status=verification.RESULT_BANNED))
+        self.assertEqual(tags.assigned, [("L1", ("id-banned / dead",))])
+
+    def test_the_video_selfie_is_tagged_unable_to_verify(self):
+        tags = self._apply(self._outcome_for(
+            detail="the photo challenge could not be completed"))
+        self.assertEqual(tags.assigned, [("L1", ("id-unable to verify",))])
+
+    def test_a_bad_sms_hour_is_never_tagged(self):
+        """That is weather, not a diagnosis, and a tag would hide the profile
+        from every future pass over something that changes by the hour."""
+        tags = self._apply(self._outcome_for(detail="no code arrived for 3 numbers"))
+        self.assertEqual(tags.assigned, [])
+
+    def test_a_solve_is_never_tagged(self):
+        tags = self._apply(self._outcome_for(status=verification.RESULT_SOLVED))
+        self.assertEqual(tags.assigned, [])
+
+    def test_a_tag_the_workspace_lacks_is_skipped_not_invented(self):
+        """This borrows the VAs' vocabulary; it does not get to extend it."""
+        tags = self._apply(self._outcome_for(status=verification.RESULT_SIGNED_OUT),
+                           tags=self.FakeTags(known=()))
+        self.assertEqual(tags.assigned, [])
+
+    def test_a_tagging_failure_never_breaks_the_pass(self):
+        class Exploding(self.FakeTags):
+            def assign(self, profile_id, tag_ids):
+                raise RuntimeError("MLX said no")
+
+        out = self._outcome_for(status=verification.RESULT_SIGNED_OUT)
+        self._apply(out, tags=Exploding())
+        self.assertEqual(out.diagnosis_tag, "")
+
+    def test_every_tag_it_writes_is_one_the_next_pass_skips(self):
+        """The loop only closes if these names match DIAGNOSED_ELSEWHERE_TAGS."""
+        for _status, _marker, tag in vr._DIAGNOSIS_TAGS:
+            self.assertIn(vr._wanted_key(tag), vr.DIAGNOSED_ELSEWHERE_TAGS, tag)

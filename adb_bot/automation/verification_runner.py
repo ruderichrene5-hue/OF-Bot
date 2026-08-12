@@ -115,6 +115,40 @@ _TERMINAL_MARKERS = (
 )
 
 
+# What to write back into MultiLogin when a run settles something a person will
+# have to act on. Deliberately the tags the VAs *already* use -- `logged out`
+# (11 profiles), `unable to verify` (3), `Banned / Dead` (4) -- rather than a
+# private vocabulary. Three things follow from reusing theirs:
+#
+#   * the finding lands where the work actually happens, instead of in a log
+#     file and a local JSON nobody opens;
+#   * `DIAGNOSED_ELSEWHERE_TAGS` already skips these, so the next pass costs
+#     nothing on a profile this one has settled;
+#   * a VA reading the workspace cannot tell a bot's `logged out` from their
+#     own, and does not need to -- it means the same thing either way.
+#
+# Only outcomes with a screen behind them get one. "No code arrived" is a bad
+# hour, not a diagnosis, and must never become a tag that hides a profile.
+_DIAGNOSIS_TAGS = (
+    # (status, detail marker or None, tag)
+    (verification.RESULT_SIGNED_OUT, None, "logged out"),
+    (verification.RESULT_BANNED, None, "Banned / Dead"),
+    (None, "photo challenge could not be completed", "unable to verify"),
+    (None, "number the bot does not control", "unable to verify"),
+)
+
+
+def diagnosis_tag_for(outcome) -> str | None:
+    """The MultiLogin tag that records what this run found, or None."""
+    detail = str(outcome.detail or "").lower()
+    for status, marker, tag in _DIAGNOSIS_TAGS:
+        if status is not None and outcome.status == status:
+            return tag
+        if marker is not None and marker in detail:
+            return tag
+    return None
+
+
 def is_terminal_outcome(outcome) -> bool:
     """Whether re-running this profile could plausibly give a different answer.
 
@@ -354,6 +388,7 @@ class ProfileOutcome:
     numbers_used: int = 0
     untagged: bool = False
     flagged_banned: bool = False
+    diagnosis_tag: str = ""   # what this run wrote back into MultiLogin
     error: str = ""
 
 
@@ -583,12 +618,40 @@ def _work_one(clients, adb_client, logger, planned, outcome, country,
                 planned.name, result.status, result.detail)
 
 
+def _record_diagnosis_tag(tag_client, logger, planned, outcome) -> None:
+    """Write what this run found back into MultiLogin, as a tag a VA already uses.
+
+    Never raises and never removes anything -- `assign` only adds. An existing
+    tag is left alone rather than re-applied, and a tag the workspace has not
+    got is skipped rather than invented: this borrows the VAs' vocabulary, it
+    does not get to extend it.
+    """
+    tag = diagnosis_tag_for(outcome)
+    if not tag or tag_client is None:
+        return
+    try:
+        tag_id = tag_client.tag_ids_by_name().get(tag.lower())
+        if not tag_id:
+            logger.info("verification pass: would tag %s %r, but the workspace "
+                        "has no such tag", planned.name, tag)
+            return
+        if tag_client.assign(planned.launch_id, [tag_id]):
+            outcome.diagnosis_tag = tag
+            logger.info("verification pass: tagged %s %r -- so the next pass "
+                        "skips it and a VA can see why without reading a log",
+                        planned.name, tag)
+    except Exception as exc:
+        logger.warning("verification pass: tagging %s %r failed (%s)",
+                       planned.name, tag, exc)
+
+
 def _write_back(airtable, tag_client, logger, planned, outcome, record) -> None:
     """Act on one outcome. Never raises -- a write failure is not worth the pass."""
     if outcome.error or not outcome.status:
         return
 
     untag, flag_banned = route_result(outcome.status)
+    _record_diagnosis_tag(tag_client, logger, planned, outcome)
 
     if untag and tag_client is not None:
         try:
@@ -736,6 +799,8 @@ def main(argv=None) -> int:
             marks.append("untagged")
         if outcome.flagged_banned:
             marks.append("flagged banned")
+        if outcome.diagnosis_tag:
+            marks.append(f"tagged {outcome.diagnosis_tag!r}")
         if outcome.numbers_used:
             marks.append(f"{outcome.numbers_used} number(s)")
         suffix = f"  [{', '.join(marks)}]" if marks else ""
