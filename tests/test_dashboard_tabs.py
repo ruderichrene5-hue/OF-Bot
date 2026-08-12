@@ -92,6 +92,54 @@ class HandoffQueueTest(unittest.TestCase):
         out = report.handoff_queue([_profile()], _progress("262894", plan_days=0))
         self.assertEqual(out["profiles"], [])
 
+    def test_it_names_the_multilogin_folder_the_phone_is_in(self):
+        """These profiles are called "Blank (NN)". Without the folder, the
+        person doing the hand-off cannot tell whose account they are setting
+        up without opening MultiLogin and searching for the serial."""
+        out = report.handoff_queue([_profile()], _progress("262894"),
+                                   folder_of={"262894": "Jasmin"})
+        self.assertEqual(out["profiles"][0]["folder"], "Jasmin")
+
+    def test_a_phone_multilogin_does_not_have_is_marked_not_left_blank(self):
+        """MLX answered and this serial was not in it — worth saying, because
+        it is the one case where going to look for the phone is wasted time."""
+        out = report.handoff_queue([_profile()], _progress("262894"),
+                                   folder_of={"999": "Jasmin"})
+        self.assertEqual(out["profiles"][0]["folder"], "?")
+
+    def test_multilogin_being_unreadable_costs_the_column_not_the_list(self):
+        """The hand-off work is still the work when MLX is down, and an empty
+        folder must not read as "this phone is missing"."""
+        out = report.handoff_queue([_profile()], _progress("262894"), folder_of={})
+        self.assertEqual(len(out["profiles"]), 1)
+        self.assertEqual(out["profiles"][0]["folder"], "")
+
+
+class HandoffFolderCellTest(unittest.TestCase):
+    """The three folder answers stay three, because they send a person to
+    different places: a folder to open, a phone not to look for, and a fact
+    the page could not read."""
+
+    def test_a_folder_is_shown_by_name(self):
+        self.assertIn("Jasmin", report_html._handoff_folder("Jasmin"))
+
+    def test_a_missing_phone_says_so(self):
+        self.assertIn("not in MultiLogin", report_html._handoff_folder("?"))
+
+    def test_an_unread_folder_is_a_dash_not_a_missing_phone(self):
+        cell = report_html._handoff_folder("")
+        self.assertNotIn("not in MultiLogin", cell)
+        self.assertIn("—", cell)
+
+    def test_the_folder_reaches_the_rendered_table(self):
+        html = report_html._section_handoff({
+            "profiles": [{"name": "Blank (5)", "serial": "262894", "folder": "Jasmin",
+                          "finished_at": "2026-08-08 08:50", "outstanding": ["bio"],
+                          "done_tasks": ["profile picture", "first post"]}],
+            "done": 0, "plan_days": 4, "finish_day": 4})
+        self.assertIn("<th>Folder</th>", html)
+        self.assertIn("Jasmin", html)
+
 
 class ClassifyProfileTest(unittest.TestCase):
     """Each phone lands in exactly one column, and the order is the precedence."""

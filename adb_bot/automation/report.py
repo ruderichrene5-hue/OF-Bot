@@ -2086,7 +2086,31 @@ def classify_profile(profile: dict, warming: set = (), finished: set = ()) -> st
     return "other"
 
 
-def handoff_queue(profiles, warmup_progress: dict) -> dict:
+def folder_by_serial(mlx_items=None, folder_names=None) -> dict:
+    """``{MLX serial_no: folder name}``, for the phones MultiLogin still has.
+
+    Airtable has no folder column, so MultiLogin is the only place the grouping
+    exists and every panel that wants to name a phone's folder has to build the
+    same map. Shared rather than rebuilt per section so the hand-off list and
+    the folder breakdown cannot disagree about where the same phone lives.
+
+    A serial MLX does not return is simply absent: the caller decides what to
+    say about it, because "no folder" and "not in MultiLogin any more" read
+    differently on a worklist than they do in a count.
+    """
+    from adb_bot.automation.mlx_sync import normalize_mlx_item
+
+    out: dict = {}
+    for item in mlx_items or []:
+        normalized = normalize_mlx_item(item)
+        if normalized is None:
+            continue
+        folder_id = str(item.get("folder_id") or "")
+        out[normalized.serial_no] = (folder_names or {}).get(folder_id) or ""
+    return out
+
+
+def handoff_queue(profiles, warmup_progress: dict, folder_of: dict = None) -> dict:
     """Profiles that finished their warm-up and are waiting on a person.
 
     A phone coming off the warm-up is not a posting target yet. It has no bio,
@@ -2100,6 +2124,12 @@ def handoff_queue(profiles, warmup_progress: dict) -> dict:
     accident of how they were made, not a rule -- assign one to a model and it
     becomes postable the same hour. `posting_planner` enforces it properly; this
     is what tells somebody the work is waiting.
+
+    `folder_of` (see `folder_by_serial`) names the MultiLogin folder each phone
+    sits in. It is optional because MultiLogin may not answer -- the work is
+    still the work when it does not -- but without it the list names phones
+    that are mostly called "Blank (NN)", and the person doing the hand-off has
+    to open MultiLogin and search to find out whose bio they are writing.
     """
     finished_stage = ""
     try:
@@ -2130,9 +2160,14 @@ def handoff_queue(profiles, warmup_progress: dict) -> dict:
         if not outstanding:
             out["done"] += 1
             continue
+        serial = profile.get("serial") or ""
         out["profiles"].append({
             "name": profile["name"],
-            "serial": profile.get("serial") or "",
+            "serial": serial,
+            # "" when MultiLogin could not be read at all, and "?" when it was
+            # read and does not have this phone -- a real difference to whoever
+            # is about to go looking for it. The renderer says which is which.
+            "folder": (folder_of or {}).get(serial, "?") if folder_of else "",
             "launch_id": profile.get("launch_id") or "",
             "status": profile.get("status") or "",
             "day": (entry or {}).get("day") or profile.get("warmup_day") or 0,
@@ -2246,8 +2281,6 @@ def folder_breakdown(profiles, mlx_items=None, folder_names=None,
     page could answer before -- "how is Jasmin doing" -- without reading 151
     rows and knowing which "Blank (12)" belongs to whom.
     """
-    from adb_bot.automation.mlx_sync import normalize_mlx_item
-
     progress = warmup_progress or {}
     # The same completion test the warm-up tab and the hand-off list use:
     # `classify_profile` files a phone under "handoff" or "ready" off this set,
@@ -2262,14 +2295,8 @@ def folder_breakdown(profiles, mlx_items=None, folder_names=None,
             finished.add(serial)
 
     # Serial -> folder, from MLX. Airtable has no folder column, so this is the
-    # only place the grouping exists.
-    folder_of: dict = {}
-    for item in mlx_items or []:
-        normalized = normalize_mlx_item(item)
-        if normalized is None:
-            continue
-        folder_id = str(item.get("folder_id") or "")
-        folder_of[normalized.serial_no] = (folder_names or {}).get(folder_id) or ""
+    # only place the grouping exists. Shared with the hand-off list.
+    folder_of = folder_by_serial(mlx_items, folder_names)
 
     folders: dict = {}
     for profile in profiles or []:
@@ -3429,7 +3456,16 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
                 # One read serving both people-facing tabs, so they cannot
                 # disagree about the same profile mid-refresh.
                 overview = airtable.profile_overview()
-                data["handoff"] = handoff_queue(overview, data["warmup_progress"])
+                # The same memoised inventory the two panels below use, so
+                # naming each phone's folder on the hand-off list costs no
+                # extra call. Both readers answer {} / [] on failure rather
+                # than raising, which is what keeps this safe to put first:
+                # a MultiLogin outage drops one column, not the worklist.
+                folder_of = folder_by_serial(
+                    _slow("mlx_inventory", mlx_inventory),
+                    _slow("mlx_folders", mlx_folders))
+                data["handoff"] = handoff_queue(
+                    overview, data["warmup_progress"], folder_of=folder_of)
                 # Same listing and the same memoised inventory `folders` uses
                 # below, so the hand-tagged worklist costs no extra call.
                 data["mlx_issues"] = mlx_only_issues(

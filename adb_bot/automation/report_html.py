@@ -898,6 +898,22 @@ def _pills(labels, tone: str) -> str:
     return " ".join(f'<span class="pill {tone}">{_e(label)}</span>' for label in labels)
 
 
+def _handoff_folder(folder) -> str:
+    """The MultiLogin folder cell on the hand-off list.
+
+    Three answers, not two, because they send a person to different places.
+    A name is the folder to open. `?` means MultiLogin answered and does not
+    have this phone -- searching for it is wasted time, somebody deleted or
+    moved it. Empty means MultiLogin did not answer at all, so the folder is
+    unknown rather than absent, and the phone is very likely fine.
+    """
+    if folder and folder != "?":
+        return f"<span class='mono'>{_e(folder)}</span>"
+    if folder == "?":
+        return "<span class='pill warn'>not in MultiLogin</span>"
+    return "<span class='sub'>—</span>"
+
+
 def _section_handoff(handoff: dict) -> str:
     """Profiles that finished their warm-up and are waiting on a person.
 
@@ -932,10 +948,11 @@ def _section_handoff(handoff: dict) -> str:
             f'automated reel is the one Instagram acts on.'
             + (f' {done} other profile(s) are already done.' if done else "") + '</p>')
 
-    head = ("<tr><th>Profile</th><th class='num'>Serial</th><th class='num'>Finished</th>"
-            "<th>Still to do</th><th>Already done</th></tr>")
+    head = ("<tr><th>Profile</th><th>Folder</th><th class='num'>Serial</th>"
+            "<th class='num'>Finished</th><th>Still to do</th><th>Already done</th></tr>")
     rows = "".join(
         f"<tr><td class='mono'>{_e(p['name'])}</td>"
+        f"<td>{_handoff_folder(p.get('folder'))}</td>"
         f"<td class='num mono'>{_e(p['serial'])}</td>"
         f"<td class='num mono'>{_e(p['finished_at'] or '—')}</td>"
         f"<td>{_pills(p['outstanding'], 'bad')}</td>"
@@ -945,7 +962,9 @@ def _section_handoff(handoff: dict) -> str:
             + '<div class="howto"><dl>'
               '<dt>What to do</dt><dd>Open the phone in MultiLogin, write the bio, set the '
               'profile picture, then make one post by hand and watch it appear on the '
-              'profile.</dd>'
+              'profile. <span class="mono">Folder</span> is where to look for it — these '
+              'phones are mostly called <span class="mono">Blank (NN)</span>, so the folder '
+              'is what says whose account you are setting up.</dd>'
               '<dt>When each part is done</dt><dd>Tick <span class="mono">Bio Done</span>, '
               '<span class="mono">Profile Picture Done</span> and <span class="mono">First '
               'Post Done</span> on that profile in Airtable (Profiles (Cloning)). Tick them '
