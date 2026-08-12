@@ -124,6 +124,17 @@ _CAPTCHA_MIN_HEIGHT = 40
 # asked to read characters out of somebody's face.
 _CAPTCHA_MIN_ASPECT = 1.8
 
+# ...and how much of the screen's width a captcha strip spans. This is what
+# tells it apart from the Instagram wordmark in the header, which passes every
+# other test: it is wide, short, and large enough. On 2026-08-12 a run whose
+# captcha image had not been drawn yet cropped the wordmark instead and
+# 2captcha dutifully read it back as "Instagram" -- a paid solve of a logo,
+# then typed into the answer box.
+#
+# Measured, not guessed: the two real captchas seen span 900/1080 and 916/1080
+# (83-85%) of the width, while the wordmark spans 330/1080 (31%).
+_CAPTCHA_MIN_WIDTH_FRACTION = 0.5
+
 
 def looks_like_captcha(width: int, height: int) -> bool:
     """Whether an on-screen image's shape is that of a captcha strip.
@@ -884,6 +895,15 @@ class AdbChallengeDriver:
             self._log("info", "captcha: cv2 unavailable, cannot crop")
             return None
 
+        # The screenshot's own width, so "half the screen" means the same thing
+        # on every phone model in the fleet.
+        screen_width = 0
+        try:
+            image = cv2.imread(str(png_path))
+            screen_width = int(image.shape[1]) if image is not None else 0
+        except Exception:
+            screen_width = 0
+
         best = None
         for node in self._root.iter():
             attrs = node.attrib
@@ -896,6 +916,15 @@ class AdbChallengeDriver:
             x1, y1, x2, y2 = bounds
             width, height = x2 - x1, y2 - y1
             if not looks_like_captcha(width, height):
+                continue
+            # The wordmark clears every shape test; only its width gives it
+            # away. Skipped when the screen size could not be read rather than
+            # applied on a guess.
+            if screen_width and width < screen_width * _CAPTCHA_MIN_WIDTH_FRACTION:
+                self._log("info", "captcha: ignoring a %dx%d image -- too narrow "
+                                  "for a captcha strip on a %dpx screen (most "
+                                  "likely the Instagram wordmark)",
+                          width, height, screen_width)
                 continue
             area = width * height
             if best is None or area > best[0]:

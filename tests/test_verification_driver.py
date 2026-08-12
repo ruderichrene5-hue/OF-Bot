@@ -786,3 +786,24 @@ class PermissionDialogLaunchTest(unittest.TestCase):
             ["com.android.permissioncontroller/.GrantPermissionsActivity"] * 200,
             grant_returns=False)
         self.assertFalse(ok)
+
+
+class CaptchaWordmarkTest(unittest.TestCase):
+    """The Instagram wordmark passes every shape test a captcha strip does.
+
+    On 2026-08-12 a run whose captcha image had not been drawn yet cropped the
+    header logo instead, and 2captcha read it back as "Instagram" -- a paid
+    solve of a logo, typed into the answer box. Only its width gives it away.
+    """
+
+    def test_the_wordmark_shape_alone_still_looks_like_a_captcha(self):
+        """Which is why the width fraction is needed at all."""
+        self.assertTrue(vd.looks_like_captcha(330, 156))
+
+    def test_a_real_captcha_strip_spans_most_of_the_screen(self):
+        for width, height in ((900, 225), (916, 241)):
+            self.assertGreaterEqual(width / 1080, vd._CAPTCHA_MIN_WIDTH_FRACTION,
+                                    f"{width}x{height}")
+
+    def test_the_wordmark_does_not(self):
+        self.assertLess(330 / 1080, vd._CAPTCHA_MIN_WIDTH_FRACTION)
