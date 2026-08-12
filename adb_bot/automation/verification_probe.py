@@ -137,6 +137,9 @@ def cmd_list(args) -> int:
 
 
 INSTAGRAM_PACKAGE = "com.instagram.android"
+# Android's own runtime-permission dialog. It overlays Instagram, holds the
+# foreground, and nothing dismisses it on its own.
+PERMISSION_CONTROLLER_PACKAGE = "com.android.permissioncontroller"
 
 # How long to give Instagram to reach the foreground before giving up on it.
 #
@@ -153,6 +156,12 @@ APP_START_SECONDS = 75
 # lands during the phone's own boot animation can be dropped silently.
 RESTART_EVERY_SECONDS = 24
 
+# A fresh profile can face several permission dialogs in a row. Each one
+# cleared buys this much more launch time, up to this many of them -- enough
+# for a real chain, not enough for a dialog that keeps coming back.
+MAX_PERMISSION_DIALOGS = 6
+PERMISSION_GRACE_SECONDS = 30
+
 
 def _foreground_app(target: str, adb_client) -> str:
     """Whatever app is on top right now, as a readable string.
@@ -165,6 +174,37 @@ def _foreground_app(target: str, adb_client) -> str:
         f"adb -s {target} shell dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'")
     text = " ".join((out or "").split())
     return text[:200] or "<could not read the foreground>"
+
+
+def _clear_permission_dialog(target, adb_client, logger) -> bool:
+    """Grant an Android runtime-permission dialog sitting on top of Instagram.
+
+    `632451306307322212` was held here for the full 75s launch window on
+    2026-08-12: `com.android.permissioncontroller/.GrantPermissionsActivity` had
+    the foreground, so Instagram never reached it and the probe -- correctly --
+    refused to read the screen. The phone was fine; nothing was ever going to
+    dismiss the dialog.
+
+    Reuses `interruptions`, which the posting and warm-up flows already grant
+    these with, rather than inventing a second answer to the same question. Two
+    properties of that code matter here: the label match is EXACT, so "Allow"
+    can never hit "Don't allow", and the tap only ever comes from a UI dump,
+    never from OCR.
+
+    Gated by the caller on the *foreground package*, not on text markers. The
+    package is definitive -- a dialog whose wording nobody has seen still
+    reports as `permissioncontroller`, and this fleet is not one Android build.
+    """
+    from adb_bot.automation.flows import instagram as ig
+    from adb_bot.automation.flows import interruptions
+
+    root = ig._adb_capture_ui_dump(target, logger=logger)
+    if root is None:
+        logger.warning("probe: a permission dialog is up but its screen could not "
+                       "be read; leaving it alone")
+        return False
+    return interruptions._advance_permission_screen(
+        target, adb_client, root, logger=logger)
 
 
 def _open_instagram(target: str, adb_client, logger) -> bool:
@@ -200,6 +240,7 @@ def _open_instagram(target: str, adb_client, logger) -> bool:
 
     deadline = time.monotonic() + APP_START_SECONDS
     attempt = 0
+    dialogs_cleared = 0
     while time.monotonic() < deadline:
         attempt += 1
         time.sleep(3)
@@ -216,8 +257,30 @@ def _open_instagram(target: str, adb_client, logger) -> bool:
         # `_adb_get_foreground_activity` only ever reports Instagram, so a None
         # from it means "not Instagram" and not "could not read". Ask what IS on
         # top separately, or the log says nothing about what went wrong.
+        foreground = _foreground_app(target, adb_client)
         logger.info("probe: after %ds Instagram is not in front; the foreground "
-                    "is %s", attempt * 3, _foreground_app(target, adb_client))
+                    "is %s", attempt * 3, foreground)
+
+        # An Android permission dialog is not a failed launch -- Instagram is
+        # running fine underneath it. Re-issuing the start intent (below) does
+        # nothing at all here, which is exactly what the 75s of identical log
+        # lines on `Default profile name (47)` were.
+        if PERMISSION_CONTROLLER_PACKAGE in (foreground or ""):
+            logger.warning("probe: an Android permission dialog is covering "
+                           "Instagram; granting it")
+            if _clear_permission_dialog(target, adb_client, logger):
+                # Clearing one is progress, not waiting, so it must not eat the
+                # launch budget: a fresh profile can face a chain of these, and
+                # timing out halfway through would report a phone that was
+                # actively being fixed as one that never started. Bounded, so a
+                # dialog that reappears for ever still ends the run.
+                dialogs_cleared += 1
+                if dialogs_cleared <= MAX_PERMISSION_DIALOGS:
+                    deadline = max(deadline,
+                                   time.monotonic() + PERMISSION_GRACE_SECONDS)
+                # Straight back to the foreground check: the dialog may be one
+                # of a chain, and each round of this loop clears one.
+                continue
 
         # Re-issue the start periodically rather than once. An intent that
         # lands while the phone is still finishing its own boot is dropped

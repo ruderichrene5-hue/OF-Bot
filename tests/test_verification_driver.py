@@ -660,3 +660,114 @@ class DismissConfirmationTest(unittest.TestCase):
         driver = _driver(_root(_button("Done")), act=False, adb=adb)
         self.assertFalse(driver.dismiss_confirmation())
         self.assertEqual(adb.commands, [])
+
+
+class PermissionDialogLaunchTest(unittest.TestCase):
+    """An Android permission dialog is not a failed launch.
+
+    `632451306307322212`, 2026-08-12: Instagram was running fine, but
+    `com.android.permissioncontroller/.GrantPermissionsActivity` held the
+    foreground for the whole 75s launch window. The probe refused to read the
+    screen -- right, since whatever is on it says nothing about the account --
+    but nothing was ever going to dismiss the dialog, so the profile was simply
+    unreachable. Re-issuing the start intent, which is what the loop did for
+    75 seconds, does nothing at all in that state.
+    """
+
+    class _Clock:
+        """Stands in for the `time` module inside verification_probe.
+
+        A fake clock rather than a stubbed `sleep`: with only `sleep` faked the
+        loop spins against a *real* 75-second deadline, which is 75 seconds of
+        wall-clock per test. Swapping the module attribute also leaves the
+        global `time` module alone.
+        """
+
+        def __init__(self):
+            self.now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += seconds
+
+    def setUp(self):
+        from adb_bot.automation import verification_probe as vp
+        self.vp = vp
+        self.clock = self._Clock()
+        self._real_time = vp.time
+        vp.time = self.clock
+        self.addCleanup(lambda: setattr(vp, "time", self._real_time))
+
+    class _Logger:
+        def __init__(self):
+            self.lines = []
+
+        def info(self, message, *args):
+            self.lines.append(message % args if args else message)
+
+        warning = error = info
+
+        def text(self):
+            return " | ".join(self.lines)
+
+    def _run(self, foregrounds, grant_returns=True):
+        """Drive `_open_instagram` over a scripted sequence of foreground apps."""
+        vp, calls = self.vp, {"grants": 0}
+        ig = __import__("adb_bot.automation.flows.instagram",
+                        fromlist=["instagram"])
+        state = {"i": 0}
+
+        def foreground_activity(target, logger=None):
+            i = min(state["i"], len(foregrounds) - 1)
+            state["i"] += 1
+            app = foregrounds[i]
+            return app if vp.INSTAGRAM_PACKAGE in app else None
+
+        def clear(target, adb_client, logger):
+            calls["grants"] += 1
+            return grant_returns
+
+        adb = FakeAdb()
+        adb.run_command = lambda cmd: (
+            f"package:{vp.INSTAGRAM_PACKAGE}" if "pm list packages" in cmd else "")
+
+        saved_fg = ig._adb_get_foreground_activity
+        saved_app = vp._foreground_app
+        saved_clear = vp._clear_permission_dialog
+        ig._adb_get_foreground_activity = foreground_activity
+        vp._foreground_app = lambda t, a: foregrounds[min(state["i"] - 1,
+                                                         len(foregrounds) - 1)]
+        vp._clear_permission_dialog = clear
+        self.addCleanup(lambda: setattr(ig, "_adb_get_foreground_activity", saved_fg))
+        self.addCleanup(lambda: setattr(vp, "_foreground_app", saved_app))
+        self.addCleanup(lambda: setattr(vp, "_clear_permission_dialog", saved_clear))
+
+        logger = self._Logger()
+        ok = vp._open_instagram("dev:1", adb, logger)
+        return ok, calls["grants"], logger
+
+    def test_a_permission_dialog_is_granted_and_the_launch_succeeds(self):
+        ok, grants, logger = self._run([
+            "com.android.permissioncontroller/.GrantPermissionsActivity",
+            f"{self.vp.INSTAGRAM_PACKAGE}/.activity.MainTabActivity",
+        ])
+        self.assertTrue(ok)
+        self.assertEqual(grants, 1)
+        self.assertIn("permission dialog", logger.text())
+
+    def test_a_chain_of_dialogs_is_worked_through(self):
+        perm = "com.android.permissioncontroller/.GrantPermissionsActivity"
+        ok, grants, _ = self._run(
+            [perm, perm, perm, f"{self.vp.INSTAGRAM_PACKAGE}/.activity.MainTabActivity"])
+        self.assertTrue(ok)
+        self.assertEqual(grants, 3)
+
+    def test_a_dialog_that_never_clears_still_ends_the_launch(self):
+        """Bounded on purpose: a dialog that keeps coming back must not hold a
+        phone for ever, or an unattended pass stops on its first bad profile."""
+        ok, _, _ = self._run(
+            ["com.android.permissioncontroller/.GrantPermissionsActivity"] * 200,
+            grant_returns=False)
+        self.assertFalse(ok)
