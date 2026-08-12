@@ -7,6 +7,7 @@ the evidence isn't there.
 """
 
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import MagicMock
@@ -106,6 +107,37 @@ class ApplyOutcomeTest(TestCase):
         self.assertNotEqual(_args[2], at.ISSUE_NEEDS_RETRY)
 
 
+class AgeFromRecheckStampTest(TestCase):
+    """The fallback age used when there is no ledger entry to read.
+
+    It decides whether a row is written off, so the two ways it can be wrong
+    are: reading a missing value as "old" (writes off a live post), and getting
+    the timezone wrong (writes off early, west of Greenwich).
+    """
+
+    def _age(self, raw, now):
+        return recheck_runner._age_from_recheck_stamp({at.F_PQ_RECHECK_AFTER: raw}, now)
+
+    def test_it_measures_from_the_stamp(self):
+        now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc).timestamp()
+        self.assertAlmostEqual(self._age("2026-08-12T09:00:00.000Z", now), 3 * 3600)
+
+    def test_a_naive_stamp_is_read_as_utc(self):
+        now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc).timestamp()
+        self.assertAlmostEqual(self._age("2026-08-12T09:00:00", now), 3 * 3600)
+
+    def test_a_missing_stamp_has_no_age_rather_than_a_huge_one(self):
+        self.assertIsNone(recheck_runner._age_from_recheck_stamp({}, 4e9))
+        self.assertIsNone(self._age("", 4e9))
+
+    def test_an_unparseable_stamp_has_no_age(self):
+        self.assertIsNone(self._age("soon", 4e9))
+
+    def test_a_stamp_in_the_future_is_zero_not_negative(self):
+        now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc).timestamp()
+        self.assertEqual(self._age("2026-08-12T18:00:00.000Z", now), 0.0)
+
+
 class RecheckPassTest(TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -173,6 +205,48 @@ class RecheckPassTest(TestCase):
         tally = recheck_runner.recheck_pending_posts(
             self.airtable, lambda pid, fields: Count(99, True), ledger=self.ledger)
         self.assertEqual(tally["checked"], 0)
+        self.assertEqual(tally["unknown"], 1)
+        self.airtable.mark_post_result.assert_not_called()
+
+    def _stamp_recheck_after(self, value):
+        """Put a `Recheck After` on the one row the fake Airtable returns."""
+        rows = self.airtable.list_posts_awaiting_recheck.return_value
+        rows[0]["fields"][at.F_PQ_RECHECK_AFTER] = value
+
+    def test_a_ledgerless_row_still_inside_the_window_is_left_alone(self):
+        """Not every missing entry is permanent -- another host may be mid-run,
+        and writing the row off an hour in would libel a post that landed."""
+        self._stamp_recheck_after("2026-08-10T12:00:00.000Z")
+        one_hour_later = datetime(2026, 8, 10, 13, 0, tzinfo=timezone.utc).timestamp()
+        tally = recheck_runner.recheck_pending_posts(
+            self.airtable, lambda pid, fields: Count(99, True), ledger=self.ledger,
+            now=lambda: one_hour_later)
+        self.assertEqual(tally["unknown"], 1)
+        self.assertEqual(tally["abandoned"], 0)
+        self.airtable.mark_post_result.assert_not_called()
+
+    def test_a_ledgerless_row_past_the_window_is_written_off(self):
+        """The regression this exists for: `decide_recheck` gives up at 24h, but
+        it reads the age off the ledger entry -- so a row with no entry could
+        never reach it and parked in Verifying for good. Seven did, for two
+        days, until the 2026-08-10 migration was found to have renumbered them.
+        """
+        self._stamp_recheck_after("2026-08-10T12:00:00.000Z")
+        two_days_later = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc).timestamp()
+        tally = recheck_runner.recheck_pending_posts(
+            self.airtable, lambda pid, fields: Count(99, True), ledger=self.ledger,
+            now=lambda: two_days_later)
+        self.assertEqual(tally["abandoned"], 1)
+        self.assertEqual(tally["unknown"], 0)
+        self.airtable.mark_post_result.assert_called_once_with(
+            "q1", at.POST_STATUS_FAILED, at.ISSUE_OTHER)
+
+    def test_an_unreadable_stamp_leaves_a_ledgerless_row_alone(self):
+        """No age means no grounds to write it off. Silence beats a guess."""
+        self._stamp_recheck_after("not a date")
+        tally = recheck_runner.recheck_pending_posts(
+            self.airtable, lambda pid, fields: Count(99, True), ledger=self.ledger,
+            now=lambda: 4e9)
         self.assertEqual(tally["unknown"], 1)
         self.airtable.mark_post_result.assert_not_called()
 
