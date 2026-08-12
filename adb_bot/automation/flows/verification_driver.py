@@ -834,6 +834,34 @@ class AdbChallengeDriver:
         time.sleep(max(self.settle_seconds, 3.0))
         return True
 
+    def clear_blocking_prompts(self) -> bool:
+        """Tap through Meta's consent / onboarding chain and any permission
+        dialogs. True if at least one screen was advanced.
+
+        Delegates wholesale to `interruptions.handle_blocking_prompts`, which
+        the posting and warm-up flows already use, rather than growing a second
+        answer here. Two of its properties are why this is safe to point at a
+        live account:
+
+        * the ads-subscription screen has a **paid** option, and it explicitly
+          selects `Use free of charge with ads` before pressing Continue -- so
+          "approve the consents" never buys a subscription;
+        * every tap is an EXACT label match from a UI dump, so `Allow` cannot
+          hit `Don't allow` and `Continue` cannot hit `Continue with
+          personalised ads`.
+
+        It walks the whole chain itself, with its own stuck-detection, so the
+        verification loop sees this as one step rather than one step per screen
+        -- which also keeps a five-screen consent chain from exhausting
+        `MAX_REPEATS`.
+        """
+        from adb_bot.automation.flows import interruptions
+
+        if not self.act:
+            return self._refuse("tap through the consent / onboarding screens")
+        return interruptions.handle_blocking_prompts(
+            self.target, self.adb_client, logger=self.logger, flow=self.flow)
+
     def dismiss_confirmation(self) -> bool:
         """Tap `Done` on the screen a cleared chain ends on. Best effort.
 

@@ -66,6 +66,7 @@ CHALLENGE_PHONE = "phone"                   # asks for a phone number
 CHALLENGE_CODE = "code"                     # asks for the code it just sent
 CHALLENGE_PHOTO = "photo"                   # asks for a photo to prove a human
 CHALLENGE_IMAGE_CAPTCHA = "image_captcha"   # asks for letters/digits in an image
+CHALLENGE_CONSENT = "consent"               # Meta consent / onboarding gate
 CHALLENGE_BANNED = "banned"                 # not a challenge; the account is gone
 CHALLENGE_SIGNED_OUT = "signed_out"         # not a challenge; nobody is logged in
 
@@ -266,15 +267,26 @@ _APP_HEALTHY_MARKERS = (
     "no longer suspended",
 )
 
-# Meta's "choose if we process your data for ads" gate. Not a verification
-# challenge and not a healthy screen: it blocks the app until somebody answers
-# it, and its only control is `Get started`, which leads to a *consent choice*.
-# Deliberately not automated -- what an account consents to on its owner's
-# behalf is not this bot's decision to make. Named so a VA is told which screen
-# to go and clear, instead of being handed a paragraph of raw text.
+# Meta's consent / onboarding gates. Not verification challenges and not
+# healthy screens: they block the app until answered.
+#
+# These were deliberately left to a person until 2026-08-12, when they turned
+# out to be ~20% of the flagged blanks and the owner decided: **approve
+# anything that costs nothing.** `interruptions` already does exactly that and
+# is what clears them -- including picking `Use free of charge with ads` on the
+# subscription screen, so approving never buys anything.
+#
+# Kept as a list here as well as in `interruptions` because this module has to
+# *recognise* the screen to route it; that one knows how to *tap* it.
 _CONSENT_GATE_MARKERS = (
     "choose if we process your data for ads",
     "consent to us processing your personal data",
+    "process your personal data",
+    "subscribe or continue using our products",
+    "free of charge with ads",
+    "cookies on our products",
+    "consent to meta processing",
+    "set up on new device",
 )
 
 
@@ -324,6 +336,11 @@ _ORDERED_MARKERS = (
     (CHALLENGE_CODE, _CODE_WEAK_MARKERS),
     (CHALLENGE_PHONE, _PHONE_WEAK_MARKERS),
     (CHALLENGE_SIGNED_OUT, _SIGNED_OUT_WEAK_MARKERS),
+    # Last on purpose. A consent gate is only ever a consent gate when nothing
+    # that actually asks something of the account matched first -- these words
+    # are broad, and shadowing a phone or code screen with one would be far
+    # worse than the reverse.
+    (CHALLENGE_CONSENT, _CONSENT_GATE_MARKERS),
 )
 
 
@@ -455,6 +472,17 @@ MAX_CAPTCHA_IMAGES = 2
 # within 27 seconds of each other, the second rented purely to learn that.
 MAX_PHONE_REFUSALS = 2
 
+# How many times one run will re-enter a consent chain. `interruptions` already
+# walks a whole chain per call with its own stuck-detection, so this bounds
+# *re-entry*: a gate still on screen after being answered twice is not being
+# answered, and a person should look.
+#
+# Two rather than three so this fires before `MAX_REPEATS` does. Both stop the
+# run safely, but "a consent screen was still there after 2 attempts" tells a
+# VA which screen to go and clear; "the consent screen kept coming back
+# unchanged" makes them go and find out.
+MAX_CONSENT_ROUNDS = 2
+
 # Instagram's inline error on the phone screen when it will not text the number
 # that was just submitted. Read off `Jil 10`, 2026-08-12.
 _PHONE_REFUSED_MARKERS = (
@@ -562,6 +590,7 @@ class _Session:
         self._captcha_answered = False
         self._captcha_images = 0
         self._refusals = 0
+        self._consent_rounds = 0
 
     # --- main loop ------------------------------------------------------------
     def run(self, max_steps: int) -> VerificationResult:
@@ -756,10 +785,37 @@ class _Session:
                                     "the photo challenge could not be completed")
             return None
 
+        if challenge == CHALLENGE_CONSENT:
+            return self._handle_consent()
+
         if challenge == CHALLENGE_IMAGE_CAPTCHA:
             return self._handle_image_captcha()
 
         return self._result(RESULT_FAILED, f"unhandled challenge {challenge!r}")
+
+    def _handle_consent(self):
+        """Tap through Meta's consent / onboarding chain.
+
+        Free by definition -- `interruptions` picks the no-cost option on the
+        one screen that has a paid one. What it must never do is loop: a gate
+        still on screen after being answered is not being answered.
+        """
+        if self._consent_rounds >= MAX_CONSENT_ROUNDS:
+            return self._result(
+                RESULT_NEEDS_HUMAN,
+                f"a consent screen was still there after {self._consent_rounds} "
+                f"attempts to answer it")
+        self._consent_rounds += 1
+
+        clear = getattr(self.driver, "clear_blocking_prompts", None)
+        if not callable(clear) or not clear():
+            return self._result(
+                RESULT_NEEDS_HUMAN,
+                "Instagram is showing a consent screen this run could not get "
+                "past")
+        self._log("info", "verification: tapped through the consent screens "
+                          "(round %d)", self._consent_rounds)
+        return None
 
     # --- individual screens ---------------------------------------------------
     def _handle_phone(self, text=None):

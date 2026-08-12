@@ -102,10 +102,13 @@ TERMINAL_COOLOFF_HOURS = 24.0 * 7
 # text because that is where the reason lives -- `needs_human` covers both "no
 # code arrived" (worth another go when the pool is kinder) and "Instagram wants
 # a video selfie" (never worth another go).
+# Note what is NOT here any more: the consent gate. It was terminal while it
+# needed a person; since 2026-08-12 the flow taps through it, so a run that
+# still could not get past one is a mechanical failure worth retrying, not a
+# settled answer.
 _TERMINAL_MARKERS = (
     "photo challenge could not be completed",   # the video-selfie request
     "number the bot does not control",          # IG texts an owner's own phone
-    "ads-consent gate",                         # needs a consent decision
     "nobody is logged into instagram",          # needs credentials
     "account is disabled",                      # banned
 )

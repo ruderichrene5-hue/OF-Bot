@@ -12,6 +12,7 @@ from adb_bot.automation.flows.verification import (
     CHALLENGE_BANNED,
     CHALLENGE_CHOOSE_METHOD,
     CHALLENGE_CODE,
+    CHALLENGE_CONSENT,
     CHALLENGE_IMAGE_CAPTCHA,
     CHALLENGE_NONE,
     CHALLENGE_PHONE,
@@ -1011,3 +1012,77 @@ class LoggedOutErrorDialogTest(FlowTestCase):
         self.assertEqual(
             classify_challenge(SCREEN_FEED + " change password settings"),
             CHALLENGE_NONE)
+
+
+class ConsentGateTest(FlowTestCase):
+    """Meta's consent / onboarding gates, approved automatically.
+
+    Left to a person until 2026-08-12, when they turned out to be ~20% of the
+    flagged blanks and the owner decided: approve anything that costs nothing.
+    The cost part is not incidental -- the ads-subscription screen has a paid
+    option, and `interruptions` is what knows to pick the free one.
+    """
+
+    GATE = ("choose if we process your data for ads choose if we process your "
+            "data for ads as part of laws in your region, you can choose whether "
+            "you consent to us processing your personal data for personalised "
+            "ads on meta company products. get started")
+
+    SUBSCRIPTION = ("subscribe or continue using our products use free of charge "
+                    "with ads subscribe for no ads continue")
+
+    class ConsentDriver(FakeDriver):
+        def __init__(self, screens, can_clear=True):
+            super().__init__(screens)
+            self.can_clear = can_clear
+            self.cleared = 0
+
+        def clear_blocking_prompts(self):
+            self.cleared += 1
+            self.actions.append(("consent", None))
+            return self._advance() if self.can_clear else False
+
+    def test_a_consent_gate_is_recognised(self):
+        self.assertEqual(classify_challenge(self.GATE), CHALLENGE_CONSENT)
+
+    def test_the_subscription_screen_is_recognised(self):
+        self.assertEqual(classify_challenge(self.SUBSCRIPTION), CHALLENGE_CONSENT)
+
+    def test_it_is_tapped_through_rather_than_handed_to_a_person(self):
+        driver = self.ConsentDriver([self.GATE, SCREEN_FEED])
+        result, _, _ = self.run_chain(None, driver=driver)
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertEqual(driver.cleared, 1)
+
+    def test_a_gate_in_front_of_a_real_challenge_is_cleared_first(self):
+        driver = self.ConsentDriver(
+            [self.GATE, SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED])
+        result, _, _ = self.run_chain(None, driver=driver)
+        self.assertEqual([a[0] for a in driver.actions],
+                         ["consent", "phone", "code"])
+        self.assertEqual(result.status, RESULT_SOLVED)
+
+    def test_a_gate_that_will_not_clear_goes_to_a_person(self):
+        driver = self.ConsentDriver([self.GATE], can_clear=False)
+        result, _, _ = self.run_chain(None, driver=driver)
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+
+    def test_a_gate_that_keeps_coming_back_stops(self):
+        """Still on screen after being answered means it is not being answered."""
+        driver = self.ConsentDriver([self.GATE])
+        driver._advance = lambda: True          # never actually moves on
+        result, _, _ = self.run_chain(None, driver=driver)
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+        self.assertLessEqual(driver.cleared, 3)
+
+    def test_a_real_challenge_always_outranks_a_consent_marker(self):
+        """The consent words are broad; shadowing a phone or code screen with
+        one would be far worse than the reverse."""
+        mixed = SCREEN_PHONE + " " + self.GATE
+        self.assertEqual(classify_challenge(mixed), CHALLENGE_PHONE)
+
+    def test_a_driver_without_the_method_still_ends_cleanly(self):
+        driver = FakeDriver([self.GATE])
+        self.assertFalse(hasattr(driver, "clear_blocking_prompts"))
+        result, _, _ = self.run_chain(None, driver=driver)
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
