@@ -237,6 +237,51 @@ happily returned **370185 — the wrong code, from the wrong account, eight days
 old**. Any mailbox reader has to confirm whose inbox it is reading before it
 reads anything off it.
 
+### 2.1b Retried on a clean phone, and it fails in the same place
+
+The obvious objection to §2.1a was that `Blank (12)` was a used phone: it
+already held `i1aikjgs11a@gmail.com`, so ours was a *second* account, and two
+of the four attempts were spoiled by the script rather than by Google.
+
+So it was retried on **`gmail test`** (`632713499880980888`, folder
+`Caio Tests`) — a phone made for the purpose, with Gmail and Instagram
+installed and, per `dumpsys account`, **no Google account on it at all**. The
+chain ran clean, in one process, with nothing tapped blind:
+
+```
+1  GOT IT                        7  password → NEXT
+2  Add an email address          8  2FA chooser → Authenticator
+3  Google                        9  TOTP typed with 13s left → NEXT  -- accepted
+4  checking info...             10  Google Terms of Service → "I agree"
+5  "sign in with ease" → SKIP   11  "Sorry, something went wrong there."
+6  email → NEXT
+```
+
+`dumpsys account` afterwards: still empty.
+
+**Same failure, same step, on a phone with no history.** Email, password,
+**TOTP** and the Terms are all accepted; it is the provisioning behind them
+that Google refuses. That rules out the old phone's state, the second-account
+theory, and the earlier script bugs.
+
+Step 5 matters for anyone re-testing: `sign in with ease` is Google offering to
+find accounts *by phone number*, and it is skipped deliberately — these cloud
+phones cannot receive SMS, so a carrier lookup can only fail. The likeliest
+reading of step 11 is the same thing happening silently: the last step is where
+the account is bound to the device, and a device that cannot receive a
+verification SMS fails there with a generic error.
+
+One script bug worth recording, because it wasted an attempt: a "tap anything
+consent-shaped" loop whose label list contained `More`, matched by **substring**,
+tapped **`Learn more`** on the 2-Step Verification screen, opened a Google Help
+article, and then pressed "Skip to main content" ten times. Generic words and
+substring matching do not belong in a tapper; the rewrite matches labels
+exactly and walks to the clickable ancestor.
+
+**So the mailbox stays unreadable from the fleet**, and the remaining options
+are unchanged from §2: an app-specific password (then `imaplib` works from the
+server and no phone is involved at all), or a mailbox provider we control.
+
 ### 2.2 The device's mailbox has been used for this before
 
 The Gmail inbox on this phone (`i1aikjgs11a@gmail.com`) holds, from **5 Aug**:
