@@ -101,6 +101,13 @@ def _create_one(profile_item, clients, adb_client, router, args, logger) -> dict
         print("  busy -- another loop holds its lock")
         return {"profile": name, "status": "busy", "username": ""}
 
+    # Written down **before** the phone is touched, not after success. The
+    # 2026-08-13 run that created `@hanna.sommer33` ended `stuck` on a late
+    # screen, so this was never reached -- the account exists and its generated
+    # password does not, anywhere. An account whose password was only ever in
+    # memory is the state sixteen fleet profiles are already in.
+    record_account(profile_id, name, identity, status="attempting")
+
     recorder = VerificationRecorder(f"signup-{name}", logger=logger)
     started = time.monotonic()
     try:
@@ -130,10 +137,16 @@ def _create_one(profile_item, clients, adb_client, router, args, logger) -> dict
 
         if result.ok:
             path = record_account(profile_id, name, identity,
-                                  phone_number=result.phone_number)
+                                  phone_number=result.phone_number,
+                                  status="created")
             print(f"  CREATED @{identity.username} "
                   f"({result.numbers_used} number(s)) -- credentials in {path}")
         else:
+            # Keep the credentials and say how far it got: a half-made account
+            # is still an account somebody may have to log into.
+            record_account(profile_id, name, identity,
+                           phone_number=result.phone_number,
+                           status=result.status)
             print(f"  {result.status}: {result.detail[:160]}")
         return {"profile": name, "status": result.status,
                 "username": identity.username, "numbers": result.numbers_used,
