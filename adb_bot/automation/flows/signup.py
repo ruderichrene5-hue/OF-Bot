@@ -51,6 +51,8 @@ SCREEN_PERMISSIONS = "permissions"      # "Allow Instagram to access your device
 SCREEN_PHOTO_PROMPT = "photo_prompt"    # "Add a profile photo"
 SCREEN_FOLLOW = "follow"                # "Follow 5 or more people"
 SCREEN_ADD_EMAIL = "add_email"          # post-creation "Add an email address"
+SCREEN_ADD_PHONE = "add_phone"          # post-creation "Add a mobile number"
+SCREEN_PERMISSION_DIALOG = "permission_dialog"   # Android's own allow/deny
 SCREEN_INTERSTITIAL = "interstitial"    # feed personalisation, nav tips
 SCREEN_SAVE_PASSWORD = "save_password"  # Android autofill, not Instagram
 SCREEN_LAUNCHER = "launcher"            # the phone's home screen -- start the app
@@ -62,6 +64,10 @@ SCREEN_UNKNOWN = "unknown"              # stop -- never act on this
 _ENTRY_MARKERS = (
     "join instagram",
     "share what you're into with the people who get you",
+    # A freshly installed Instagram opens on its **login** form instead, with
+    # signup offered as `Create new account` at the bottom. Seen on the
+    # `gmail test` phone, 2026-08-13 -- same destination, different door.
+    "create new account",
 )
 
 # "Get started" alone is too broad to name the entry screen -- it appears on
@@ -141,7 +147,26 @@ _ADD_EMAIL_MARKERS = (
     "enter the email where you can be contacted",
 )
 
+# Post-creation, Instagram also asks for a phone number. Not the signup phone
+# screen -- that one asks "What's your mobile number?" -- and not something to
+# answer: the account is already made.
+_ADD_PHONE_MARKERS = (
+    "add a mobile number",
+    "enter the mobile number where you can be contacted",
+)
+
+# Android's own runtime permission dialogs, raised by the screen below. Contacts
+# especially: syncing them is what ties these accounts to each other.
+# Note the wording: Android's dialogs name the *thing* ("your contacts"), while
+# Instagram's own screen asks about "your device". Including the latter here
+# made the flow deny a screen that has nothing to deny.
+_PERMISSION_DIALOG_MARKERS = (
+    "allow instagram to access your contacts",
+    "allow instagram to send you notifications",
+)
+
 _INTERSTITIAL_MARKERS = (
+    "only get message notifications",
     "see more of what you love in your feed",
     "swipe to easily access reels and messages",
     "we've simplified our navigation",
@@ -164,8 +189,11 @@ _ACCOUNT_EXISTS_MARKERS = (
     "edit profile",
     "share profile",
     "add your bio",
-    "your profile.",
 )
+# NOT "your profile.": half the signup says "no one will see this on your
+# profile", and so does the post-creation "Add a mobile number" prompt. Reading
+# that as a finished account is a false success -- the worst kind of bug this
+# flow can have, because it stops the run believing it won.
 
 _ORDERED_MARKERS = (
     # Before anything else: a screen that says the account is gone is not a
@@ -181,7 +209,9 @@ _ORDERED_MARKERS = (
     # "add an email address" before the signup email screen: the post-creation
     # prompt also contains the word pair, and mistaking it for the signup
     # screen would type an address into a live account's settings.
+    (SCREEN_PERMISSION_DIALOG, _PERMISSION_DIALOG_MARKERS),
     (SCREEN_ADD_EMAIL, _ADD_EMAIL_MARKERS),
+    (SCREEN_ADD_PHONE, _ADD_PHONE_MARKERS),
     (SCREEN_EMAIL, _EMAIL_MARKERS),
     (SCREEN_PHONE, _PHONE_MARKERS),
     (SCREEN_PERMISSIONS, _PERMISSIONS_MARKERS),
@@ -420,6 +450,7 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
     loading_waits = 0
     app_restarts = 0
     empty_reads = 0
+    code_submitted = False
     done_flags = set()
 
     def release(count_failure: bool):
@@ -529,7 +560,9 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 return finish(RESULT_UNKNOWN_SCREEN, (text or "")[:400])
 
             if screen == SCREEN_ENTRY:
-                driver.tap_label(("Get started",))
+                # Two entry screens exist: "Join Instagram" with `Get started`,
+                # and the login form with `Create new account`.
+                driver.tap_label(("Get started", "Create new account"))
 
             elif screen == SCREEN_EMAIL:
                 # Signup defaults to phone; if we somehow landed here, go back
@@ -555,6 +588,21 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 sleep(6)
 
             elif screen == SCREEN_CODE:
+                if code_submitted:
+                    # The code was typed and it submits itself. Pressing
+                    # anything now is how the run walks backwards: with no
+                    # keyboard up, Back is navigation, and it took a finished
+                    # code screen back to "What's your mobile number?".
+                    loading_waits += 1
+                    if loading_waits > MAX_LOADING_WAITS:
+                        return finish(RESULT_STUCK,
+                                      "the code screen did not advance after the "
+                                      "code was entered")
+                    log("info", "code entered; waiting for the screen to move on "
+                                "(%d/%d)", loading_waits, MAX_LOADING_WAITS)
+                    steps.pop()
+                    sleep(LOADING_WAIT_SECONDS)
+                    continue
                 if lease is None:
                     log("warning", "code screen with no number; going back")
                     driver.tap_label(("Back",))
@@ -570,11 +618,10 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 log("info", "code arrived")
                 driver.fill(("code",), code, "confirmation code",
                             submits_itself=True)
+                code_submitted = True
                 release(False)
-                # The field auto-submits on the sixth digit, so a submit tap is
-                # a bonus rather than a requirement.
-                driver.dismiss_keyboard()
-                driver.tap_label(_SUBMIT_LABELS)
+                # Nothing else is pressed here. The field acts on its sixth
+                # digit, and the next look will show whatever it advanced to.
                 sleep(10)
 
             elif screen == SCREEN_PASSWORD:
@@ -626,11 +673,27 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 driver.dismiss_keyboard()
                 sleep(3)
 
-            elif screen in (SCREEN_PERMISSIONS, SCREEN_PHOTO_PROMPT, SCREEN_FOLLOW,
-                            SCREEN_ADD_EMAIL, SCREEN_INTERSTITIAL):
-                # All declined. Contacts sync links these accounts together;
-                # the photo and the first post are the human hand-off; and the
-                # email prompt arrives holding the phone's own Google account.
+            elif screen == SCREEN_PERMISSION_DIALOG:
+                # Android's own dialog. Always deny: contacts sync is what ties
+                # these accounts to one another, and notifications buy nothing.
+                if not driver.tap_label(("DON'T ALLOW", "Don't allow", "Deny")):
+                    log("warning", "no deny button on the permission dialog")
+                    driver.tap_label(_SKIP_LABELS)
+                sleep(4)
+
+            elif screen == SCREEN_PERMISSIONS:
+                # Two variants: one offers `Skip`, the other only `Next`, which
+                # leads to Android's dialogs above (where the answer is no).
+                if not driver.tap_label(_SKIP_LABELS):
+                    driver.tap_label(_SUBMIT_LABELS)
+                sleep(5)
+
+            elif screen in (SCREEN_PHOTO_PROMPT, SCREEN_FOLLOW,
+                            SCREEN_ADD_EMAIL, SCREEN_ADD_PHONE,
+                            SCREEN_INTERSTITIAL):
+                # All declined. The photo and the first post are the human
+                # hand-off, and the email and phone prompts arrive pre-filled
+                # with whatever the device knows.
                 if not driver.tap_label(_SKIP_LABELS):
                     log("warning", "nothing to skip on %s", screen)
                     driver.dismiss_keyboard()

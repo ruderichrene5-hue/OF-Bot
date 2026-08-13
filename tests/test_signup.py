@@ -454,3 +454,136 @@ def test_one_empty_read_is_forgiven():
     result = signup.run_signup(driver, FakeRouter([FakeLease()]), _identity(),
                                sleep=lambda _s: None)
     assert result.status == signup.RESULT_CREATED
+
+
+# --- the other entry screen ---------------------------------------------------
+# A freshly installed Instagram opens on its login form, with signup offered at
+# the bottom. Read off the `gmail test` phone, 2026-08-13.
+LOGIN_ENTRY = ("english (us) username, email or mobile number, password, log in "
+               "forgot password? create new account terms and imprint")
+
+
+def test_the_login_form_counts_as_the_entry_screen():
+    assert signup.classify_signup_screen(LOGIN_ENTRY) == signup.SCREEN_ENTRY
+
+
+def test_either_entry_screen_is_opened():
+    for entry in (SCREENS[signup.SCREEN_ENTRY], LOGIN_ENTRY):
+        driver = FakeDriver([entry, SCREENS[signup.SCREEN_PHONE],
+                             SCREENS[signup.SCREEN_CODE],
+                             SCREENS[signup.SCREEN_TERMS], DONE])
+        result = signup.run_signup(driver, FakeRouter([FakeLease()]), _identity(),
+                                   sleep=lambda _s: None)
+        assert result.status == signup.RESULT_CREATED
+        assert ("Get started", "Create new account") in driver.taps
+
+
+def test_nothing_is_pressed_after_a_code_that_submits_itself():
+    """With no keyboard up, Back is navigation: it took a finished code screen
+    back to "What's your mobile number?" and undid the signup."""
+    driver = FakeDriver([
+        SCREENS[signup.SCREEN_ENTRY],
+        SCREENS[signup.SCREEN_PHONE],
+        SCREENS[signup.SCREEN_CODE],
+        SCREENS[signup.SCREEN_CODE],      # still settling after the code
+        SCREENS[signup.SCREEN_TERMS],     # no password screen, to isolate this
+        DONE,
+    ])
+    result = signup.run_signup(driver, FakeRouter([FakeLease()]), _identity(),
+                               sleep=lambda _s: None)
+    assert result.status == signup.RESULT_CREATED
+    # Exactly one: the phone field. The code screen dismisses nothing, because
+    # with no keyboard up Back walks the signup backwards.
+    assert driver.keyboard_dismissals == 1
+
+
+def test_a_code_screen_that_never_advances_gives_up_rather_than_retyping():
+    driver = FakeDriver([
+        SCREENS[signup.SCREEN_ENTRY],
+        SCREENS[signup.SCREEN_PHONE],
+    ] + [SCREENS[signup.SCREEN_CODE]] * (signup.MAX_LOADING_WAITS + 4))
+    result = signup.run_signup(driver, FakeRouter([FakeLease()]), _identity(),
+                               sleep=lambda _s: None)
+    assert result.status == signup.RESULT_STUCK
+    assert "did not advance" in result.detail
+
+
+# --- what comes after the account exists --------------------------------------
+# All three read off `gmail test`, 2026-08-13, on the run that created
+# @hanna.sommer33 through the email path.
+ADD_PHONE = ("add a mobile number enter the mobile number where you can be "
+             "contacted. no one will see this on your profile. de +49 mobile "
+             "number you may receive sms")
+PERMISSIONS_NEXT_ONLY = ("allow instagram to access your device? notifications "
+                         "turning on notifications helps you keep up with your "
+                         "friends. contacts contacts on this device will be "
+                         "periodically synced. next, allow access or skip these "
+                         "steps. you can change these settings anytime. next")
+CONTACTS_DIALOG = "allow instagram to access your contacts? allow don't allow"
+MESSAGE_NAG = ("only get message notifications turn on message notifications to "
+               "keep up with chats and snooze everything else. turn on not now")
+
+
+def test_the_post_creation_phone_prompt_is_not_a_finished_account():
+    """It contains "no one will see this on your profile", which used to be
+    read as evidence of a profile -- a false success, the worst kind here."""
+    assert signup.classify_signup_screen(ADD_PHONE) == signup.SCREEN_ADD_PHONE
+
+
+def test_no_signup_screen_is_mistaken_for_a_finished_account():
+    for text in (ADD_PHONE, SCREENS[signup.SCREEN_EMAIL],
+                 SCREENS[signup.SCREEN_PHONE]):
+        assert signup.classify_signup_screen(text) != signup.SCREEN_DONE
+
+
+def test_androids_own_permission_dialog_is_told_apart_from_instagrams_screen():
+    assert signup.classify_signup_screen(CONTACTS_DIALOG) == \
+        signup.SCREEN_PERMISSION_DIALOG
+    assert signup.classify_signup_screen(PERMISSIONS_NEXT_ONLY) == \
+        signup.SCREEN_PERMISSIONS
+
+
+def test_the_message_notification_nag_is_skippable():
+    assert signup.classify_signup_screen(MESSAGE_NAG) == \
+        signup.SCREEN_INTERSTITIAL
+
+
+def test_contacts_are_always_denied():
+    """Contacts sync is what ties these accounts to one another."""
+    driver = FakeDriver([CONTACTS_DIALOG, DONE])
+    signup.run_signup(driver, FakeRouter([]), _identity(), sleep=lambda _s: None)
+    assert ("DON'T ALLOW", "Don't allow", "Deny") in driver.taps
+
+
+class HonestDriver(FakeDriver):
+    """Taps only labels the screen really offers, matched exactly.
+
+    The real driver compares against a node's whole text, which is why "Skip"
+    must not be satisfied by the words "skip these steps" in a paragraph.
+    """
+
+    def __init__(self, screens_and_labels):
+        super().__init__([text for text, _ in screens_and_labels])
+        self._labels = [set(labels) for _, labels in screens_and_labels]
+        self._current = set()
+
+    def read_screen(self):
+        self._current = self._labels.pop(0) if self._labels else set()
+        return super().read_screen()
+
+    def tap_label(self, labels):
+        self.taps.append(tuple(labels))
+        return any(label in self._current for label in labels)
+
+
+def test_the_permissions_screen_advances_even_without_a_skip():
+    """One variant offers Skip; the other only Next, which leads to the
+    dialogs above -- where the answer is no."""
+    driver = HonestDriver([
+        (PERMISSIONS_NEXT_ONLY, {"Next"}),          # no Skip button at all
+        (CONTACTS_DIALOG, {"DON'T ALLOW"}),
+        (DONE, set()),
+    ])
+    signup.run_signup(driver, FakeRouter([]), _identity(), sleep=lambda _s: None)
+    assert driver.taps[0] == signup._SKIP_LABELS      # tried Skip, not there
+    assert driver.taps[1] == signup._SUBMIT_LABELS    # fell back to Next
