@@ -282,6 +282,47 @@ exactly and walks to the clickable ancestor.
 are unchanged from §2: an app-specific password (then `imaplib` works from the
 server and no phone is involved at all), or a mailbox provider we control.
 
+### 2.1c The Play Store adds the account. Gmail's own setup does not.
+
+**Solved.** The same credentials, the same phone, the same TOTP — entered
+through the **Play Store's** `Sign in` instead of Gmail's *Add an email
+address* — and the account went on:
+
+```
+1  Play Store → Sign in           5  password → NEXT
+2  "sign in with ease" → SKIP     6  2FA chooser → Authenticator
+3  (Google sign-in form)          7  TOTP typed with 17s left → NEXT
+4  email → NEXT                   8  Google Terms → "I agree"
+                                  *** ACCOUNT ADDED after 8 rounds ***
+```
+
+```
+adb shell dumpsys account
+    Account {name=ciciaurainta@gmail.com, type=com.google}
+```
+
+and Gmail then opened on `signed in as cici aura in ta
+ciciaurainta@gmail.com`.
+
+**The entry point is the whole difference.** Gmail's setup flow (`Add an email
+address` → `Google`) failed at the Terms step every single time, on two
+different phones including one with no Google account at all. The Play Store's
+sign-in walks the same `MinuteMaidActivity` screens and completes. Nothing else
+changed — not the account, not the seed, not the code.
+
+So the earlier conclusion ("Google refuses to provision on these phones") was
+**wrong**, and the honest correction is that it refuses *from Gmail's entry
+point*. Worth remembering as a general lesson: a flow that fails at a
+consistent step may be failing because of where it was entered, not because of
+what it is doing.
+
+**One thing left to finish**: a freshly added account arrives with **sync off**,
+so the inbox is empty and Gmail says so in a *tip* rather than an error — which
+a flow would happily read as "no mail". The switch is Gmail → account settings
+→ Data usage → **`Sync Gmail`** (found, but the phone hit its ~15 minutes
+before it was toggled). The account persists on the MLX profile, so the next
+launch starts already signed in.
+
 ### 2.2 The device's mailbox has been used for this before
 
 The Gmail inbox on this phone (`i1aikjgs11a@gmail.com`) holds, from **5 Aug**:
