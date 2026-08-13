@@ -311,11 +311,25 @@ def plan_verification(mlx_items, attempts=None, now=None,
         # named profile has a reason, and refusing because the tag is missing
         # would just be unhelpful. It does NOT override the diagnosis check
         # below: that one is another person's finding, not a filter.
+        #
+        # An entry may be a launch id instead of a name, because names on this
+        # workspace are not unique and the ambiguity warning below has always
+        # said "use the id" without there being any way to do so: three
+        # profiles are called `Blank (13)`, and asking for that name works all
+        # three, two of which nobody asked about.
         if wanted is not None:
-            if name_key not in wanted:
+            # Normalised the same way names are: ids are digits on this
+            # workspace, so this only ever costs surrounding whitespace, and it
+            # keeps one rule for what "the same string" means.
+            item_key = _wanted_key(item.get("id") or "")
+            if item_key and item_key in wanted:
+                seen_names.setdefault(item_key, 0)
+                seen_names[item_key] += 1
+            elif name_key in wanted:
+                seen_names.setdefault(name_key, 0)
+                seen_names[name_key] += 1
+            else:
                 continue
-            seen_names.setdefault(name_key, 0)
-            seen_names[name_key] += 1
         elif ISSUE_TAG not in tags:
             continue
 
@@ -736,10 +750,13 @@ def main(argv=None) -> int:
     parser.add_argument("--country", default=None,
                         help="override the country numbers are rented from.")
     parser.add_argument("--only", default=None,
-                        help="comma-separated profile names to work instead of "
-                             "the whole flagged population (e.g. "
-                             "'luisa 2,luisa 3'). Overrides the Issue-tag "
-                             "filter, but not the diagnosis check.")
+                        help="comma-separated profile names or launch ids to "
+                             "work instead of the whole flagged population "
+                             "(e.g. 'luisa 2,luisa 3'). Names on this workspace "
+                             "are not unique -- three profiles are called "
+                             "'Blank (13)' -- so use the id to mean one of "
+                             "them. Overrides the Issue-tag filter, but not the "
+                             "diagnosis check.")
     parser.add_argument("--match", default=None,
                         help="only work flagged profiles whose name contains "
                              "this (e.g. 'blank'). Combines with --limit.")

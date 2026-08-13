@@ -698,3 +698,56 @@ class OneLinePerProfileTest(unittest.TestCase):
         self.assertGreaterEqual(settled, returns,
                                 "a return path in _work_one settles nothing, so "
                                 "the pass has nothing to log for it")
+
+
+class OnlyByIdTest(unittest.TestCase):
+    """Asking for one profile when three share its name.
+
+    The ambiguity warning has always ended "-- use the id", and until now there
+    was no way to do that: `--only` matched names alone. On 2026-08-13 the
+    three `Blank (13)` profiles made it concrete -- a re-run aimed at one of
+    them planned all three, and pushed the two profiles actually wanted off the
+    end of the limit.
+    """
+
+    def test_an_id_picks_exactly_one_of_a_duplicated_name(self):
+        plan = vr.plan_verification(
+            [_item("blank (13)", launch_id="L1"),
+             _item("blank (13)", launch_id="L2"),
+             _item("blank (13)", launch_id="L3")],
+            now=NOW, only=["L2"], limit=10)
+        self.assertEqual([p.launch_id for p in plan.to_run], ["L2"])
+        self.assertEqual(plan.not_found, [])
+
+    def test_ids_and_names_mix_in_one_list(self):
+        plan = vr.plan_verification(
+            [_item("blank (13)", launch_id="L1"),
+             _item("blank (13)", launch_id="L2"),
+             _item("jasmin 5", launch_id="L9")],
+            now=NOW, only=["L1", "jasmin 5"], limit=10)
+        self.assertEqual({p.launch_id for p in plan.to_run}, {"L1", "L9"})
+
+    def test_an_id_that_matches_nothing_is_reported(self):
+        plan = vr.plan_verification([_item("luisa 2", launch_id="L1")],
+                                    now=NOW, only=["L404"], limit=10)
+        self.assertEqual(plan.to_run, [])
+        self.assertTrue(any("l404" in m.lower() for m in plan.not_found),
+                        plan.not_found)
+
+    def test_an_id_still_does_not_override_a_persons_diagnosis(self):
+        plan = vr.plan_verification(
+            [_item("jil 2", launch_id="L1", tags=("Issue", "logged out"))],
+            now=NOW, only=["L1"], limit=10)
+        self.assertEqual(plan.to_run, [])
+        self.assertEqual(len(plan.diagnosed), 1)
+
+    def test_a_name_that_is_also_wanted_by_id_is_not_counted_twice(self):
+        """Both forms name the same profile; it is planned once."""
+        plan = vr.plan_verification(
+            [_item("luisa 2", launch_id="L1")],
+            now=NOW, only=["L1", "luisa 2"], limit=10)
+        self.assertEqual([p.launch_id for p in plan.to_run], ["L1"])
+        # The name matched no profile of its own, which is worth saying rather
+        # than hiding: it is how a typo in a mixed list would show up.
+        self.assertTrue(any("luisa 2" in m for m in plan.not_found),
+                        plan.not_found)
