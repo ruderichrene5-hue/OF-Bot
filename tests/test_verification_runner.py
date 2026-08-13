@@ -637,3 +637,64 @@ class DiagnosisTagTest(unittest.TestCase):
         """The loop only closes if these names match DIAGNOSED_ELSEWHERE_TAGS."""
         for _status, _marker, tag in vr._DIAGNOSIS_TAGS:
             self.assertIn(vr._wanted_key(tag), vr.DIAGNOSED_ELSEWHERE_TAGS, tag)
+
+
+class OneLinePerProfileTest(unittest.TestCase):
+    """Every profile the pass touches says what happened to it, once.
+
+    `_work_one` settles several profiles before the screen loop ever runs --
+    Instagram not installed, no usable device, never ADB-ready -- and each of
+    those returns from its own place. While the result line lived inside
+    `_work_one`, only the profiles that reached the chain got one: on
+    2026-08-13 `Blank (9)` logged `launching` and then nothing at all, while
+    quietly collecting a status, a detail and a seven-day bench.
+
+    Checked against the source because the loop needs MultiLogin, a lock file
+    and a phone to run, and a test that mocked all three would be asserting on
+    the mocks.
+    """
+
+    def _pass_source(self):
+        import inspect
+        return inspect.getsource(vr.run_verification_pass)
+
+    def test_the_result_line_is_not_left_to_the_chain(self):
+        import inspect
+        source = inspect.getsource(vr._work_one)
+        self.assertNotIn('"verification pass: %s -> %s (%s)"', source)
+
+    def test_the_pass_logs_a_settled_outcome(self):
+        self.assertIn('"verification pass: %s -> %s (%s)"', self._pass_source())
+
+    def test_the_pass_still_logs_an_infrastructure_failure(self):
+        self.assertIn("could not be worked", self._pass_source())
+
+    def test_an_outcome_with_neither_is_not_silent(self):
+        """The bug was silence, so the unreachable branch is the point."""
+        # Split across two source lines, so matched in halves.
+        self.assertIn("finished with no ", self._pass_source())
+        self.assertIn("outcome recorded", self._pass_source())
+
+    def test_every_early_return_settles_something(self):
+        """A return that sets neither status nor error would log nothing.
+
+        Walks `_work_one`'s body: every `return` must be preceded, in its own
+        branch, by an assignment to `outcome.status` or `outcome.error`.
+        """
+        import ast, inspect, textwrap
+        tree = ast.parse(textwrap.dedent(inspect.getsource(vr._work_one)))
+        fn = tree.body[0]
+        settled = 0
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Assign):
+                continue
+            for target in node.targets:
+                if (isinstance(target, ast.Attribute)
+                        and target.attr in ("status", "error")
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "outcome"):
+                    settled += 1
+        returns = sum(1 for node in ast.walk(fn) if isinstance(node, ast.Return))
+        self.assertGreaterEqual(settled, returns,
+                                "a return path in _work_one settles nothing, so "
+                                "the pass has nothing to log for it")

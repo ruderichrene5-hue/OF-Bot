@@ -493,14 +493,25 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
                           max_seconds=max_seconds,
                           readiness_attempts=readiness_attempts,
                           readiness_wait=readiness_wait)
+                # Exactly one line per profile, whatever happened. `_work_one`
+                # logs nothing itself: it settles some profiles before the
+                # chain ever runs -- no Instagram installed, no usable device --
+                # and each of those returns from a different place. Leaving the
+                # line to each return is how `Blank (9)` produced `launching`
+                # and then silence on 2026-08-13, with a status, a detail and a
+                # seven-day bench that nothing in the log ever mentioned.
                 if outcome.error:
-                    # `_work_one` only logs a line when the chain actually ran.
-                    # Without this an infrastructure failure -- a phone stuck
-                    # `offline`, Instagram refusing to open -- passes through
-                    # leaving no per-profile line at all, so reading the log
-                    # cannot tell you what happened to `Luisa 3`.
                     logger.warning("verification pass: %s -> could not be worked "
                                    "(%s)", planned.name, outcome.error)
+                elif outcome.status:
+                    logger.info("verification pass: %s -> %s (%s)", planned.name,
+                                outcome.status, outcome.detail)
+                else:
+                    # Not reachable by any current path, and logged rather than
+                    # asserted because a pass that stops mid-fleet over a
+                    # bookkeeping slip is worse than one that says so.
+                    logger.warning("verification pass: %s -> finished with no "
+                                   "outcome recorded", planned.name)
             except Exception as exc:
                 # One phone's failure must not end the pass: the next profile is
                 # a different phone with a different problem.
@@ -614,8 +625,8 @@ def _work_one(clients, adb_client, logger, planned, outcome, country,
     outcome.status = result.status
     outcome.detail = result.detail
     outcome.numbers_used = result.numbers_used
-    logger.info("verification pass: %s -> %s (%s)",
-                planned.name, result.status, result.detail)
+    # The per-profile line is the caller's, so that the profiles settled above
+    # -- before this chain runs at all -- get one too.
 
 
 def _record_diagnosis_tag(tag_client, logger, planned, outcome) -> None:
