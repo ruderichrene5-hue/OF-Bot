@@ -1276,3 +1276,82 @@ class ForeignCodeScreenTest(FlowTestCase):
         result, driver, _ = self.run_chain(None, driver=driver)
         self.assertEqual(driver.actions, [])
         self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+
+
+class UnreadableCaptchaScreenTest(FlowTestCase):
+    """A captcha screen that produced no UI dump is not worth buying.
+
+    `Default profile name (44)`, 2026-08-13: the answer went in, `Next` was
+    pressed, and 43 seconds later the phone -- still working -- produced no
+    dump. OCR read the picture, which still showed the captcha screen with the
+    answer sitting in its field, so the run reported a possibly-correct solve
+    as wrong, bought a second one off the whole screenshot, and then failed
+    with `no input field on screen`, there being no dump to find one in.
+
+    Nothing on OCR text can be tapped or typed into, so the only useful move is
+    to wait for the phone and look again.
+    """
+
+    class BlindDriver(FakeDriver):
+        """Says how each screen was read, from a script of sources."""
+
+        def __init__(self, screens, sources=()):
+            super().__init__(screens)
+            self.sources = list(sources)
+            self.source = "ui-dump"
+
+        def read_screen(self):
+            self.source = self.sources.pop(0) if self.sources else "ui-dump"
+            return super().read_screen()
+
+        def screen_source(self):
+            return self.source
+
+    def test_it_waits_instead_of_buying_an_answer(self):
+        solver = FakeSolver(answer="7F3KQ")
+        driver = self.BlindDriver([SCREEN_CAPTCHA, SCREEN_FEED],
+                                  sources=["ocr", "ui-dump"])
+        result, driver, _ = self.run_chain(None, driver=driver, solver=solver)
+        # One purchase, made on the look that could be acted on.
+        self.assertEqual(solver.calls, 1)
+        self.assertEqual([a[0] for a in driver.actions], ["captcha"])
+        self.assertEqual(result.status, RESULT_SOLVED)
+
+    def test_a_screen_that_never_settles_goes_to_a_person(self):
+        solver = FakeSolver(answer="7F3KQ")
+        driver = self.BlindDriver([SCREEN_CAPTCHA, SCREEN_FEED],
+                                  sources=["ocr"] * 6)
+        result, driver, _ = self.run_chain(None, driver=driver, solver=solver)
+        self.assertEqual(solver.calls, 0)
+        self.assertEqual(driver.actions, [])
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+        self.assertIn("never produced a UI dump", result.detail)
+
+    def test_an_answer_is_not_called_wrong_on_a_screen_it_cannot_read(self):
+        """The expensive half: reporting a good solve refunds it and marks the
+        service's worker down for being right."""
+        solver = FakeSolver(answers=["7F3KQ", "N3XT1"])
+        driver = self.BlindDriver([SCREEN_CAPTCHA, SCREEN_CAPTCHA, SCREEN_FEED],
+                                  sources=["ui-dump"] + ["ocr"] * 5)
+        result, _, _ = self.run_chain(None, driver=driver, solver=solver)
+        self.assertEqual(solver.calls, 1)
+        self.assertEqual(solver.reported, 0)
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+
+    def test_a_dump_backed_repeat_is_still_reported_as_wrong(self):
+        """The guard must not cost the feedback the service actually needs."""
+        solver = FakeSolver(answers=["WR0NG", "R1GHT"])
+        driver = self.BlindDriver([SCREEN_CAPTCHA, SCREEN_CAPTCHA, SCREEN_FEED],
+                                  sources=["ui-dump", "ocr", "ui-dump"])
+        result, _, _ = self.run_chain(None, driver=driver, solver=solver)
+        self.assertEqual(solver.calls, 2)
+        self.assertEqual(solver.reported, 1)
+        self.assertEqual(result.status, RESULT_SOLVED)
+
+    def test_a_driver_that_cannot_say_is_unaffected(self):
+        solver = FakeSolver(answer="7F3KQ")
+        driver = FakeDriver([SCREEN_CAPTCHA, SCREEN_FEED])
+        self.assertFalse(hasattr(driver, "screen_source"))
+        result, _, _ = self.run_chain(None, driver=driver, solver=solver)
+        self.assertEqual(solver.calls, 1)
+        self.assertEqual(result.status, RESULT_SOLVED)

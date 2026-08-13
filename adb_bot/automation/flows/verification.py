@@ -513,6 +513,14 @@ MAX_NUMBER_TAKEOVERS = 1
 # also spends one of `MAX_REPEATS` on the same screen.
 MAX_CAPTCHA_IMAGES = 2
 
+# How many times one run will look again at a captcha screen that produced no
+# UI dump, and how long it waits between looks. A phone that is still thinking
+# about the answer just submitted is the common case (`Default profile name
+# (44)`, 2026-08-13), and it resolves in under a minute or not at all: two
+# waits cover it without letting a phone that never settles hold the pass.
+MAX_CAPTCHA_BLIND_READS = 2
+CAPTCHA_SETTLE_SECONDS = 20.0
+
 # Consecutive "code not sent" refusals before the run gives up on this account.
 # Instagram's own wording offers both readings -- "try again later **or** use a
 # different mobile number" -- so one more number is worth trying. Two identical
@@ -641,6 +649,7 @@ class _Session:
         self._refusals = 0
         self._consent_rounds = 0
         self._number_takeovers = 0   # see `_handle_code`
+        self._captcha_blind_reads = 0  # see `_handle_image_captcha`
 
     # --- main loop ------------------------------------------------------------
     def run(self, max_steps: int) -> VerificationResult:
@@ -1032,6 +1041,40 @@ class _Session:
         return None
 
     def _handle_image_captcha(self):
+        # A captcha screen nothing can be typed into is not worth buying an
+        # answer for. `Default profile name (44)` on 2026-08-13: the answer
+        # `312129` went in, `Next` was pressed, and 43 seconds later the phone
+        # -- still working, the intro screen had said it "takes about 30
+        # seconds" -- produced no UI dump at all. OCR read the picture, which
+        # still showed the captcha screen with `312129` sitting in the field,
+        # so the run called the answer wrong, reported it back to 2captcha,
+        # bought a second solve off the whole screenshot, and then failed with
+        # `no input field on screen` -- because there was no dump to find one
+        # in. Three wasted actions, and the first answer may well have been
+        # right.
+        #
+        # So: no dump, no purchase. Wait for the phone to finish and look
+        # again; only what a dump shows is worth acting on.
+        if not self._screen_is_actionable():
+            if self._captcha_blind_reads < MAX_CAPTCHA_BLIND_READS:
+                self._captcha_blind_reads += 1
+                self._log("info",
+                          "verification: the captcha screen produced no UI dump "
+                          "(%d of %d) -- nothing on it can be typed into, so "
+                          "waiting %.0fs for the phone to settle rather than "
+                          "buying an answer",
+                          self._captcha_blind_reads, MAX_CAPTCHA_BLIND_READS,
+                          CAPTCHA_SETTLE_SECONDS)
+                self.sleep(CAPTCHA_SETTLE_SECONDS)
+                # The screen name will repeat; waiting for it to settle is
+                # progress, in the same sense as asking for a new number.
+                self._repeats = 0
+                return None
+            return self._result(
+                RESULT_NEEDS_HUMAN,
+                "the captcha screen never produced a UI dump, so an answer "
+                "could not be typed into it")
+
         # Seeing this screen again after we typed an answer means the answer was
         # wrong. Tell the service before asking it for another one: that refunds
         # the bad solve and is the only feedback keeping its accuracy honest.
@@ -1084,6 +1127,24 @@ class _Session:
         except Exception as exc:
             self._log("warning", "verification: reporting a bad captcha raised (%s)",
                       exc)
+
+    def _screen_is_actionable(self) -> bool:
+        """Whether the screen just read carries elements, not just words.
+
+        A driver that cannot say counts as actionable: every fake driver in the
+        tests answers screens straight from a script, and the cautious reading
+        would stop all of them from ever solving anything.
+        """
+        source = getattr(self.driver, "screen_source", None)
+        if not callable(source):
+            return True
+        try:
+            return str(source()) == "ui-dump"
+        except Exception as exc:
+            self._log("warning",
+                      "verification: could not tell how the screen was read (%s)",
+                      exc)
+            return True
 
     def _change_number_offered(self) -> bool:
         """Whether the screen we are on offers to change the number.

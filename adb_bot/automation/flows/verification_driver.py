@@ -693,6 +693,15 @@ class AdbChallengeDriver:
         self._submit()
         return True
 
+    def screen_source(self) -> str:
+        """Where the last `read_screen` got its text: ui-dump, ocr or none.
+
+        The difference is not cosmetic. A dump can be acted on -- it carries
+        every field and button with its bounds -- and OCR text cannot: it is a
+        picture of words, so nothing on it can be tapped or typed into.
+        """
+        return self._source
+
     def can_request_new_number(self) -> bool:
         """Whether the screen already read offers the change-number link.
 
