@@ -399,6 +399,59 @@ that mailbox, i.e. it needs the same mailbox access §2 could not get. **Fix the
 mailbox question before making more accounts**, or every one of them will be
 one challenge away from being unrecoverable.
 
+## 4b. The flow's own first runs — four wrong assumptions, all now fixed
+
+`signup_runner --limit 1 --apply`, four times against live phones on
+`Blank (1)`. No account came out of them; each failure was a different wrong
+assumption, and every one is now a test.
+
+**1. A submit that is still working is not a submit that failed.** Instagram
+does not disable its button while it works — **it renames it to `Loading`**.
+The password went through on the very first tap; the screen still said "create
+a password"; and the flow spent four rounds hunting a `Next` that no longer
+existed before giving up on a verified number:
+
+```
+none of ['Next','NEXT','Continue','Done'] is on screen; clickable labels were
+['••••••••••••','Password,','Learn more','Loading','I already have an account','Back']
+```
+
+Galling, because *"`Loading` is a better wait signal than a sleep"* is written
+in §4 of this very document and was not implemented. Screens whose button reads
+`Loading` are now waited on, bounded, and the run carried straight on to the
+date picker afterwards.
+
+**2. A tap taken from a stale dump loses the dialog.** All three date spinners
+were located in one dump — but the keyboard opening *moves* the dialog, so the
+second and third taps landed outside it, and a tap outside a dialog dismisses
+it. The run became a password ↔ date-picker loop, sixteen steps of it. Each
+spinner is now found in its own fresh dump, the run stops rather than tapping
+blind if the dialog goes away mid-way, and `SET` is tried **before** Back is
+ever pressed, because Back on an open dialog throws away the date just typed.
+
+**3. A phone that has died is not an unrecognised screen.** When the cloud
+phone stopped answering, `read_screen` returned nothing and the run reported
+`unknown_screen:` with an empty detail — which sends somebody hunting for a
+marker list that does not exist. Three empty reads now say plainly that the
+phone stopped answering.
+
+**4. One provider's empty wallet is not the fleet's.** The router raised
+`InsufficientBalance` straight out of `lease()`, so a signup died on SMSPool's
+$0.02 while the 5sim account held **$6.89 and was never asked**. Each provider
+has its own wallet; it now falls through, and only says "top one up" when every
+provider is broke.
+
+What the runs *did* prove, on real phones: the number is typed as the national
+part and read back, `Back` swaps a timed-out number for a fresh one, the
+confirmation code is accepted (22s and 52s on the two that delivered), the
+password lands as 12 masked characters, and the date picker is reached. The
+chain is right; these were four bugs in the driving of it.
+
+**Where it stops now:** SMSPool is down to **$0.02** and 5sim answers
+`no free phones` for Germany at this hour. The flow cannot be finished
+end-to-end until one of those changes — the fallback works, there is simply no
+number to rent.
+
 ## 5. Where this run got to
 
 | | |
