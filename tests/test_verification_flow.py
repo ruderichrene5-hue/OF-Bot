@@ -1355,3 +1355,37 @@ class UnreadableCaptchaScreenTest(FlowTestCase):
         result, _, _ = self.run_chain(None, driver=driver, solver=solver)
         self.assertEqual(solver.calls, 1)
         self.assertEqual(result.status, RESULT_SOLVED)
+
+
+class SolveDetailTest(FlowTestCase):
+    """A solve says what it cleared, or says that there was nothing to clear.
+
+    `Jasmin 5` was tagged `Issue` at 04:40 on 2026-08-13 for `Retries
+    Exhausted` -- a posting failure, not a challenge -- and the pass launched
+    it, found an ordinary working Instagram and reported `solved`, in the same
+    words it uses for a captcha it actually answered. Both are legitimate
+    outcomes; counting them as the same number is what makes a tally of
+    verification successes mean nothing.
+    """
+
+    def test_a_phone_with_no_challenge_says_so(self):
+        result, _, _ = self.run_chain([SCREEN_FEED])
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertIn("no challenge on this phone", result.detail)
+        self.assertEqual(result.steps, [])
+
+    def test_a_cleared_captcha_is_named(self):
+        result, _, _ = self.run_chain([SCREEN_CAPTCHA, SCREEN_FEED],
+                                      solver=FakeSolver(answer="7F3KQ"))
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertEqual(result.detail, "cleared image_captcha")
+
+    def test_a_chain_lists_what_it_worked_in_order(self):
+        result, _, _ = self.run_chain([SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED])
+        self.assertEqual(result.detail, "cleared phone, code")
+
+    def test_a_screen_that_came_round_twice_is_named_once(self):
+        solver = FakeSolver(answers=["WR0NG", "R1GHT"])
+        result, _, _ = self.run_chain(
+            [SCREEN_CAPTCHA, SCREEN_CAPTCHA, SCREEN_FEED], solver=solver)
+        self.assertEqual(result.detail, "cleared image_captcha")

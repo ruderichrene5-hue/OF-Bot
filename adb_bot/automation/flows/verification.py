@@ -723,7 +723,23 @@ class _Session:
         """
         if screen_is_healthy(text):
             self._dismiss_confirmation()
-            return self._result(RESULT_SOLVED, "no verification screen remaining")
+            # Two very different runs end here, and until now both reported the
+            # same sentence. `Jasmin 5` was tagged `Issue` at 04:40 on
+            # 2026-08-13 for `Retries Exhausted` -- a posting failure -- and
+            # this pass launched it, found an ordinary working Instagram and
+            # called it solved, exactly as it reads a captcha that was actually
+            # answered. The tally then counts a launch that cleared nothing as
+            # a verification success, which is the number decisions get made
+            # on. `steps` already knows the difference.
+            worked = [s for s in self.steps if s != CHALLENGE_NONE]
+            if worked:
+                # dict.fromkeys: in order, without repeating a screen that came
+                # round twice.
+                detail = "cleared " + ", ".join(dict.fromkeys(worked))
+            else:
+                detail = ("Instagram was already working -- there was no "
+                          "challenge on this phone to clear")
+            return self._result(RESULT_SOLVED, detail)
 
         if looks_like_consent_gate(text):
             return self._result(
