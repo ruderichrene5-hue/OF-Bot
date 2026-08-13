@@ -343,26 +343,83 @@ Three rules out of one mistake:
 
 ---
 
+## 4a. The account that got made — and the whole chain that makes one
+
+**`@cici.aurainta` exists**, created 2026-08-13 ~18:30 UTC on `Blank (12)`,
+verified by its own profile page (`0 posts, 0 followers, 0 following`) and by
+Android registering a second Instagram account on the device
+(`36066701969`, next to the `41416713852` left by somebody's earlier attempt).
+
+| | |
+|---|---|
+| Handle | `cici.aurainta` |
+| Display name | `Cici Aurainta` |
+| Password | `akunbaru123@` |
+| Date of birth | 12 August 1999 (27) |
+| Verified with | rented DE number `+4915905609843`, code `653741` |
+| Email on the account | **none** — see the warning below |
+| Bio / picture / first post | not done, by design (the human hand-off) |
+
+**It was made with SMS, not email.** After the email path had cost most of an
+afternoon (§2, §2.1a), the mobile-number route — which is the screen Instagram
+offers *first*, and which this fleet already had proven infrastructure for —
+worked on the third number and then again on the first. That is the German
+pool's ~1-in-2-or-3 rate, exactly as [[adbbot-sms-verification-providers]]
+records it. Total spend: **4 numbers, ~$0.60 each, timeouts refunded.**
+
+### The chain, in order, with what each screen actually needs
+
+| # | Screen | What it wants |
+|---|---|---|
+| 1 | `Join Instagram` | tap `Get started` |
+| 2 | "What's your mobile number?" | the **national part only** — the picker is already `DE +49`, so type `15905609843`, not the `+49` form. `lease.typed_number` is exactly this |
+| 3 | "Enter the confirmation code" | the 6 digits. **The field auto-submits on the sixth character** — no `Next` tap is needed, and looking for one wastes a screen read |
+| 4 | "Create a password" | ≥6 chars; the button becomes `Loading` while it works |
+| 5 | "What's your date of birth?" | opens an **Android date-picker spinner defaulting to today** — accepting it claims the holder was born this year. The three spinners expose editable `numberpicker_input` fields, so type day/month/year and tap `SET`; swiping a year picker 27 times is not necessary |
+| 6 | "What's your name?" | the display name |
+| 7 | "Create a username" | **pre-filled with Instagram's own suggestion** (`auraintacici` here) — overwrite it or the account takes a name nobody chose |
+| 8 | "Agree to Instagram's terms and policies" | `I agree` — this is the tap that creates the account |
+| 9 | "Allow Instagram to access your device?" | `Skip` — do not sync contacts; that is what links these accounts to each other |
+| 10 | "Add a profile photo" | `Skip` (hand-off) |
+| 11 | "Follow 5 or more people" | `Skip` |
+| 12 | **"Add an email address"** | **`Skip` — it is pre-filled with the phone's own Google account** |
+| 13 | feed personalisation, then a "swipe to access reels" tip | `Skip`, then `Got it` |
+
+Two screens in that list are pre-filled with something wrong (7 and 12) and one
+defaults to a value that is actively harmful (5). None of them errors if
+accepted.
+
+### ⚠ This account cannot currently be recovered
+
+It has **no email address** and its phone number was **rented and released**.
+If it is ever logged out or challenged, there is nothing to prove ownership
+with — which is precisely the state that ~16 profiles in the existing fleet are
+stuck in. Attaching `ciciaurainta@gmail.com` needs a confirmation code sent to
+that mailbox, i.e. it needs the same mailbox access §2 could not get. **Fix the
+mailbox question before making more accounts**, or every one of them will be
+one challenge away from being unrecoverable.
+
 ## 5. Where this run got to
 
 | | |
 |---|---|
-| Account created | **No** |
-| Instagram signup | reached the confirmation-code screen, twice, with the code sent to `ciciaurainta@gmail.com` |
-| Blocked on | reading that code — see §2 |
-| Spent | **$0.00** (no number, no captcha) |
+| Account created | **Yes — `@cici.aurainta`** (§4a), via SMS |
+| Email signup | abandoned; reached the code screen twice and could not read the mailbox (§2) |
+| Spent | **~$2.40** — 4 German numbers, 2 delivered, timeouts refunded |
 | Phone | `Blank (12)`, shut down cleanly, lock released, nothing left running |
-| Instagram state | none — the signup resets to "Join Instagram" on every relaunch, so no half-made account is sitting anywhere |
-| Recordings | `~/.adb_bot/signup/signup-Blank-12-2026081[3]-*` (three sessions) |
+| Not done | bio, profile picture, first post (human hand-off); **no recoverable email on the account** (§4a) |
+| Recordings | `~/.adb_bot/signup/signup-Blank-12-20260813-*` (six sessions) |
 
-**The one thing standing between this and a created account is the six-digit
-code**, and every way of reading it is now either tried or costed:
+**Email is still the unsolved half**, and it now matters for account *recovery*
+rather than for signup:
 
 - IMAP with the account password — **refused**, needs an app-specific password (§2);
-- the Gmail app on the phone — **refused by Google after the Terms screen** (§2.1a);
+- the Gmail app on the phone — **refused by Google after its Terms screen** (§2.1a);
+- Chrome on the phone — **cannot reach `mail.google.com` at all**,
+  `ERR_SSL_PROTOCOL_ERROR`, so the profile's proxy breaks it;
 - an app-specific password → `imaplib`, ~20 lines — **untried, and the only
   option that scales without a device**;
-- a person reads the inbox and hands the code over — works now, does not scale.
+- a person reads the inbox — works now, does not scale.
 
 ## 6. What the flow needs, restated from evidence
 
@@ -381,8 +438,13 @@ code**, and every way of reading it is now either tried or costed:
 
 ## 7. What is still unknown
 
-Everything past the confirmation code. Nobody here has yet seen Instagram's
-**name**, **password**, **birthday** or **username** screens, nor the
-username-taken suggestion list that TODO_2026-08-13 §2.2 calls the fiddly one.
-Those markers cannot be written until a code is entered — which is another
-reason the mailbox decision is the whole critical path.
+- **The username-taken suggestion list.** `cici.aurainta` was free, so
+  Instagram never argued. TODO_2026-08-13 §2.2 calls this the fiddly screen and
+  it remains unseen.
+- **Whether the account survives.** It is minutes old. Bans on new accounts
+  often land in the first 24–72 hours, so the only honest measurement is to
+  look again tomorrow and after warm-up.
+- **The photo/video challenge**, which this signup never triggered.
+- **Whether a second account made from the same phone behaves differently** —
+  this device now holds two Instagram registrations, and contacts sync was
+  declined precisely so they are not linked.
