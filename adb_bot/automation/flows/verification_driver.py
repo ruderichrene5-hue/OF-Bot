@@ -693,6 +693,15 @@ class AdbChallengeDriver:
         self._submit()
         return True
 
+    def can_request_new_number(self) -> bool:
+        """Whether the screen already read offers the change-number link.
+
+        Reads nothing itself: it answers about the dump `read_screen` last
+        produced, which is the screen the caller is deciding about. Reading
+        again would answer about a different moment.
+        """
+        return self._find_exact(_NEW_NUMBER_LABELS) is not None
+
     def request_new_number(self) -> bool:
         self._log("info", "getting back to the phone number screen")
         center = self._find_exact(_NEW_NUMBER_LABELS)

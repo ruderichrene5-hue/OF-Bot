@@ -1185,3 +1185,94 @@ class ChallengeIntroTest(FlowTestCase):
         self.assertFalse(hasattr(driver, "advance_intro"))
         result, _, _ = self.run_chain(None, driver=driver)
         self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+
+
+class ForeignCodeScreenTest(FlowTestCase):
+    """A code screen waiting on a number this bot never rented.
+
+    `Blank (13)` and `Blank (15)` both opened here on 2026-08-13 -- "enter the
+    6-digit confirmation code we sent via sms to +49..." over an `Update mobile
+    number` link -- and both were settled as terminal, tagged `unable to
+    verify`, and benched for seven days without that link ever being pressed.
+    Blank (15) had burned three of our own numbers the day before, so the
+    number it was waiting on was most likely one of ours, already refunded and
+    unreadable: nothing about the account was wrong.
+
+    The link is only pressed when it is really on screen, because
+    `request_new_number` presses Back when it finds nothing, and Back on this
+    screen leaves the chain rather than restarting it.
+    """
+
+    # Blank (13)'s screen, as the recorder wrote it down.
+    FOREIGN_CODE = ("get support menu enter confirmation code enter the 6-digit "
+                    "confirmation code we sent via sms to +4967870390593. it may "
+                    "take up to a minute for you to receive this code. 6-digit "
+                    "code request new code next update mobile number")
+
+    class LinkDriver(FakeDriver):
+        """FakeDriver that can say whether the change-number link is there.
+
+        `lands_on` is what pressing it produces: the phone screen when the link
+        does what it says, and nothing at all when it does not.
+        """
+
+        def __init__(self, screens, offered=True, lands_on=None, works=True):
+            super().__init__(screens)
+            self.offered = offered
+            self.lands_on = lands_on
+            self.works = works
+
+        def can_request_new_number(self):
+            return self.offered
+
+        def request_new_number(self):
+            self.actions.append(("new_number", None))
+            if not self.works:
+                return False
+            if self.lands_on:
+                self.screens.insert(0, self.lands_on)
+            return True
+
+    def test_the_screen_is_still_read_as_the_code_screen(self):
+        # If this ever stops being true the rest of the class tests nothing.
+        self.assertEqual(classify_challenge(self.FOREIGN_CODE), CHALLENGE_CODE)
+
+    def test_it_asks_for_the_phone_screen_and_finishes_the_chain(self):
+        driver = self.LinkDriver([self.FOREIGN_CODE, SCREEN_FEED],
+                                 lands_on=SCREEN_PHONE)
+        result, driver, provider = self.run_chain(None, driver=driver)
+        self.assertEqual([a[0] for a in driver.actions],
+                         ["new_number", "phone", "code"])
+        # The number typed is one we rented, which is the whole point: the
+        # screen was waiting on +4967870390593, and this is not it.
+        self.assertEqual(provider.purchases, 1)
+        self.assertNotIn(dict(driver.actions)["phone"], self.FOREIGN_CODE)
+        self.assertEqual(result.status, RESULT_SOLVED)
+
+    def test_a_screen_without_the_link_is_left_alone(self):
+        driver = self.LinkDriver([self.FOREIGN_CODE, SCREEN_FEED], offered=False)
+        result, driver, _ = self.run_chain(None, driver=driver)
+        self.assertEqual(driver.actions, [])
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+        self.assertIn("does not control", result.detail)
+
+    def test_a_link_that_does_nothing_is_pressed_once(self):
+        # It reports success and leaves us on the same foreign code screen.
+        driver = self.LinkDriver([self.FOREIGN_CODE, SCREEN_FEED])
+        result, driver, _ = self.run_chain(None, driver=driver)
+        self.assertEqual([a[0] for a in driver.actions], ["new_number"])
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+        self.assertIn("does not control", result.detail)
+
+    def test_a_link_that_refuses_hands_back(self):
+        driver = self.LinkDriver([self.FOREIGN_CODE, SCREEN_FEED], works=False)
+        result, driver, _ = self.run_chain(None, driver=driver)
+        self.assertEqual([a[0] for a in driver.actions], ["new_number"])
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+
+    def test_a_driver_that_cannot_say_takes_the_cautious_branch(self):
+        driver = FakeDriver([self.FOREIGN_CODE, SCREEN_FEED])
+        self.assertFalse(hasattr(driver, "can_request_new_number"))
+        result, driver, _ = self.run_chain(None, driver=driver)
+        self.assertEqual(driver.actions, [])
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)

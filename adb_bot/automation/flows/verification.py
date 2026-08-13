@@ -440,6 +440,18 @@ class ChallengeDriver(Protocol):
         one call here rather than the loop guessing at buttons.
         """
 
+    def can_request_new_number(self) -> bool:
+        """Whether *this* screen offers the change-number link.
+
+        `request_new_number` presses Back when it finds no link, which is a fine
+        last resort when a number we rented has just timed out -- we know where
+        we are. It is not fine as a way to *ask*: on a code screen for somebody
+        else's number, Back leaves the chain rather than restarting it.
+
+        Optional. A driver without it is treated as unable to say, and the loop
+        takes the cautious branch.
+        """
+
     def upload_photo(self) -> bool:
         """Satisfy the photo challenge by uploading a picture from the device.
 
@@ -486,6 +498,13 @@ MAX_NUMBER_ATTEMPTS = 3
 # The same screen this many times in a row, with the step reporting success each
 # time, means the step is not actually advancing anything.
 MAX_REPEATS = 3
+
+# How many times one run may take over a code screen that is waiting on a number
+# it does not own (`_handle_code`). Once: if pressing the change-number link
+# lands us straight back on somebody else's code screen, the link did not do
+# what it says, and pressing it again is how a loop is built. The rented-number
+# retries that follow are bounded separately by MAX_NUMBER_ATTEMPTS.
+MAX_NUMBER_TAKEOVERS = 1
 
 # How many times one run will ask Instagram for a different captcha image. The
 # blank-image case is a real one (`Laila 3`, 2026-08-12: correctly sized node,
@@ -621,6 +640,7 @@ class _Session:
         self._captcha_images = 0
         self._refusals = 0
         self._consent_rounds = 0
+        self._number_takeovers = 0   # see `_handle_code`
 
     # --- main loop ------------------------------------------------------------
     def run(self, max_steps: int) -> VerificationResult:
@@ -951,6 +971,38 @@ class _Session:
         if self.lease is None:
             # The code screen without a number we rented: Instagram is asking
             # about a number already on the account, and we cannot read its SMS.
+            #
+            # That is not the end of it, because the screen itself offers a way
+            # out. `Blank (13)` and `Blank (15)` both opened here on 2026-08-13
+            # -- "enter the 6-digit confirmation code we sent via sms to
+            # +49..." over an `Update mobile number` link -- and both were
+            # settled as terminal, tagged `unable to verify`, and benched for
+            # seven days without that link ever being pressed. Blank (15) had
+            # burned three of our own numbers the day before, so the number it
+            # was waiting on was very likely one of ours that we had already
+            # refunded: unreadable now, but nothing about the *account* was
+            # wrong.
+            #
+            # So ask for the phone screen instead, once, and let the loop rent
+            # a number we can actually read. Only when the link is really on
+            # screen: `request_new_number` falls back to pressing Back, which
+            # from here leaves the chain rather than restarting it.
+            if self._number_takeovers < MAX_NUMBER_TAKEOVERS \
+                    and self.numbers_used < self.max_number_attempts \
+                    and self._change_number_offered():
+                self._number_takeovers += 1
+                self._log("info",
+                          "verification: the code screen wants a number we do "
+                          "not control, but offers to change it -- asking for "
+                          "the phone screen so we can use one we can read")
+                if self.driver.request_new_number():
+                    # Same reasoning as the timed-out-number path below: the
+                    # screen name will repeat, and asking again is progress.
+                    self._repeats = 0
+                    return None
+                self._log("warning",
+                          "verification: could not reach the phone screen from "
+                          "a code screen for somebody else's number")
             return self._result(
                 RESULT_NEEDS_HUMAN,
                 "a code was requested for a number the bot does not control")
@@ -1032,6 +1084,25 @@ class _Session:
         except Exception as exc:
             self._log("warning", "verification: reporting a bad captcha raised (%s)",
                       exc)
+
+    def _change_number_offered(self) -> bool:
+        """Whether the screen we are on offers to change the number.
+
+        A driver that cannot answer counts as "no": the only caller uses this
+        to decide whether to press something on a screen it did not expect, and
+        the cautious branch there hands the profile back unchanged, which is
+        where it already was.
+        """
+        ask = getattr(self.driver, "can_request_new_number", None)
+        if not callable(ask):
+            return False
+        try:
+            return bool(ask())
+        except Exception as exc:
+            self._log("warning",
+                      "verification: could not tell whether the code screen "
+                      "offers a new number (%s)", exc)
+            return False
 
     # --- bookkeeping ----------------------------------------------------------
     def _note_progress(self, challenge: str) -> bool:
