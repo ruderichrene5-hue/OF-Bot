@@ -358,13 +358,27 @@ class PurchaseFailureTest(RouterTestCase):
         with self.assertRaises(AllProvidersFailed):
             router.lease()
 
-    def test_an_empty_wallet_is_raised_not_counted(self):
-        """Switching providers cannot fix an empty wallet -- it needs a person."""
+    def test_an_empty_wallet_falls_through_to_the_provider_that_has_money(self):
+        """Each provider has its own wallet. A signup died on SMSPool's $0.02
+        on 2026-08-13 while 5sim held $6.89 and was never asked."""
         primary = FakeProvider(
             PROVIDER_SMSPOOL, can_sell=False,
             sell_error=InsufficientBalance(PROVIDER_SMSPOOL, "insufficient balance"))
         router = self.build(primary, FakeProvider(PROVIDER_5SIM, code="1"))
 
-        with self.assertRaises(InsufficientBalance):
+        lease = router.lease()
+        self.assertEqual(lease.provider.name, PROVIDER_5SIM)
+        # An empty wallet is not evidence that the pool is burned.
+        self.assertEqual(self.failures(router), 0)
+
+    def test_every_wallet_empty_says_so_plainly(self):
+        router = self.build(
+            FakeProvider(PROVIDER_SMSPOOL, can_sell=False,
+                         sell_error=InsufficientBalance(PROVIDER_SMSPOOL, "broke")),
+            FakeProvider(PROVIDER_5SIM, can_sell=False,
+                         sell_error=InsufficientBalance(PROVIDER_5SIM, "broke")))
+
+        with self.assertRaises(InsufficientBalance) as caught:
             router.lease()
+        self.assertIn("top one up", str(caught.exception))
         self.assertEqual(self.failures(router), 0)

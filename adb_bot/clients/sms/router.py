@@ -110,14 +110,23 @@ class SmsRouter:
         state = self.store.load()
         active = self._select(state, self._clock())
         errors = []
+        broke = []
 
         for provider in self._ordered_from(active):
             try:
                 order = provider.purchase(service=service, country=country)
-            except InsufficientBalance:
-                # Not a pool problem: switching providers cannot fix an empty
-                # wallet, and it needs a human, so surface it immediately.
-                raise
+            except InsufficientBalance as exc:
+                # **Each provider has its own wallet.** SMSPool running dry
+                # says nothing about 5sim, so this falls through to the next
+                # one rather than failing the run -- on 2026-08-13 a signup
+                # died on SMSPool's $0.02 while 5sim held $6.89 and was never
+                # asked. It is still not a *pool* problem, so it does not count
+                # toward the breaker: an empty wallet is not evidence that the
+                # numbers are burned.
+                broke.append(f"{provider.name} ({exc})")
+                self._log("warning", "sms: %s is out of money (%s); trying the "
+                                     "next provider", provider.name, exc)
+                continue
             except SmsProviderError as exc:
                 errors.append(str(exc))
                 self._log("warning", "sms: %s could not sell a number (%s)",
@@ -128,8 +137,15 @@ class SmsRouter:
             self._log("info", "sms: leased %s from %s", order.e164, provider.name)
             return NumberLease(self, provider, order)
 
+        if broke and not errors:
+            # Every provider is out of money. That really does need a person,
+            # and saying so beats a generic "nobody could sell a number".
+            raise InsufficientBalance(
+                "all", "every SMS provider is out of money -- top one up: "
+                       + "; ".join(broke))
+
         raise AllProvidersFailed(
-            "no provider could rent a number: " + "; ".join(errors))
+            "no provider could rent a number: " + "; ".join(errors + broke))
 
     # --- outcome recording ----------------------------------------------------
     def record_success(self, provider_name: str) -> None:
