@@ -1389,3 +1389,80 @@ class SolveDetailTest(FlowTestCase):
         result, _, _ = self.run_chain(
             [SCREEN_CAPTCHA, SCREEN_CAPTCHA, SCREEN_FEED], solver=solver)
         self.assertEqual(result.detail, "cleared image_captcha")
+
+
+from adb_bot.automation.flows import verification  # noqa: E402
+
+
+# --- the phone sitting on its home screen -------------------------------------
+JIL_6_LAUNCHER = ("search gallery gallery play store play store home telephone "
+                  "telephone messaging messaging music music chrome chrome "
+                  "camera camera")
+
+
+def test_the_android_launcher_is_recognised():
+    """Read off `Jil 6`, 2026-08-13, which cost a launch and a hand-back."""
+    assert verification.looks_like_launcher(JIL_6_LAUNCHER)
+
+
+def test_a_launcher_is_not_a_cleared_account():
+    """It carries no challenge marker, so the danger is reading it as success."""
+    assert not verification.screen_is_healthy(JIL_6_LAUNCHER)
+
+
+def test_instagram_screens_are_not_mistaken_for_the_launcher():
+    for text in ("open your camera and take a photo of yourself",
+                 "enter the 6-digit confirmation code we sent via sms to +49123",
+                 "gallery"):
+        assert not verification.looks_like_launcher(text)
+
+
+class _RestartingDriver:
+    """On the home screen until Instagram is started, then a healthy feed."""
+
+    def __init__(self, restarts_needed=1, can_restart=True):
+        self._left = restarts_needed
+        self._can_restart = can_restart
+        self.restarts = 0
+
+    def read_screen(self):
+        return JIL_6_LAUNCHER if self._left else (
+            "reels tray container add to story home reels message "
+            "search and explore profile")
+
+    def restart_app(self):
+        self.restarts += 1
+        if not self._can_restart:
+            return False
+        self._left = max(0, self._left - 1)
+        return True
+
+    def __getattr__(self, name):
+        # Anything else the flow may ask for is a no-op that reports failure.
+        return lambda *a, **kw: False
+
+
+def _run(driver):
+    return verification.run_verification(driver, router=None, logger=None,
+                                         sleep=lambda _s: None)
+
+
+def test_a_backgrounded_instagram_is_restarted_rather_than_handed_over():
+    driver = _RestartingDriver(restarts_needed=1)
+    result = _run(driver)
+    assert driver.restarts == 1
+    assert result.status == verification.RESULT_SOLVED
+
+
+def test_a_phone_that_never_shows_instagram_reaches_a_person():
+    driver = _RestartingDriver(restarts_needed=99)
+    result = _run(driver)
+    assert driver.restarts == verification.MAX_APP_RESTARTS
+    assert result.status == verification.RESULT_NEEDS_HUMAN
+    assert "would not start" in result.detail
+
+
+def test_a_driver_that_cannot_restart_still_hands_back_cleanly():
+    driver = _RestartingDriver(restarts_needed=99, can_restart=False)
+    result = _run(driver)
+    assert result.status == verification.RESULT_NEEDS_HUMAN

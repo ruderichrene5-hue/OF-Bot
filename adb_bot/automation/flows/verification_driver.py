@@ -711,6 +711,23 @@ class AdbChallengeDriver:
         """
         return self._find_exact(_NEW_NUMBER_LABELS) is not None
 
+    def restart_app(self) -> bool:
+        """Bring Instagram back to the foreground.
+
+        `am start` with the explicit activity, never `monkey`: on these MLX
+        cloud phones `monkey` returns an empty string and starts nothing, which
+        is how a probe once watched the Android home screen for two minutes and
+        reported "no verification challenge found".
+        """
+        if not self.act:
+            return self._refuse("start Instagram again")
+        out = self.adb_client.run_command(
+            f"adb -s {self.target} shell am start -n "
+            f"com.instagram.android/.activity.MainTabActivity")
+        self._log("info", "am start said %r", (out or "").strip()[:120])
+        time.sleep(6)
+        return True
+
     def request_new_number(self) -> bool:
         self._log("info", "getting back to the phone number screen")
         center = self._find_exact(_NEW_NUMBER_LABELS)

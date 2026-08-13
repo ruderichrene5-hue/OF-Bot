@@ -540,6 +540,42 @@ MAX_PHONE_REFUSALS = 2
 # unchanged" makes them go and find out.
 MAX_CONSENT_ROUNDS = 2
 
+# How many times a run will start Instagram again when the phone is sitting on
+# the Android home screen. `Jil 6` (2026-08-13) spent a whole launch, a
+# concurrency slot and a hand-back on this: Instagram was simply not running,
+# and the pass reported "no verification challenge, but not a working
+# Instagram either" -- true, useless, and a person had to look at a phone whose
+# only problem was that nobody had opened the app. Two is enough for an app
+# that was killed; a phone that will not run Instagram at all is a real
+# problem and should still reach a person.
+MAX_APP_RESTARTS = 2
+
+# The Android launcher, read off `Jil 6`: "search gallery gallery play store
+# play store home telephone telephone messaging messaging music music chrome
+# chrome camera camera". `play store` is the reliable half -- no Instagram
+# screen mentions it -- and the second half keeps a single stray word from
+# convicting a screen that really is Instagram's.
+_LAUNCHER_STRONG_MARKERS = ("play store", "google play store")
+_LAUNCHER_SUPPORTING_MARKERS = ("telephone", "messaging", "gallery", "camera",
+                                "chrome", "music")
+
+
+def looks_like_launcher(text: str | None) -> bool:
+    """True when the phone is showing its home screen rather than Instagram.
+
+    Not a challenge and not a verdict about the account: the app is not
+    running. Reported separately because the fix is to start it, and because
+    reading a launcher as "no challenge found" is one of the four ways the old
+    `solved` default was wrong.
+    """
+    if not text:
+        return False
+    haystack = text.lower()
+    if not any(marker in haystack for marker in _LAUNCHER_STRONG_MARKERS):
+        return False
+    return sum(marker in haystack
+               for marker in _LAUNCHER_SUPPORTING_MARKERS) >= 2
+
 # Instagram's inline error on the phone screen when it will not text the number
 # that was just submitted. Read off `Jil 10`, 2026-08-12.
 _PHONE_REFUSED_MARKERS = (
@@ -650,6 +686,7 @@ class _Session:
         self._consent_rounds = 0
         self._number_takeovers = 0   # see `_handle_code`
         self._captcha_blind_reads = 0  # see `_handle_image_captcha`
+        self._app_restarts = 0       # see `looks_like_launcher`
 
     # --- main loop ------------------------------------------------------------
     def run(self, max_steps: int) -> VerificationResult:
@@ -665,6 +702,26 @@ class _Session:
                     f"gave up after {elapsed / 60:.0f} minutes on this account")
 
             text = self.driver.read_screen()
+
+            # Instagram not being on screen is not an answer about the account.
+            # Starting it again is nearly free and recovers the launch; only a
+            # phone that will not show Instagram after that is a person's
+            # problem. Checked before classification because a launcher carries
+            # no challenge marker and would otherwise be weighed as "clear".
+            if looks_like_launcher(text):
+                if self._app_restarts < MAX_APP_RESTARTS and self._restart_app():
+                    self._app_restarts += 1
+                    self._log("info",
+                              "verification: the phone is on its home screen, not "
+                              "Instagram -- starting it again (%d/%d)",
+                              self._app_restarts, MAX_APP_RESTARTS)
+                    self._repeats = 0
+                    continue
+                return self._result(
+                    RESULT_NEEDS_HUMAN,
+                    "Instagram is not running on this phone and would not start, "
+                    "so nothing here says anything about the account")
+
             challenge = classify_challenge(text)
 
             if challenge == CHALLENGE_NONE:
@@ -1161,6 +1218,22 @@ class _Session:
                       "verification: could not tell how the screen was read (%s)",
                       exc)
             return True
+
+    def _restart_app(self) -> bool:
+        """Ask the driver to start Instagram again.
+
+        Optional on the driver, the same way `can_request_new_number` is: a
+        driver that cannot do it answers no, and the run falls through to the
+        hand-back it would have made anyway.
+        """
+        starter = getattr(self.driver, "restart_app", None)
+        if not callable(starter):
+            return False
+        try:
+            return bool(starter())
+        except Exception as exc:
+            self._log("warning", "verification: restarting Instagram raised (%s)", exc)
+            return False
 
     def _change_number_offered(self) -> bool:
         """Whether the screen we are on offers to change the number.

@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from adb_bot.automation import ban_detection
-from adb_bot.automation.flows.verification import screen_is_healthy
+from adb_bot.automation.flows.verification import looks_like_launcher, screen_is_healthy
 
 # --- what a screen can be -----------------------------------------------------
 SCREEN_ENTRY = "entry"                  # "Join Instagram" -- the start
@@ -53,6 +53,7 @@ SCREEN_FOLLOW = "follow"                # "Follow 5 or more people"
 SCREEN_ADD_EMAIL = "add_email"          # post-creation "Add an email address"
 SCREEN_INTERSTITIAL = "interstitial"    # feed personalisation, nav tips
 SCREEN_SAVE_PASSWORD = "save_password"  # Android autofill, not Instagram
+SCREEN_LAUNCHER = "launcher"            # the phone's home screen -- start the app
 SCREEN_LOADING = "loading"              # mid-render -- wait, do not act
 SCREEN_DONE = "done"                    # a working account
 SCREEN_BANNED = "banned"                # created and immediately disabled
@@ -232,6 +233,12 @@ def classify_signup_screen(text: str | None) -> str:
     if ban_detection.classify_block_text(haystack) == ban_detection.KIND_BANNED:
         return SCREEN_BANNED
 
+    # Before the markers: a home screen carries none of them, so it would fall
+    # through to `unknown` and stop a run whose only problem is that Instagram
+    # is not in front. Verification learned this the expensive way on `Jil 6`.
+    if looks_like_launcher(haystack):
+        return SCREEN_LAUNCHER
+
     for kind, markers in _ORDERED_MARKERS:
         if any(marker in haystack for marker in markers):
             return kind
@@ -348,6 +355,10 @@ CODE_WAIT_SECONDS = 150
 MAX_LOADING_WAITS = 8
 LOADING_WAIT_SECONDS = 6
 
+# Same reasoning as verification's: an app that was backgrounded is worth
+# starting again, a phone that will not run Instagram at all is not.
+MAX_APP_RESTARTS = 2
+
 # Screens that are simply dismissed, and the exact labels that dismiss them.
 # `Skip` on the permissions screen is what declines contacts sync -- which is
 # the thing that would link these accounts to one another.
@@ -378,6 +389,7 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
     last_screen = None
     repeats = 0
     loading_waits = 0
+    app_restarts = 0
     done_flags = set()
 
     def release(count_failure: bool):
@@ -402,6 +414,20 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
             screen = classify_signup_screen(text)
             log("info", "step %d: %s", step + 1, screen)
             steps.append(screen)
+
+            if screen == SCREEN_LAUNCHER:
+                # Not a signup screen and not a verdict: Instagram is simply
+                # not in front. Starting it again is nearly free.
+                starter = getattr(driver, "restart_app", None)
+                if app_restarts < MAX_APP_RESTARTS and callable(starter) and starter():
+                    app_restarts += 1
+                    log("info", "on the home screen; starting Instagram again "
+                                "(%d/%d)", app_restarts, MAX_APP_RESTARTS)
+                    steps.pop()
+                    sleep(6)
+                    continue
+                return finish(RESULT_STUCK,
+                              "Instagram is not running and would not start")
 
             if screen == SCREEN_LOADING:
                 # Waiting is not a step: it must neither consume the step

@@ -313,3 +313,47 @@ def test_a_screen_that_never_draws_ends_the_run():
                                sleep=lambda _s: None)
     assert result.status == signup.RESULT_STUCK
     assert "never finished drawing" in result.detail
+
+
+# --- the phone on its home screen ---------------------------------------------
+LAUNCHER = ("search gallery gallery play store play store home telephone "
+            "telephone messaging messaging music music chrome chrome camera")
+
+
+def test_the_home_screen_is_named_not_unknown():
+    assert signup.classify_signup_screen(LAUNCHER) == signup.SCREEN_LAUNCHER
+
+
+class RestartingDriver(FakeDriver):
+    def __init__(self, screens, can_restart=True):
+        super().__init__(screens)
+        self.restarts = 0
+        self._can_restart = can_restart
+
+    def restart_app(self):
+        self.restarts += 1
+        return self._can_restart
+
+
+def test_a_backgrounded_instagram_is_restarted_mid_signup():
+    driver = RestartingDriver([
+        SCREENS[signup.SCREEN_ENTRY],
+        LAUNCHER,
+        SCREENS[signup.SCREEN_PHONE],
+        SCREENS[signup.SCREEN_CODE],
+        SCREENS[signup.SCREEN_TERMS],
+        DONE,
+    ])
+    result = signup.run_signup(driver, FakeRouter([FakeLease()]), _identity(),
+                               sleep=lambda _s: None)
+    assert driver.restarts == 1
+    assert result.status == signup.RESULT_CREATED
+    assert signup.SCREEN_LAUNCHER not in result.steps
+
+
+def test_a_phone_that_will_not_run_instagram_stops_the_signup():
+    driver = RestartingDriver([LAUNCHER] * 8, can_restart=False)
+    result = signup.run_signup(driver, FakeRouter([]), _identity(),
+                               sleep=lambda _s: None)
+    assert result.status == signup.RESULT_STUCK
+    assert "would not start" in result.detail
