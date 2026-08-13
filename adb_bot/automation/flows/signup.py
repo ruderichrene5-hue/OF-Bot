@@ -205,6 +205,26 @@ _CHROME_ONLY_WORDS = frozenset({
 })
 
 
+def submit_in_flight(text: str | None) -> bool:
+    """Whether the screen's own submit button is busy.
+
+    Instagram does not disable the button while it works -- it **renames it to
+    `Loading`**. So a screen mid-submit still classifies as the screen it was,
+    and a flow that re-taps `Next` finds no such button and concludes nothing
+    is happening. That is exactly what cost the first real run its account:
+    `Blank (1)`, 2026-08-13, gave up after four tries at a password screen
+    whose clickable labels were `['••••••••••••', 'Password,', 'Learn more',
+    'Loading', 'I already have an account', 'Back']` -- the password had gone
+    through on the very first tap.
+
+    Waiting is always right here: the button will either finish or the screen
+    will change, and both are handled by looking again.
+    """
+    if not text:
+        return False
+    return bool(re.search(r"\bloading\b", text.lower()))
+
+
 def _looks_like_loading(haystack: str) -> bool:
     """Whether this is a screen mid-render rather than one we cannot name.
 
@@ -277,7 +297,8 @@ class SignupDriver(Protocol):
         clickable parent.
         """
 
-    def fill(self, hints, value: str, what: str) -> bool:
+    def fill(self, hints, value: str, what: str,
+             submits_itself: bool = False) -> bool:
         """Clear the field `hints` names, type `value`, and prove it landed.
 
         Both halves matter. A partial clear silently prepends whatever survived
@@ -315,6 +336,7 @@ RESULT_UNKNOWN_SCREEN = "unknown_screen"
 RESULT_NO_NUMBER = "no_number"
 RESULT_BANNED = "banned"
 RESULT_STUCK = "stuck"
+RESULT_PHONE_LOST = "phone_lost"
 RESULT_ERROR = "error"
 
 
@@ -359,6 +381,13 @@ LOADING_WAIT_SECONDS = 6
 # starting again, a phone that will not run Instagram at all is not.
 MAX_APP_RESTARTS = 2
 
+# Reads that come back empty before the phone is written off. A cloud phone
+# that dies mid-run -- they last about fifteen minutes -- returns nothing at
+# all, and calling that an unrecognised screen sends somebody looking for a
+# marker list that does not exist. One empty read can be a screen mid-redraw;
+# three in a row is the phone.
+MAX_EMPTY_READS = 3
+
 # Screens that are simply dismissed, and the exact labels that dismiss them.
 # `Skip` on the permissions screen is what declines contacts sync -- which is
 # the thing that would link these accounts to one another.
@@ -390,6 +419,7 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
     repeats = 0
     loading_waits = 0
     app_restarts = 0
+    empty_reads = 0
     done_flags = set()
 
     def release(count_failure: bool):
@@ -411,6 +441,21 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
     try:
         for step in range(MAX_STEPS):
             text = driver.read_screen()
+
+            # Nothing at all came back. That is the phone, not the screen.
+            if not (text or "").strip():
+                empty_reads += 1
+                if empty_reads >= MAX_EMPTY_READS:
+                    return finish(
+                        RESULT_PHONE_LOST,
+                        f"the phone stopped answering after {len(steps)} screen(s)"
+                        f" -- these cloud phones last about fifteen minutes")
+                log("warning", "the screen read as empty (%d/%d)",
+                    empty_reads, MAX_EMPTY_READS)
+                sleep(LOADING_WAIT_SECONDS)
+                continue
+            empty_reads = 0
+
             screen = classify_signup_screen(text)
             log("info", "step %d: %s", step + 1, screen)
             steps.append(screen)
@@ -428,6 +473,21 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     continue
                 return finish(RESULT_STUCK,
                               "Instagram is not running and would not start")
+
+            # A screen whose submit button says `Loading` has already taken the
+            # tap. Acting again finds no button, and four rounds of that is a
+            # run that throws away a verified number.
+            if screen not in (SCREEN_DONE, SCREEN_BANNED) and submit_in_flight(text):
+                loading_waits += 1
+                if loading_waits > MAX_LOADING_WAITS:
+                    return finish(RESULT_STUCK,
+                                  f"the {screen} screen was still working after "
+                                  f"{MAX_LOADING_WAITS} waits")
+                log("info", "the %s screen is still working; waiting (%d/%d)",
+                    screen, loading_waits, MAX_LOADING_WAITS)
+                steps.pop()
+                sleep(LOADING_WAIT_SECONDS)
+                continue
 
             if screen == SCREEN_LOADING:
                 # Waiting is not a step: it must neither consume the step
@@ -508,7 +568,8 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     sleep(4)
                     continue
                 log("info", "code arrived")
-                driver.fill(("code",), code, "confirmation code")
+                driver.fill(("code",), code, "confirmation code",
+                            submits_itself=True)
                 release(False)
                 # The field auto-submits on the sixth digit, so a submit tap is
                 # a bonus rather than a requirement.

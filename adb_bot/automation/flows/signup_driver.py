@@ -84,8 +84,17 @@ class AdbSignupDriver(AdbChallengeDriver):
         return False
 
     # --- typing ---------------------------------------------------------------
-    def fill(self, hints, value: str, what: str) -> bool:
-        """Clear, type, and prove the field holds exactly `value`."""
+    def fill(self, hints, value: str, what: str,
+             submits_itself: bool = False) -> bool:
+        """Clear, type, and prove the field holds exactly `value`.
+
+        `submits_itself` is for fields that act on the last character rather
+        than waiting for a button -- the confirmation code does, on its sixth
+        digit. For those, an empty or vanished field after typing is the screen
+        having moved on, which is success; reading it as failure produced
+        "the confirmation code did not land; fields now hold ['']" on a run
+        where the code had in fact been accepted.
+        """
         field = self._pick_field([h.lower() for h in hints])
         if field is None:
             self._log("warning", "no field for %s (hints %s)", what, list(hints))
@@ -128,8 +137,13 @@ class AdbSignupDriver(AdbChallengeDriver):
                 self._log("info", "the %s field holds %d masked characters",
                           what, len(landed))
                 return True
+        remaining = [f["value"] for f in self._edit_fields(root)]
+        if submits_itself and not any(remaining):
+            self._log("info", "the %s submitted itself and the screen moved on",
+                      what)
+            return True
         self._log("warning", "the %s did not land; fields now hold %s", what,
-                  [f["value"] for f in self._edit_fields(root)])
+                  remaining)
         return False
 
     # --- the keyboard ---------------------------------------------------------
@@ -164,18 +178,32 @@ class AdbSignupDriver(AdbChallengeDriver):
         """
         root, _xml = self._dump()
         self._root = root
-        inputs = self._picker_inputs(root)
-        if len(inputs) != 3:
-            self._log("warning", "expected 3 date spinners, found %d", len(inputs))
+        if len(self._picker_inputs(root)) != 3:
+            self._log("warning", "expected 3 date spinners, found %d",
+                      len(self._picker_inputs(root)))
             return False
         if not self.act:
             return self._refuse(f"set the date to {day} {month} {year}")
 
-        for node, value in zip(inputs, (str(day), str(month), str(year))):
+        # One spinner at a time, each located in a **fresh** dump. Taking all
+        # three positions from a single dump loses the dialog: the keyboard
+        # opening moves it, so the second or third tap lands outside it, and a
+        # tap outside a dialog dismisses the dialog. That is what turned the
+        # first scripted run into a password/date-picker loop.
+        for index, value in enumerate((str(day), str(month), str(year))):
+            root, _xml = self._dump()
+            self._root = root
+            inputs = self._picker_inputs(root)
+            if len(inputs) != 3:
+                self._log("warning",
+                          "the date picker went away after %d of 3 spinners "
+                          "(found %d) -- not tapping blind", index, len(inputs))
+                return False
+            node = inputs[index]
             self.adb_client.run_command(
                 f"adb -s {self.target} shell input tap {node['center'][0]} "
                 f"{node['center'][1]}")
-            time.sleep(0.5)
+            time.sleep(0.6)
             self.adb_client.run_command(
                 f"adb -s {self.target} shell input keyevent 123")
             for _ in range(8):
@@ -183,13 +211,19 @@ class AdbSignupDriver(AdbChallengeDriver):
                     f"adb -s {self.target} shell input keyevent 67")
             self.adb_client.run_command(
                 f"adb -s {self.target} shell {write_text(value)}")
-            time.sleep(0.4)
+            time.sleep(0.5)
 
         root, _xml = self._dump()
         self._root = root
-        landed = [n["value"] for n in self._picker_inputs(root)]
-        self._log("info", "date spinners now read %s", landed)
+        self._log("info", "date spinners now read %s",
+                  [n["value"] for n in self._picker_inputs(root)])
 
+        # Try the button before touching Back. `dismiss_keyboard` sends Back,
+        # and Back on an open dialog closes the dialog -- which throws away the
+        # date that was just typed.
+        if self.tap_label(("SET", "Set", "OK", "Done")):
+            return True
+        self._log("info", "SET is not reachable; dropping the keyboard first")
         self.dismiss_keyboard()
         root, _xml = self._dump()
         self._root = root

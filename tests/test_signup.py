@@ -134,6 +134,7 @@ class FakeDriver:
     def __init__(self, screens):
         self._screens = list(screens)
         self.filled = {}
+        self.autosubmitted = {}
         self.taps = []
         self.dates = []
         self.keyboard_dismissals = 0
@@ -146,8 +147,9 @@ class FakeDriver:
         self.taps.append(tuple(labels))
         return True
 
-    def fill(self, hints, value, what):
+    def fill(self, hints, value, what, submits_itself=False):
         self.filled[what] = value
+        self.autosubmitted[what] = submits_itself
         return True
 
     def dismiss_keyboard(self):
@@ -357,3 +359,98 @@ def test_a_phone_that_will_not_run_instagram_stops_the_signup():
                                sleep=lambda _s: None)
     assert result.status == signup.RESULT_STUCK
     assert "would not start" in result.detail
+
+
+# --- a submit that is still working -------------------------------------------
+# Verbatim from `Blank (1)`, 2026-08-13: the password had gone through on the
+# first tap and the button had renamed itself, so re-tapping `Next` found no
+# such button and the run gave up on a verified number after four tries.
+PASSWORD_SUBMITTING = (
+    "create a password create a password with at least six letters or numbers. "
+    "it should be something that others can't guess. password •••••••••••• "
+    "password, remember login info. learn more loading loading "
+    "i already have an account back")
+
+
+def test_a_screen_mid_submit_is_still_its_own_screen():
+    assert signup.classify_signup_screen(PASSWORD_SUBMITTING) == \
+        signup.SCREEN_PASSWORD
+    assert signup.submit_in_flight(PASSWORD_SUBMITTING)
+
+
+def test_an_idle_screen_is_not_mistaken_for_a_working_one():
+    assert not signup.submit_in_flight(SCREENS[signup.SCREEN_PASSWORD])
+    assert not signup.submit_in_flight(SCREENS[signup.SCREEN_USERNAME])
+
+
+def test_the_run_waits_for_a_submit_instead_of_tapping_again():
+    """The regression that cost the first real run its account."""
+    driver = FakeDriver([
+        SCREENS[signup.SCREEN_ENTRY],
+        SCREENS[signup.SCREEN_PHONE],
+        SCREENS[signup.SCREEN_CODE],
+        SCREENS[signup.SCREEN_PASSWORD],
+        PASSWORD_SUBMITTING,      # the tap landed; the button says Loading
+        PASSWORD_SUBMITTING,
+        PASSWORD_SUBMITTING,
+        PASSWORD_SUBMITTING,      # more repeats than MAX_REPEATS allows
+        PASSWORD_SUBMITTING,
+        SCREENS[signup.SCREEN_TERMS],
+        DONE,
+    ])
+    result = signup.run_signup(driver, FakeRouter([FakeLease()]), _identity(),
+                               sleep=lambda _s: None)
+    assert result.status == signup.RESULT_CREATED
+    # The password is typed once, not once per look.
+    assert driver.filled["password"] == "hunter2hunter"
+
+
+def test_a_submit_that_never_finishes_still_ends_the_run():
+    driver = FakeDriver([SCREENS[signup.SCREEN_ENTRY]]
+                        + [PASSWORD_SUBMITTING] * (signup.MAX_LOADING_WAITS + 4))
+    result = signup.run_signup(driver, FakeRouter([]), _identity(),
+                               sleep=lambda _s: None)
+    assert result.status == signup.RESULT_STUCK
+    assert "still working" in result.detail
+
+
+def test_the_confirmation_code_is_marked_as_self_submitting():
+    """It acts on the sixth digit, so an empty field afterwards is success."""
+    driver = FakeDriver([
+        SCREENS[signup.SCREEN_ENTRY],
+        SCREENS[signup.SCREEN_PHONE],
+        SCREENS[signup.SCREEN_CODE],
+        SCREENS[signup.SCREEN_TERMS],
+        DONE,
+    ])
+    signup.run_signup(driver, FakeRouter([FakeLease()]), _identity(),
+                      sleep=lambda _s: None)
+    assert driver.autosubmitted["confirmation code"] is True
+    assert driver.autosubmitted.get("mobile number") is False
+
+
+# --- the phone going away -----------------------------------------------------
+def test_a_dead_phone_is_named_as_such_not_as_an_unknown_screen():
+    """A cloud phone that dies returns nothing; reporting that as an
+    unrecognised screen sends somebody hunting for a marker list that does not
+    exist. Seen on `Blank (1)`, 2026-08-13, which ended `unknown_screen:` with
+    an empty detail."""
+    driver = FakeDriver([SCREENS[signup.SCREEN_ENTRY], "", "", "", ""])
+    result = signup.run_signup(driver, FakeRouter([]), _identity(),
+                               sleep=lambda _s: None)
+    assert result.status == signup.RESULT_PHONE_LOST
+    assert "stopped answering" in result.detail
+
+
+def test_one_empty_read_is_forgiven():
+    driver = FakeDriver([
+        SCREENS[signup.SCREEN_ENTRY],
+        "",                                   # a redraw, not a dead phone
+        SCREENS[signup.SCREEN_PHONE],
+        SCREENS[signup.SCREEN_CODE],
+        SCREENS[signup.SCREEN_TERMS],
+        DONE,
+    ])
+    result = signup.run_signup(driver, FakeRouter([FakeLease()]), _identity(),
+                               sleep=lambda _s: None)
+    assert result.status == signup.RESULT_CREATED
