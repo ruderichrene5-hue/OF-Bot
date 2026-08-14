@@ -90,17 +90,32 @@ _ORDERED = (
 )
 
 
+def classify_block_text_marker(text: str | None) -> tuple:
+    """`(kind, matched_marker)` for on-screen `text`, or `(None, "")`.
+
+    The marker is returned so a caller can log *why* it flagged. Every flag here
+    parks a profile and asks a person to go and look at it, and "flagged:
+    human_verification" gives them nothing to check the decision against -- a
+    wrong one then stays wrong for as long as nobody launches the phone by hand.
+
+    `text` must be visible screen text (UI dump text/content-desc, or OCR), not
+    a raw XML hierarchy: see `flows.instagram.visible_text_from_hierarchy`.
+    """
+    if not text:
+        return (None, "")
+    haystack = text.lower()
+    for kind, markers in _ORDERED:
+        for marker in markers:
+            if marker in haystack:
+                return (kind, marker)
+    return (None, "")
+
+
 def classify_block_text(text: str | None) -> str | None:
     """Return the incident kind for on-screen `text`, or None if it's not a
     known block screen. `text` should already be lowercased screen text (UI dump
     or OCR); we lowercase again defensively."""
-    if not text:
-        return None
-    haystack = text.lower()
-    for kind, markers in _ORDERED:
-        if any(marker in haystack for marker in markers):
-            return kind
-    return None
+    return classify_block_text_marker(text)[0]
 
 
 # --- kind -> Airtable mapping -------------------------------------------------

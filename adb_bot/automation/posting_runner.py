@@ -176,6 +176,8 @@ def run_posting_queue(
     confirm_callback=None,
     flow: str = POST_FLOW,
     max_concurrent_profiles=None,
+    ignore_needs_human: bool = False,
+    max_posts_per_profile=None,
 ) -> dict:
     """Plan the due posts, launch their profiles, run the reel-upload flow with
     each post's video + caption, and write results back."""
@@ -206,7 +208,13 @@ def run_posting_queue(
             captions_by_id=airtable.captions_by_id(),
             now=now,
             selected_launch_ids=selected_launch_ids,
+            ignore_needs_human=ignore_needs_human,
+            max_posts_per_profile=max_posts_per_profile,
         )
+        if ignore_needs_human:
+            logger.warning("posting: the Needs Human Check gate is OFF for this "
+                           "run -- supervised only, %s profile(s) selected",
+                           len(selected_launch_ids or ()) or "all")
     except Exception as exc:
         logger.error("Failed to build the posting-queue plan: %s", exc)
         return result({"processed": 0, "error": str(exc)})

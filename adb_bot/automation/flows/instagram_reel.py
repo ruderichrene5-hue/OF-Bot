@@ -16,6 +16,18 @@ from . import waits
 u2 = getattr(instagram_module, "u2", None)
 
 _emit = instagram_module._emit
+
+
+class _EmitAsLogger:
+    """Adapt this flow's `emit(level, message, *args)` to a logger interface."""
+
+    def __init__(self, emit):
+        self._emit = emit
+
+    def __getattr__(self, level):
+        def log(message, *args):
+            self._emit(level, message, *args)
+        return log
 _u2_describe = instagram_module._u2_describe
 _u2_find = instagram_module._u2_find
 _u2_click = instagram_module._u2_click
@@ -1315,7 +1327,10 @@ class InstagramReelUploadU2Flow:
         uncertain/verify path owns that decision -- flagging the account there
         could discard a live post.
         """
-        flag = instagram_module.account_flag_u2(d)
+        # `emit` is this flow's (level, message, *args) callable while
+        # `account_flag_u2` logs through a logger-shaped object; the shim keeps
+        # the "what did it match" line in the same run log as everything else.
+        flag = instagram_module.account_flag_u2(d, logger=_EmitAsLogger(emit))
         if not flag:
             return None
         emit("warning", "Instagram flagged %s during %s: %s -- not a retryable failure",
