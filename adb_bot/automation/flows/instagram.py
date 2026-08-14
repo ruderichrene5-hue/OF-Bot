@@ -115,7 +115,40 @@ def _emit(logger, level, message, *args) -> None:
         print(message)
 
 
-def account_flag_u2(d) -> str | None:
+def visible_text_from_hierarchy(xml: str | None) -> str:
+    """The `text` and `content-desc` of every node in a u2 hierarchy dump,
+    lowercased -- i.e. what a person looking at the phone can actually read.
+
+    `classify_block_text` documents that it wants *screen text*, and it decides
+    whether an account is challenged, banned, or fine. Handing it the raw XML
+    breaks that contract in the worst direction: the dump also carries
+    `resource-id`, `class` and `package` on every node, so any marker that
+    happens to appear inside an Instagram widget id classifies a working screen
+    as a block. That is the same mistake that produced 17 false
+    "Human Verification Required" flags out of 29 on 2026-08-11, fixed there and
+    left standing here.
+
+    Parse failures return "" rather than the raw XML: no classification is
+    better than one made from ids, because the caller's answer stops a profile
+    posting and asks a person to go and look at it.
+    """
+    if not xml:
+        return ""
+    try:
+        import xml.etree.ElementTree as ElementTree
+        root = ElementTree.fromstring(xml)
+    except Exception:
+        return ""
+    parts = []
+    for node in root.iter():
+        for key in ("text", "content-desc"):
+            value = str(node.attrib.get(key, "") or "").strip()
+            if value:
+                parts.append(value)
+    return " ".join(parts).lower()
+
+
+def account_flag_u2(d, logger=None) -> str | None:
     """Classify an IG block screen from the u2 hierarchy: a ban_detection kind
     ("banned" / "human_verification" / "action_block"), or None if the screen
     isn't one. Reads the whole dumped hierarchy, so bans and action-blocks are
@@ -125,12 +158,24 @@ def account_flag_u2(d) -> str | None:
     flow's class tree, and a checkpoint stops a reel post exactly as dead as it
     stops a bio edit. Keeping one implementation means a new marker in
     ban_detection reaches every flow at once.
+
+    Reads only the visible text (see `visible_text_from_hierarchy`), and logs
+    the phrase it matched. A flag costs a person a trip to the phone, so the log
+    has to say what was on screen -- "flagged: human_verification" is not
+    something anyone can check, and a wrong one is invisible until somebody
+    launches the phone by hand.
     """
     try:
         xml = d.dump_hierarchy()
     except Exception:
         xml = ""
-    return ban_detection.classify_block_text(xml)
+    text = visible_text_from_hierarchy(xml)
+    kind, marker = ban_detection.classify_block_text_marker(text)
+    if kind:
+        where = text.find(marker)
+        _emit(logger, "info", "block screen: %s matched %r in: ...%s...",
+              kind, marker, text[max(0, where - 60):where + 90])
+    return kind
 
 
 def _u2_describe(sel) -> str:

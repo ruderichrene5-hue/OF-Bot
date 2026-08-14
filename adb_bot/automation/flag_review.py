@@ -68,6 +68,64 @@ REAL_ISSUES = (
 
 REVIEW_DIR = Path.home() / ".adb_bot" / "flag_review"
 
+# The two reasons that mean "posting stopped working", as opposed to a reason
+# naming something wrong with the account. `Retries Exhausted` is a row that ran
+# out of attempts; `No Recent Success` is a profile still trying and no longer
+# landing. Neither is evidence of a challenge, and both are re-applied on every
+# tick until a post is *confirmed* -- so clearing one without posting buys about
+# half an hour. See `stale_profiles`.
+POSTING_REASONS = ("no recent success", "retries exhausted")
+
+# Reasons a screen read may not overrule. These are conclusions drawn from an
+# actual posting attempt -- Instagram answered, and the answer was recorded --
+# while this tool has one screenshot of one moment.
+#
+# `Laila 5` is why. It was reported `banned` on 2026-08-12 (the suspension notice
+# is real: "177 days left to appeal"), and on 2026-08-13 its phone showed a
+# perfectly ordinary feed with its own story tray, so the sweep cleared it. A
+# suspended account keeps rendering a cached feed until the app next checks, so
+# no single screen could have told the difference. Worse, clearing it started a
+# chain: the recovery loop un-flags a profile whose `Issue` tag is gone,
+# `stale_profiles` then re-flagged it as `No Recent Success` -- and the
+# `Banned / Blocked` diagnosis was gone for good.
+PROTECTED_REASONS = ("banned / blocked", "banned/blocked",
+                     "human verification required")
+
+
+def protected_ids(profile_rows) -> set:
+    """MLX ids whose Airtable reason is a recorded verdict, not a guess."""
+    out = set()
+    for row in profile_rows or []:
+        launch_id = str(row.get("launch_id") or "").strip()
+        reason = str(row.get("reason") or "").strip().lower()
+        if launch_id and row.get("needs_human") and reason in PROTECTED_REASONS:
+            out.add(launch_id)
+    return out
+
+
+def by_reason(items, profile_rows, wanted) -> list:
+    """MLX items narrowed to the ones whose Airtable `Issue Reason` is `wanted`.
+
+    The reason lives in Airtable and the tag lives in MultiLogin, so a caller
+    who wants "everything that stopped posting" cannot get it from the tags
+    alone -- `Issue` is one bit and says nothing about why. Joined on the MLX
+    API ID, which is the only field the two systems share.
+
+    A profile with no Airtable row is dropped rather than kept: the whole point
+    of asking for a reason is to look at a named subset, and an unmatched
+    profile has no reason to be in it.
+    """
+    want = {str(w).strip().lower() for w in wanted if str(w).strip()}
+    reason_by_id = {}
+    for row in profile_rows or []:
+        launch_id = str(row.get("launch_id") or "").strip()
+        reason = str(row.get("reason") or "").strip().lower()
+        # Flagged rows win: two rows can point at one profile, and the one that
+        # carries the diagnosis is the one worth keeping.
+        if launch_id and (row.get("needs_human") or launch_id not in reason_by_id):
+            reason_by_id[launch_id] = reason
+    return [i for i in items if reason_by_id.get(str(i.get("id")), "") in want]
+
 
 def is_model_profile(item) -> bool:
     name = str(item.get("serial_name") or "").strip().lower()
@@ -179,6 +237,13 @@ def main(argv=None) -> int:
                              "profiles. Without it, nothing is touched.")
     parser.add_argument("--limit", type=int, default=0,
                         help="check at most this many (0 = all)")
+    parser.add_argument("--reason", action="append", default=None, metavar="TEXT",
+                        help="only profiles whose Airtable Issue Reason is this "
+                             "(repeatable). --posting-reasons is the usual pair.")
+    parser.add_argument("--posting-reasons", action="store_true",
+                        help=f"shorthand for {' and '.join(POSTING_REASONS)} -- "
+                             "the reasons that mean posting stopped, not that "
+                             "the account is broken.")
     parser.add_argument("--readiness-attempts", type=int, default=8)
     parser.add_argument("--readiness-wait", type=int, default=15)
     args = parser.parse_args(argv)
@@ -186,6 +251,31 @@ def main(argv=None) -> int:
     logger = get_logger("adb_bot")
     token = _resolve_token(args.mlx_token)
     items = _profiles(token)
+
+    reasons = list(args.reason or [])
+    if args.posting_reasons:
+        reasons.extend(POSTING_REASONS)
+
+    # Always read the Airtable reasons, even without --reason: they are what
+    # says a profile has already been judged by something better than a
+    # screenshot, and clearing one of those is how a real ban got erased.
+    from adb_bot.automation.run_loop import _airtable
+    try:
+        profile_rows = _airtable(args.base_id, args.airtable_token).posting_profiles()
+    except Exception as exc:
+        logger.warning("flag review: could not read Airtable reasons (%s) -- "
+                       "no profile will be cleared this run", exc)
+        profile_rows = None
+
+    if reasons:
+        items = by_reason(items, profile_rows or [], reasons)
+        print(f"\nnarrowed to {len(items)} profile(s) whose Issue Reason is "
+              f"{sorted({r.strip().lower() for r in reasons})}")
+
+    # None means Airtable could not be read at all. Clearing then would be
+    # deciding without the evidence that matters most, so nothing is cleared.
+    protected = protected_ids(profile_rows) if profile_rows is not None else None
+
     to_check, diagnosed = select(items)
     if args.limit:
         to_check = to_check[:args.limit]
@@ -215,7 +305,14 @@ def main(argv=None) -> int:
     for index, item in enumerate(to_check, start=1):
         print(f"\n[{index}/{len(to_check)}] {item.get('serial_name')}")
         outcome = _look(item, clients, adb_client, args, logger)
-        if outcome["verdict"] == "clean":
+        if outcome["verdict"] == "clean" and protected is None:
+            outcome["verdict"] = "clean-but-unverifiable"
+            print("  looks clean, but Airtable could not be read -- left flagged")
+        elif outcome["verdict"] == "clean" and outcome["id"] in protected:
+            outcome["verdict"] = "clean-but-already-judged"
+            print("  looks clean, but a posting attempt already found something "
+                  "worse -- left flagged")
+        elif outcome["verdict"] == "clean":
             outcome["untagged"] = _untag(tag_client, logger, outcome)
             print(f"  clean -- {'tag removed' if outcome['untagged'] else 'UNTAG FAILED'}")
         else:
