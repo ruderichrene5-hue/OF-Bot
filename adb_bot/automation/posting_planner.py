@@ -90,6 +90,8 @@ def plan_posting_queue(
     captions_by_id: dict,
     now: datetime | None = None,
     selected_launch_ids=None,
+    ignore_needs_human: bool = False,
+    max_posts_per_profile: int | None = None,
 ) -> PostingPlan:
     """Build the list of due posts.
 
@@ -98,6 +100,16 @@ def plan_posting_queue(
     - `variants_by_id`: variant record_id -> {'file_path', 'status'}
     - `captions_by_id`: caption record_id -> text
     - `selected_launch_ids`: restrict to these launch ids (None = all)
+    - `ignore_needs_human`: post on a flagged profile anyway. **For a supervised
+      run only** (`posting_probe`), and never from a timer. Some profiles are
+      flagged *because* they stopped posting -- `No Recent Success` means "no
+      confirmed post in 24h" -- so the flag blocks the only thing that could
+      clear it, and the profile sits parked forever. Six of them had not been
+      attempted once in six days when this was added. Breaking that needs a
+      person watching, because the other reason a profile is flagged is a real
+      checkpoint, and posting into one is how an account gets acted on.
+    - `max_posts_per_profile`: at most this many posts per phone this run
+      (None = no cap). See `_cap_per_profile`.
     """
     now = now or datetime.now()
     plan = PostingPlan()
@@ -162,7 +174,7 @@ def plan_posting_queue(
         # challenge is against the device, so dropping the profile here drops
         # every account that posts from it -- both accounts of a two-account
         # phone, deliberately.
-        if info.get("needs_human"):
+        if info.get("needs_human") and not ignore_needs_human:
             plan.skipped.append(SkippedPost(account_name, "profile needs a human check"))
             continue
         profile_status = info.get("status")
@@ -235,4 +247,31 @@ def plan_posting_queue(
             account_slot=at._select_name(fields.get(at.F_PQ_ACCOUNT_SLOT)),
         ))
 
+    if max_posts_per_profile:
+        plan.to_post = _cap_per_profile(plan.to_post, max_posts_per_profile)
+
     return plan
+
+
+def _cap_per_profile(items: list, cap: int) -> list:
+    """At most `cap` posts per phone this run, earliest scheduled first.
+
+    Everything due on a profile runs sequentially on one launch, so a profile
+    that has been parked for days empties its whole backlog the moment it is
+    allowed to post -- `Jil 8` had 17 rows waiting on 2026-08-14. Seventeen reels
+    back to back from an account that posted nothing for a week is not a catch-up,
+    it is the behaviour Instagram acts on.
+
+    Uncapped by default: the timer-driven loop runs often enough that a backlog
+    means something else is wrong, and silently dropping its work would hide it.
+    The supervised probe sets 1.
+    """
+    seen: dict = {}
+    kept = []
+    for item in sorted(items, key=lambda i: (i.scheduled or "")):
+        count = seen.get(item.launch_id, 0)
+        if count >= cap:
+            continue
+        seen[item.launch_id] = count + 1
+        kept.append(item)
+    return kept

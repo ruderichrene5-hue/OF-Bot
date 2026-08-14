@@ -191,3 +191,73 @@ class InterruptionsOutcomeTest(TestCase):
         self.assertEqual(interruptions.account_flag_for(interruptions.OUTCOME_ACTION_BLOCK), KIND_ACTION_BLOCK)
         self.assertIsNone(interruptions.account_flag_for(interruptions.OUTCOME_HANDLED))
         self.assertIsNone(interruptions.account_flag_for(interruptions.OUTCOME_NONE))
+
+
+class VisibleTextOnlyTest(TestCase):
+    """A block screen is decided from what is on the screen, never from the
+    hierarchy's ids and class names.
+
+    2026-08-11: markers matched against raw XML produced 17 false
+    "Human Verification Required" flags out of 29. The reel flow kept doing it
+    until 2026-08-14, which is how `Laila 4` was flagged seven times in a row
+    while its account was fine.
+    """
+
+    def test_only_text_and_content_desc_reach_the_classifier(self):
+        """Everything else in the dump -- ids, class names, package, bounds --
+        is machine detail the account should never be judged on."""
+        from adb_bot.automation.flows.instagram import visible_text_from_hierarchy
+        xml = (
+            '<hierarchy>'
+            '<node resource-id="com.instagram.android:id/gallery_grid" '
+            'class="androidx.recyclerview.widget.RecyclerView" '
+            'package="com.instagram.android" bounds="[0,0][1080,2400]" '
+            'text="Recents" content-desc="Select multiple"/>'
+            '</hierarchy>'
+        )
+        text = visible_text_from_hierarchy(xml)
+        self.assertEqual(text, "recents select multiple")
+        for machine_detail in ("gallery_grid", "recyclerview", "com.instagram",
+                               "1080", "bounds"):
+            self.assertNotIn(machine_detail, text)
+        self.assertIsNone(classify_block_text(text))
+
+    def test_a_marker_hiding_in_a_non_visible_attribute_is_ignored(self):
+        """The classifier's contract is screen text. Anything that reaches it
+        from elsewhere in the dump is a flag nobody can verify by looking."""
+        from adb_bot.automation.flows.instagram import visible_text_from_hierarchy
+        xml = ('<hierarchy><node hint="we detected unusual activity" '
+               'text="Recents" content-desc=""/></hierarchy>')
+        self.assertIsNone(classify_block_text(visible_text_from_hierarchy(xml)))
+        # Raw XML is what the reel flow used to pass, and it says the opposite.
+        self.assertEqual(classify_block_text(xml), KIND_HUMAN_VERIFICATION)
+
+    def test_a_real_checkpoint_is_still_caught(self):
+        from adb_bot.automation.flows.instagram import visible_text_from_hierarchy
+        xml = ('<hierarchy><node text="Confirm you&apos;re human" '
+               'content-desc=""/></hierarchy>')
+        self.assertEqual(
+            classify_block_text(visible_text_from_hierarchy(xml)),
+            KIND_HUMAN_VERIFICATION)
+
+    def test_unparseable_xml_flags_nothing(self):
+        """No classification beats one made from ids: the answer parks a
+        profile and sends a person to look at the phone."""
+        from adb_bot.automation.flows.instagram import visible_text_from_hierarchy
+        self.assertEqual(visible_text_from_hierarchy("<hierarchy><node "), "")
+        self.assertEqual(visible_text_from_hierarchy(None), "")
+
+    def test_the_matched_phrase_comes_back_for_the_log(self):
+        kind, marker = ban_detection.classify_block_text_marker(
+            "sorry, we detected unusual activity on this account")
+        self.assertEqual(kind, KIND_HUMAN_VERIFICATION)
+        self.assertEqual(marker, "we detected unusual activity")
+
+    def test_no_match_returns_an_empty_marker(self):
+        self.assertEqual(ban_detection.classify_block_text_marker("your feed"),
+                         (None, ""))
+
+    def test_severity_order_survives_the_marker_change(self):
+        kind, _ = ban_detection.classify_block_text_marker(
+            "your account has been suspended. we detected unusual activity")
+        self.assertEqual(kind, KIND_BANNED)
