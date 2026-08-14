@@ -254,7 +254,7 @@ def plan_posting_queue(
 
 
 def _cap_per_profile(items: list, cap: int) -> list:
-    """At most `cap` posts per phone this run, earliest scheduled first.
+    """At most `cap` posts per phone this run, taking each account in turn.
 
     Everything due on a profile runs sequentially on one launch, so a profile
     that has been parked for days empties its whole backlog the moment it is
@@ -262,16 +262,43 @@ def _cap_per_profile(items: list, cap: int) -> list:
     back to back from an account that posted nothing for a week is not a catch-up,
     it is the behaviour Instagram acts on.
 
+    **Round-robin across the phone's accounts, not simply oldest-first.** A
+    strictly earliest-first cap starves the account that still works. On a
+    two-account phone the oldest rows belong to whichever handle has been failing
+    longest, so they are exactly the rows that cannot succeed: on 2026-08-14
+    `Jil 8` had ten dead-handle rows queued ahead of its first healthy one, and a
+    cap of one would have spent the phone's whole visit on a refusal while
+    `@jil.lena777` -- twelve posts, perfectly fine -- waited behind them. Giving
+    each handle a turn before any handle gets seconds means one signed-out
+    account can no longer park the sibling it shares a phone with.
+
+    Within a handle the order is still earliest scheduled first, and handles are
+    offered in order of their oldest waiting row, so "oldest first" still decides
+    everything it can decide.
+
     Uncapped by default: the timer-driven loop runs often enough that a backlog
     means something else is wrong, and silently dropping its work would hide it.
     The supervised probe sets 1.
     """
-    seen: dict = {}
+    by_profile: dict = {}
+    for item in items:
+        by_profile.setdefault(item.launch_id, {}).setdefault(
+            (item.target_handle or "").strip().lower(), []).append(item)
+
     kept = []
-    for item in sorted(items, key=lambda i: (i.scheduled or "")):
-        count = seen.get(item.launch_id, 0)
-        if count >= cap:
-            continue
-        seen[item.launch_id] = count + 1
-        kept.append(item)
+    for queues in by_profile.values():
+        for rows in queues.values():
+            rows.sort(key=lambda i: (i.scheduled or ""))
+        # Oldest-waiting account first, so the phone's turn order is still
+        # decided by how long each has been waiting.
+        order = sorted(queues.values(), key=lambda rows: rows[0].scheduled or "")
+        taken, index = 0, 0
+        while taken < cap and any(order):
+            rows = order[index % len(order)]
+            index += 1
+            if rows:
+                kept.append(rows.pop(0))
+                taken += 1
+            if index % len(order) == 0 and not any(order):
+                break
     return kept

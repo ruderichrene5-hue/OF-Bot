@@ -401,6 +401,63 @@ class PerProfileCapTest(TestCase):
         self.assertEqual(self._plan(self._rows(5), cap=1).skipped, [])
 
 
+class CapDoesNotStarveTheHealthyAccountTest(TestCase):
+    """A cap must not spend a two-account phone's whole visit on the dead one.
+
+    On a parked phone the oldest rows belong to whichever handle has been
+    failing longest -- which is exactly the handle that cannot succeed. On
+    2026-08-14 `Jil 8` had ten rows for a signed-out handle queued ahead of its
+    first healthy one, so a strictly earliest-first cap would refuse a post and
+    go home while `@jil.lena777` (12 posts, fine) waited behind them.
+    """
+
+    def _rows(self, specs):
+        """specs: (row_id, handle, hour)."""
+        return [{"id": rid, "fields": {
+            "Name": f"Jil 8 / {hour}:00", "Post Status": "Pending",
+            "Scheduled DateTime": f"2026-08-07T{hour:02d}:00:00.000Z",
+            "Target Profile": ["recP1"], "Spoof Variant": ["recV1"],
+            "Target IG Handle": handle}}
+            for rid, handle, hour in specs]
+
+    def _plan(self, rows, cap):
+        return plan_posting_queue(
+            rows, accounts_by_id={},
+            profiles_by_recid={"recP1": {"launch_id": "111", "name": "Jil 8",
+                                         "needs_human": False, "status": "Active"}},
+            variants_by_id={"recV1": {"file_path": "/tmp/a.mp4"}},
+            captions_by_id={}, now=datetime(2026, 8, 8, 12, 0),
+            max_posts_per_profile=cap)
+
+    def test_the_healthy_account_gets_the_turn_it_is_owed(self):
+        rows = self._rows([("q1", "helen_aiscooll", 9), ("q2", "helen_aiscooll", 10),
+                           ("q3", "helen_aiscooll", 11), ("q4", "jil.lena777", 12)])
+        kept = self._plan(rows, cap=2).to_post
+        self.assertEqual({i.target_handle for i in kept},
+                         {"helen_aiscooll", "jil.lena777"})
+
+    def test_a_cap_of_one_still_takes_the_oldest_waiting_account(self):
+        """Round-robin decides who shares, not who goes first."""
+        rows = self._rows([("q1", "helen_aiscooll", 9), ("q2", "jil.lena777", 12)])
+        kept = self._plan(rows, cap=1).to_post
+        self.assertEqual([i.target_handle for i in kept], ["helen_aiscooll"])
+
+    def test_within_one_account_it_is_still_oldest_first(self):
+        rows = self._rows([("q1", "jil.lena777", 14), ("q2", "jil.lena777", 9)])
+        kept = self._plan(rows, cap=1).to_post
+        self.assertEqual(kept[0].scheduled, "2026-08-07T09:00:00.000Z")
+
+    def test_a_single_account_phone_behaves_exactly_as_before(self):
+        rows = self._rows([("q1", "", 9), ("q2", "", 10), ("q3", "", 11)])
+        kept = self._plan(rows, cap=2).to_post
+        self.assertEqual([i.scheduled for i in kept],
+                         ["2026-08-07T09:00:00.000Z", "2026-08-07T10:00:00.000Z"])
+
+    def test_a_cap_larger_than_the_backlog_keeps_everything(self):
+        rows = self._rows([("q1", "a", 9), ("q2", "b", 10)])
+        self.assertEqual(len(self._plan(rows, cap=9).to_post), 2)
+
+
 class HandoffGateTest(TestCase):
     """A phone off the warm-up may not post until a person has set it up.
 
