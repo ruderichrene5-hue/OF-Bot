@@ -75,6 +75,32 @@ Jasmin 5 / 19:52    status=Failed  issue=Account Not On Phone
 
 Full suite: 2319 passed, 1 skipped.
 
+### Proved on the phone: the healthy account posts
+
+Jil 5 was re-run with a cap of 4, which is exactly its three dead rows plus the
+first healthy one. The three `@jiji.ll12` rows refused, and then:
+
+```
+Baseline post count for 199.190.44.226:22864: 94
+u2: REEL mode confirmed selected
+Verifying reel post: baseline=94, min 20s / max 45s
+CONFIRMED (strong) via post_count after 46s (post count 94 -> 95)
+Post result for helenaiscutee: done
+```
+
+**A real reel went out**, verified by the post count incrementing rather than by
+trusting a banner. `@helenaiscutee` is now 17 Posted, up from 16. Nothing was
+wrong with the phone or the account — the healthy row was simply queued behind
+dead ones.
+
+The cost of each doomed row is visible in the timestamps: the three refusals
+landed at **18:45:53, 18:50:19 and 18:54:49** — a consistent **~4.4 minutes**
+each, every one a fresh launch, boot, ADB connect and media push before the
+switcher says no. On live code that is multiplied by five retries per row.
+
+Six rows are now terminal `Account Not On Phone` and permanently out of the
+retry loop: four `@jiji.ll12`, one `@helen_aiscooll`, one `@jasmindiecoolee`.
+
 ## Fault 2 — the accounts themselves, which code cannot fix
 
 Two different problems, and the remedies differ. Split by whether the handle
@@ -115,6 +141,21 @@ Unable to select reel media
 That REEL-tab failure is fleet-wide and declining, not specific to this phone:
 13 occurrences on 2026-08-11, 8 on 08-12, 3 on 08-13. Worth its own look; a
 profile that has never posted is the wrong place to conclude anything about it.
+
+## Two things worth not misreading
+
+**A single refusal is not a dead account.** `@mini_jas12` (Jasmin 3) shows one
+`does not list` in the recent logs, which looks like a seventh casualty in the
+"one account every 2–3 days" progression. It is not: that handle has 17 posts
+and **last posted the same day, 17:27**. The fix guards exactly this by refusing
+to conclude "absent" unless the switcher is demonstrably open — a sheet that
+never opened used to read as absence.
+
+**Zero refusals can mean nobody tried.** `@helen_aiscooll` and
+`@jasmindiecoolee` show no refusals at all in the two most recent posting logs,
+because their profiles were parked and never attempted — not because they
+recovered. Any check that counts failures per window has this hole; confirm the
+thing it watches was actually attempted before believing its all-clear.
 
 ## What is still open
 
