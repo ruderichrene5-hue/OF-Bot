@@ -11,9 +11,18 @@ They matter for two reasons, and RAM is the lesser one. A stale phone stays
 keeps a session alive on an Instagram account for hours with nobody driving it.
 
 **How a phone is identified.** Each `phone_launcher_linux_amd64` process carries
-its profile in argv: ``-p <profile_id> -n <profile name>``. That is what makes a
-clean shutdown possible -- ask MultiLogin to stop that profile, rather than
-killing a process and leaving its cloud phone running.
+its profile id in argv as ``-p <profile_id>``. That is what makes a clean
+shutdown possible -- ask MultiLogin to stop that profile, rather than killing a
+process and leaving its cloud phone running.
+
+The profile's *name* is a separate question, and the launcher does not answer it
+with a flag. It once passed ``-n <profile name>``; the launcher this box runs
+does not, and the name reaches the process only inside the ``-u`` console URL, as
+its ``envName`` query parameter. Reading the name from ``-n`` alone therefore
+left every live phone anonymous -- which is only cosmetic here in the reaper's
+log line, but is what the dashboard's "Live right now" table shows as the
+Profile column, so it filled with the word "unknown". Both spellings are read,
+newest launcher first, so this keeps working whichever one is installed.
 
 **What counts as an orphan.** Age over `DEFAULT_MIN_AGE_SECONDS` *and* no
 profile lock held for it. Both conditions, deliberately:
@@ -37,6 +46,7 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
+from urllib.parse import unquote
 
 from adb_bot.core import locks
 
@@ -52,6 +62,26 @@ SHUTDOWN_GRACE_SECONDS = 20.0
 
 _PROFILE_ARG = re.compile(r"\x00-p\x00(?P<id>\d+)\x00")
 _NAME_ARG = re.compile(r"\x00-n\x00(?P<name>[^\x00]+)\x00")
+# The name as the current launcher carries it: a query parameter of the `-u`
+# console URL. Stopping at `&` and at the NUL that ends the argument matters --
+# `envName` is not the last parameter, and a name is allowed to contain spaces
+# ("Kathi 9"), which is exactly what a greedier pattern would swallow the rest
+# of the URL on.
+_ENV_NAME_ARG = re.compile(r"[?&]envName=(?P<name>[^&\x00]*)")
+
+
+def _name_from_cmdline(cmdline: str) -> str:
+    """The profile's display name, from whichever place the launcher put it."""
+    match = _NAME_ARG.search(cmdline)
+    if match:
+        return match.group("name").strip()
+    match = _ENV_NAME_ARG.search(cmdline)
+    if not match:
+        return ""
+    # Percent-decoded, not plus-decoded: this launcher writes the name into the
+    # URL raw -- spaces arrive as spaces -- so treating `+` as a space would
+    # corrupt any name that genuinely contains one.
+    return unquote(match.group("name")).strip()
 
 
 @dataclass
@@ -128,11 +158,10 @@ def list_phones() -> list:
         except OSError:
             continue                                   # exited while we looked
         profile = _PROFILE_ARG.search(cmdline)
-        name = _NAME_ARG.search(cmdline)
         phones.append(Phone(
             pid=pid,
             profile_id=profile.group("id") if profile else "",
-            name=name.group("name").strip() if name else "",
+            name=_name_from_cmdline(cmdline),
             age_seconds=_process_age(pid),
             rss_mb=_rss_mb(pid),
         ))

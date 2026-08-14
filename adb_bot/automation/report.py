@@ -547,7 +547,12 @@ def phone_processes() -> list:
         orphan_pids = {p.pid for p in phone_reaper.find_orphans(phones)}
     except Exception:
         return []
-    rows = [{"pid": p.pid, "name": p.name or "(unknown)", "profile_id": p.profile_id,
+    # `label` rather than a bare "(unknown)": a phone whose name could not be
+    # read is still a phone with an id, and an 18-digit id can be pasted into
+    # MultiLogin to find out whose it is. The word cannot be. It also used to
+    # defeat the profile-id fallback further down `live_work`, because a row
+    # already holding the string "(unknown)" is not an empty one.
+    rows = [{"pid": p.pid, "name": p.label, "profile_id": p.profile_id,
              "age_seconds": p.age_seconds, "rss_mb": p.rss_mb,
              "orphan": p.pid in orphan_pids} for p in phones]
     rows.sort(key=lambda r: r["age_seconds"])
