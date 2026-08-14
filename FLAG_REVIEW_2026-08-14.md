@@ -164,10 +164,32 @@ Four other phones switch accounts successfully in both directions
 `nikkish97` ↔ `nikkiishier`, `jsmin3075` ↔ `janabahdim`), so the switcher itself
 works. It is the recorded handles that are wrong.
 
-**Not fixed here, deliberately.** Swapping the two fields would make these
-profiles post immediately -- but only a person can say which account is *meant*
-to be the model's primary. If the `helen*` accounts are the real ones, they are
-missing from the phones and that is a different job.
+### It is not a transposition -- correction
+
+The pattern above reads as the two fields being swapped, and swapping them back
+was nearly the recommendation. It is wrong. Asking whether the "missing" handles
+had **ever** posted killed it: three of them had.
+
+| handle | slot | last posted | first failed |
+|---|---|---|---|
+| `helenaypurebabe` | Primary | Aug 7 | Aug 10 |
+| `helen_aiscooll` | Primary | Aug 8 | Aug 12 |
+| `jiji.ll12` | Second | Aug 11 | Aug 14 |
+| `helenisyourebabe` | Primary | **never** | Aug 13 |
+| `jasmindiecoolee` | Primary | **never** | Aug 13 |
+
+Two faults wearing one symptom:
+
+1. **Signed out** (`helenaypurebabe`, `helen_aiscooll`, `jiji.ll12`) -- real
+   accounts with posting history that have dropped out of the phone's account
+   switcher. They need a re-login, so they need credentials.
+2. **Never there** (`helenisyourebabe`, `jasmindiecoolee`) -- recorded in
+   Airtable, never posted once, never in the switcher. A data error.
+
+**It is progressive: one account roughly every 2-3 days.** Aug 7, Aug 8, Aug 11.
+Five of the fourteen two-account phones are affected so far, and on that trend
+more will follow. Swapping the fields would have hidden the first group and
+"fixed" nothing -- the account still is not on the phone.
 
 ## Still open
 
