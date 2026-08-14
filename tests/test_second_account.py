@@ -561,3 +561,123 @@ class ReportTest(TestCase):
         self.assertIn("helenaypurebabe", html)
         # The phone that cannot post yet is called out, not just listed.
         self.assertIn("handle missing", html)
+
+
+class AccountAbsentIsNotRetryableTest(TestCase):
+    """"The phone does not have that account" is a data error, not a failure.
+
+    Retried as an ordinary failure it costs a launch and a ~2 min boot per
+    attempt to reach the same answer, five times per row. On 2026-08-14 five
+    profiles' worth of these took 367 of the fleet's 687 launch calls in 48h and
+    produced **zero** posts, at 4.0 launches per confirmed post against 1.9 for
+    everyone else.
+
+    The distinction that must hold: only a switcher we actually read and found
+    wanting is permanent. A screen we failed to read is worth another go.
+    """
+
+    def setUp(self):
+        from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
+        self.flow = InstagramReelUploadU2Flow()
+        self.emitted = []
+
+    def _emit(self, level, message, *args):
+        self.emitted.append(message % args if args else message)
+
+    def _state(self, device, want):
+        return self.flow._ensure_account_state_u2(
+            device, "1.2.3.4:5555", want, self._emit)
+
+    def test_a_handle_the_switcher_does_not_list_is_absent(self):
+        device = FakeDevice(handle="jills.sav", listed=("jills.sav",))
+        ok, why = self._state(device, "helenisyourebabe")
+        self.assertFalse(ok)
+        self.assertEqual(why, self.flow.ACCOUNT_ABSENT)
+
+    def test_an_unreadable_header_is_not_absent(self):
+        """We never saw the switcher, so we cannot say the account is missing."""
+        device = FakeDevice(handle="jills.sav", header_readable=False)
+        ok, why = self._state(device, "helenisyourebabe")
+        self.assertFalse(ok)
+        self.assertEqual(why, self.flow.ACCOUNT_UNREADABLE)
+
+    def test_the_happy_path_reports_no_reason(self):
+        device = FakeDevice(handle="helenaiscutee")
+        self.assertEqual(self._state(device, "helenaiscutee"),
+                         (True, self.flow.ACCOUNT_OK))
+
+    def test_a_single_account_phone_is_untouched(self):
+        device = FakeDevice()
+        self.assertEqual(self._state(device, None), (True, self.flow.ACCOUNT_OK))
+        self.assertEqual(device.tabs_opened, 0)
+
+    def test_the_bool_wrapper_still_works_for_its_callers(self):
+        """The recheck post-count probe only needs yes or no."""
+        device = FakeDevice(handle="jills.sav", listed=("jills.sav",))
+        self.assertFalse(
+            self.flow._ensure_account_u2(device, "1.2.3.4:5555",
+                                         "helenisyourebabe", self._emit))
+        self.assertTrue(
+            self.flow._ensure_account_u2(device, "1.2.3.4:5555",
+                                         "jills.sav", self._emit))
+
+
+class WrongAccountWriteBackTest(TestCase):
+    """What an absent account does to the queue row."""
+
+    def test_it_is_not_re_queued_by_the_retry_pass(self):
+        from adb_bot.automation.posting_runner import _map_post_status
+        from adb_bot.clients import airtable as at
+        post_status, issue, incident, run_result, _ = _map_post_status("wrong_account")
+        self.assertEqual(issue, at.ISSUE_ACCOUNT_MISSING)
+        # The retry pass re-queues exactly one value, and this is not it.
+        self.assertNotEqual(issue, at.ISSUE_NEEDS_RETRY)
+        self.assertEqual(run_result, at.RESULT_SKIPPED)
+
+    def test_it_is_not_an_instagram_incident(self):
+        """Nothing is wrong with the account; the row names the wrong one."""
+        from adb_bot.automation.posting_runner import _map_post_status
+        self.assertIsNone(_map_post_status("wrong_account")[2])
+
+    def test_the_lifecycle_runner_agrees_it_is_a_skip(self):
+        from adb_bot.automation.airtable_runner import _map_terminal_status
+        result, note, incident = _map_terminal_status("wrong_account")
+        self.assertIsNone(incident)
+        self.assertIn("does not have this account", note)
+
+
+class SwitcherMustBeOpenTest(TestCase):
+    """A permanent verdict needs proof the sheet was actually read.
+
+    `_open_account_switcher_u2` returns True as soon as it *taps* the header --
+    it never confirms anything opened. Without a check, "the row is not there"
+    on a sheet that never opened would mark a perfectly good account as
+    permanently missing and stop its queue row for good. The proof is the row
+    for the account we are already signed in as: an open sheet always lists it.
+    """
+
+    def setUp(self):
+        from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
+        self.flow = InstagramReelUploadU2Flow()
+
+    def _emit(self, level, message, *args):
+        pass
+
+    def test_a_sheet_that_never_opened_is_not_evidence_of_absence(self):
+        # header unreadable -> the fake never opens the switcher
+        device = FakeDevice(handle="jills.sav", header_readable=False)
+        ok, why = self.flow._ensure_account_state_u2(
+            device, "1.2.3.4:5555", "helenisyourebabe", self._emit)
+        self.assertFalse(ok)
+        self.assertEqual(why, self.flow.ACCOUNT_UNREADABLE)
+
+    def test_an_open_sheet_without_the_handle_is_absence(self):
+        device = FakeDevice(handle="jills.sav", listed=("jills.sav",))
+        ok, why = self.flow._ensure_account_state_u2(
+            device, "1.2.3.4:5555", "helenisyourebabe", self._emit)
+        self.assertFalse(ok)
+        self.assertEqual(why, self.flow.ACCOUNT_ABSENT)
+
+    def test_the_open_check_needs_a_handle_to_look_for(self):
+        """No readable current handle means no proof either way."""
+        self.assertFalse(self.flow._switcher_is_open_u2(FakeDevice(), None))

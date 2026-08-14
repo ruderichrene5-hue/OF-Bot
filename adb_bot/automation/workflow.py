@@ -855,6 +855,18 @@ def _run_profile_workflow(
             emit_status(profile_id_value, "already_shared", flow_result)
             return
 
+        if flow_result.get("wrong_account", False) and not flow_result.get("aborted", False):
+            # The account switcher opened and the handle this row asks for is
+            # not on the phone. Exactly like `already_shared` above, this is a
+            # guard working, not a breakage: no retry can put the account there,
+            # so labelling it `Failed - Needs Retry` burns a launch and a boot
+            # per attempt to reach the same answer. Five profiles' worth of
+            # these took 53% of the fleet's launches on 2026-08-14 for 0 posts.
+            logger.info("Not retrying profile %s: the phone does not have @%s",
+                        profile_id_value, flow_result.get("wanted_handle") or "?")
+            emit_status(profile_id_value, "wrong_account", flow_result)
+            return
+
         if flow_result.get("aborted", False) or flow_result.get("failed", False) or flow_result.get("success") is False:
             logger.info("Workflow failed for profile %s", profile_id_value)
             emit_status(profile_id_value, "failed", flow_result)

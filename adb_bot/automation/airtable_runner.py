@@ -106,6 +106,11 @@ def _map_terminal_status(status: str):
                 "check the account before re-running", None)
     if status == "already_had_bio":
         return (RESULT_SKIPPED, "already had a bio", None)
+    if status == "wrong_account":
+        # A guard refusing to post on the wrong account, not a breakage, and
+        # not an Instagram incident: the handle is simply not on this phone.
+        return (RESULT_SKIPPED,
+                "skipped: the phone's account switcher does not have this account", None)
     if status == "adb_connect_failed":
         return (RESULT_FAILED, "ADB connect failed", None)
     if status == "failed":

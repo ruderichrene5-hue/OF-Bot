@@ -108,6 +108,13 @@ ISSUE_NEEDS_RETRY = "Failed - Needs Retry"
 ISSUE_BANNED_BLOCKED = "Banned / Blocked"
 ISSUE_HUMAN_VERIFICATION = "Human Verification Required"
 ISSUE_OTHER = "Other"
+# The row names an Instagram account the phone's switcher does not list. Its own
+# value rather than `Other` because it is the one failure a person can fix in
+# ten seconds -- correct the handle -- and because the retry pass must never
+# re-queue it: nothing about launching the phone again puts the account there.
+# Written with typecast on, so Airtable adds the option the first time it is
+# used. See `flows.instagram_reel.ACCOUNT_ABSENT`.
+ISSUE_ACCOUNT_MISSING = "Account Not On Phone"
 F_PQ_NOTES = "Notes"
 F_PQ_RECHECK_AFTER = "Recheck After"     # dateTime; when the deferred pass may look
 

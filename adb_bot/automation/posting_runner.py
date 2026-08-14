@@ -71,6 +71,17 @@ def _map_post_status(status: str):
         return (at.POST_STATUS_FAILED, at.ISSUE_OTHER, None, at.RESULT_SKIPPED,
                 "skipped: this clip was already sent to this profile")
 
+    if status == "wrong_account":
+        # Terminal and NOT retryable, for the same reason as `already_shared`:
+        # the retry pass only re-queues `Failed - Needs Retry`, and this row
+        # asks the phone for an account it does not have. Logged as Skipped
+        # rather than Failed because a guard that refuses to post on the wrong
+        # account is doing its job. The counter is not bumped -- a refusal is
+        # not an attempt -- and the variant is left unused so the clip can go
+        # out once the handle is corrected.
+        return (at.POST_STATUS_FAILED, at.ISSUE_ACCOUNT_MISSING, None, at.RESULT_SKIPPED,
+                "skipped: the phone's account switcher does not have this account")
+
     if status == "heartbeat_lost":
         # The phone stopped being ours mid-post. Retryable: nothing is wrong
         # with the account, the post simply never completed.
