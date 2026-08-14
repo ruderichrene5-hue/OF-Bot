@@ -863,15 +863,27 @@ class InstagramReelUploadU2Flow:
         #
         # No handle means a single-account phone, and this does nothing at all.
         want_handle = getattr(profile, "target_handle", None)
-        if want_handle and not self._ensure_account_u2(d, target, want_handle, emit, logger=log):
+        account_ok, account_why = (True, self.ACCOUNT_OK)
+        if want_handle:
+            account_ok, account_why = self._ensure_account_state_u2(
+                d, target, want_handle, emit, logger=log)
+        if want_handle and not account_ok:
             flagged = self._account_flag_result_u2(d, profile, target, emit, "switching accounts")
             if flagged:
                 return flagged
             emit("warning", "Not posting on %s: could not prove it is signed in as @%s. "
                             "The clip stays queued -- posting it on the wrong account is the "
                             "one outcome that cannot be undone.", target, want_handle)
-            return {"profile_id": profile.id, "target": target, "aborted": False,
-                    "success": False, "failed": True}
+            result = {"profile_id": profile.id, "target": target, "aborted": False,
+                      "success": False, "failed": True}
+            if account_why == self.ACCOUNT_ABSENT:
+                # Not a failure to retry: the phone does not have this account,
+                # and it will not have it next time either. Retried as an
+                # ordinary failure, five rows' worth of these took more than
+                # half the fleet's launches on 2026-08-14 and produced nothing.
+                result["wrong_account"] = True
+                result["wanted_handle"] = str(want_handle)
+            return result
 
         # Baseline for post-verification: read the account's post count BEFORE
         # uploading, so afterwards a +1 proves the reel landed even if Instagram
@@ -2086,8 +2098,43 @@ class InstagramReelUploadU2Flow:
         _emit(logger, "info", "u2: no account-switcher control on the profile header for %s", target)
         return False
 
+    def _switcher_is_open_u2(self, d, current_handle, logger=None) -> bool:
+        """Is the account-switcher sheet actually in front?
+
+        Proved by finding the row for the account we are *already* signed in as:
+        an open sheet always lists it, and no other screen does. Without this
+        the flow cannot tell "this phone does not have that account" from "the
+        sheet did not open", and it must, because the first answer is permanent
+        and stops the queue row for good.
+        """
+        if not current_handle:
+            return False
+        pattern = rf"(?i)^\s*@?{re.escape(current_handle)}\s*$"
+        try:
+            return bool(d(textMatches=pattern).exists)
+        except Exception as exc:
+            _emit(logger, "warning", "u2: could not confirm the switcher is open: %s", exc)
+            return False
+
+    # Why the phone could not be put on the wanted account. The distinction is
+    # the difference between a retry and a person: `ACCOUNT_ABSENT` means the
+    # switcher opened and the handle is simply not on this phone, which no
+    # number of retries can change, while everything else is a screen we failed
+    # to read and might read fine next time.
+    ACCOUNT_OK = ""
+    ACCOUNT_ABSENT = "absent"
+    ACCOUNT_UNREADABLE = "unreadable"
+
     def _ensure_account_u2(self, d, target, want_handle, emit, logger=None,
                            max_attempts: int = 2) -> bool:
+        """`_ensure_account_state_u2` as a plain bool, for callers that only
+        need to know whether to go on."""
+        return self._ensure_account_state_u2(
+            d, target, want_handle, emit, logger=logger,
+            max_attempts=max_attempts)[0]
+
+    def _ensure_account_state_u2(self, d, target, want_handle, emit, logger=None,
+                                 max_attempts: int = 2) -> tuple:
         """Make sure the phone is signed in as `want_handle` before anything else.
 
         Phones carrying two Instagram accounts in one cloned app reach the
@@ -2097,24 +2144,29 @@ class InstagramReelUploadU2Flow:
         account posts the next one there too, and the primary account silently
         stops receiving content while its queue rows all say Posted.
 
-        Returns True only when the handle is **proven** to be the one asked for.
-        An unreadable header is False, deliberately: the caller's response to
-        False is to not post at all, and posting a model's reel on the wrong
-        account is far more expensive than a retry.
+        Returns `(ok, reason)`. `ok` is True only when the handle is **proven**
+        to be the one asked for. An unreadable header is False, deliberately:
+        the caller's response to False is to not post at all, and posting a
+        model's reel on the wrong account is far more expensive than a retry.
 
-        `want_handle` empty/None is True immediately -- that is every
+        `reason` separates "this phone does not have that account"
+        (`ACCOUNT_ABSENT` -- a data error, and retrying it forever is what took
+        53% of the fleet's launches on 2026-08-14) from "we could not read the
+        screen" (`ACCOUNT_UNREADABLE` -- worth another go).
+
+        `want_handle` empty/None is ok immediately -- that is every
         single-account phone, which has nothing to switch to and never opens a
         switcher.
         """
         want = self._normalize_handle(want_handle)
         if not want:
-            return True
+            return (True, self.ACCOUNT_OK)
 
         for attempt in range(1, max_attempts + 1):
             if not self._open_profile_tab_u2(d, target, logger=logger):
                 emit("warning", "Could not open the profile tab on %s to check which account "
                                 "is signed in", target)
-                return False
+                return (False, self.ACCOUNT_UNREADABLE)
             waits.settle(3, ready=waits.u2_ready(d, *self._ACCOUNT_TITLE_SELECTORS),
                          logger=logger, what="profile header")
 
@@ -2122,12 +2174,12 @@ class InstagramReelUploadU2Flow:
             if current == want:
                 if attempt > 1:
                     emit("info", "Switched %s to @%s", target, want)
-                return True
+                return (True, self.ACCOUNT_OK)
             emit("info", "%s is signed in as %s; switching to @%s",
                  target, f"@{current}" if current else "an unreadable account", want)
 
             if not self._open_account_switcher_u2(d, target, logger=logger):
-                return False
+                return (False, self.ACCOUNT_UNREADABLE)
             # Match the row by its text rather than by a resource id: the sheet's
             # ids differ across builds, but the row for an account always carries
             # that account's handle, with or without a leading '@'.
@@ -2135,14 +2187,28 @@ class InstagramReelUploadU2Flow:
             try:
                 row = d(textMatches=pattern)
                 if not row.exists:
+                    # "The row is not there" is only evidence of a missing
+                    # account if the sheet is actually open --
+                    # `_open_account_switcher_u2` returns True as soon as it
+                    # *taps* the header, without proving anything opened. Since
+                    # this verdict is permanent and stops the row being retried,
+                    # it needs positive proof: the account we are signed in as
+                    # must itself be listed. If we cannot see even that, we are
+                    # looking at the wrong screen, not at a phone missing an
+                    # account.
                     emit("warning", "The account switcher on %s does not list @%s -- Airtable "
                                     "says this phone has it, the phone disagrees", target, want)
-                    return False
+                    if not self._switcher_is_open_u2(d, current, logger=logger):
+                        emit("warning", "...but the switcher on %s does not list @%s either, so "
+                                        "the sheet never opened -- treating this as a screen we "
+                                        "lost, not a missing account", target, current or "?")
+                        return (False, self.ACCOUNT_UNREADABLE)
+                    return (False, self.ACCOUNT_ABSENT)
                 row.click()
             except Exception as exc:
                 emit("warning", "Could not tap @%s in the account switcher on %s: %s",
                      want, target, exc)
-                return False
+                return (False, self.ACCOUNT_UNREADABLE)
 
             # Switching accounts reloads the whole app; give it the same settle
             # the launch path gets before reading anything back.
@@ -2152,10 +2218,13 @@ class InstagramReelUploadU2Flow:
         current = self._read_current_handle_u2(d, target, logger=logger)
         if current == want:
             emit("info", "Switched %s to @%s", target, want)
-            return True
+            return (True, self.ACCOUNT_OK)
+        # The switcher listed the handle and tapping it still did not land.
+        # Unreadable rather than absent: the account exists on this phone, so
+        # this is a screen we lost, and the next run may well manage it.
         emit("warning", "Gave up switching %s to @%s after %s attempt(s); it is showing %s",
              target, want, max_attempts, f"@{current}" if current else "no readable handle")
-        return False
+        return (False, self.ACCOUNT_UNREADABLE)
 
     def _screen_text_probe_u2(self, d, target, logger=None):
         """All visible text + any transient toast, lowercased, for the screen
