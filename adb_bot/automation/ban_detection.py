@@ -65,6 +65,18 @@ _HUMAN_VERIFICATION_MARKERS = (
     "confirm your identity",
     "enter the code we sent",
     "we need more information to confirm",
+    # Instagram's SMS checkpoint (ChallengeActivity). Read off `Kathi 7` on
+    # 2026-08-14: "Enter the 6-digit confirmation code we sent via SMS to
+    # +31...". The older "enter the code we sent" marker does not match it --
+    # "6-digit confirmation" sits in the middle -- so the checkpoint read as an
+    # ordinary flow failure, was retried five times and produced a false
+    # `Retries Exhausted` on an account that simply needs a code typed in.
+    "enter confirmation code",
+    "confirmation code we sent",
+    # The two controls that screen offers. Kept because the body text is the
+    # part Instagram rewords between builds, while these buttons have not.
+    "update mobile number",
+    "request new code",
 )
 
 # Temporary "action blocked / try again later" throttle.

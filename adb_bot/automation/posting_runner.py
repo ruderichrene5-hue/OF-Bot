@@ -21,7 +21,7 @@ from adb_bot.core.locks import ProfileLocks, live_profile_count, live_profile_sl
 from adb_bot.core.batching import LaunchGate, resolve_concurrency, run_rolling
 from adb_bot.automation import incidents
 from adb_bot.automation.posting_planner import plan_posting_queue
-from adb_bot.automation.workflow import run_profile_workflow
+from adb_bot.automation.workflow import STAND_IN_NOTE, run_profile_workflow
 
 # The flow that actually uploads a reel. u2 is the reliable path being standardized.
 POST_FLOW = "instagram_reel_upload_u2"
@@ -277,11 +277,16 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
     stats = launcher_client.stats
 
     # 3) Post each item (parallel across profiles) ----------------------------
-    def run_post(item) -> None:
+    def run_post(item) -> bool:
+        """Post one row. Returns True if it went out on a stand-in account."""
         if aborted():
-            return
+            return False
+        stood_in = False
 
         def _cb(pid: str, status: str, detail: str = "") -> None:
+            nonlocal stood_in
+            if status == "done" and STAND_IN_NOTE in (detail or ""):
+                stood_in = True
             if callable(status_callback):
                 try:
                     status_callback(pid, status, detail)
@@ -342,6 +347,7 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
             # instead of re-enabling ADB on something that isn't running.
             launcher_client=launcher_client,
         )
+        return stood_in
 
     # A rolling window of at most `concurrency` phones. The previous fixed
     # batches ran only as fast as their slowest profile: with a 3-minute post
@@ -406,7 +412,23 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
             for item in items_by_launch.get(launch_id, []):
                 if aborted():
                     return
-                run_post(item)
+                if run_post(item):
+                    # That clip went out on the phone's own account because the
+                    # row named a handle the phone does not have. One per profile
+                    # per run, deliberately: a phone parked on a missing handle
+                    # has a backlog of them (Jasmin 5 had nine), they all resolve
+                    # to the *same* stand-in account, and the loop is uncapped --
+                    # so without this the sibling account posts its own rows plus
+                    # the whole orphaned backlog back to back. Thirteen reels in a
+                    # row from one account is the behaviour Instagram acts on.
+                    # The rest stay queued and drain a post per tick.
+                    logger.info(
+                        "Profile %s posted on a stand-in account this run; leaving its "
+                        "remaining %s row(s) for the next tick rather than sending an "
+                        "orphaned backlog in one go.",
+                        launch_id,
+                        max(0, len(items_by_launch.get(launch_id, [])) - 1))
+                    return
 
     logger.info("Posting %s profile(s), up to %s at a time (rolling, global ceiling %s)",
                 len(launch_ids), concurrency, max_live_profiles())

@@ -239,6 +239,22 @@ class SelectorCoverageTest(TestCase):
         # Same list drives the readiness wait and the composer-open check.
         self.assertTrue(len(self.flow._GALLERY_SELECTORS) >= 5)
 
+    def test_a_bare_next_is_not_evidence_the_gallery_is_open(self):
+        """"Next" is on every onboarding, login and checkpoint screen.
+
+        `Kathi 7` sat on a phone-number confirmation screen on 2026-08-14; a
+        `^next$` gallery selector matched its Next button, the flow reported the
+        composer open, and then swiped for a REEL tab that could not exist. The
+        composer-open check must only accept markers the composer actually has.
+        """
+        for selector in self.flow._GALLERY_SELECTORS:
+            for value in selector.values():
+                self.assertNotIn("next", str(value).lower())
+        # It stays available where it is correct: advancing *after* media is
+        # picked, which is a screen the flow has already proven it is on.
+        blob = " ".join(str(v).lower() for s in self.flow._NEXT_SELECTORS for v in s.values())
+        self.assertIn("next", blob)
+
 
 class BrowseRefreshTest(TestCase):
     """The post count only updates if the profile screen is actually re-rendered

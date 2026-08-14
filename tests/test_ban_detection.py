@@ -32,6 +32,30 @@ class ClassifyTest(TestCase):
         ):
             self.assertEqual(classify_block_text(text), KIND_HUMAN_VERIFICATION, text)
 
+    def test_the_sms_confirmation_checkpoint_is_human_verification(self):
+        """Verbatim from `Kathi 7`'s ChallengeActivity, 2026-08-14.
+
+        This screen was classified as nothing at all, so the reel flow reported
+        an ordinary failure, the retry pass re-queued it five times, and the
+        profile landed on `Retries Exhausted` -- a label that says the bot gave
+        up, on an account that only needs somebody to type in a code.
+        """
+        screen = ("Get support Enter confirmation code Enter the 6-digit confirmation "
+                  "code we sent via SMS to +31613813164. It may take up to a minute for "
+                  "you to receive this code. 6-digit code Request new code Next "
+                  "Update mobile number")
+        self.assertEqual(classify_block_text(screen), KIND_HUMAN_VERIFICATION)
+
+    def test_the_composer_is_not_mistaken_for_a_checkpoint(self):
+        """The markers must not fire on the screens the flow posts from."""
+        for text in (
+            "REEL POST STORY LIVE Recents Next",
+            "New reel Gallery Camera Next Share",
+            "Add a caption Share Next",
+            "",
+        ):
+            self.assertIsNone(classify_block_text(text), text)
+
     def test_action_block_screens(self):
         for text in (
             "Action Blocked. Try Again Later.",

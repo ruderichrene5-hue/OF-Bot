@@ -15,7 +15,7 @@ the `No Recent Success` deadlock. Three distinct faults were wearing it.
 | Jil 8 | `wrong_account` | `@helen_aiscooll` is not in the phone's account switcher |
 | Jasmin 5 | `wrong_account` | `@jasmindiecoolee` is not in the phone's account switcher |
 | Jil 5 | `wrong_account` | `@jiji.ll12` is not in the phone's account switcher |
-| Kathi 7 | `failed` | composer opened, but the REEL tab never became reachable |
+| Kathi 7 | `failed` | never in a composer at all — an Instagram SMS checkpoint |
 
 Launch health for the run: 4 attempts, 4 ok, 0 MLX-500. The phones are fine.
 In all four cases the flow **refused to post rather than post the wrong thing**,
@@ -120,6 +120,31 @@ device. Their healthy counterparts (`jil.lena777` 12 posts, `naughty_jasminn`
 This is the progression already recorded — roughly one account falling out of a
 switcher every 2–3 days. Expect more; do not read the next one as a new fault.
 
+### Follow-up: the clip now goes out on the account the phone does have
+
+Asked for on 2026-08-14. Parking a clip forever waits on credentials nobody
+has, while the phone's sibling account posts fine — and it is the same model's
+content either way. So when the switcher is demonstrably open and the row's
+handle is demonstrably not in it, the reel goes out on the account the phone
+*is* signed in as, and the row's note records which:
+
+```
+posted on @jil.lena777 -- the row's handle is not on this phone
+```
+
+Two limits, both deliberate:
+
+- **Only off an `ACCOUNT_ABSENT` verdict.** That verdict already requires the
+  switcher to have been proven open. If the profile header will not read, there
+  is no stand-in and nothing is posted — posting on an account nobody
+  identified is the exact outcome the account check exists to prevent.
+- **One stand-in post per profile per run.** A phone parked on a missing handle
+  has a *backlog* of orphaned rows (Jasmin 5 has nine) and they all resolve to
+  the same stand-in account, while the timer loop sets no per-profile cap.
+  Without this, `@naughty_jasminn` would post its own four rows plus nine
+  orphans back to back. Thirteen reels in a row from one account is the
+  behaviour Instagram acts on. The rest stay queued and drain one per tick.
+
 ## Fault 3 — Kathi 7 is not an account problem at all
 
 Kathi 7 has no `Primary IG Handle` recorded, is a much newer profile (MLX serial
@@ -130,7 +155,7 @@ failed two different ways:
   starting urls"`, the phone never booted, ADB never went ready. Still happening
   today: 7 occurrences in `phone_launcher_20260814.log`, intermittent bursts.
   MLX-side, not the local webkit fault from 2026-08-13.
-- **On this run** — it booted, reached the composer, then:
+- **On this run** — it booted, and then:
 
 ```
 u2: REEL tab never became visible after 4 swipe(s)
@@ -138,9 +163,58 @@ u2: could not confirm REEL mode; not selecting media to avoid posting a non-reel
 Unable to select reel media
 ```
 
-That REEL-tab failure is fleet-wide and declining, not specific to this phone:
-13 occurrences on 2026-08-11, 8 on 08-12, 3 on 08-13. Worth its own look; a
-profile that has never posted is the wrong place to conclude anything about it.
+### Why the REEL tab was never going to appear
+
+**Kathi 7 was never in a composer.** Read directly off the phone, read-only, on
+2026-08-14 — Instagram is sitting on
+`com.instagram.challenge.activity.ChallengeActivity`:
+
+```
+Get support
+Enter confirmation code
+Enter the 6-digit confirmation code we sent via SMS to +31613813164.
+It may take up to a minute for you to receive this code.
+6-digit code | Request new code | Next | Update mobile number
+```
+
+It is an SMS checkpoint. Instagram is installed and healthy (v442.0.0.46.79);
+the account is simply waiting for somebody to type in a code. The run log said
+so an hour before anyone looked — the composer step listed its tap candidates as
+`request new code`, `next` and `update mobile number` — and three separate
+signals up-thread agreed: no profile tab, not on the home feed, and the Home tab
+not found by *any* selector.
+
+**Two bugs let a checkpoint look like a composer failure.**
+
+1. **`^next$` counted as proof the gallery was open.** `_GALLERY_SELECTORS`
+   accepted a bare "Next", which is on nearly every Instagram onboarding, login
+   and checkpoint screen. It matched the checkpoint's Next button, the flow
+   announced `reel composer / gallery appeared`, and then swiped four times
+   hunting a REEL tab that could not exist. Removed — every remaining entry
+   names something only the composer has, and the successful Jil 5 post matched
+   on the real one (`id=com.instagram.android:id/cam_dest_clips`), so the happy
+   path is untouched.
+
+2. **The checkpoint was not classified as one.** `ban_detection` had
+   `"enter the code we sent"`, which does **not** match `"Enter the 6-digit
+   confirmation code we sent via SMS"` — the words in the middle break it. So
+   `account_flag_u2` returned nothing, the flow reported a plain failure, the
+   retry pass re-queued it five times, and the profile landed on
+   `Retries Exhausted`. Added the markers this screen actually shows, with the
+   verbatim text as a test, plus a test that the composer's own screens do not
+   trip them.
+
+With both fixed the screen classifies as `human_verification`, which maps to
+`Failed` + `Human Verification Required` + an incident — terminal, no retry
+counter bumped, not re-queued. Exactly the same disease as fault 1: a
+non-retryable condition reported as a retryable failure.
+
+Kathi 7's Airtable reason has been corrected from `Retries Exhausted` to
+`Human Verification Required`, with the evidence in its Issue Notes.
+
+The bare `REEL tab never became visible` warning is fleet-wide and declining
+(13 on 08-11, 8 on 08-12, 3 on 08-13); with `^next$` gone, the cases that were
+really checkpoints will now say so instead of counting swipes.
 
 ## Two things worth not misreading
 

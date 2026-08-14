@@ -622,6 +622,71 @@ class AccountAbsentIsNotRetryableTest(TestCase):
                                          "jills.sav", self._emit))
 
 
+class StandInAccountTest(TestCase):
+    """When the row's handle is not on the phone, post on the one that is.
+
+    Asked for on 2026-08-14: parking the clip forever waits on credentials
+    nobody has, while the phone's other account is posting fine. The clip is the
+    same model's either way, so it goes out on the account that is actually
+    there -- and the row records which, because a row reading Posted while
+    naming a handle that never received it is worse than the failure was.
+
+    The line that must hold: this only ever runs off an `ACCOUNT_ABSENT`
+    verdict, which requires the switcher to have been demonstrably open. If the
+    header will not read, there is no stand-in and nothing is posted -- posting
+    on an account nobody identified is the outcome the whole check exists to
+    prevent.
+    """
+
+    def setUp(self):
+        from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
+        self.flow = InstagramReelUploadU2Flow()
+        self.emitted = []
+
+    def _emit(self, level, message, *args):
+        self.emitted.append(message % args if args else message)
+
+    def test_it_names_the_account_the_phone_is_actually_on(self):
+        device = FakeDevice(handle="helenaiscutee", listed=("helenaiscutee",))
+        stand_in = self.flow._phones_own_account_u2(device, "1.2.3.4:5555", self._emit)
+        self.assertEqual(stand_in, "helenaiscutee")
+
+    def test_an_unreadable_header_yields_no_stand_in(self):
+        """No identified account means no post, not a guess."""
+        device = FakeDevice(handle="helenaiscutee", header_readable=False)
+        stand_in = self.flow._phones_own_account_u2(device, "1.2.3.4:5555", self._emit)
+        self.assertIsNone(stand_in)
+
+    def test_the_note_says_which_account_posted(self):
+        """`posted_as` has to survive into the row's note, or the record lies."""
+        from adb_bot.automation.workflow import status_detail
+        detail = status_detail({"posted_as": "jil.lena777"})
+        self.assertIn("jil.lena777", detail)
+        self.assertIn("not on this phone", detail)
+
+    def test_it_does_not_bury_the_verification_method(self):
+        """The stand-in note is added to how the post was proven, not instead."""
+        from adb_bot.automation.workflow import status_detail
+        detail = status_detail({"verify_method": "post_count",
+                                "verify_strength": "strong",
+                                "posted_as": "jil.lena777"})
+        self.assertIn("post_count", detail)
+        self.assertIn("jil.lena777", detail)
+
+    def test_an_ordinary_post_says_nothing_about_stand_ins(self):
+        from adb_bot.automation.workflow import STAND_IN_NOTE, status_detail
+        detail = status_detail({"verify_method": "post_count", "verify_strength": "strong"})
+        self.assertNotIn(STAND_IN_NOTE, detail)
+
+    def test_the_posting_loop_recognises_the_note_it_writes(self):
+        """The loop caps stand-ins at one per profile per run by spotting this
+        marker, so the two must not drift apart."""
+        from adb_bot.automation.workflow import STAND_IN_NOTE, status_detail
+        from adb_bot.automation import posting_runner
+        self.assertIs(posting_runner.STAND_IN_NOTE, STAND_IN_NOTE)
+        self.assertIn(STAND_IN_NOTE, status_detail({"posted_as": "jil.lena777"}))
+
+
 class WrongAccountWriteBackTest(TestCase):
     """What an absent account does to the queue row."""
 

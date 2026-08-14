@@ -560,6 +560,38 @@ def _guarantee_profile_closed(inner):
     return wrapper
 
 
+# Marker put in a post's detail when the clip went out on the phone's own
+# account instead of the one the row named. Shared so the posting loop can spot
+# a stand-in post without re-deriving the wording it writes.
+STAND_IN_NOTE = "the row's handle is not on this phone"
+
+
+def status_detail(result) -> str:
+    """The human-readable "how" behind a flow's terminal status.
+
+    Module-level rather than buried in `emit_status` so it can be tested
+    without standing up a whole workflow run: what it says ends up on the queue
+    row's note, which is the only durable record of what actually happened.
+    """
+    if not isinstance(result, dict):
+        return ""
+    detail = ""
+    method = result.get("verify_method") or ""
+    strength = result.get("verify_strength") or ""
+    extra = result.get("verify_detail") or ""
+    if method:
+        detail = f"via {method}" + (f" [{strength}]" if strength else "")
+        if extra:
+            detail += f": {extra}"
+    # A clip that went out on the phone's own account because the row's handle
+    # was not on the phone. Carried through so the note says which account
+    # actually posted -- a row reading Posted while naming a handle that never
+    # received it is worse than the failure it replaced.
+    posted_as = result.get("posted_as") or ""
+    if posted_as:
+        stand_in = f"posted on @{posted_as} -- {STAND_IN_NOTE}"
+        detail = f"{detail}; {stand_in}" if detail else stand_in
+    return detail
 
 
 def _run_profile_workflow(
@@ -606,15 +638,7 @@ def _run_profile_workflow(
         """
         if not callable(status_callback):
             return
-        detail = ""
-        if isinstance(result, dict):
-            method = result.get("verify_method") or ""
-            strength = result.get("verify_strength") or ""
-            extra = result.get("verify_detail") or ""
-            if method:
-                detail = f"via {method}" + (f" [{strength}]" if strength else "")
-                if extra:
-                    detail += f": {extra}"
+        detail = status_detail(result)
         try:
             status_callback(pid, status, detail)
         except TypeError:

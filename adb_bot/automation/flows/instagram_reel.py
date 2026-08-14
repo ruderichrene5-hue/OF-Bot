@@ -644,10 +644,18 @@ class InstagramReelUploadU2Flow:
     )
 
     # The composer/gallery is open once any of these is on screen.
+    #
+    # A bare "Next" is deliberately NOT here. It is on almost every Instagram
+    # onboarding, login and checkpoint screen, so it says nothing about the
+    # composer -- and on 2026-08-14 it was what made `Kathi 7` spend a launch a
+    # day for two days: the phone was parked on a phone-number confirmation
+    # screen ("request new code" / "update mobile number"), `^next$` matched its
+    # Next button, the flow announced "reel composer / gallery appeared" and
+    # then swiped four times for a REEL tab that was never going to exist.
+    # Every entry below names something only the composer/gallery has.
     _GALLERY_SELECTORS = (
         {"textMatches": "(?i)^reels?$"},
         {"descriptionMatches": "(?i)^reels?$"},
-        {"textMatches": "(?i)^next$"},
         {"descriptionStartsWith": "Video"},
         {"descriptionStartsWith": "Photo"},
         {"textContains": "Recents"},
@@ -855,23 +863,42 @@ class InstagramReelUploadU2Flow:
         if want_handle:
             account_ok, account_why = self._ensure_account_state_u2(
                 d, target, want_handle, emit, logger=log)
+        posted_as = None
         if want_handle and not account_ok:
             flagged = self._account_flag_result_u2(d, profile, target, emit, "switching accounts")
             if flagged:
                 return flagged
-            emit("warning", "Not posting on %s: could not prove it is signed in as @%s. "
-                            "The clip stays queued -- posting it on the wrong account is the "
-                            "one outcome that cannot be undone.", target, want_handle)
-            result = {"profile_id": profile.id, "target": target, "aborted": False,
-                      "success": False, "failed": True}
+            # The phone demonstrably does not have this account, and it will not
+            # have it next time either. Rather than park the clip forever, post
+            # it on the account the phone *does* have: same model, and a queued
+            # reel going out late on the sibling account beats a phone that
+            # posts nothing while somebody finds the missing credentials.
+            #
+            # Only for ACCOUNT_ABSENT -- that verdict requires the switcher to
+            # have been demonstrably open. An unreadable screen is NOT allowed
+            # to retarget: "we could not tell who is in front" is exactly when
+            # posting on whoever is in front is a guess.
             if account_why == self.ACCOUNT_ABSENT:
-                # Not a failure to retry: the phone does not have this account,
-                # and it will not have it next time either. Retried as an
-                # ordinary failure, five rows' worth of these took more than
-                # half the fleet's launches on 2026-08-14 and produced nothing.
-                result["wrong_account"] = True
-                result["wanted_handle"] = str(want_handle)
-            return result
+                posted_as = self._phones_own_account_u2(d, target, emit, log)
+            if posted_as:
+                emit("warning", "The phone does not have @%s, so this clip goes out on @%s -- "
+                                "the account this phone is actually signed in as. Recorded on the "
+                                "row, because the queue asked for a different handle.",
+                     want_handle, posted_as)
+            else:
+                emit("warning", "Not posting on %s: could not prove it is signed in as @%s. "
+                                "The clip stays queued -- posting it on the wrong account is the "
+                                "one outcome that cannot be undone.", target, want_handle)
+                result = {"profile_id": profile.id, "target": target, "aborted": False,
+                          "success": False, "failed": True}
+                if account_why == self.ACCOUNT_ABSENT:
+                    # Absent and no stand-in readable: still terminal, because no
+                    # number of retries puts the account on the phone. Retried as
+                    # an ordinary failure, five rows' worth of these took more
+                    # than half the fleet's launches on 2026-08-14 for 0 posts.
+                    result["wrong_account"] = True
+                    result["wanted_handle"] = str(want_handle)
+                return result
 
         # Baseline for post-verification: read the account's post count BEFORE
         # uploading, so afterwards a +1 proves the reel landed even if Instagram
@@ -1086,6 +1113,9 @@ class InstagramReelUploadU2Flow:
             # this exact clip without re-hashing the file.
             "media_hash": media_hash,
             "media_path": media_path,
+            # Set only when the row's handle was not on the phone and the clip
+            # went out on the account that was. None on every ordinary post.
+            "posted_as": posted_as,
         }
 
     def build_launch_commands(self, target: str) -> list[str]:
@@ -2210,6 +2240,33 @@ class InstagramReelUploadU2Flow:
         emit("warning", "Gave up switching %s to @%s after %s attempt(s); it is showing %s",
              target, want, max_attempts, f"@{current}" if current else "no readable handle")
         return (False, self.ACCOUNT_UNREADABLE)
+
+    def _phones_own_account_u2(self, d, target, emit, logger=None) -> str | None:
+        """The handle this phone is actually signed in as, with the account
+        switcher closed again, or None if it cannot be read.
+
+        Called only after an `ACCOUNT_ABSENT` verdict, which leaves the switcher
+        sheet open (the wanted row was never tapped, because it was not there).
+        The sheet has to come down before anything else happens, or the composer
+        step starts on top of it.
+
+        Returns None rather than a guess when the header will not read: the
+        caller's fallback is to post on this account, and a clip going out on an
+        account nobody identified is the outcome the whole account check exists
+        to prevent.
+        """
+        try:
+            d.press("back")
+        except Exception as exc:
+            _emit(logger, "warning", "u2: could not close the account switcher on %s: %s",
+                  target, exc)
+        if not self._open_profile_tab_u2(d, target, logger=logger):
+            emit("warning", "Could not reopen the profile tab on %s to see which account the "
+                            "phone is on, so this clip is not going out on a guess", target)
+            return None
+        waits.settle(3, ready=waits.u2_ready(d, *self._ACCOUNT_TITLE_SELECTORS),
+                     logger=logger, what="profile header")
+        return self._read_current_handle_u2(d, target, logger=logger) or None
 
     def _screen_text_probe_u2(self, d, target, logger=None):
         """All visible text + any transient toast, lowercased, for the screen
