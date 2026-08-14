@@ -1,0 +1,39 @@
+[Unit]
+# Local operational dashboard: what ran today, what is running now, what failed.
+#
+# Bound to loopback only. This page lists every profile by name along with its
+# failure reasons, and the box holds Instagram sessions and an Airtable PAT, so
+# it is not something to expose on an interface by accident. To read it from a
+# laptop, forward the port rather than rebinding:
+#
+#     ssh -N -L 8080:localhost:8080 <this-box>
+#
+# Not a timer. Every other unit here is a oneshot on a schedule; this one is a
+# server that renders on request, which is what makes "running now" mean now.
+Description=ADB bot operational report (local dashboard on 127.0.0.1:8080)
+Documentation=file:///root/adb_bot/deploy/RUNBOOK.md
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.report_server
+EnvironmentFile=-/etc/adbbot/env
+Environment=PYTHONUNBUFFERED=1
+Environment=ADBBOT_REPORT_HOST=127.0.0.1
+Environment=ADBBOT_REPORT_PORT=8080
+Restart=always
+RestartSec=5
+# Read-only by design: it renders existing state and writes nothing back. These
+# make that a property of the unit rather than a promise in a docstring.
+ProtectSystem=strict
+ReadWritePaths=/root/.adb_bot /root/adb_bot/logs
+PrivateTmp=true
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=adbbot-report
+
+[Install]
+WantedBy=multi-user.target

@@ -114,6 +114,24 @@ def _emit(logger, level, message, *args) -> None:
         print(message)
 
 
+def account_flag_u2(d) -> str | None:
+    """Classify an IG block screen from the u2 hierarchy: a ban_detection kind
+    ("banned" / "human_verification" / "action_block"), or None if the screen
+    isn't one. Reads the whole dumped hierarchy, so bans and action-blocks are
+    caught too, not just the human-verification checkpoint.
+
+    Module-level on purpose: the reel-upload flow is not part of the u2 bio
+    flow's class tree, and a checkpoint stops a reel post exactly as dead as it
+    stops a bio edit. Keeping one implementation means a new marker in
+    ban_detection reaches every flow at once.
+    """
+    try:
+        xml = d.dump_hierarchy()
+    except Exception:
+        xml = ""
+    return ban_detection.classify_block_text(xml)
+
+
 def _u2_describe(sel) -> str:
     """Compact one-line description of a uiautomator2 element for logging:
     its text, content-desc, resource-id, class, bounds and clickable/enabled
@@ -1037,22 +1055,47 @@ def _adb_push_media_to_device(target: str, local_media_path: str, remote_media_p
             return False
 
         _emit(logger, "info", "Pushing local story media %s to %s on %s", local_media_path, remote_media_path, target)
-        result = _run_hidden(
-            [
-                "adb",
-                "-s",
-                target,
-                "push",
-                local_media_path,
-                remote_media_path,
-            ],
-            shell=False,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
+        try:
+            result = _run_hidden(
+                [
+                    "adb",
+                    "-s",
+                    target,
+                    "push",
+                    local_media_path,
+                    remote_media_path,
+                ],
+                shell=False,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            stdout = (result.stdout or "").strip()
+            stderr = (result.stderr or "").strip()
+        except subprocess.CalledProcessError as exc:
+            # adb can transfer every byte and still exit non-zero, typically
+            # `failed to read copy response` when the tunnel to a cloud phone
+            # hiccups on the way back. Its own output says so in the same
+            # breath: "1 file pushed, 0 skipped ... (22833002 bytes in 7.100s)"
+            # followed by the error. Believing the exit code there throws away
+            # a post that is already on the device -- seen twice on 2026-08-10,
+            # both on the larger clips over a slow link.
+            #
+            # The text is not the evidence, though. Hash the file on the device
+            # and only continue if it matches the local one, so a genuinely
+            # half-written push still fails.
+            stdout = (exc.stdout or "").strip()
+            stderr = (exc.stderr or "").strip()
+            if not _adb_verify_remote_media_matches_local(
+                    target, local_media_path, remote_media_path, logger=logger):
+                _emit(logger, "warning",
+                      "adb push failed for %s and the file on the device does not "
+                      "match the local one: %s", target, stderr or stdout)
+                return False
+            _emit(logger, "warning",
+                  "adb push exited non-zero for %s (%s) but the file on the device "
+                  "matches the local hash -- treating it as delivered",
+                  target, stderr or stdout)
         if stdout:
             _emit(logger, "info", "adb push stdout for %s: %s", target, stdout)
         if stderr:
@@ -4762,11 +4805,7 @@ class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):
         ban_detection kind ("banned" / "human_verification" / "action_block") or
         None. Reads the whole dumped hierarchy so ban/suspend/action-block
         screens are caught, not just the human-verification checkpoint."""
-        try:
-            xml = d.dump_hierarchy()
-        except Exception:
-            xml = ""
-        return ban_detection.classify_block_text(xml)
+        return account_flag_u2(d)
 
     def _looks_like_human_verification_u2(self, d) -> bool:
         """Back-compat: True if any IG account-flag screen is showing."""

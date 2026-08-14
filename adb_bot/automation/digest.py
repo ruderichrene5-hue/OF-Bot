@@ -1,0 +1,354 @@
+"""The once-a-day picture of what is waiting on a person.
+
+The event notification in `issue_tags` tells the group the moment a phone breaks.
+That is the right shape for "something just happened" and the wrong shape for
+"this has been broken since Tuesday": a message you have already scrolled past
+does not get louder as it ages. This is the other half -- one message a day, and
+the number in it is the backlog.
+
+What makes it worth reading is the **ageing**, not the count. "27 phones need a
+person" is a wall; "the oldest has been waiting 5 days" is the line that gets one
+picked up.
+
+Two things it deliberately reports that nothing else surfaces to a human:
+
+* **Un-flagged but still parked.** A profile whose `Needs Human Check` was
+  cleared while `Status` stayed `Inactive` will never post, and the VA who
+  cleared it has no way to know -- they saw the `Issue` tag disappear and
+  reasonably assumed they were done. `recovery_runner` computes this and writes
+  it to a log nobody reads.
+* **What was due against what landed**, over the last 24h rather than "today", so
+  the number means the same thing whatever hour the digest runs.
+
+The composition is pure -- `build_digest` and `format_digest` take rows and
+return a summary and a string. Only `run_digest` touches Airtable or Telegram,
+which is what makes the interesting part testable without either.
+"""
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+
+from adb_bot.clients import airtable as at
+
+# The window "last 24h" rather than "since midnight": the digest should report
+# the same span whenever somebody moves the timer, and a morning run that said
+# "3 posted" only because it ran at 08:00 would be misleading.
+WINDOW_HOURS = 24
+
+# Long enough that a phone appearing here is genuinely stuck rather than just
+# waiting for the next working day.
+STALE_FLAG_DAYS = 2
+
+
+def _parse(value) -> datetime | None:
+    try:
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
+def _select(fields: dict, key: str):
+    value = fields.get(key)
+    return value.get("name") if isinstance(value, dict) else value
+
+
+def _sample(names, limit: int = 5) -> list:
+    """Up to `limit` distinct names, in order -- for an "e.g." line."""
+    seen, out = set(), []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+        if len(out) == limit:
+            break
+    return out
+
+
+def _label(entries, limit: int = 5) -> list:
+    """Up to `limit` phones as `Name · serial`, for an "e.g." line.
+
+    Names are not unique in this workspace -- `Blank (10)` is three separate
+    phones -- so two sections can legitimately name the same string while
+    meaning different hardware. That reads as a duplicate the moment both lines
+    are in one message, which is what the serial settles. Sorted by name so the
+    sample is stable between runs, and the serial breaks the tie.
+    """
+    out = []
+    for entry in sorted(entries, key=lambda e: (str(e.get("name") or ""),
+                                                str(e.get("serial") or ""))):
+        name = str(entry.get("name") or "?")
+        serial = str(entry.get("serial") or "").strip()
+        out.append(f"{name} · {serial}" if serial else name)
+        if len(out) == limit:
+            break
+    return out
+
+
+def blocked_warmup(profiles, exclude_ids=()) -> list:
+    """Warm-up profiles that cannot finish until a person assigns them a model.
+
+    Day 4 of the plan is a reel, and the warm-up loop deliberately does not run
+    it: `warmup_targets` skips with "the plan's reel is left to the Posting
+    Queue", because a reel needs a spoofed variant and a variant needs a model.
+    A profile still called `Blank (NN)` belongs to no model, so the queue has
+    nothing to build a row from -- and the hand-off never happens.
+
+    The result is a dead end rather than a failure: on 2026-08-10 all 54 warm-up
+    profiles sat at `Warmup Day 3 Done` with `Last Result: Done`, zero Spoof
+    Variants and zero queue rows between them. Nothing was broken; the warm-up
+    had simply run out of things it was allowed to do, and no loop said so.
+
+    Keyed on the model being `Blank`, which is what "no model assigned" means
+    here -- the same first-word derivation `mlx_sync` uses -- rather than on the
+    absence of variants, so it reports the cause and not a symptom of it.
+
+    `exclude_ids` drops profiles already named by the hand-tagged section, so a
+    phone is not reported twice in one message. Matched on the **MLX API ID**
+    and never on the name: this workspace has three `Blank (5)` and two
+    `Blank (13)`, so subtracting by name would silently drop the untagged twin
+    of every tagged phone.
+    """
+    return sorted(e["name"] for e in blocked_warmup_rows(profiles, exclude_ids))
+
+
+def blocked_warmup_rows(profiles, exclude_ids=()) -> list:
+    """`blocked_warmup` with the serial kept, as `[{'name', 'serial'}]`.
+
+    The serial is what makes a sample line readable: `Blank (10)` is three
+    different phones in this workspace, so a name on its own cannot say which.
+    """
+    skip = {str(i) for i in (exclude_ids or ()) if str(i).strip()}
+    out = []
+    for row in profiles or []:
+        f = row.get("fields", row) or {}
+        if not f.get(at.F_PROF_WARMUP_STARTED):
+            continue
+        if skip and str(f.get(at.F_PROF_MLX_API_ID) or "").strip() in skip:
+            continue
+        name = str(f.get(at.F_PROF_NAME) or "").strip()
+        if name.split()[:1] == ["Blank"] or name.lower().startswith("blank"):
+            out.append({"name": name or "?",
+                        "serial": str(f.get(at.F_PROF_MLX_SERIAL) or "").strip()})
+    return out
+
+
+@dataclass
+class Digest:
+    flagged: int = 0
+    by_reason: list = field(default_factory=list)     # [(reason, count)], commonest first
+    oldest_name: str | None = None
+    oldest_days: int = 0
+    stale: int = 0                                    # flagged longer than STALE_FLAG_DAYS
+    parked_unflagged: list = field(default_factory=list)   # cleared, but Status Inactive
+    blocked_warmup: list = field(default_factory=list)     # after the tagged are removed
+    blocked_warmup_total: int = 0                          # before, so the errand's real size survives
+    tagged_warmup: list = field(default_factory=list)      # Issue tag in MLX, no flag
+    # Pre-labelled `Name · serial` samples: names alone repeat across the two
+    # sections and would read as the duplication this was meant to end.
+    blocked_sample: list = field(default_factory=list)
+    tagged_sample: list = field(default_factory=list)
+    due: int = 0
+    posted: int = 0
+    failed: int = 0
+    pending: int = 0
+
+    @property
+    def quiet(self) -> bool:
+        """Nothing waiting and nothing stuck -- worth saying so in one line."""
+        return not self.flagged and not self.parked_unflagged \
+               and not self.blocked_warmup and not self.tagged_warmup
+
+
+def build_digest(profiles, queue_rows, now=None, tagged_warmup=None) -> Digest:
+    """Compose the day's numbers. Pure: rows in, summary out.
+
+    `tagged_warmup` is `report.mlx_only_issues(...)["warmup"]` -- warm-up phones
+    somebody tagged `Issue` in MultiLogin without ticking anything in Airtable.
+    Passed in rather than read here because it needs the MultiLogin inventory,
+    and the digest's whole shape is that composition takes rows and returns a
+    string. Omitted, it is simply absent from the message.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=WINDOW_HOURS)
+    out = Digest()
+
+    reasons: Counter = Counter()
+    oldest: datetime | None = None
+    for row in profiles or []:
+        f = row.get("fields", row) or {}
+        flagged = bool(f.get(at.F_PROF_NEEDS_HUMAN))
+        status = _select(f, at.F_PROF_STATUS)
+        stamp = _parse(f.get(at.F_PROF_FLAGGED_AT))
+
+        if flagged:
+            out.flagged += 1
+            reasons[str(_select(f, at.F_PROF_ISSUE_REASON) or "no reason recorded")] += 1
+            if stamp:
+                age = (now - stamp).days
+                if age >= STALE_FLAG_DAYS:
+                    out.stale += 1
+                if oldest is None or stamp < oldest:
+                    oldest, out.oldest_name, out.oldest_days = (
+                        stamp, str(f.get(at.F_PROF_NAME) or "?"), age)
+        elif stamp and status == at.STATUS_SELECT_INACTIVE:
+            # Cleared by a person, but still switched off: the exact state that
+            # looks fixed from MultiLogin and posts nothing.
+            out.parked_unflagged.append(str(f.get(at.F_PROF_NAME) or "?"))
+
+    out.by_reason = reasons.most_common()
+    out.tagged_warmup = sorted(
+        str(e.get("name") or "?") if isinstance(e, dict) else str(e)
+        for e in (tagged_warmup or []))
+    # Every tagged phone is also a `Blank`, so without this the same twenty-one
+    # names appear in both warm-up sections of one message. The tagged section
+    # keeps them: "somebody marked this phone" is a finding a person made, while
+    # "waiting for a model" is the default state of the whole population. The
+    # total is kept so the model backlog does not appear to shrink -- these
+    # phones still need one, they are just listed under the more specific
+    # heading. Keys only ever come from dict entries; a caller passing bare
+    # names has nothing to match on and gets no suppression.
+    out.blocked_warmup_total = len(blocked_warmup(profiles))
+    remaining = blocked_warmup_rows(profiles, exclude_ids=[
+        e.get("launch_id") for e in (tagged_warmup or []) if isinstance(e, dict)])
+    out.blocked_warmup = sorted(e["name"] for e in remaining)
+    out.blocked_sample = _label(remaining)
+    out.tagged_sample = _label(
+        [e if isinstance(e, dict) else {"name": e} for e in (tagged_warmup or [])])
+
+    for row in queue_rows or []:
+        f = row.get("fields", row) or {}
+        when = _parse(f.get(at.F_PQ_SCHEDULED))
+        if not when or when < cutoff or when > now:
+            continue
+        out.due += 1
+        status = str(_select(f, at.F_PQ_POST_STATUS) or "")
+        if status == at.POST_STATUS_POSTED:
+            out.posted += 1
+        elif status == at.POST_STATUS_FAILED:
+            out.failed += 1
+        elif status == at.POST_STATUS_PENDING:
+            out.pending += 1
+    return out
+
+
+def format_digest(d: Digest) -> str:
+    """The message body, in Telegram HTML."""
+    if d.quiet:
+        lines = ["📋 <b>Morning check — nothing waiting on a person</b>", ""]
+    else:
+        lines = [f"📋 <b>Morning check — {d.flagged} phone"
+                 f"{'' if d.flagged == 1 else 's'} waiting on a person</b>", ""]
+        for reason, count in d.by_reason:
+            lines.append(f"• <b>{count}</b> — {reason}")
+        if d.oldest_name:
+            lines += ["", f"Oldest: <b>{d.oldest_name}</b>, waiting "
+                          f"<b>{d.oldest_days} day{'' if d.oldest_days == 1 else 's'}</b>."]
+        if d.stale:
+            lines.append(f"{d.stale} of them have been waiting more than "
+                         f"{STALE_FLAG_DAYS} days.")
+
+    if d.parked_unflagged:
+        names = ", ".join(f"<b>{n}</b>" for n in sorted(d.parked_unflagged)[:8])
+        more = f" and {len(d.parked_unflagged) - 8} more" if len(d.parked_unflagged) > 8 else ""
+        lines += ["", f"⚠️ Un-flagged but still switched off, so still not posting: "
+                      f"{names}{more}. Set <b>Status</b> back to <b>Active</b> in Airtable."]
+
+    if d.tagged_warmup:
+        n = len(d.tagged_warmup)
+        lines += ["", f"🏷 <b>{n} warm-up phone{'' if n == 1 else 's'} tagged "
+                      f"<code>Issue</code> in MultiLogin</b> with nothing ticked in "
+                      f"Airtable. Somebody marked them and no loop reads that tag, so "
+                      f"the warm-up keeps running them. Check the phone, then tick "
+                      f"<b>Needs Human Check</b> in Airtable if it still needs a person "
+                      f"— or clear the tag in MultiLogin if it does not.",
+                  "e.g. " + ", ".join(f"<b>{name}</b>" for name in d.tagged_sample)
+                  + (f" … {n} in total" if n > 5 else "")]
+
+    # How many of the model backlog are already named in the tagged section.
+    suppressed = max(0, d.blocked_warmup_total - len(d.blocked_warmup))
+
+    if not d.blocked_warmup and suppressed:
+        # Every blocked phone was tagged, so they are all listed above already.
+        # Without this line the model errand -- the thing that actually unblocks
+        # them -- would vanish from the message entirely.
+        lines += ["", f"🕓 Those {suppressed} also need a <b>model</b> before day 4 can "
+                      f"run: day 4 is the first reel, and a reel needs a model's video. "
+                      f"Rename them from <code>Blank (NN)</code> to "
+                      f"<code>&lt;Model&gt; N</code> in MultiLogin and Airtable."]
+    elif d.blocked_warmup:
+        n = len(d.blocked_warmup)
+        also = (f" The {suppressed} tagged above need one too — "
+                f"{d.blocked_warmup_total} in all." if suppressed else "")
+        lines += ["", f"🕓 <b>{n} {'more ' if suppressed else ''}warm-up phone"
+                      f"{'' if n == 1 else 's'} cannot finish "
+                      f"without a person.</b> They have done every day the bot can "
+                      f"run and are waiting for a model: day 4 is the first reel, "
+                      f"and a reel needs a model's video. Rename them from "
+                      f"<code>Blank (NN)</code> to <code>&lt;Model&gt; N</code> in "
+                      f"MultiLogin and Airtable and they finish on their own." + also,
+                  # De-duplicated for display only: MLX names are not unique
+                  # (this workspace has three "Blank (5)"), and a sample that
+                  # repeats a name reads as a bug rather than as two phones.
+                  # The count above stays the true number of profiles.
+                  "e.g. " + ", ".join(f"<b>{n}</b>" for n in d.blocked_sample)
+                  + (f" … {n} in total" if n > 5 else "")]
+
+    lines += ["", f"Last {WINDOW_HOURS}h: <b>{d.posted} posted</b>, {d.failed} failed, "
+                  f"{d.pending} still queued (of {d.due} due)."]
+    if d.flagged:
+        lines.append(f"All flagged phones carry the <code>{at_issue_tag()}</code> "
+                     f"tag in MultiLogin.")
+    return "\n".join(lines)
+
+
+def at_issue_tag() -> str:
+    from adb_bot.automation.issue_tags import ISSUE_TAG
+    return ISSUE_TAG
+
+
+def run_digest(airtable, notifier=None, dry_run: bool = True, logger=None,
+               now=None) -> Digest:
+    """Read both tables, compose, and send. Read-only against Airtable."""
+    if notifier is None:
+        from adb_bot.clients.telegram import TelegramNotifier
+        notifier = TelegramNotifier()
+
+    profiles = airtable.list_profile_rows() if hasattr(airtable, "list_profile_rows") \
+        else airtable._list_table(at.TABLE_PROFILES)
+    queue_rows = airtable._list_table(at.TABLE_POSTING_QUEUE)
+
+    # Its own try, and a soft failure: the hand-applied tags need MultiLogin and
+    # a second, differently-shaped read of the same table, and neither is worth
+    # losing the whole digest over. Missing, the section is simply absent.
+    tagged: list = []
+    try:
+        from adb_bot.automation.report import mlx_inventory, mlx_only_issues
+        tagged = mlx_only_issues(airtable.profile_overview(),
+                                 mlx_items=mlx_inventory()).get("warmup") or []
+    except Exception as exc:
+        if logger is not None:
+            logger.info("digest: hand-applied tags not read (%s: %s)",
+                        type(exc).__name__, exc)
+
+    d = build_digest(profiles, queue_rows, now=now, tagged_warmup=tagged)
+    body = format_digest(d)
+
+    if logger is not None:
+        logger.info("digest: %d flagged, %d parked-unflagged, last %dh %d/%d posted",
+                    d.flagged, len(d.parked_unflagged), WINDOW_HOURS, d.posted, d.due)
+        for line in body.replace("<b>", "").replace("</b>", "") \
+                        .replace("<code>", "").replace("</code>", "").splitlines():
+            if line.strip():
+                logger.info("  %s", line)
+
+    if dry_run:
+        return d
+    if not notifier.configured:
+        if logger is not None:
+            logger.info("digest: %s, nothing sent", notifier.describe())
+        return d
+    notifier.send(body, logger=logger)
+    return d

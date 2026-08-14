@@ -9,6 +9,7 @@ from adb_bot.automation.lifecycle import (
     STAGE_NOT_STARTED,
     STAGE_POSTING,
     STAGE_WARMUP,
+    WARMUP_DAYS,
     campaign_stage,
     day_number,
     describe_campaign,
@@ -30,17 +31,20 @@ class LifecycleTest(TestCase):
         self.assertEqual(campaign_stage(START, date(2026, 1, 5)), STAGE_WARMUP)
         self.assertEqual(campaign_stage(START, date(2026, 1, 6)), STAGE_POSTING)
 
-    def test_warmup_days_1_2_4_5_only_warmup(self):
-        for d in (1, 2, 4, 5):
+    def test_every_warmup_day_is_warmup_only(self):
+        for d in (1, 2, 3, 4, 5):
             actions = plan_actions_for_day(START, date(2026, 1, d))
             self.assertEqual([a.flow for a in actions], [FLOW_WARMUP])
 
-    def test_day_3_adds_picture_and_bio(self):
-        actions = plan_actions_for_day(START, date(2026, 1, 3))
-        self.assertEqual(
-            [a.flow for a in actions],
-            [FLOW_WARMUP, FLOW_UPDATE_PICTURE, FLOW_UPDATE_BIO],
-        )
+    def test_no_warmup_day_sets_the_picture_or_bio(self):
+        """Dropped from the warm-up on 2026-08-06 (client's call) -- picture and
+        bio are set up outside it now. The flows themselves still exist for the
+        UI and for a Warmup Plan row that asks for them; what changed is that
+        the built-in schedule never asks on its own."""
+        scheduled = {a.flow for d in range(1, WARMUP_DAYS + 1)
+                     for a in plan_actions_for_day(START, date(2026, 1, d))}
+        self.assertNotIn(FLOW_UPDATE_PICTURE, scheduled)
+        self.assertNotIn(FLOW_UPDATE_BIO, scheduled)
 
     def test_day_6_onward_three_reels_with_times(self):
         actions = plan_actions_for_day(START, date(2026, 1, 6))
@@ -59,6 +63,6 @@ class LifecycleTest(TestCase):
         self.assertEqual(len(preview), 6)
         self.assertEqual(preview[0]["day"], 1)
         self.assertEqual(preview[2]["day"], 3)
-        self.assertEqual(len(preview[2]["actions"]), 3)  # warmup + picture + bio
+        self.assertEqual(len(preview[2]["actions"]), 1)  # warm-up only, every warm-up day
         self.assertEqual(preview[5]["stage"], STAGE_POSTING)
         self.assertEqual(len(preview[5]["actions"]), 3)  # three reels

@@ -209,3 +209,60 @@ class FlowWiringTest(TestCase):
         pushed_at = src.index("_adb_push_media_to_device(")
         self.assertLess(checked_at, pushed_at,
                         "checking after the push wastes a 20MB upload on a post we must refuse")
+
+
+class QueueIdReachesTheLedgerTest(TestCase):
+    """The recheck matches ledger entries to Airtable rows by queue_id.
+
+    Live evidence, 2026-08-03: both Verifying rows came back "no local ledger
+    entry -- cannot be resolved here" while the ledger held all four posts --
+    every entry written with queue_id="". Nothing set it on the Profile, so
+    `getattr(profile, "queue_id", "")` in the reel flow always read empty and
+    the deferred recheck could never resolve any row, for any post.
+    """
+
+    def test_profile_carries_queue_id(self):
+        from adb_bot.core.models import Profile
+        self.assertIsNone(Profile(id="p", status="active").queue_id)
+        self.assertEqual(Profile(id="p", status="active", queue_id="recQ1").queue_id, "recQ1")
+
+    def test_coerce_profile_sets_it_for_each_input_shape(self):
+        from adb_bot.automation.workflow import coerce_profile
+        from adb_bot.core.models import Profile
+
+        made = coerce_profile({"id": "p", "status": "active"}, "p", queue_id="recQ1")
+        self.assertEqual(made.queue_id, "recQ1")
+
+        existing = Profile(id="p", status="active")
+        self.assertEqual(coerce_profile(existing, "p", queue_id="recQ2").queue_id, "recQ2")
+
+        class Raw:
+            id, status, ip, port, pwd = "p", "active", "1.2.3.4", "5555", ""
+        self.assertEqual(coerce_profile(Raw(), "p", queue_id="recQ3").queue_id, "recQ3")
+
+    def test_posting_runner_passes_the_queue_id_through(self):
+        """The end of the chain: the runner must hand its item's queue_id to the
+        workflow, or the ledger entry is unmatchable no matter what else works."""
+        from unittest import mock
+        from adb_bot.automation import posting_runner
+        from adb_bot.automation.posting_planner import PostingItem
+
+        item = PostingItem(queue_id="recQ9", account_id=None, account_name="Katja 1",
+                           launch_id="LID", video_path="v.mp4", caption=None,
+                           variant_id="recV1", scheduled=None, retry_count=0)
+        captured = {}
+
+        def fake_workflow(*args, **kwargs):
+            captured.update(kwargs)
+
+        with mock.patch.object(posting_runner, "run_profile_workflow", fake_workflow):
+            plan = mock.Mock(to_post=[item], skipped=[])
+            with mock.patch.object(posting_runner, "ProfileLocks"), \
+                 mock.patch.object(posting_runner, "resolve_concurrency", return_value=1):
+                posting_runner._launch_and_post(
+                    plan, ["LID"], mock.Mock(), mock.Mock(), mock.Mock(), mock.Mock(),
+                    mock.Mock(bearer_token="t"), mock.Mock(), mock.Mock(),
+                    10, 2, 0, None, None, None, "instagram_reel_upload_u2",
+                )
+
+        self.assertEqual(captured.get("queue_id"), "recQ9")

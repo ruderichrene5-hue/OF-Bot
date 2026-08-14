@@ -1,0 +1,93 @@
+# MultiLogin X agent -- the local service every phone-touching loop depends on.
+#
+# Install with deploy/systemd/install_mlx_agent.sh (NOT install_units.sh: that
+# script installs the loop *timers*, and this is a plain always-on service).
+#
+# Everything below was read off the hand-started process it replaces
+# (pid 520998, started 2026-08-04 23:07) rather than from documentation:
+#
+#   /proc/<pid>/exe      -> /opt/mlx/agent.bin
+#   /proc/<pid>/cmdline  -> "/opt/mlx/agent.bin"   (no arguments)
+#   /proc/<pid>/cwd      -> /opt/mlx
+#   /proc/<pid>/status   -> Uid 0 (root)
+#   /proc/<pid>/environ  -> DISPLAY=:0
+#                           XAUTHORITY=/var/run/lightdm/root/:0
+#
+# Note that the process LISTENING on :45001 is not this binary -- it is
+# `deps/launcher/<version>/launcher-linux_amd64.bin`, which agent.bin spawns as
+# a child. Supervise the parent: the launcher's path carries a version number
+# that MLX rewrites on every self-update, so a unit pointed at it would break at
+# the next upgrade.
+
+[Unit]
+Description=MultiLogin X agent (mobile profile launcher API on :45001)
+Documentation=file:///root/adb_bot/deploy/RUNBOOK.md
+
+# The agent needs a running X server: it is a desktop app driving phone windows.
+# graphical.target is the requirement from TODO_2026-08-05 3.1;
+# display-manager.service is added because that is the unit that actually starts
+# X and writes the cookie at XAUTHORITY, and "graphical.target reached" is only
+# a rough proxy for "X is usable". Ordering only -- no Wants=/Requires=, so
+# booting this box to plain multi-user.target does not drag a GUI in. (In that
+# case both After= lines are simply ignored, and the ExecStartPre wait below is
+# what stops us racing ahead of a display that is coming up late.)
+After=graphical.target display-manager.service
+After=network-online.target
+Wants=network-online.target
+
+# "Restart=always" should mean always. The default start rate limit (5 starts in
+# 10s) would otherwise let a fast crash loop latch the unit into `failed` and
+# leave it there -- which is exactly the silent hour this unit exists to prevent.
+StartLimitIntervalSec=0
+
+[Service]
+# simple, not forking: the hand-started agent.bin stayed in the foreground as a
+# direct child of the shell that launched it (PPid 520997 was the launching
+# `bash -c`), so it never daemonises away from its parent.
+Type=simple
+WorkingDirectory=/opt/mlx
+ExecStart=/opt/mlx/agent.bin
+
+# Give a late-starting X server up to 30s before we launch into it. Always
+# succeeds -- if the display never appears we start anyway and let Restart=
+# handle the fallout, rather than failing in ExecStartPre where restart
+# semantics are murkier.
+ExecStartPre=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do [ -e /var/run/lightdm/root/:0 ] && break; sleep 3; done'
+
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/var/run/lightdm/root/:0
+
+# Repo convention (see the adbbot-*.service loop units). The agent does not read
+# our tokens -- the live process has no MULTILOGIN_TOKEN in its environment, it
+# authenticates from /root/mlx/configs -- so this is parity and future-proofing
+# only. The leading '-' keeps a missing file from being a startup failure.
+EnvironmentFile=-/etc/adbbot/env
+
+Restart=always
+RestartSec=10
+
+# The OOM kill that took the agent down on 2026-08-04 took its whole session
+# with it. This cgroup holds the launcher plus one phone_launcher per live
+# profile (~170 MB each, and there can be a dozen), so those children are the
+# likely OOM victims. The default OOMPolicy=stop would tear down the agent -- and
+# every other live phone -- because one phone was killed. `continue` keeps the
+# agent up and lets only the killed child die.
+OOMPolicy=continue
+
+# Explicit because it is load-bearing, not just the default: stopping the unit
+# must reap the launcher and every phone_launcher too. An orphaned launcher
+# would keep :45001 bound and leave a stale pid in /root/mlx/launcher.lock, so
+# the restarted agent could not come back.
+KillMode=control-group
+TimeoutStopSec=30
+
+# Runs as root: no User= is set, matching the loop units, and root is required
+# rather than incidental -- the cookie at /var/run/lightdm/root/:0 is mode 0600
+# owned by root, so any other user cannot open the display.
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=adbbot-mlx-agent
+
+[Install]
+WantedBy=multi-user.target

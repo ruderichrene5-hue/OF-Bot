@@ -22,10 +22,33 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# How many MultiLogin profiles may be running at the same moment. Five is what
-# the server drives without the flows slowing each other down; above that,
-# everything gets slower at once rather than anything failing outright.
-MAX_CONCURRENT_PROFILES = 5
+# How many MultiLogin profiles one loop may DRIVE at the same moment. Note what
+# this does not bound: the phone's OS processes outlive the window. A profile
+# the bot has finished with keeps its WebKitWebProcess (~150 MB) alive for tens
+# of minutes after shutdown is issued, and each loop applies this cap
+# independently -- posting and warmup do not know about each other.
+#
+# On 2026-08-04 that gap emptied the box twice. The kernel's OOM dump at the
+# first kill counted 78 WebKitWebProcess (12.8 GB) and 77 phone processes
+# (3.6 GB) alive at once: 17.7 GB of RSS on 15.6 GB of RAM with no swap. The
+# cap was doing its job -- five profiles were being driven -- while seventy-odd
+# phones from earlier runs had not yet gone away. The OOM killer took the user
+# session's systemd and dbus, which took the MultiLogin agent down with them.
+#
+# Raised to 10 once the leak itself was fixed: `run_profile_workflow` now closes
+# every phone on every exit path and force-closes anything still open after
+# MAX_PROFILE_OPEN_SECONDS (7 min). With phones actually being reaped, the live
+# count tracks this cap instead of climbing all evening, so 10 x ~150 MB is a
+# bounded ~1.5 GB per loop rather than the unbounded growth that hit 78.
+# 8 GB of swap was added the same night as a second line of defence.
+#
+# "Each loop applies this cap independently" is no longer the end of the story:
+# `locks.live_profile_slot` is the ceiling that spans loops (default 12 phones,
+# ADBBOT_MAX_LIVE_PROFILES), and every path that opens a phone takes a slot from
+# it before launching. This constant still bounds one loop's rolling window --
+# how much work it will try to have in flight -- while the slot decides whether
+# the box can afford the next phone at all.
+MAX_CONCURRENT_PROFILES = 10
 
 
 def chunked(items, size: int) -> list:

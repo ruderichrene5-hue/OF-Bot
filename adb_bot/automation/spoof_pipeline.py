@@ -16,22 +16,81 @@ video_spoofer CLI).
 from __future__ import annotations
 
 import hashlib
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from adb_bot.clients import airtable as at
+from adb_bot.config.settings import DEFAULT_RAW_FOLDER_MODEL_ALIASES
 
 # Video extensions the pipeline treats as raw sources.
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
 
 SPOOF_METHOD = "video_spoofer/vtf run"
 
+# A skip whose reason contains one of these means "raw clips arrived for a model
+# that has no target to spoof them for" -- an onboarding gap, not an idle run.
+# `loop_watchdog.observe_pipeline` matches on it so an unroutable folder stops
+# reading as IDLE, so the exact wording below is load-bearing; change both.
+UNROUTABLE_SKIP_MARKERS = ("no MLX profiles under model",
+                           "no active accounts under model")
+
 # Most variants one run will produce before stopping and leaving the rest for the
 # next cycle. Without this, the first run against a full raw library would kick
 # off hundreds of encodes back-to-back and fill the disk.
 MAX_VARIANTS_PER_RUN = 20
+
+# What a raw video gets spoofed *for*. See run_pipeline().
+TARGETS_ACCOUNTS = "accounts"
+TARGETS_PROFILES = "profiles"
+
+
+# Raw folders whose name is not the model whose content they hold. Everything
+# here keys off the folder name, so a mislabelled folder matches no targets and
+# every video under it is skipped -- and the skip reads "no MLX profiles under
+# model 'Corina'", which looks like a real inventory gap rather than a label
+# that is simply wrong. Confirmed by the operator on 2026-08-04: 01_Raw_Videos/
+# Corina holds Nikki's content (its files are even named "nikki N ..."), and
+# Mandy's holds Luisa's. Between them they cover 23 of the 52 live profiles.
+#
+# Keys are compared lower-cased; values are the model name as Airtable spells
+# it. Delete an entry once the Drive folder itself is renamed.
+#
+# The map is CONFIGURATION, not code (moved 2026-08-10): it lives in
+# `settings.get_raw_folder_model_aliases()`, overridable by the
+# `RAW_FOLDER_MODEL_ALIASES` env var or a saved `raw_folder_model_aliases` dict,
+# and defaults to exactly the two entries below. Onboarding a model whose Drive
+# folder is named after it needs no entry at all; one whose folder disagrees is
+# now an ops edit rather than a code change plus a redeploy of the pinned copy
+# under /opt. The default is defined once, in settings, and re-exported here so
+# importers (and the report's `_aliased_folder`) keep working and the two copies
+# can never drift.
+RAW_FOLDER_MODEL_ALIASES = dict(DEFAULT_RAW_FOLDER_MODEL_ALIASES)  # back-compat name
+
+
+def raw_folder_model_aliases() -> dict:
+    """The live alias map. Falls back to the built-in default if settings can't
+    be read -- an unreadable settings file must not silently re-point Nikki's
+    and Luisa's content at folders with no profiles."""
+    try:
+        from adb_bot.config import settings
+
+        aliases = settings.get_raw_folder_model_aliases()
+    except Exception:
+        aliases = None
+    return aliases if isinstance(aliases, dict) and aliases else dict(DEFAULT_RAW_FOLDER_MODEL_ALIASES)
+
+
+def resolve_model(folder_name: str, aliases: dict | None = None) -> str:
+    """The model a raw folder's videos belong to, honouring the alias map.
+
+    `aliases` is for callers that already loaded the map (a loop over folders,
+    a test); omitted, it is read from settings.
+    """
+    table = raw_folder_model_aliases() if aliases is None else aliases
+    return table.get((folder_name or "").strip().lower(), folder_name)
 
 
 @dataclass
@@ -62,6 +121,18 @@ class LocalRawSource:
     def release(self, video: RawVideo, path: str) -> None:
         return None
 
+    def list_folder_names(self) -> list:
+        """Every model folder that exists, INCLUDING the empty ones.
+
+        `list_by_model` deliberately drops a folder with no videos -- the
+        pipeline only wants folders with work. But an empty folder is exactly
+        what a just-onboarded model looks like, so dropping it everywhere made a
+        new model invisible to every check. Inventory checks use this instead.
+        """
+        if not self.raw_root.is_dir():
+            return []
+        return sorted(d.name for d in self.raw_root.iterdir() if d.is_dir())
+
     def list_by_model(self) -> dict:
         out: dict = {}
         if not self.raw_root.is_dir():
@@ -79,6 +150,21 @@ class LocalRawSource:
         return out
 
 
+DRIVE_TEMP_DIRNAME = "adbbot_raw"
+
+
+def drive_temp_root(temp_dir: str | None = None) -> str:
+    """Where Drive downloads land: `<tmp>/adbbot_raw/<Model>/<file>`.
+
+    A function rather than a constant because the cleanup loop needs the same
+    answer `DriveRawSource.resolve` uses -- `release()` unlinks the downloaded
+    file but leaves the per-model folder behind, so without a shared definition
+    the empty dirs pile up unseen.
+    """
+    base = Path(temp_dir) if temp_dir else Path(tempfile.gettempdir())
+    return str(base / DRIVE_TEMP_DIRNAME)
+
+
 class DriveRawSource:
     """Raw videos in Google Drive: per-model subfolders under a root folder
     (`01_Raw_Videos/{Model}/*.mp4`), matching the local layout.
@@ -92,6 +178,12 @@ class DriveRawSource:
         self.client = client
         self.root_folder_id = root_folder_id
         self.temp_dir = temp_dir
+
+    def list_folder_names(self) -> list:
+        """Every model folder under the raw root, empty ones included. One cheap
+        metadata call -- no per-folder file listing. See the local source."""
+        return sorted(str(f.get("name") or "") for f in self.client.list_subfolders(self.root_folder_id)
+                      if str(f.get("name") or "").strip())
 
     def list_by_model(self) -> dict:
         out: dict = {}
@@ -114,8 +206,7 @@ class DriveRawSource:
     def resolve(self, video: RawVideo) -> str | None:
         if not video.source_id:
             return video.path or None
-        base = Path(self.temp_dir) if self.temp_dir else Path(tempfile.gettempdir())
-        dest = base / "adbbot_raw" / video.model / video.name
+        dest = Path(drive_temp_root(self.temp_dir)) / video.model / video.name
         return self.client.download(video.source_id, str(dest))
 
     def release(self, video: RawVideo, path: str) -> None:
@@ -147,6 +238,58 @@ def _seed_for(raw_name: str, handle: str) -> int:
     the same distinct variant, and two accounts never get the same one."""
     digest = hashlib.sha256(f"{raw_name}|{handle}".encode("utf-8")).hexdigest()
     return int(digest[:8], 16)
+
+
+def safe_name(text: str) -> str:
+    """Filesystem- and shell-safe filename fragment.
+
+    Output paths end up inside Android shell commands (the media-scanner
+    broadcast takes the pushed file's path), and the device shell splits on
+    spaces, so a name like ``clip 1 aug.mp4`` would break on the phone even
+    though `adb push` itself handles it. Collapse anything outside
+    ``[A-Za-z0-9._-]`` to a single underscore.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(text).strip())
+    return cleaned.strip("._-") or "unnamed"
+
+
+def next_run_dir(out_root: str, model: str) -> Path:
+    """``<out_root>/<Model>/run<N>``, N one past the highest run folder present.
+
+    One run folder per raw video. Numbering continues across pipeline
+    invocations -- a video picked up tomorrow becomes the next run rather than
+    reopening an existing one. A run folder removed by cleanup can have its
+    number reused; that is harmless because the Airtable rows pointing at it
+    were only cleaned up once already marked Used.
+    """
+    model_dir = Path(out_root) / model
+    highest = 0
+    if model_dir.is_dir():
+        for child in model_dir.iterdir():
+            if not child.is_dir():
+                continue
+            match = re.fullmatch(r"run(\d+)", child.name)
+            if match:
+                highest = max(highest, int(match.group(1)))
+    return model_dir / f"run{highest + 1}"
+
+
+def finalize_variant(produced: Path, raw_name: str, handle: str) -> Path:
+    """Rename a freshly-spoofed file to ``<source>__<handle><ext>``.
+
+    Must happen before the next account is spoofed into the same run folder.
+    `vtf` names every output after the SOURCE video, so without this the second
+    account's encode overwrites the first (the CLI is run with ``--overwrite``),
+    `build_cli_spoofer` then finds no new file, falls back to "newest video in
+    the directory", and every account ends up sharing one file -- the exact
+    duplicate-content problem the per-account variants exist to avoid.
+    """
+    target = produced.with_name(
+        f"{safe_name(Path(raw_name).stem)}__{safe_name(handle)}{produced.suffix}"
+    )
+    if target != produced:
+        produced.replace(target)   # replace() overwrites an existing target
+    return target
 
 
 def build_cli_spoofer(spoofer_python: str, spoofer_cwd: str, preset: str = "normal"):
@@ -202,8 +345,30 @@ def build_source(raw_root: str | None = None, drive_folder_id: str | None = None
 def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
                  spoof_fn=None, source=None, dry_run: bool = True,
                  drive_folder_id: str | None = None, service_account_json: str | None = None,
-                 max_variants: int | None = MAX_VARIANTS_PER_RUN) -> PipelineReport:
-    """Scan for new raw videos and spoof one variant per active account.
+                 max_variants: int | None = MAX_VARIANTS_PER_RUN,
+                 targets: str = TARGETS_ACCOUNTS,
+                 only_handles=None) -> PipelineReport:
+    """Scan for new raw videos and spoof one variant per target under the model.
+
+    `targets` picks what a "target" is:
+
+    - ``'accounts'`` (default): Airtable Accounts at Lifecycle Stage Active.
+    - ``'profiles'``: the MLX profile inventory, via Profiles (Cloning). Use this
+      for models that have phones but no Accounts rows yet -- the variant links
+      to the profile instead of an account. A phone carrying two Instagram
+      accounts arrives as two targets with different handles, so it gets two
+      encodes of every raw video -- one per account. That is the point: posting
+      one file on both accounts of the same phone is duplicate content of the
+      most detectable kind.
+
+    Either way a target is ``{'handle': str}`` plus an id, so everything below
+    this point is the same for both.
+
+    `only_handles` narrows the run to those target handles (account handle or
+    profile name, case-insensitive). Models left with no target after filtering
+    are dropped entirely rather than reported as skips -- they were never asked
+    for. Use it to try one profile end to end before committing to a full
+    fan-out, which is 28 serial encodes at the current inventory.
 
     `spoof_fn(raw_path, out_dir, seed, logger) -> Path|None` does the actual
     encoding; if omitted, real runs need one (dry-runs don't call it).
@@ -239,17 +404,42 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
         return report
 
     existing = airtable.content_pipeline_names()
-    active_by_model = airtable.active_accounts_by_model()
+    by_profile = targets == TARGETS_PROFILES
+    active_by_model = (airtable.profile_targets_by_model() if by_profile
+                       else airtable.active_accounts_by_model())
+    if only_handles:
+        wanted = {str(h).strip().lower() for h in only_handles if str(h).strip()}
+        active_by_model = {
+            model: kept
+            for model, targets_for_model in active_by_model.items()
+            if (kept := [t for t in targets_for_model if str(t["handle"]).lower() in wanted])
+        }
+        logger.info("pipeline: restricted to %s target(s): %s",
+                    sum(len(v) for v in active_by_model.values()),
+                    ", ".join(sorted(t["handle"] for v in active_by_model.values() for t in v)) or "none")
     model_ids = airtable.models_by_name()
 
     capped = False
-    for model, videos in by_model.items():
+    # Read the (now configurable) alias map once per run, not once per folder.
+    aliases = raw_folder_model_aliases()
+    for raw_folder, videos in by_model.items():
+        # The folder name is only a label for the model; an aliased folder is
+        # treated as its real model everywhere below (targets, the Content
+        # Pipeline link, and the output run folder).
+        model = resolve_model(raw_folder, aliases)
+        if model != raw_folder:
+            logger.info("pipeline: raw folder %r holds %s content", raw_folder, model)
         accounts = active_by_model.get(model.lower(), [])
+        if only_handles and not accounts:
+            # Filtered out, not missing: reporting every other model as a skip on
+            # a one-profile run would bury the skips that actually mean something.
+            continue
         for video in videos:
             if video.name in existing:
                 continue  # already processed on a prior run
             if not accounts:
-                report.skipped.append((video.name, f"no active accounts under model '{model}'"))
+                what = "MLX profiles" if by_profile else "active accounts"
+                report.skipped.append((video.name, f"no {what} under model '{model}'"))
                 continue
 
             # Budget check happens between videos so a video is always done in
@@ -263,8 +453,9 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
             if dry_run:
                 report.processed_videos.append(video.name)
                 report.variants_created += len(accounts)
-                logger.info("[DRY-RUN] would spoof %s for %s account(s) under %s",
-                            video.name, len(accounts), model)
+                logger.info("[DRY-RUN] would spoof %s for %s %s under %s",
+                            video.name, len(accounts),
+                            "profile(s)" if by_profile else "account(s)", model)
                 continue
 
             if spoof_fn is None:
@@ -288,21 +479,49 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
                 continue
             report.processed_videos.append(video.name)
 
+            # One run folder per raw video, shared by every account under the
+            # model: <out_root>/<Model>/run<N>/<source>__<handle>.mp4
+            run_dir = next_run_dir(out_root, model)
+            logger.info("pipeline: %s -> %s", video.name, run_dir)
+
             any_failed = False
             try:
                 for acct in accounts:
                     handle = acct["handle"]
-                    out_dir = str(Path(out_root) / model / handle)
                     try:
-                        variant_path = spoof_fn(local_raw, out_dir, _seed_for(video.name, handle), logger)
+                        produced = spoof_fn(local_raw, str(run_dir), _seed_for(video.name, handle), logger)
                     except Exception as exc:  # a bad encode shouldn't kill the batch
                         logger.warning("spoof error for %s/%s: %s", model, handle, exc)
-                        variant_path = None
-                    if not variant_path:
+                        produced = None
+                    if not produced:
                         any_failed = True
                         report.errors.append((f"{video.name} -> {handle}", "spoof produced no file"))
                         continue
-                    airtable.create_spoof_variant(cp_id, acct["account_id"], str(variant_path), method=SPOOF_METHOD)
+                    # Rename before the next account runs -- see finalize_variant().
+                    # A failure here must not be recorded: the un-renamed file
+                    # would be overwritten by the next account and the row would
+                    # point at somebody else's video.
+                    try:
+                        variant_path = finalize_variant(Path(produced), video.name, handle)
+                    except OSError as exc:
+                        logger.warning("could not name the variant for %s/%s: %s", model, handle, exc)
+                        any_failed = True
+                        report.errors.append((f"{video.name} -> {handle}", f"could not name the variant: {exc}"))
+                        continue
+                    airtable.create_spoof_variant(
+                        cp_id,
+                        None if by_profile else acct["account_id"],
+                        str(variant_path),
+                        method=SPOOF_METHOD,
+                        target_profile_id=acct["profile_id"] if by_profile else None,
+                        # A two-account phone appears here as two targets on one
+                        # profile. Stamping the slot is what stops the queue
+                        # pooling their variants together -- unstamped, both
+                        # accounts would draw from one pile and each raw video
+                        # would reach only one of them.
+                        target_handle=acct.get("ig_handle"),
+                        account_slot=acct.get("slot"),
+                    )
                     report.variants_created += 1
             finally:
                 source.release(video, local_raw)

@@ -61,6 +61,11 @@ class NormalizedProfile:
     proxy_endpoint: str | None = None
     proxy_location: str | None = None
     created_at: str | None = None
+    # MLX's own labels for the profile ("Created", "Active / Posting",
+    # "Issue", ...). The warm-up runs on the "Created" ones -- see
+    # warmup_targets.py -- so this is the one field here that decides work
+    # rather than describing a phone.
+    tags: tuple = ()
 
 
 @dataclass
@@ -171,6 +176,7 @@ def normalize_mlx_item(item: dict, folder_names: dict | None = None) -> Normaliz
         proxy_endpoint=_proxy_endpoint(proxy),
         proxy_location=_clean(equipment.get("country_name")),
         created_at=_clean(item.get("created_at")),
+        tags=tuple(t for t in (_clean(tag) for tag in (item.get("tags") or [])) if t),
     )
 
 

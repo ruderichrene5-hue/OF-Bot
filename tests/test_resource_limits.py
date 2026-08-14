@@ -1,6 +1,7 @@
 """CPU/disk guard rails: profile concurrency, spoof throughput, and retention."""
 
 import logging
+import tempfile
 import time
 from pathlib import Path
 from unittest import TestCase
@@ -19,10 +20,14 @@ LOG = logging.getLogger("test")
 
 
 class BatchingTest(TestCase):
-    def test_default_cap_is_five_profiles(self):
-        # Above five, the flows do not fail -- they all get slower together.
-        self.assertEqual(MAX_CONCURRENT_PROFILES, 5)
-        self.assertEqual(resolve_concurrency(None), 5)
+    def test_default_cap_is_ten_profiles(self):
+        # Raised to 10 on 2026-08-04, once `run_profile_workflow` was made to
+        # close every phone on every exit path (and force-close anything still
+        # open after 7 min). Before that the live phone count was unbounded by
+        # this cap -- 78 were alive with only five being driven -- and the box
+        # OOMed twice. See batching.py and workflow.py for the full note.
+        self.assertEqual(MAX_CONCURRENT_PROFILES, 10)
+        self.assertEqual(resolve_concurrency(None), 10)
 
     def test_chunks_are_capped(self):
         batches = chunked(range(25), 10)
@@ -32,16 +37,16 @@ class BatchingTest(TestCase):
     def test_no_batch_exceeds_the_cap_for_a_big_fleet(self):
         # 91 profiles is the real MultiLogin workspace size.
         for batch in chunked(range(91), resolve_concurrency(None)):
-            self.assertLessEqual(len(batch), 5)
+            self.assertLessEqual(len(batch), MAX_CONCURRENT_PROFILES)
 
     def test_empty_input(self):
         self.assertEqual(chunked([], 10), [])
 
     def test_explicit_override_and_bad_values(self):
-        self.assertEqual(resolve_concurrency(3), 3)
+        self.assertEqual(resolve_concurrency(7), 7)
         self.assertEqual(resolve_concurrency(0), 1)      # never zero
         self.assertEqual(resolve_concurrency(-5), 1)
-        self.assertEqual(resolve_concurrency("nonsense"), 5)
+        self.assertEqual(resolve_concurrency("nonsense"), MAX_CONCURRENT_PROFILES)
 
     def test_every_run_path_uses_the_rolling_window(self):
         """Including the UI. The headless runners were capped long ago, but the
@@ -204,8 +209,9 @@ class FakePipelineClient:
     def create_content_pipeline(self, name, model_id=None, raw_link=None):
         return f"recCP-{name}"
 
-    def create_spoof_variant(self, cp, acct, path, method=None, variant_id=None):
-        self.variant_rows.append((cp, acct, path))
+    def create_spoof_variant(self, cp, acct, path, method=None, variant_id=None,
+                             target_profile_id=None, target_handle=None, account_slot=None):
+        self.variant_rows.append((cp, acct or target_profile_id, path))
         return "recSV"
 
     def set_content_pipeline_spoofed(self, rec, failed=False):
@@ -236,11 +242,17 @@ class VariantCapTest(TestCase):
         def spoof(raw, out_dir, seed, logger=None):
             if order is not None:
                 order.append(raw)
-            return Path(out_dir) / f"v{seed}.mp4"
+            # spoof_fn must return a file that exists: the pipeline renames it
+            # into <source>__<handle> before recording the variant.
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            produced = Path(out_dir) / f"v{seed}.mp4"
+            produced.write_text("video")
+            return produced
 
         kwargs = {} if max_variants is None else {"max_variants": max_variants}
-        report = run_pipeline(client, LOG, raw_root="/raw", out_root="/out",
-                              source=FakeSource(videos), spoof_fn=spoof, dry_run=False, **kwargs)
+        with tempfile.TemporaryDirectory() as out_root:
+            report = run_pipeline(client, LOG, raw_root="/raw", out_root=out_root,
+                                  source=FakeSource(videos), spoof_fn=spoof, dry_run=False, **kwargs)
         return report, client
 
     def test_default_cap_is_twenty(self):
@@ -365,6 +377,323 @@ class VariantRetentionTest(TestCase):
         self.assertEqual(report.deleted, [])
 
 
+class UsedInboxDetectionTest(TestCase):
+    """The input sweep has nothing to sweep on this server -- say so rather than
+    logging a clean `deleted=0 kept=0`, which reads like a working pass."""
+
+    def test_false_when_no_root_has_a_used_folder(self):
+        import tempfile
+        root = Path(tempfile.mkdtemp())
+        (root / "Nikki").mkdir()
+        self.assertFalse(retention.has_used_inbox([str(root)]))
+
+    def test_true_when_one_root_has_one(self):
+        import tempfile
+        a = Path(tempfile.mkdtemp())
+        b = Path(tempfile.mkdtemp())
+        (b / "used").mkdir()
+        self.assertTrue(retention.has_used_inbox([str(a), str(b)]))
+
+    def test_blank_and_missing_roots_are_safe(self):
+        self.assertFalse(retention.has_used_inbox([None, "", "/no/such/dir"]))
+        self.assertFalse(retention.has_used_inbox(None))
+
+
+class OrphanVariantSweepTest(TestCase):
+    """Files on disk that no Spoof Variant row mentions. This is the only sweep
+    that deletes without a `Used` status, so most of these tests are about it
+    refusing to run."""
+
+    def setUp(self):
+        import os
+        import tempfile
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / "Nikki").mkdir()
+        self.orphan_old = self.root / "Nikki" / "orphan_old.mp4"
+        self.orphan_new = self.root / "Nikki" / "orphan_new.mp4"
+        self.known_ready = self.root / "Nikki" / "ready.mp4"
+        self.known_used = self.root / "Nikki" / "used.mp4"
+        self.not_a_video = self.root / "Nikki" / "notes.txt"
+        for f in (self.orphan_old, self.orphan_new, self.known_ready,
+                  self.known_used, self.not_a_video):
+            f.write_bytes(b"q" * 40)
+        old = time.time() - (30 * 86400)
+        for f in (self.orphan_old, self.known_ready, self.known_used, self.not_a_video):
+            os.utime(f, (old, old))
+
+        rows = {
+            "v1": {"file_path": str(self.known_ready), "status": "Ready"},
+            "v2": {"file_path": str(self.known_used), "status": "Used"},
+            "v3": {"file_path": "/gone/already.mp4", "status": "Used"},
+        }
+
+        class FakeAT:
+            def variants_by_id(inner):
+                return dict(rows)
+        self.airtable = FakeAT()
+
+    def test_deletes_only_the_old_unreferenced_file(self):
+        report = retention.purge_orphan_variants(
+            self.airtable, str(self.root), orphan_age_days=7, dry_run=False)
+        self.assertFalse(self.orphan_old.exists())
+        self.assertTrue(self.orphan_new.exists())     # inside the window
+        self.assertTrue(self.known_ready.exists())    # referenced at Ready
+        self.assertTrue(self.known_used.exists())     # referenced; the other sweep's job
+        self.assertTrue(self.not_a_video.exists())    # not a video
+        self.assertEqual([Path(p).name for p in report.deleted], ["orphan_old.mp4"])
+
+    def test_a_referenced_file_is_never_an_orphan_whatever_its_status(self):
+        # The reference set is built from every row at every status, so a Pending
+        # or Failed variant is as protected as a Ready one.
+        class OneRow:
+            def variants_by_id(inner):
+                return {"v1": {"file_path": str(self.known_ready), "status": "Failed"}}
+
+        retention.purge_orphan_variants(OneRow(), str(self.root),
+                                        orphan_age_days=7, dry_run=False,
+                                        max_delete_fraction=1.0)
+        self.assertTrue(self.known_ready.exists())
+
+    def test_dry_run_reports_without_deleting(self):
+        report = retention.purge_orphan_variants(
+            self.airtable, str(self.root), orphan_age_days=7, dry_run=True)
+        self.assertTrue(self.orphan_old.exists())
+        self.assertEqual(len(report.deleted), 1)
+        self.assertGreater(report.freed_bytes, 0)
+
+    def test_empty_airtable_listing_aborts_the_whole_sweep(self):
+        # THE dangerous case: one API blip that returns nothing must not read as
+        # "no file is referenced" and wipe the spoofed folder.
+        class Empty:
+            def variants_by_id(inner):
+                return {}
+
+        report = retention.purge_orphan_variants(Empty(), str(self.root),
+                                                 orphan_age_days=0, dry_run=False)
+        self.assertEqual(report.deleted, [])
+        self.assertTrue(report.aborted)
+        for f in (self.orphan_old, self.known_ready, self.known_used):
+            self.assertTrue(f.exists())
+
+    def test_airtable_failure_aborts_the_whole_sweep(self):
+        class Broken:
+            def variants_by_id(inner):
+                raise RuntimeError("api down")
+
+        report = retention.purge_orphan_variants(Broken(), str(self.root),
+                                                 orphan_age_days=0, dry_run=False)
+        self.assertEqual(report.deleted, [])
+        self.assertTrue(report.aborted)
+        self.assertTrue(report.errors)
+        self.assertTrue(self.orphan_old.exists())
+
+    def test_a_truncated_listing_aborts_too(self):
+        # A partial page of rows is not an empty listing, but it makes most of
+        # the folder look unreferenced. Above the fraction, nothing is deleted.
+        class Truncated:
+            def variants_by_id(inner):
+                return {"v1": {"file_path": str(self.known_used), "status": "Used"}}
+
+        report = retention.purge_orphan_variants(
+            Truncated(), str(self.root), orphan_age_days=0, dry_run=False,
+            max_delete_fraction=0.5)
+        self.assertEqual(report.deleted, [])
+        self.assertTrue(report.aborted)
+        self.assertTrue(self.known_ready.exists())
+        self.assertTrue(self.orphan_old.exists())
+
+    def test_missing_root_is_safe(self):
+        self.assertEqual(
+            retention.purge_orphan_variants(self.airtable, None).deleted, [])
+        self.assertEqual(
+            retention.purge_orphan_variants(self.airtable, "/no/such/dir").deleted, [])
+
+    def test_default_window_is_much_longer_than_the_used_window(self):
+        # A variant is written to disk before its row is created; the gap has to
+        # be far bigger than the time that takes.
+        self.assertGreater(retention.DEFAULT_ORPHAN_AGE_DAYS,
+                           retention.DEFAULT_MAX_AGE_DAYS)
+
+    def test_two_listings_that_disagree_abort_the_sweep(self):
+        """The real completeness check. A listing short by a few rows produces
+        far too few candidates to trip the 50% magnitude guard, so the only thing
+        that can catch it is a second read that disagrees."""
+        rows_a = {"v1": {"file_path": str(self.known_ready), "status": "Ready"},
+                  "v2": {"file_path": str(self.known_used), "status": "Used"}}
+        rows_b = dict(rows_a)
+        rows_b.pop("v1")              # the second read is one row short
+
+        class Flaky:
+            calls = 0
+
+            def variants_by_id(inner):
+                inner.calls += 1
+                return dict(rows_a) if inner.calls == 1 else dict(rows_b)
+
+        report = retention.purge_orphan_variants(
+            Flaky(), str(self.root), orphan_age_days=0, dry_run=False,
+            max_delete_fraction=1.0)      # magnitude guard deliberately disabled
+        self.assertEqual(report.deleted, [])
+        self.assertTrue(report.aborted)
+        self.assertIn("disagreed", report.aborted)
+        self.assertTrue(self.orphan_old.exists())
+        self.assertTrue(self.known_ready.exists())
+
+    def test_a_short_listing_that_the_magnitude_guard_would_miss_is_still_caught(self):
+        """The 402-file case from the comment on DEFAULT_ORPHAN_MAX_FRACTION,
+        in miniature: few enough candidates to sail under 50%, caught anyway."""
+        full = dict(
+            {"v1": {"file_path": str(self.known_ready), "status": "Ready"},
+             "v2": {"file_path": str(self.known_used), "status": "Used"},
+             "v3": {"file_path": str(self.orphan_old), "status": "Ready"}})
+        short = {k: v for k, v in full.items() if k != "v3"}   # 1 of 3 rows lost
+
+        # Passed in as the first listing (what purge_used_variants read), with a
+        # short second read. Only 1 of 4 videos on disk looks orphaned -- 25%,
+        # under the guard -- and armed it would delete a Ready variant.
+        class Short:
+            def variants_by_id(inner):
+                return dict(short)
+
+        report = retention.purge_orphan_variants(
+            Short(), str(self.root), orphan_age_days=0, dry_run=False,
+            variants=full)
+        self.assertEqual(report.deleted, [])
+        self.assertTrue(report.aborted)
+        self.assertTrue(self.orphan_old.exists())
+
+    def test_a_supplied_listing_is_reused_not_re_read(self):
+        """purge_used_variants already paid for one read; this pass adds exactly
+        one more (the cross-check), never a third."""
+        class Counting:
+            calls = 0
+
+            def variants_by_id(inner):
+                inner.calls += 1
+                return {"v1": {"file_path": str(self.known_ready), "status": "Ready"},
+                        "v2": {"file_path": str(self.known_used), "status": "Used"}}
+
+        at_fake = Counting()
+        supplied = at_fake.variants_by_id()      # stands in for the earlier sweep
+        at_fake.calls = 0
+        retention.purge_orphan_variants(
+            at_fake, str(self.root), orphan_age_days=7, dry_run=True,
+            max_delete_fraction=1.0, variants=supplied)
+        self.assertEqual(at_fake.calls, 1)
+
+    def test_an_unusable_file_path_cannot_stop_the_sweep(self):
+        """A File Path cell with an embedded NUL. On this Python the ValueError
+        does not come from `Path()` -- the constructor accepts it -- it comes out
+        of `.resolve()` inside `_known_variant_paths`, which caught OSError only.
+        It escaped the sweep, escaped `_run_cleanup` (whose try caught SystemExit
+        only) and killed the whole cleanup run."""
+        class Nasty:
+            def variants_by_id(inner):
+                return {"v1": {"file_path": "bad\0path.mp4", "status": "Used"},
+                        "v2": {"file_path": str(self.known_ready), "status": "Ready"},
+                        "v3": {"file_path": str(self.known_used), "status": "Used"}}
+
+        self.assertEqual(len(retention._known_variant_paths(Nasty().variants_by_id())), 3)
+
+        report = retention.purge_orphan_variants(
+            Nasty(), str(self.root), orphan_age_days=0, dry_run=True,
+            max_delete_fraction=1.0)
+        self.assertIsNone(report.aborted)
+        self.assertTrue(self.known_ready.exists())
+
+        used = retention.purge_used_variants(Nasty(), max_age_days=0, dry_run=True)
+        self.assertIn(str(self.known_used), used.deleted)
+
+    def test_a_file_path_cell_that_is_not_a_string_is_survivable(self):
+        # A mis-typed Airtable field (attachment rather than text) hands back a
+        # list, and `Path([...])` raises TypeError.
+        class WrongType:
+            def variants_by_id(inner):
+                return {"v1": {"file_path": [{"url": "x"}], "status": "Used"},
+                        "v2": {"file_path": str(self.known_ready), "status": "Ready"}}
+
+        used = retention.purge_used_variants(WrongType(), max_age_days=0, dry_run=True)
+        self.assertTrue(any("unusable File Path" in msg for _p, msg in used.errors))
+        self.assertEqual(used.deleted, [])
+        self.assertEqual(len(retention._known_variant_paths(WrongType().variants_by_id())), 2)
+
+
+class StrandedReadyReportTest(TestCase):
+    """Ready variants aimed at a parked profile: counted, never deleted."""
+
+    def setUp(self):
+        import tempfile
+        self.root = Path(tempfile.mkdtemp())
+        self.parked_file = self.root / "parked.mp4"
+        self.active_file = self.root / "active.mp4"
+        for f in (self.parked_file, self.active_file):
+            f.write_bytes(b"s" * 1000)
+
+        ready = [
+            {"id": "v1", "file_path": str(self.parked_file), "profile_id": "recParked"},
+            {"id": "v2", "file_path": str(self.active_file), "profile_id": "recActive"},
+            {"id": "v3", "file_path": "/gone/missing.mp4", "profile_id": "recParked"},
+            {"id": "v4", "file_path": str(self.parked_file), "profile_id": None},
+        ]
+        profiles = [
+            {"record_id": "recParked", "status": "Inactive"},
+            {"record_id": "recActive", "status": "Active"},
+        ]
+
+        class FakeAT:
+            def list_ready_variants(inner):
+                return list(ready)
+
+            def posting_profiles(inner):
+                return list(profiles)
+        self.airtable = FakeAT()
+
+    def test_counts_only_parked_targets_and_deletes_nothing(self):
+        report = retention.report_stranded_ready(self.airtable)
+        self.assertEqual(report.files, 1)             # v3's file is gone, v4 has no profile
+        self.assertEqual(report.bytes, 1000)
+        self.assertEqual(report.profiles, {"recParked"})
+        self.assertTrue(self.parked_file.exists())
+        self.assertTrue(self.active_file.exists())
+
+    def test_no_parked_profiles_reports_nothing(self):
+        class AllActive:
+            def list_ready_variants(inner):
+                return []
+
+            def posting_profiles(inner):
+                return [{"record_id": "recActive", "status": "Active"}]
+
+        self.assertEqual(retention.report_stranded_ready(AllActive()).files, 0)
+
+    def test_airtable_failure_is_reported_not_raised(self):
+        class Broken:
+            def list_ready_variants(inner):
+                raise RuntimeError("api down")
+
+            def posting_profiles(inner):
+                return []
+
+        report = retention.report_stranded_ready(Broken())
+        self.assertTrue(report.error)
+        self.assertEqual(report.files, 0)
+
+    def test_an_unusable_file_path_is_skipped_not_raised(self):
+        # Path("...\0...") raises ValueError, which used to escape the report.
+        class Nasty:
+            def list_ready_variants(inner):
+                return [{"id": "v1", "file_path": "bad\0path.mp4", "profile_id": "recParked"},
+                        {"id": "v2", "file_path": str(self.parked_file),
+                         "profile_id": "recParked"}]
+
+            def posting_profiles(inner):
+                return [{"record_id": "recParked", "status": "Inactive"}]
+
+        report = retention.report_stranded_ready(Nasty())
+        self.assertEqual(report.files, 1)
+        self.assertIsNone(report.error)
+
+
 class EmptyDirPruneTest(TestCase):
     def test_removes_empty_dirs_but_keeps_the_root(self):
         import tempfile
@@ -381,6 +710,144 @@ class EmptyDirPruneTest(TestCase):
     def test_no_root_is_safe(self):
         self.assertEqual(retention.prune_empty_dirs(None), 0)
         self.assertEqual(retention.prune_empty_dirs("/no/such/dir"), 0)
+
+    def test_the_log_line_names_which_tree_was_swept(self):
+        """Cleanup prunes more than one root, and both lines used to read
+        `retention: N empty folder(s) found` -- so the count from the /tmp Drive
+        scratch tree was indistinguishable from the spoofed output tree, which is
+        the one an operator assumes they are reading."""
+        import tempfile
+        spoofed = Path(tempfile.mkdtemp())
+        scratch = Path(tempfile.mkdtemp())
+        (spoofed / "Nikki").mkdir()
+        (scratch / "Corina").mkdir()
+        log = logging.getLogger("prune-label-test")
+        with self.assertLogs(log, level="INFO") as captured:
+            retention.prune_empty_dirs(str(spoofed), logger=log, label="spoofed output")
+            retention.prune_empty_dirs(str(scratch), logger=log, label="Drive scratch")
+        lines = captured.output
+        self.assertEqual(len(lines), 2)
+        self.assertNotEqual(lines[0], lines[1])
+        self.assertIn("spoofed output", lines[0])
+        self.assertIn(str(spoofed), lines[0])
+        self.assertIn("Drive scratch", lines[1])
+        self.assertIn(str(scratch), lines[1])
+
+
+class CleanupCommandTest(TestCase):
+    """The wiring in `run_loop cleanup`: which sweeps are armed by --apply alone."""
+
+    def setUp(self):
+        import os
+        import tempfile
+        from types import SimpleNamespace
+        from adb_bot.automation import run_loop, spoof_pipeline
+
+        self.run_loop = run_loop
+        self.spoof_pipeline = spoof_pipeline
+        self.out = Path(tempfile.mkdtemp())
+        self.orphan = self.out / "orphan.mp4"
+        self.used = self.out / "used.mp4"
+        # Two Ready files keep the orphan a minority of what is left on disk
+        # after the Used sweep, so the truncated-listing guard stays quiet.
+        self.ready_a = self.out / "ready_a.mp4"
+        self.ready_b = self.out / "ready_b.mp4"
+        for f in (self.orphan, self.used, self.ready_a, self.ready_b):
+            f.write_bytes(b"c" * 10)
+        old = time.time() - (60 * 86400)
+        for f in (self.orphan, self.used, self.ready_a, self.ready_b):
+            os.utime(f, (old, old))
+
+        rows = {
+            "v1": {"file_path": str(self.used), "status": "Used"},
+            "v2": {"file_path": str(self.ready_a), "status": "Ready"},
+            "v3": {"file_path": str(self.ready_b), "status": "Ready"},
+        }
+
+        class FakeAT:
+            def variants_by_id(inner):
+                return dict(rows)
+
+            def list_ready_variants(inner):
+                return []
+
+            def posting_profiles(inner):
+                return []
+
+        # A real Drive scratch tree with one empty per-model folder in it, so the
+        # gating tests below are about the flag and not about a missing path.
+        self.drive_temp = Path(tempfile.mkdtemp())
+        (self.drive_temp / "Nikki").mkdir()
+
+        self._real_airtable = run_loop._airtable
+        self._real_temp_root = spoof_pipeline.drive_temp_root
+        run_loop._airtable = lambda *a, **k: FakeAT()
+        spoof_pipeline.drive_temp_root = lambda *a, **k: str(self.drive_temp)
+
+        self.args = SimpleNamespace(
+            apply=True, max_age_days=None, orphan_age_days=None, orphan_sweep=False,
+            drive_temp_sweep=False,
+            raw_root=str(self.out), out_root=str(self.out),
+            base_id=None, airtable_token=None,
+        )
+        self.logger = logging.getLogger("cleanup-test")
+
+    def tearDown(self):
+        self.run_loop._airtable = self._real_airtable
+        self.spoof_pipeline.drive_temp_root = self._real_temp_root
+
+    def test_apply_alone_does_not_arm_the_orphan_sweep(self):
+        self.run_loop._run_cleanup(self.args, self.logger)
+        self.assertFalse(self.used.exists())      # Used + old: the normal sweep
+        self.assertTrue(self.orphan.exists())     # unreferenced: reported only
+
+    def test_orphan_sweep_flag_arms_it(self):
+        self.args.orphan_sweep = True
+        self.run_loop._run_cleanup(self.args, self.logger)
+        self.assertFalse(self.orphan.exists())
+        self.assertTrue(self.ready_a.exists())    # Ready is still untouchable
+        self.assertTrue(self.ready_b.exists())
+
+    def test_orphan_sweep_flag_without_apply_still_deletes_nothing(self):
+        self.args.orphan_sweep = True
+        self.args.apply = False
+        self.run_loop._run_cleanup(self.args, self.logger)
+        self.assertTrue(self.orphan.exists())
+        self.assertTrue(self.used.exists())
+
+    def test_apply_alone_does_not_prune_the_drive_scratch_tree(self):
+        """The one genuinely new deletion in this change, and the one that races
+        a live loop: an rmdir landing between the pipeline's mkdir and its file
+        open fails that clip as "could not fetch the raw video". --apply must not
+        be enough to turn it on."""
+        self.run_loop._run_cleanup(self.args, self.logger)
+        self.assertTrue((self.drive_temp / "Nikki").is_dir())
+
+    def test_drive_temp_sweep_flag_arms_it(self):
+        self.args.drive_temp_sweep = True
+        self.run_loop._run_cleanup(self.args, self.logger)
+        self.assertFalse((self.drive_temp / "Nikki").exists())
+        self.assertTrue(self.drive_temp.is_dir())        # the root itself stays
+
+    def test_drive_temp_sweep_flag_without_apply_removes_nothing(self):
+        self.args.drive_temp_sweep = True
+        self.args.apply = False
+        self.run_loop._run_cleanup(self.args, self.logger)
+        self.assertTrue((self.drive_temp / "Nikki").is_dir())
+
+    def test_an_airtable_blow_up_does_not_kill_the_rest_of_the_run(self):
+        """The try around the Airtable sweeps caught SystemExit only, so anything
+        else -- a ValueError out of a bad File Path, a client that won't build --
+        took the whole run with it, empty-dir passes included."""
+        def explode(*a, **k):
+            raise ValueError("embedded null byte")
+
+        self.run_loop._airtable = explode
+        self.args.drive_temp_sweep = True
+        rc = self.run_loop._run_cleanup(self.args, self.logger)
+        self.assertEqual(rc, 1)                                   # reported, not swallowed
+        self.assertFalse((self.drive_temp / "Nikki").exists())    # and the run went on
+        self.assertTrue(self.used.exists())                       # nothing deleted blind
 
 
 class RunnerConcurrencyTest(TestCase):

@@ -53,6 +53,66 @@ def _exe_version(exe: str, args=("--version",)) -> str | None:
         return path
 
 
+# --- one live listing per doctor run -----------------------------------------
+
+_probe_cache: dict = {}
+
+
+def _probe(key, fetch):
+    """Memoise a live listing for the length of one :func:`run_checks`.
+
+    Two checks want the same MLX mobile-profile inventory (`check_multilogin`,
+    `check_models`) and two want the same Drive subfolder listing (`check_drive`,
+    `check_models`), so an otherwise idle doctor run made four API calls where
+    two do -- every 30 minutes, on a MultiLogin token whose whole job is to still
+    be valid when a loop needs it.
+
+    Deliberately not a TTL cache: it is cleared at the top of `run_checks`, so
+    "one run, one fetch" is the only guarantee it makes and a long-lived process
+    can never be served a stale fleet. Failures are cached too, so a dead token
+    is reported by both checks without being asked twice.
+    """
+    if key not in _probe_cache:
+        try:
+            _probe_cache[key] = (fetch(), None)
+        except Exception as exc:
+            _probe_cache[key] = (None, exc)
+    value, error = _probe_cache[key]
+    if error is not None:
+        raise error
+    return value
+
+
+def _mlx_mobile_profiles(token: str) -> list:
+    from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
+
+    return _probe(("mlx_mobile_profiles", token),
+                  lambda: MultiloginMobileListClient(token).list_mobile_profiles())
+
+
+class _CachedSubfolders:
+    """A DriveClient stand-in holding one already-fetched subfolder listing.
+
+    Lets `check_models` hand the real `DriveRawSource` the listing `check_drive`
+    already paid for, instead of a second identical call. It answers only
+    `list_subfolders`; anything that tried to download a file through it would
+    (correctly) fail loudly, because nothing in a doctor run should.
+    """
+
+    def __init__(self, folders: list):
+        self._folders = list(folders or [])
+
+    def list_subfolders(self, _folder_id) -> list:
+        return list(self._folders)
+
+
+def _drive_subfolders(service_account_json: str, folder_id: str) -> list:
+    from adb_bot.clients.gdrive import DriveClient
+
+    return _probe(("drive_subfolders", service_account_json, folder_id),
+                  lambda: DriveClient(service_account_json).list_subfolders(folder_id))
+
+
 # --- individual checks -------------------------------------------------------
 
 def check_adb() -> CheckResult:
@@ -172,7 +232,7 @@ def check_airtable(token: str, base_id: str) -> CheckResult:
     missing = []
     for table in required:
         try:
-            client._list_table(table, page_size=1)
+            client._list_table(table, page_size=1, max_records=1)
         except Exception as exc:
             text = str(exc)
             if "401" in text or "403" in text:
@@ -189,9 +249,8 @@ def check_multilogin(token: str) -> CheckResult:
     if not token:
         return CheckResult("MultiLogin", FAIL, "no token configured",
                            "Set MULTILOGIN_TOKEN (use the workspace Automation Token for unattended runs).")
-    from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
     try:
-        items = MultiloginMobileListClient(token).list_mobile_profiles()
+        items = _mlx_mobile_profiles(token)
     except Exception as exc:
         text = str(exc)
         hint = ("Token expired? A regular MLX token lasts ~1h -- use the workspace Automation Token."
@@ -236,10 +295,9 @@ def check_drive(service_account_json: str, folder_id: str) -> CheckResult:
     if not service_account_json or not folder_id:
         return CheckResult("Google Drive", FAIL, "half-configured",
                            "Drive needs BOTH DRIVE_RAW_FOLDER_ID and GOOGLE_SERVICE_ACCOUNT_JSON.")
-    from adb_bot.clients.gdrive import DriveClient, DriveUnavailable
+    from adb_bot.clients.gdrive import DriveUnavailable
     try:
-        client = DriveClient(service_account_json)
-        folders = client.list_subfolders(folder_id)
+        folders = _drive_subfolders(service_account_json, folder_id)
     except DriveUnavailable as exc:
         return CheckResult("Google Drive", FAIL, str(exc)[:90],
                            "pip install google-api-python-client google-auth, and check the key path.")
@@ -247,6 +305,93 @@ def check_drive(service_account_json: str, folder_id: str) -> CheckResult:
         return CheckResult("Google Drive", FAIL, str(exc)[:90],
                            "Share the folder with the service account's email, and verify the folder id.")
     return CheckResult("Google Drive", PASS, f"{len(folders)} model folder(s) visible")
+
+
+def check_models(airtable_token: str, base_id: str, mlx_token: str,
+                 raw_root: str, drive_folder: str, service_account_json: str) -> CheckResult:
+    """Do Drive, MultiLogin and Airtable agree on which models exist?
+
+    The gap this closes: a model can be created in MultiLogin, cloned onto real
+    phones and warmed up for a week while every posting code path is blind to it,
+    because the join key is the *Airtable* profile name and `mlx_sync` writes
+    that field only on create. The failure mode is silence -- zero variants, no
+    error -- so the only way to catch it is to compare the systems on purpose.
+
+    WARN, never FAIL: nothing here is broken, something is un-onboarded, and a
+    FAIL would block `--apply` runs that are otherwise fine.
+
+    A source that cannot be read makes the rules that depend on it *drop*, never
+    run against an empty list. Without that, a Drive outage (or simply no
+    DRIVE_RAW_FOLDER_ID) turned "I could not look" into "no model has a raw
+    folder" and WARNed for every model on the fleet, hinting at Drive folders
+    that already exist. What was skipped leads the detail line.
+    """
+    from adb_bot.automation import model_inventory, spoof_pipeline
+
+    if not airtable_token:
+        return CheckResult("Model inventory", WARN, "no Airtable token; cannot compare models",
+                           "Set AIRTABLE_TOKEN.")
+
+    mlx_profiles = mlx_folders = None
+    partial = []
+    try:
+        from adb_bot.clients import airtable as at
+        from adb_bot.clients.airtable import AirtableClient
+
+        client = AirtableClient(airtable_token, base_id, at.TABLE_PROFILES)
+    except Exception as exc:
+        return CheckResult("Model inventory", WARN, f"Airtable unreadable: {str(exc)[:70]}")
+
+    if mlx_token:
+        try:
+            from adb_bot.clients.multilogin.folders import MultiloginFolderClient
+
+            mlx_profiles = _mlx_mobile_profiles(mlx_token)
+            mlx_folders = MultiloginFolderClient(mlx_token).list_mobile_folders()
+        except Exception as exc:
+            mlx_profiles = mlx_folders = None
+            partial.append(f"MultiLogin unreadable ({str(exc)[:40]})")
+    else:
+        partial.append("no MultiLogin token")
+
+    source = None
+    build_error = ""
+    try:
+        if drive_folder and service_account_json:
+            # Reuse the listing check_drive just fetched rather than asking Drive
+            # for the same folder twice. The real DriveRawSource still does the
+            # name derivation, so the two paths cannot drift.
+            source = spoof_pipeline.DriveRawSource(
+                _CachedSubfolders(_drive_subfolders(service_account_json, drive_folder)),
+                drive_folder)
+        else:
+            source = spoof_pipeline.build_source(raw_root, drive_folder, service_account_json)
+    except Exception as exc:
+        build_error = str(exc)[:40]
+
+    try:
+        inventory = model_inventory.collect(airtable=client, mlx_profiles=mlx_profiles,
+                                            mlx_folders=mlx_folders, raw_source=source)
+        findings = model_inventory.diff_models(inventory)
+    except Exception as exc:
+        return CheckResult("Model inventory", WARN, f"could not compare models: {str(exc)[:70]}")
+
+    # The raw half of the comparison is either done or not done; there is no
+    # half. When it is not done, `diff_models` has already dropped the two rules
+    # that read raw folders, and the reader has to be told that BEFORE the
+    # summary -- a trailing "[partial: ...]" reads as a footnote on a sentence
+    # that has already claimed everything lines up.
+    if not model_inventory.raw_source_known(inventory):
+        why = build_error or inventory.raw_source_error or "no folders listed"
+        partial.insert(0, f"raw source unreadable ({why}); "
+                          f"raw-folder rules skipped")
+    detail = model_inventory.summarise(findings)
+    if partial:
+        detail = f"[partial: {'; '.join(partial)}] {detail}"
+    gaps = [f for f in findings if f.severity == model_inventory.WARN]
+    if not gaps:
+        return CheckResult("Model inventory", PASS, detail)
+    return CheckResult("Model inventory", WARN, detail, gaps[0].hint)
 
 
 def check_spoofer(spoofer_python: str, spoofer_root: str) -> CheckResult:
@@ -272,19 +417,17 @@ def check_spoofer(spoofer_python: str, spoofer_root: str) -> CheckResult:
 
 
 def check_scheduler() -> CheckResult:
+    """Name the loops that are not scheduled, not just "none are".
+
+    A loop with no timer runs only when a human types the command, so a partly
+    installed set looks healthy until something quietly never happens (a
+    `Verifying` row waiting on a recheck that is never triggered).
+    """
     from adb_bot.automation import scheduling
-    if not scheduling.is_supported():
-        return CheckResult("Scheduler", WARN, "no scheduler backend available",
-                           scheduling.unavailable_reason())
-    status = scheduling.list_status()
-    installed = {loop: state for loop, state in status.items() if state}
-    if not installed:
-        installer = ("deploy/scheduler/install_tasks.ps1" if scheduling.backend_name() == scheduling.WINDOWS
-                     else "sudo deploy/systemd/install_units.sh")
-        return CheckResult("Scheduler", WARN, f"{scheduling.backend_name()}: no loops installed",
-                           f"Enable the loops in the app's Scheduler window (or run {installer}).")
-    return CheckResult("Scheduler", PASS,
-                       f"{scheduling.backend_name()}: " + ", ".join(f"{k}={v}" for k, v in installed.items()))
+    report = scheduling.timer_report()
+    if not report.supported:
+        return CheckResult("Scheduler", WARN, "no scheduler backend available", report.hint())
+    return CheckResult("Scheduler", PASS if report.ok else WARN, report.summary(), report.hint())
 
 
 def check_locks() -> CheckResult:
@@ -303,12 +446,93 @@ def check_locks() -> CheckResult:
                        "locks self-expire, or delete them in " + str(locks.lock_dir()))
 
 
+def check_loop_production() -> CheckResult:
+    """Report any loop the watchdog currently has flagged as stalled.
+
+    The alert already went to `logs/alerts.log` when it tripped; this is so
+    somebody who runs `doctor` an hour later still finds out, instead of having
+    to know which log to read.
+    """
+    from adb_bot.automation import loop_watchdog
+
+    try:
+        # No sinks: this only reads the state files, it must never alert.
+        states = loop_watchdog.LoopWatchdog(sinks=[]).snapshot()
+    except Exception as exc:
+        return CheckResult("Loop production", WARN, f"could not read the watchdog state: {exc}")
+    # Drop doctor's own health entry, and only that one. It is written by
+    # `observe_doctor` from the result of this very check, so reading it back
+    # here would make a single failing check latch: doctor fails -> entry goes
+    # unhealthy -> this check fails because that entry is unhealthy, and it
+    # never recovers. Another loop's unhealthy entry has no such feedback path
+    # and must be surfaced -- `issue-tags` reports itself this way, and dropping
+    # every unhealthy entry would have hidden it completely.
+    states = {name: s for name, s in states.items() if name != DOCTOR_WATCHDOG_LOOP}
+    if not states:
+        return CheckResult("Loop production", WARN, "no loop has reported yet",
+                           "Expected until the scheduled loops have each run once.")
+    stalled = [s for s in states.values() if s.state == loop_watchdog.STATE_STALLED]
+    unhealthy = [s for s in states.values() if s.state == loop_watchdog.STATE_UNHEALTHY]
+    if stalled or unhealthy:
+        parts = []
+        if stalled:
+            parts.append(f"{len(stalled)} loop(s) producing nothing while work is due: "
+                         + ", ".join(sorted(s.loop for s in stalled)))
+        if unhealthy:
+            parts.append(f"{len(unhealthy)} loop(s) failing: "
+                         + ", ".join(sorted(s.loop for s in unhealthy)))
+        return CheckResult("Loop production", FAIL, "; ".join(parts),
+                           "See logs/alerts.log for when it started and what to check.")
+    return CheckResult("Loop production", PASS,
+                       f"{len(states)} loop(s) watched, none stalled")
+
+
+# --- alerting ----------------------------------------------------------------
+
+# The watchdog key doctor's own health is filed under. Not a loop in the
+# production sense, but it shares the state dir, the sinks and the status line.
+DOCTOR_WATCHDOG_LOOP = "doctor"
+
+# Checks whose failure does not mean the setup is broken for the loops. The
+# desktop UI is the standing example: a server has no display, that WARNs on
+# every run, and an alert nobody can act on trains people to ignore alerts.
+HEALTH_IGNORED_CHECKS = ("Desktop UI (tkinter)",)
+
+
+def failing_checks(results, include_warnings: bool = False) -> list:
+    """The check names a human should act on. FAILs always; WARNs on request."""
+    bad = (FAIL, WARN) if include_warnings else (FAIL,)
+    return [r.name for r in results
+            if r.status in bad and r.name not in HEALTH_IGNORED_CHECKS]
+
+
+def observe_doctor(watchdog, results, include_warnings: bool = False, now=None):
+    """Report this doctor run to the watchdog, alerting on failing checks.
+
+    Scheduled preflight is the point: the connectivity checks (MLX agent
+    listening, Airtable readable, Drive reachable) previously only ran when a
+    person asked, so a dead agent surfaced as failing launches an hour later
+    rather than as an alert. Routed through the watchdog so it reuses one alert
+    path, one storm guard and one status line.
+    """
+    failures = failing_checks(results, include_warnings=include_warnings)
+    detail = ""
+    if failures:
+        by_name = {r.name: r for r in results}
+        detail = "; ".join(f"{n}: {by_name[n].detail}" for n in failures if n in by_name)
+    return watchdog.observe_health(DOCTOR_WATCHDOG_LOOP, failures,
+                                   checked=len(results), detail=detail, now=now)
+
+
 # --- report ------------------------------------------------------------------
 
 def run_checks(settings_mod=None) -> list:
     """Run every check using the app's saved settings/env. Returns CheckResults."""
     if settings_mod is None:
         from adb_bot.config import settings as settings_mod
+
+    # Every run reads the fleet fresh; only checks *within* one run share.
+    _probe_cache.clear()
 
     airtable_token = settings_mod.get_saved_airtable_token()
     base_id = settings_mod.get_saved_airtable_base_id()
@@ -333,9 +557,11 @@ def run_checks(settings_mod=None) -> list:
     results.extend(check_paths(raw_root, out_root, drive_folder))
     results.extend([
         check_drive(sa_json, drive_folder),
+        check_models(airtable_token, base_id, mlx_token, raw_root, drive_folder, sa_json),
         check_spoofer(spoofer_python, spoofer_root),
         check_scheduler(),
         check_locks(),
+        check_loop_production(),
     ])
     return results
 

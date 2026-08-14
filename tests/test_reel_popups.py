@@ -239,6 +239,22 @@ class SelectorCoverageTest(TestCase):
         # Same list drives the readiness wait and the composer-open check.
         self.assertTrue(len(self.flow._GALLERY_SELECTORS) >= 5)
 
+    def test_a_bare_next_is_not_evidence_the_gallery_is_open(self):
+        """"Next" is on every onboarding, login and checkpoint screen.
+
+        `Kathi 7` sat on a phone-number confirmation screen on 2026-08-14; a
+        `^next$` gallery selector matched its Next button, the flow reported the
+        composer open, and then swiped for a REEL tab that could not exist. The
+        composer-open check must only accept markers the composer actually has.
+        """
+        for selector in self.flow._GALLERY_SELECTORS:
+            for value in selector.values():
+                self.assertNotIn("next", str(value).lower())
+        # It stays available where it is correct: advancing *after* media is
+        # picked, which is a screen the flow has already proven it is on.
+        blob = " ".join(str(v).lower() for s in self.flow._NEXT_SELECTORS for v in s.values())
+        self.assertIn("next", blob)
+
 
 class BrowseRefreshTest(TestCase):
     """The post count only updates if the profile screen is actually re-rendered
@@ -512,3 +528,105 @@ class BrowseRefreshGestureTest(TestCase):
     def test_feed_gesture_pulls_downward_to_reload(self):
         first = self._swipes()[0]
         self.assertLess(first[0], first[1], "should pull down (reload), not scroll away")
+
+
+class ReelAccountFlagTest(TestCase):
+    """A checkpoint must not be reported as a retryable failure.
+
+    Live evidence, 2026-08-03: Jil 1 sat on ChallengeActivity showing "Confirm
+    you're human to use your account, helenadiecutee". The composer never
+    opened, the flow returned a bare failure, and the queue row landed on
+    `Failed - Needs Retry` with the retry counter bumped -- queueing a blind
+    relaunch of an account only a person can unblock.
+    """
+
+    # The text the real challenge screen actually carried.
+    CHALLENGE = hierarchy(
+        node(text="Confirm you're human to use your account, helenadiecutee", clickable="false"),
+        node(text="Continue"),
+        node(text="Log out helenadiecutee"),
+    )
+    ORDINARY = hierarchy(node(text="Something went wrong", clickable="false"))
+
+    def setUp(self):
+        self.flow = InstagramReelUploadU2Flow()
+        self.profile = mock.Mock(id="628337668232577352")
+        self.emitted = []
+
+    def _result(self, xml):
+        return self.flow._account_flag_result_u2(
+            FakeDevice(xml), self.profile, "1.2.3.4:5555",
+            lambda level, msg, *a: self.emitted.append(msg % a if a else msg),
+            "opening the composer",
+        )
+
+    def test_challenge_screen_is_classified_as_human_verification(self):
+        result = self._result(self.CHALLENGE)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["account_flag"], "human_verification")
+        self.assertFalse(result["success"])
+        self.assertFalse(result["aborted"])
+        # No "failed" key: that is what routes it to the retryable path.
+        self.assertNotIn("failed", result)
+
+    def test_ordinary_failure_is_left_alone(self):
+        self.assertIsNone(self._result(self.ORDINARY))
+
+    def test_unreadable_screen_is_not_guessed_at(self):
+        class Broken:
+            def dump_hierarchy(self):
+                raise RuntimeError("device offline")
+
+        result = self.flow._account_flag_result_u2(
+            Broken(), self.profile, "t", lambda *a: None, "opening the composer")
+        self.assertIsNone(result)
+
+    def test_the_flag_reaches_a_non_retryable_write_back(self):
+        """End of the chain: the flag maps to Human Verification Required, and
+        crucially not to Failed - Needs Retry."""
+        from adb_bot.clients import airtable as at
+        from adb_bot.automation.posting_runner import _map_post_status
+
+        post_status, issue_type, incident, _run_result, _note = _map_post_status(
+            self._result(self.CHALLENGE)["account_flag"])
+        self.assertEqual(post_status, at.POST_STATUS_FAILED)
+        self.assertEqual(issue_type, at.ISSUE_HUMAN_VERIFICATION)
+        self.assertNotEqual(issue_type, at.ISSUE_NEEDS_RETRY)
+        self.assertEqual(incident, "human_verification")
+
+
+class ProbeLaunchesInstagramTest(TestCase):
+    """The recheck probe must start Instagram before looking for it.
+
+    The in-run probe inherits an app that is already open -- the post just
+    happened on it. A recheck arrives ~15 min later on a freshly launched phone,
+    which boots to the Android launcher. Every recheck on 2026-08-03 reported
+    the post count "unreadable" for this reason; one of them had connected to a
+    perfectly healthy phone that was simply sitting on the home screen.
+    """
+
+    def test_launch_commands_run_before_the_ui_wait(self):
+        from unittest.mock import MagicMock
+        from adb_bot.automation.flows.instagram_reel import ReelPostCountProbeFlow
+
+        flow = ReelPostCountProbeFlow()
+        commands = flow.build_launch_commands("1.2.3.4:5555")
+        self.assertTrue(any("com.instagram.android" in c for c in commands))
+        self.assertTrue(any("monkey -p" in c or "am start" in c for c in commands))
+
+        # The flow must issue them through the adb client it was handed.
+        adb = MagicMock()
+        for command in flow.build_launch_commands("1.2.3.4:5555"):
+            adb.run_command(command)
+        self.assertEqual(adb.run_command.call_count, len(commands))
+
+    def test_the_probe_source_starts_instagram(self):
+        """Pin the behaviour against the source: the launch must happen inside
+        run(), before the 'Instagram UI loaded' wait it precedes."""
+        import inspect
+        from adb_bot.automation.flows.instagram_reel import ReelPostCountProbeFlow
+
+        source = inspect.getsource(ReelPostCountProbeFlow.run)
+        self.assertIn("build_launch_commands", source)
+        self.assertLess(source.index("build_launch_commands"),
+                        source.index("Instagram UI loaded"))

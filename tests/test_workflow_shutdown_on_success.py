@@ -53,7 +53,7 @@ class WorkflowShutdownOnSuccessTest(unittest.TestCase):
 
         self.assertEqual(shutdown_calls, [["profile-1"]])
 
-    def test_does_not_shut_down_profile_after_success_when_disabled(self):
+    def test_flow_skips_shutdown_when_disabled_but_the_guard_still_closes(self):
         shutdown_calls = []
 
         class DummyShutdownClient:
@@ -86,7 +86,10 @@ class WorkflowShutdownOnSuccessTest(unittest.TestCase):
                 shutdown_on_success=False,
             )
 
-        self.assertEqual(shutdown_calls, [])
+        # The flow itself does not close it -- that is what the flag means --
+        # but `_guarantee_profile_closed` does, so the phone never outlives the
+        # run. Exactly one call either way.
+        self.assertEqual(shutdown_calls, [["profile-1"]])
 
 
 if __name__ == "__main__":

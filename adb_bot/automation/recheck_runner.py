@@ -24,6 +24,7 @@ tested without a device.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 
 from adb_bot.clients import airtable as at
 from adb_bot.automation import post_ledger
@@ -76,11 +77,41 @@ def decide_recheck(baseline_count: int, baseline_exact: bool, current, age_secon
             f"post count went down ({baseline_count} -> {current.value}); not a reliable comparison")
 
 
-def apply_recheck_outcome(airtable, queue_id: str, account_id: str, account_name: str,
+def _age_from_recheck_stamp(fields: dict, now_epoch: float):
+    """Seconds since this row's `Recheck After` came due, or None if unreadable.
+
+    The fallback age, for the one case with no ledger entry to read
+    `shared_at` off. It is a *lower* bound on how long the share has gone
+    unproven -- the stamp is written at share time plus the wait -- which is
+    the safe direction: it can only delay a write-off, never bring one
+    forward. None when the field is missing or unparseable, and the caller
+    then leaves the row alone rather than writing it off on a guess.
+    """
+    raw = fields.get(at.F_PQ_RECHECK_AFTER)
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+    except Exception:
+        return None
+    # Airtable stamps UTC; a value that somehow arrives naive is read as UTC
+    # rather than as local time, which would shift the age by the offset and,
+    # west of Greenwich, write rows off early.
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return max(0.0, now_epoch - stamp.timestamp())
+
+
+def apply_recheck_outcome(airtable, queue_id: str, account_id, account_name: str,
                           outcome: str, detail: str, variant_id: str = "",
                           flow: str = "instagram_reel_upload_u2", logger=None) -> bool:
     """Write one resolved recheck back to Airtable. Returns True when the row
-    reached a terminal state (so the caller can stop tracking it)."""
+    reached a terminal state (so the caller can stop tracking it).
+
+    `account_id` may be None/empty for a profile-driven row (no Accounts row
+    exists). The queue-row write-back is what actually closes the question, so it
+    must not depend on the link: `create_run_log` omits the Account link and
+    `set_account_result` no-ops, and the row still leaves `Verifying`."""
     if outcome == OUTCOME_POSTED:
         airtable.mark_post_result(queue_id, at.POST_STATUS_POSTED, at.ISSUE_NONE)
         if variant_id:
@@ -133,20 +164,64 @@ def recheck_pending_posts(airtable, read_post_count, ledger=None, logger=None,
 
     entries = {r.queue_id: r for r in store.pending() if r.queue_id}
 
+    # Profile names are read at most once, and only if a profile-driven row shows
+    # up: a pass over ordinary account rows should not pay for a Profiles table
+    # read, and no pass should pay for one per row.
+    profile_names: dict = {}
+    names_loaded = [False]
+
+    def profile_name_for(profile_id: str) -> str:
+        if not names_loaded[0]:
+            names_loaded[0] = True
+            try:
+                profile_names.update(airtable.profile_launch_map() or {})
+            except Exception as exc:
+                log("warning", "Could not read profile names for the recheck pass: %s", exc)
+        return str((profile_names.get(profile_id) or {}).get("name") or "")
+
     for row in rows or []:
         queue_id = row.get("id")
         fields = row.get("fields", {}) or {}
         accounts = fields.get(at.F_PQ_TARGET_ACCOUNT) or []
         account_id = accounts[0] if accounts else ""
+        profiles = fields.get(at.F_PQ_TARGET_PROFILE) or []
+        profile_link_id = profiles[0] if profiles else ""
         account_name = str(fields.get(at.F_PQ_NAME) or "")
+        if not account_id and profile_link_id:
+            # Profile-driven row: no Accounts row to link or stamp, so the
+            # profile's name stands in for the handle. A row carrying *both*
+            # links keeps the account path -- the Accounts row is what holds the
+            # health guards, and quietly targeting the profile would bypass them.
+            account_name = profile_name_for(profile_link_id) or account_name
         variants = fields.get(at.F_PQ_SPOOF_VARIANT) or []
         variant_id = variants[0] if variants else ""
 
         entry = entries.get(queue_id)
         if entry is None:
             # Airtable says Verifying but this machine has no ledger record --
-            # a different host posted it, or the ledger was pruned. We cannot
-            # compare counts, so don't pretend to: leave it for a human.
+            # a different host posted it, the ledger was pruned, or the row was
+            # renumbered underneath it (the 2026-08-10 base migration did
+            # exactly that to 23 shares). We cannot compare counts, so we still
+            # do not invent a verdict.
+            #
+            # What we must not do is ask forever. `decide_recheck` writes a
+            # share off at MAX_UNRESOLVED_AGE_SECONDS precisely so a row cannot
+            # sit in Verifying for good -- but it reads the age off
+            # `entry.shared_at`, which is behind this lookup, so a row with no
+            # entry could never reach it. Seven rows sat here for two days
+            # because of that, re-logged every pass and resolving on none of
+            # them, and the loop watchdog called it a stall (which it was).
+            age = _age_from_recheck_stamp(fields, now())
+            if age is not None and age >= MAX_UNRESOLVED_AGE_SECONDS:
+                log("warning", "No local ledger entry for queue row %s and its recheck came "
+                    "due %.1fh ago; writing it off", queue_id, age / 3600)
+                apply_recheck_outcome(
+                    airtable, queue_id, account_id, account_name, OUTCOME_ABANDONED,
+                    f"no local ledger entry and still unproven {age / 3600:.1f}h after the "
+                    f"recheck came due -- giving up on proving this one",
+                    variant_id=variant_id, flow=flow, logger=logger)
+                tally["abandoned"] += 1
+                continue
             log("warning", "No local ledger entry for queue row %s; leaving it in Verifying", queue_id)
             tally["unknown"] += 1
             continue
@@ -164,10 +239,14 @@ def recheck_pending_posts(airtable, read_post_count, ledger=None, logger=None,
         )
         log("info", "Recheck for %s (%s): %s -- %s", account_name, entry.profile_id, outcome, detail)
 
-        if account_id:
-            apply_recheck_outcome(airtable, queue_id, account_id, account_name,
-                                  outcome, detail, variant_id=variant_id,
-                                  flow=flow, logger=logger)
+        # Unconditional on purpose. Gating this on a linked Account left every
+        # profile-driven row stuck in Verifying while the ledger below recorded
+        # it as resolved -- two records permanently disagreeing, which is worse
+        # than never having rechecked. The write-back needs the queue row, not
+        # the account.
+        apply_recheck_outcome(airtable, queue_id, account_id, account_name,
+                              outcome, detail, variant_id=variant_id,
+                              flow=flow, logger=logger)
 
         if outcome == OUTCOME_POSTED:
             store.resolve(entry.profile_id, entry.media_hash,

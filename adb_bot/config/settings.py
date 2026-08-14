@@ -72,9 +72,14 @@ def save_settings(settings: dict) -> bool:
 
 
 def get_saved_bearer_token() -> str:
-    """Get saved bearer token or empty string if not set."""
-    settings = load_settings()
-    return settings.get("bearer_token", "").strip() or ""
+    """Get the MultiLogin token from saved settings, else MULTILOGIN_TOKEN.
+
+    The env fallback matters on a server: systemd units inherit nothing from a
+    shell, so the token arrives via /etc/adbbot/env. Without it `doctor` reported
+    "no token configured" while the loops -- which read the env var directly --
+    worked fine.
+    """
+    return _get_saved_or_env("bearer_token", "MULTILOGIN_TOKEN")
 
 
 def _get_saved_or_env(settings_key: str, env_key: str) -> str:
@@ -90,14 +95,26 @@ def get_saved_airtable_token() -> str:
     return _get_saved_or_env("airtable_token", "AIRTABLE_TOKEN")
 
 
-# OFM Agency OS test base (the clone built for orchestrator testing). Used as a
-# fallback so the app points at the test base out of the box; a saved value or
-# the AIRTABLE_BASE_ID env var still wins.
-DEFAULT_AIRTABLE_BASE_ID = "appNAm6iTuzmOn4ib"
-
-
+# There is deliberately NO default base id.
+#
+# Until 2026-08-10 this fell back to the test base `appNAm6iTuzmOn4ib`. The bot
+# now runs against production, and 15 of the 16 units load their credentials
+# with `EnvironmentFile=-/etc/adbbot/env` -- the leading `-` means systemd
+# treats a missing file as fine and starts the loop anyway. So a renamed,
+# unreadable or half-written env file used to hand every loop a silent, working
+# connection to the WRONG base: posts, run-log rows and flag clears would land
+# in the old base while production sat still and nothing anywhere reported an
+# error. A missing base id is a broken deployment, and it should say so on the
+# first call rather than quietly do the wrong thing to real data.
 def get_saved_airtable_base_id() -> str:
-    return _get_saved_or_env("airtable_base_id", "AIRTABLE_BASE_ID") or DEFAULT_AIRTABLE_BASE_ID
+    base_id = _get_saved_or_env("airtable_base_id", "AIRTABLE_BASE_ID")
+    if not base_id:
+        raise RuntimeError(
+            "No Airtable base id configured. Set AIRTABLE_BASE_ID (normally from "
+            "/etc/adbbot/env -- check the file exists and is readable) or save an "
+            "`airtable_base_id` in the settings file. There is no default: "
+            "guessing a base risks writing to the wrong one.")
+    return base_id
 
 
 def get_saved_airtable_table_name() -> str:
@@ -129,6 +146,42 @@ def get_saved_readiness_attempts() -> int:
         return max(1, int(settings.get("readiness_max_attempts", 2)))
     except (ValueError, TypeError):
         return 2
+
+
+# How many MultiLogin phones may be open at once ACROSS EVERY LOOP. This is the
+# ceiling `MAX_CONCURRENT_PROFILES` was always mistaken for: that one is applied
+# by each loop independently, so posting (10) + warmup (10) + recheck (1) could
+# legitimately have 21 phones live with nothing coordinating them.
+#
+# 12 is derived from what the box actually survived on 2026-08-04. The kernel's
+# OOM dump counted 78 WebKitWebProcess (12.8 GB) plus 77 phone processes
+# (3.6 GB) -- ~215 MB of RSS per live phone -- against 15.2 GiB of RAM, so the
+# hard wall is around 68 phones and the machine died at ~172 launches vs 64
+# shutdowns. 12 x 215 MB is ~2.6 GB of driven phones; even if the tail of
+# already-shut-down-but-not-yet-gone phones doubles that, ~5 GB sits on top of a
+# ~4.5 GB baseline (system + MultiLogin agent) and stays inside RAM, leaving the
+# 8 GB of swap as an untouched second line of defence rather than a working set.
+#
+# It is deliberately ABOVE any single loop's cap (10), so ordinary posting is
+# never throttled by it: the ceiling only bites when a second loop overlaps,
+# which is exactly the case that was uncontrolled.
+DEFAULT_MAX_LIVE_PROFILES = 12
+
+
+def get_saved_max_live_profiles() -> int:
+    """The cross-loop ceiling on live phones: saved setting, else
+    ADBBOT_MAX_LIVE_PROFILES, else the default. Never less than 1.
+
+    Not routed through `_get_saved_or_env` because that assumes a string value
+    and would raise on a JSON number, which is how anyone would write this one.
+    """
+    raw = load_settings().get("max_live_profiles", None)
+    if raw is None or str(raw).strip() == "":
+        raw = os.environ.get("ADBBOT_MAX_LIVE_PROFILES", "")
+    try:
+        return max(1, int(str(raw).strip()))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_LIVE_PROFILES
 
 
 def get_saved_flow_speed() -> str:
@@ -185,6 +238,55 @@ def get_saved_spoofed_videos_dir() -> str:
     """Root folder the pipeline writes spoofed variants into (`02_Spoofed_Videos`
     on the server's local disk); empty until configured."""
     return _get_saved_or_env("spoofed_videos_dir", "SPOOFED_VIDEOS_DIR")
+
+
+# Raw folders whose name is not the model whose content they hold. See
+# `spoof_pipeline.resolve_model`. These are the values that were hardcoded in
+# the pipeline until 2026-08-10; they stay here as the default so a box with no
+# override behaves exactly as before.
+DEFAULT_RAW_FOLDER_MODEL_ALIASES = {
+    "corina": "Nikki",
+    "mandy": "Luisa",
+}
+
+
+def parse_raw_folder_aliases(text: str) -> dict:
+    """Parse `folder=Model,folder2=Model2` into {folder_lower: Model}.
+
+    Tolerant on purpose: this is set by hand in /etc/adbbot/env, and a stray
+    comma or a blank entry must not take the pipeline down. Malformed pairs are
+    dropped, not raised.
+    """
+    out: dict = {}
+    for chunk in str(text or "").replace(";", ",").split(","):
+        if "=" not in chunk:
+            continue
+        folder, _, model = chunk.partition("=")
+        folder, model = folder.strip().lower(), model.strip()
+        if folder and model:
+            out[folder] = model
+    return out
+
+
+def get_raw_folder_model_aliases() -> dict:
+    """Raw-folder -> model overrides for the spoofing pipeline.
+
+    Order: saved dev settings (`raw_folder_model_aliases`, a dict), then the
+    `RAW_FOLDER_MODEL_ALIASES` env var (`corina=Nikki,mandy=Luisa`), else the
+    built-in default. Whichever source wins replaces the map wholesale rather
+    than merging -- a merge would make an alias impossible to *remove* once the
+    Drive folder is finally renamed, which is the one edit this exists to allow.
+    """
+    saved = load_settings().get("raw_folder_model_aliases")
+    if isinstance(saved, dict):
+        cleaned = {str(k).strip().lower(): str(v).strip()
+                   for k, v in saved.items() if str(k).strip() and str(v).strip()}
+        if cleaned:
+            return cleaned
+    env = parse_raw_folder_aliases(os.environ.get("RAW_FOLDER_MODEL_ALIASES", ""))
+    if env:
+        return env
+    return dict(DEFAULT_RAW_FOLDER_MODEL_ALIASES)
 
 
 # The flows the per-folder media mapping feeds. Only these read a Profile's

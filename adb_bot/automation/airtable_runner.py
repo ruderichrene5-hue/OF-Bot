@@ -26,10 +26,13 @@ from adb_bot.clients.airtable import (
     STATUS_SKIPPED,
 )
 from adb_bot.automation.workflow import run_profile_workflow
+from adb_bot.clients.multilogin.launch_stats import (
+    CountingLauncherClient, MLX_500, classify_launch,
+)
 from adb_bot.automation.airtable_planner import plan_airtable_runs
 from adb_bot.automation import incidents
 from adb_bot.automation import attachments
-from adb_bot.core.locks import ProfileLocks
+from adb_bot.core.locks import ProfileLocks, live_profile_count, live_profile_slot, max_live_profiles
 from adb_bot.core.batching import LaunchGate, resolve_concurrency, run_rolling
 from adb_bot.config.settings import REEL_FLOWS
 from adb_bot.clients.airtable import (
@@ -65,6 +68,7 @@ def _status_to_airtable_fields(status: str) -> dict:
         "already_had_bio": (STATUS_SKIPPED, "already_had_bio"),
         "adb_connect_failed": (STATUS_FAILED, "failed_to_connect_adb"),
         "failed": (STATUS_FAILED, "failed"),
+        "heartbeat_lost": (STATUS_FAILED, "profile_lost_mid_run"),
     }
     if status not in mapping:
         return {}
@@ -102,6 +106,11 @@ def _map_terminal_status(status: str):
                 "check the account before re-running", None)
     if status == "already_had_bio":
         return (RESULT_SKIPPED, "already had a bio", None)
+    if status == "wrong_account":
+        # A guard refusing to post on the wrong account, not a breakage, and
+        # not an Instagram incident: the handle is simply not on this phone.
+        return (RESULT_SKIPPED,
+                "skipped: the phone's account switcher does not have this account", None)
     if status == "adb_connect_failed":
         return (RESULT_FAILED, "ADB connect failed", None)
     if status == "failed":
@@ -112,6 +121,10 @@ def _map_terminal_status(status: str):
         return (RESULT_FAILED, "account banned/suspended", "banned")
     if status == "action_block":
         return (RESULT_FAILED, "action blocked (temporary)", "action_block")
+    if status == "heartbeat_lost":
+        # The phone stopped being ours mid-flow (shut down, or opened
+        # elsewhere). Not an IG incident -- nothing is wrong with the account.
+        return (RESULT_FAILED, "profile lost mid-run (heartbeat failed)", None)
     return None
 
 
@@ -143,7 +156,7 @@ def run_airtable_queue(
     progress_callback=None,
     shutdown_on_success: bool = False,
     today=None,
-    run_reels: bool = False,
+    run_reels: bool = True,
     selected_launch_ids=None,
     confirm_callback=None,
     override_flow=None,
@@ -152,6 +165,7 @@ def run_airtable_queue(
     override_picture=None,
     media_path_resolver=None,
     max_concurrent_profiles=None,
+    plan=None,
 ) -> dict:
     """Lifecycle-driven Airtable run: read Accounts, decide each account's due
     flow(s) via the lifecycle planner, launch its Multilogin profile (by MLX API
@@ -170,17 +184,33 @@ def run_airtable_queue(
     def aborted() -> bool:
         return callable(should_stop) and should_stop()
 
+    # Count every launch this run makes, MultiLogin's own 500s apart from ours.
+    # The wrapper is what readiness relaunches through too, so a profile that
+    # has to be launched twice is counted twice -- which is the point: that
+    # second attempt is retry budget being spent.
+    launcher_client = CountingLauncherClient(launcher_client)
+    stats = launcher_client.stats
+
+    def result(payload: dict) -> dict:
+        payload.update(stats.as_dict())
+        return payload
+
     # 1) Plan -----------------------------------------------------------------
+    # A caller may hand in a ready-made plan (the profile-driven warm-up builds
+    # one from the MLX `Created` tag instead of the Accounts table). Everything
+    # after this point -- launching, locks, the concurrency ceiling, the Run Log
+    # -- is identical either way, so it is shared rather than duplicated.
     try:
-        plan = plan_airtable_runs(
-            airtable, today=today, logger=logger, run_reels=run_reels,
-            selected_launch_ids=selected_launch_ids,
-            override_flow=override_flow, override_bio=override_bio,
-            override_caption=override_caption, override_picture=override_picture,
-        )
+        if plan is None:
+            plan = plan_airtable_runs(
+                airtable, today=today, logger=logger, run_reels=run_reels,
+                selected_launch_ids=selected_launch_ids,
+                override_flow=override_flow, override_bio=override_bio,
+                override_caption=override_caption, override_picture=override_picture,
+            )
     except Exception as exc:
         logger.error("Failed to build the Airtable run plan: %s", exc)
-        return {"processed": 0, "error": str(exc)}
+        return result({"processed": 0, "error": str(exc)})
 
     for skip in plan.skipped:
         logger.info("Skipping account %s: %s", skip.account_name, skip.reason)
@@ -200,11 +230,11 @@ def run_airtable_queue(
             proceed = True
         if not proceed:
             logger.info("Airtable run cancelled before launch")
-            return {"processed": 0, "cancelled": True, "skipped": len(plan.skipped)}
+            return result({"processed": 0, "cancelled": True, "skipped": len(plan.skipped)})
 
     if not plan.plans:
         logger.info("Airtable plan: nothing due to run (%s account(s) skipped)", len(plan.skipped))
-        return {"processed": 0, "skipped": len(plan.skipped)}
+        return result({"processed": 0, "skipped": len(plan.skipped)})
 
     # 2) Lock the profiles, then launch them ----------------------------------
     # A profile already being driven by another loop (posting) is skipped this
@@ -225,7 +255,7 @@ def run_airtable_queue(
         plan.plans = [p for p in plan.plans if p.launch_id in usable]
         if not plan.plans:
             logger.info("All due profiles are busy in another loop; nothing to do this round")
-            return {"processed": 0, "skipped": len(plan.skipped), "busy": len(locks.busy)}
+            return result({"processed": 0, "skipped": len(plan.skipped), "busy": len(locks.busy)})
         return _launch_and_run_flows(
             plan, launch_ids, airtable, launcher_client, shutdown_client, adb_enable_client,
             api_client, automation, logger, readiness_wait_seconds, readiness_max_attempts,
@@ -247,6 +277,12 @@ def _launch_and_run_flows(plan, launch_ids, airtable, launcher_client, shutdown_
 
     def aborted() -> bool:
         return callable(should_stop) and should_stop()
+
+    # Normally already wrapped by run_airtable_queue; wrapping again is a no-op
+    # in effect and keeps this function honest when called directly.
+    if not isinstance(launcher_client, CountingLauncherClient):
+        launcher_client = CountingLauncherClient(launcher_client)
+    stats = launcher_client.stats
 
     # 3) Run each account's due flows (accounts parallel, flows sequential) ----
     def run_account(account_plan) -> None:
@@ -382,6 +418,8 @@ def _launch_and_run_flows(plan, launch_ids, airtable, launcher_client, shutdown_
 
     gate = LaunchGate(batch_launch_delay_seconds)
 
+    no_slot: list = []
+
     def run_profile(launch_id) -> None:
         """Launch one profile, then run everything due on it, sequentially.
 
@@ -389,25 +427,56 @@ def _launch_and_run_flows(plan, launch_ids, airtable, launcher_client, shutdown_
         shuts the profile down when its flows succeed -- so overlapping them
         would have one plan's shutdown cut another off mid-flow.
         """
-        launch_response = gate.launch(lambda: launcher_client.start_profiles([launch_id]))
-        if isinstance(launch_response, dict) and launch_response.get("status") == "error":
-            logger.error("Failed to launch profile %s on Multilogin: %s", launch_id, launch_response)
-        else:
-            logger.info("Launched profile %s", launch_id)
-        # No batch-wide readiness sleep: run_account waits for *this* profile.
-        for account_plan in plans_by_launch.get(launch_id, []):
-            if aborted():
+        # The cross-loop ceiling: `concurrency` only bounds this loop, and warmup
+        # overlapping a posting run is exactly how 21 phones could be open at
+        # once. No slot means skip the profile this run rather than launch past
+        # the limit -- warmup work is not time-critical and the next run repeats
+        # the plan anyway.
+        with live_profile_slot(owner="warmup") as slot:
+            if slot is None:
+                no_slot.append(launch_id)
+                logger.warning(
+                    "Skipping profile %s this round: %s phone(s) already open across all "
+                    "loops (global ceiling). It will be retried next run.",
+                    launch_id, live_profile_count())
                 return
-            run_account(account_plan)
 
-    logger.info("Running %s profile(s), up to %s at a time (rolling)",
-                len(launch_ids), concurrency)
+            launch_response = gate.launch(lambda: launcher_client.start_profiles([launch_id]))
+            if isinstance(launch_response, dict) and launch_response.get("status") == "error":
+                if classify_launch(launch_response) == MLX_500:
+                    # Their cloud, not ours: it self-heals, so this line should
+                    # not send anyone to check the box.
+                    logger.error("Failed to launch profile %s -- MultiLogin-side 500 (their "
+                                 "cloud; self-heals): %s", launch_id, launch_response)
+                else:
+                    logger.error("Failed to launch profile %s on Multilogin: %s",
+                                 launch_id, launch_response)
+            else:
+                logger.info("Launched profile %s", launch_id)
+            # No batch-wide readiness sleep: run_account waits for *this* profile.
+            for account_plan in plans_by_launch.get(launch_id, []):
+                if aborted():
+                    return
+                run_account(account_plan)
+
+    logger.info("Running %s profile(s), up to %s at a time (rolling, global ceiling %s)",
+                len(launch_ids), concurrency, max_live_profiles())
     outcome = run_rolling(launch_ids, run_profile, concurrency=concurrency,
                           should_stop=should_stop, logger=logger)
     if outcome["aborted"]:
-        return {"processed": 0, "aborted": True}
+        logger.info("Airtable run aborted; %s", stats.summary())
+        return {"processed": 0, "aborted": True, **stats.as_dict()}
 
-    total_flows = sum(len(p.runs) for p in plan.plans)
-    logger.info("Airtable run complete (%s account(s), %s flow-run(s))", len(plan.plans), total_flows)
-    return {"processed": len(plan.plans), "flows": total_flows,
-            "skipped": len(plan.skipped), "busy": busy_count}
+    deferred = set(no_slot)
+    ran_plans = [p for p in plan.plans if p.launch_id not in deferred]
+    total_flows = sum(len(p.runs) for p in ran_plans)
+    if deferred:
+        logger.warning("%s profile(s) deferred to the next run by the global phone ceiling: %s",
+                       len(deferred), ", ".join(sorted(deferred)))
+    # The same one-line MLX tally the posting loop reports, on the line that
+    # already closes this run -- one run summary, not two.
+    logger.info("Airtable run complete (%s account(s), %s flow-run(s)); %s",
+                len(ran_plans), total_flows, stats.summary())
+    return {"processed": len(ran_plans), "flows": total_flows,
+            "skipped": len(plan.skipped), "busy": busy_count, "no_slot": len(deferred),
+            **stats.as_dict()}

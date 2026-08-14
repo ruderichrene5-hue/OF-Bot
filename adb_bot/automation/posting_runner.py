@@ -16,11 +16,12 @@ from __future__ import annotations
 
 
 from adb_bot.clients import airtable as at
-from adb_bot.core.locks import ProfileLocks
+from adb_bot.clients.multilogin.launch_stats import CountingLauncherClient, MLX_500, classify_launch
+from adb_bot.core.locks import ProfileLocks, live_profile_count, live_profile_slot, max_live_profiles
 from adb_bot.core.batching import LaunchGate, resolve_concurrency, run_rolling
 from adb_bot.automation import incidents
 from adb_bot.automation.posting_planner import plan_posting_queue
-from adb_bot.automation.workflow import run_profile_workflow
+from adb_bot.automation.workflow import STAND_IN_NOTE, run_profile_workflow
 
 # The flow that actually uploads a reel. u2 is the reliable path being standardized.
 POST_FLOW = "instagram_reel_upload_u2"
@@ -55,7 +56,57 @@ def _map_post_status(status: str):
         return (at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY, None, at.RESULT_FAILED, "ADB connect failed")
     if status == "failed":
         return (at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY, None, at.RESULT_FAILED, "flow reported a failure (see app logs)")
+    if status == "already_shared":
+        # The ledger stopped a second send of a clip this profile already got.
+        # Terminal and NOT retryable: the queue row asks for something that has
+        # already happened, so Issue stays Other (the retry pass only re-queues
+        # "Failed - Needs Retry") and the counter is not bumped -- a refusal is
+        # not an attempt. The Run Log says Skipped rather than Failed, because
+        # a guard doing its job should not read as a breakage when someone is
+        # scanning for problems.
+        #
+        # The variant is deliberately left alone rather than marked Used: if a
+        # later recheck disproves the original post, the clip becomes sendable
+        # again, and consuming it here would throw that away.
+        return (at.POST_STATUS_FAILED, at.ISSUE_OTHER, None, at.RESULT_SKIPPED,
+                "skipped: this clip was already sent to this profile")
+
+    if status == "wrong_account":
+        # Terminal and NOT retryable, for the same reason as `already_shared`:
+        # the retry pass only re-queues `Failed - Needs Retry`, and this row
+        # asks the phone for an account it does not have. Logged as Skipped
+        # rather than Failed because a guard that refuses to post on the wrong
+        # account is doing its job. The counter is not bumped -- a refusal is
+        # not an attempt -- and the variant is left unused so the clip can go
+        # out once the handle is corrected.
+        return (at.POST_STATUS_FAILED, at.ISSUE_ACCOUNT_MISSING, None, at.RESULT_SKIPPED,
+                "skipped: the phone's account switcher does not have this account")
+
+    if status == "heartbeat_lost":
+        # The phone stopped being ours mid-post. Retryable: nothing is wrong
+        # with the account, the post simply never completed.
+        return (at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY, None, at.RESULT_FAILED,
+                "profile lost mid-run (heartbeat failed)")
     return None
+
+
+def consumes_retry_budget(status: str) -> bool:
+    """Whether this terminal status spends one of the queue row's retries.
+
+    Mirrors the last branch of `apply_post_result` -- the only one that writes
+    `retry_count + 1`. Kept as its own predicate so the MLX-500 accounting can
+    ask "did this failure cost the row a retry?" without duplicating the mapping
+    table or guessing from the status name.
+    """
+    mapped = _map_post_status(status)
+    if mapped is None:
+        return False
+    post_status, _issue, incident, _result, _note = mapped
+    if post_status != at.POST_STATUS_FAILED:
+        return False
+    # Incidents (ban / verification / action block) and `already_shared` are
+    # terminal but deliberately do NOT bump the counter.
+    return not incident and status != "already_shared"
 
 
 def apply_post_result(airtable, item, status, flow=POST_FLOW, logger=None, detail="") -> bool:
@@ -92,13 +143,24 @@ def apply_post_result(airtable, item, status, flow=POST_FLOW, logger=None, detai
         # answer. The variant stays unused until the recheck decides -- marking
         # it Used now would lose it if the post turns out never to have landed.
         airtable.mark_post_pending_verification(item.queue_id, note=note)
-    elif incident:
+    elif incident and item.account_id:
         # incidents also sets the queue row's Issue Type + Post Status=Failed and
         # flags the account so the loops skip it. Don't bump retry -- not retryable.
         incidents.apply_account_incident(
             airtable, item.account_id, flow, incident, note, logger,
             queue_record_id=item.queue_id,
         )
+    elif incident:
+        # Profile-driven run: the flag belongs on an Accounts row that doesn't
+        # exist. Still stamp the queue row so the incident is visible and the row
+        # is not retried blindly -- but no retry bump, same as the account path.
+        airtable.mark_post_result(item.queue_id, at.POST_STATUS_FAILED, issue_type)
+    elif status == "already_shared":
+        # Terminal, but not an attempt: the send never happened because the clip
+        # was already out. Bumping the counter here would spend a retry the row
+        # never used -- and the row is not retryable anyway, so the only effect
+        # would be a misleading number in front of whoever reads it.
+        airtable.mark_post_result(item.queue_id, at.POST_STATUS_FAILED, issue_type)
     else:
         airtable.mark_post_result(
             item.queue_id, at.POST_STATUS_FAILED, issue_type, retry_count=item.retry_count + 1,
@@ -132,6 +194,18 @@ def run_posting_queue(
     def aborted() -> bool:
         return callable(should_stop) and should_stop()
 
+    # Count every launch this run makes. The wrapper is handed to readiness too
+    # (as `launcher_client`), so its relaunches are counted on the same tally --
+    # and MultiLogin's own 500s stay separated from our failures. `stats` rides
+    # along on every return so even a run that launches nothing reports 0/0.0%
+    # instead of a missing number.
+    launcher_client = CountingLauncherClient(launcher_client)
+    stats = launcher_client.stats
+
+    def result(payload: dict) -> dict:
+        payload.update(stats.as_dict())
+        return payload
+
     # 1) Plan from the queue ---------------------------------------------------
     try:
         rows = airtable.list_pending_posts()
@@ -146,7 +220,7 @@ def run_posting_queue(
         )
     except Exception as exc:
         logger.error("Failed to build the posting-queue plan: %s", exc)
-        return {"processed": 0, "error": str(exc)}
+        return result({"processed": 0, "error": str(exc)})
 
     for skip in plan.skipped:
         logger.info("Skipping post %s: %s", skip.name, skip.reason)
@@ -156,12 +230,12 @@ def run_posting_queue(
         try:
             if not confirm_callback(len(plan.to_post), len(plan.skipped)):
                 logger.info("Posting run cancelled before launch")
-                return {"processed": 0, "cancelled": True, "skipped": len(plan.skipped)}
+                return result({"processed": 0, "cancelled": True, "skipped": len(plan.skipped)})
         except Exception as exc:
             logger.warning("Posting run confirm callback failed: %s", exc)
 
     if not plan.to_post:
-        return {"processed": 0, "skipped": len(plan.skipped)}
+        return result({"processed": 0, "skipped": len(plan.skipped)})
 
     # 2) Lock the profiles, then launch them ----------------------------------
     # A profile already being driven by another loop (warmup) is skipped this
@@ -175,7 +249,7 @@ def run_posting_queue(
         plan.to_post = [item for item in plan.to_post if item.launch_id in set(launch_ids)]
         if not plan.to_post:
             logger.info("All due profiles are busy in another loop; nothing to do this round")
-            return {"processed": 0, "skipped": len(plan.skipped), "busy": len(locks.busy)}
+            return result({"processed": 0, "skipped": len(plan.skipped), "busy": len(locks.busy)})
         return _launch_and_post(
             plan, launch_ids, airtable, launcher_client, shutdown_client, adb_enable_client,
             api_client, automation, logger, readiness_wait_seconds, readiness_max_attempts,
@@ -195,12 +269,24 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
     def aborted() -> bool:
         return callable(should_stop) and should_stop()
 
+    # Normally already wrapped by run_posting_queue; wrapping again here (it is
+    # idempotent) keeps this function honest when it is called directly, so no
+    # launch path can report a run without its MLX numbers.
+    if not isinstance(launcher_client, CountingLauncherClient):
+        launcher_client = CountingLauncherClient(launcher_client)
+    stats = launcher_client.stats
+
     # 3) Post each item (parallel across profiles) ----------------------------
-    def run_post(item) -> None:
+    def run_post(item) -> bool:
+        """Post one row. Returns True if it went out on a stand-in account."""
         if aborted():
-            return
+            return False
+        stood_in = False
 
         def _cb(pid: str, status: str, detail: str = "") -> None:
+            nonlocal stood_in
+            if status == "done" and STAND_IN_NOTE in (detail or ""):
+                stood_in = True
             if callable(status_callback):
                 try:
                     status_callback(pid, status, detail)
@@ -208,8 +294,24 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
                     status_callback(pid, status)
                 except Exception:
                     pass
+            # One named line per finished post, before the Airtable write can
+            # fail. Everything else in this log knows a profile only by its MLX
+            # id, so without this the daily report can say how many posts a run
+            # made but not *which* accounts they were -- and the id is no use to
+            # the person reading it. Only terminal statuses: the intermediate
+            # ones are progress, not results.
+            if _map_post_status(status) is not None:
+                logger.info("Post result for %s (profile %s): %s%s",
+                            item.account_name, item.launch_id, status,
+                            f" -- {detail}" if detail else "")
             try:
                 apply_post_result(airtable, item, status, flow=flow, logger=logger, detail=detail)
+                # If this row just spent a retry and its profile's launch 500ed
+                # on MultiLogin's side, that retry was burned by their cloud,
+                # not by anything the bot did. That is the number which explains
+                # a row reaching "Retries Exhausted" with nothing wrong here.
+                if consumes_retry_budget(status):
+                    stats.note_retry_consumed(item.launch_id)
             except Exception as exc:
                 logger.warning("Failed to write post result for %s: %s", item.account_name, exc)
 
@@ -231,10 +333,21 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
             shutdown_on_success=True,
             caption=item.caption,
             media_path=item.video_path,
+            # Which Instagram account to post as. The flow switches to it before
+            # reading the baseline post count, so the count it compares against
+            # belongs to the account being posted to.
+            target_handle=item.target_handle,
+            # Stamps the local post ledger, which is how the deferred recheck
+            # matches a ledger entry back to its Verifying row. Without it every
+            # entry is written with an empty queue_id and the recheck can never
+            # resolve anything -- proven 2026-08-03, two Verifying rows returned
+            # "no local ledger entry" against a ledger that held both posts.
+            queue_id=item.queue_id,
             # Lets readiness relaunch a profile whose launch didn't take,
             # instead of re-enabling ADB on something that isn't running.
             launcher_client=launcher_client,
         )
+        return stood_in
 
     # A rolling window of at most `concurrency` phones. The previous fixed
     # batches ran only as fast as their slowest profile: with a 3-minute post
@@ -247,6 +360,8 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
 
     gate = LaunchGate(batch_launch_delay_seconds)
 
+    no_slot: list = []
+
     def run_profile(launch_id) -> None:
         """Launch one profile, then work through everything due on it.
 
@@ -254,26 +369,83 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
         `run_profile_workflow` shuts the profile down when it succeeds -- so
         running two of them at once would have the first one's shutdown pull the
         device out from under the second.
-        """
-        response = gate.launch(lambda: launcher_client.start_profiles([launch_id]))
-        if isinstance(response, dict) and response.get("status") == "error":
-            logger.error("Failed to launch profile %s: %s", launch_id, response)
-        else:
-            logger.info("Launched profile %s", launch_id)
-        # No batch-wide readiness sleep any more: run_profile_workflow waits for
-        # *this* profile to be ready, which is the same wait applied where it
-        # belongs instead of once for a whole group.
-        for item in items_by_launch.get(launch_id, []):
-            if aborted():
-                return
-            run_post(item)
 
-    logger.info("Posting %s profile(s), up to %s at a time (rolling)",
-                len(launch_ids), concurrency)
+        A phone with two Instagram accounts therefore gets **one visit per
+        account, not one visit for both**: two due rows, run one after the
+        other, each launching the phone, switching the account switcher to its
+        own handle, posting, and closing again. Sharing a single launch was
+        tried and rejected -- `run_profile_workflow` closes the profile in a
+        `finally` no caller can opt out of, and that guarantee (a phone is never
+        left open by a loop nobody is watching) is worth more than the launch it
+        would save.
+        """
+        # The cross-loop ceiling. `concurrency` above only bounds *this* loop;
+        # warmup and recheck apply their own, so the three of them could have 21
+        # phones open between them. No slot means the box is already at its
+        # global limit: don't launch, and let the next tick pick this profile up
+        # (its queue row is untouched, exactly as when another loop holds it).
+        with live_profile_slot(owner="posting") as slot:
+            if slot is None:
+                no_slot.append(launch_id)
+                logger.warning(
+                    "Skipping profile %s this round: %s phone(s) already open across all "
+                    "loops (global ceiling). It will be retried next tick.",
+                    launch_id, live_profile_count())
+                return
+
+            response = gate.launch(lambda: launcher_client.start_profiles([launch_id]))
+            if isinstance(response, dict) and response.get("status") == "error":
+                if classify_launch(response) == MLX_500:
+                    # Say whose failure it is where it happens, not only in the
+                    # end-of-run tally: this one is MultiLogin's cloud and will
+                    # self-heal, so it is not a reason to go looking at the box.
+                    logger.error("Failed to launch profile %s -- MultiLogin-side 500 (their "
+                                 "cloud; self-heals, but it still spends this row's retry "
+                                 "budget): %s", launch_id, response)
+                else:
+                    logger.error("Failed to launch profile %s: %s", launch_id, response)
+            else:
+                logger.info("Launched profile %s", launch_id)
+            # No batch-wide readiness sleep any more: run_profile_workflow waits
+            # for *this* profile to be ready, which is the same wait applied
+            # where it belongs instead of once for a whole group.
+            for item in items_by_launch.get(launch_id, []):
+                if aborted():
+                    return
+                if run_post(item):
+                    # That clip went out on the phone's own account because the
+                    # row named a handle the phone does not have. One per profile
+                    # per run, deliberately: a phone parked on a missing handle
+                    # has a backlog of them (Jasmin 5 had nine), they all resolve
+                    # to the *same* stand-in account, and the loop is uncapped --
+                    # so without this the sibling account posts its own rows plus
+                    # the whole orphaned backlog back to back. Thirteen reels in a
+                    # row from one account is the behaviour Instagram acts on.
+                    # The rest stay queued and drain a post per tick.
+                    logger.info(
+                        "Profile %s posted on a stand-in account this run; leaving its "
+                        "remaining %s row(s) for the next tick rather than sending an "
+                        "orphaned backlog in one go.",
+                        launch_id,
+                        max(0, len(items_by_launch.get(launch_id, [])) - 1))
+                    return
+
+    logger.info("Posting %s profile(s), up to %s at a time (rolling, global ceiling %s)",
+                len(launch_ids), concurrency, max_live_profiles())
     outcome = run_rolling(launch_ids, run_profile, concurrency=concurrency,
                           should_stop=should_stop, logger=logger)
     if outcome["aborted"]:
-        return {"processed": 0, "aborted": True}
+        logger.info("Posting run aborted; %s", stats.summary())
+        return {"processed": 0, "aborted": True, **stats.as_dict()}
 
-    logger.info("Posting run complete (%s post(s))", len(plan.to_post))
-    return {"processed": len(plan.to_post), "skipped": len(plan.skipped), "busy": busy_count}
+    deferred = set(no_slot)
+    processed = len([item for item in plan.to_post if item.launch_id not in deferred])
+    if deferred:
+        logger.warning("%s profile(s) deferred to the next run by the global phone ceiling: %s",
+                       len(deferred), ", ".join(sorted(deferred)))
+    # One run summary, not two: the MLX launch tally rides on the line that
+    # already closes the run (and in the dict the loop logs and returns), so a
+    # bad night on their side is readable without correlating anything.
+    logger.info("Posting run complete (%s post(s)); %s", processed, stats.summary())
+    return {"processed": processed, "skipped": len(plan.skipped), "busy": busy_count,
+            "no_slot": len(deferred), **stats.as_dict()}

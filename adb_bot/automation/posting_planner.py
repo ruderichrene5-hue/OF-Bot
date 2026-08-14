@@ -30,6 +30,11 @@ class PostingItem:
     variant_id: str | None
     scheduled: str | None
     retry_count: int = 0
+    # Which Instagram account on the phone to post as. None = whoever is signed
+    # in, which is every single-account phone. When set, the flow proves the
+    # account switcher is on this handle before it touches the composer.
+    target_handle: str | None = None
+    account_slot: str | None = None
 
 
 @dataclass
@@ -110,30 +115,81 @@ def plan_posting_queue(
             continue
 
         account_id = _first_link(fields, at.F_PQ_TARGET_ACCOUNT)
-        if not account_id or account_id not in accounts_by_id:
-            plan.skipped.append(SkippedPost(name, "no linked Target Account"))
-            continue
-        account = accounts_by_id[account_id]
-        account_name = str(account.get(at.F_ACC_NAME) or account_id).strip()
+        direct_profile_id = _first_link(fields, at.F_PQ_TARGET_PROFILE)
 
-        # --- account health guards (checklist: skip flagged accounts) ---
-        if bool(account.get(at.F_ACC_NEEDS_VERIFICATION)):
-            plan.skipped.append(SkippedPost(account_name, "needs human verification"))
-            continue
-        if at._select_name(account.get(at.F_ACC_AUTOMATION_MODE)) == at.MODE_PAUSED:
-            plan.skipped.append(SkippedPost(account_name, "automation mode paused"))
-            continue
-        stage = at._select_name(account.get(at.F_ACC_LIFECYCLE_STAGE))
-        if stage in (at.STAGE_PAUSED, at.STAGE_BANNED):
-            plan.skipped.append(SkippedPost(account_name, f"lifecycle stage {stage}"))
+        if account_id and account_id in accounts_by_id:
+            account = accounts_by_id[account_id]
+            account_name = str(account.get(at.F_ACC_NAME) or account_id).strip()
+
+            # --- account health guards (checklist: skip flagged accounts) ---
+            if bool(account.get(at.F_ACC_NEEDS_VERIFICATION)):
+                plan.skipped.append(SkippedPost(account_name, "needs human verification"))
+                continue
+            if at._select_name(account.get(at.F_ACC_AUTOMATION_MODE)) == at.MODE_PAUSED:
+                plan.skipped.append(SkippedPost(account_name, "automation mode paused"))
+                continue
+            stage = at._select_name(account.get(at.F_ACC_LIFECYCLE_STAGE))
+            if stage in (at.STAGE_PAUSED, at.STAGE_BANNED):
+                plan.skipped.append(SkippedPost(account_name, f"lifecycle stage {stage}"))
+                continue
+
+            # --- resolve the launch key (Account -> Profile -> MLX API ID) ---
+            profile_id = _first_link(account, at.F_ACC_PROFILE)
+        elif direct_profile_id:
+            # Profile-driven row: no Accounts row exists, so there are no account
+            # health guards to apply. The profile itself is the target, and its
+            # name stands in for the handle in logs and Airtable write-back.
+            account_id = None
+            profile_id = direct_profile_id
+            account_name = str((profiles_by_recid.get(direct_profile_id) or {}).get("name")
+                               or direct_profile_id).strip()
+        else:
+            plan.skipped.append(SkippedPost(name, "no linked Target Account or Target Profile"))
             continue
 
-        # --- resolve the launch key (Account -> Profile -> MLX API ID) ---
-        profile_id = _first_link(account, at.F_ACC_PROFILE)
-        launch_id = None
-        if profile_id:
-            info = profiles_by_recid.get(profile_id) or {}
-            launch_id = info.get("launch_id")
+        info = (profiles_by_recid.get(profile_id) or {}) if profile_id else {}
+
+        # --- profile health guards ---
+        # Re-checked here and not only where rows are created, because a phone
+        # can be parked *after* its row went Pending: the queue filter cannot
+        # reach a row that already exists, so without this the phone keeps its
+        # outstanding slots and spends a launch and a boot on every one. That is
+        # what let 22 flagged profiles keep posting through 2026-08-06 -- Laila 3
+        # burned 17 launches for 0 posts in a day, and Viktoria 3 was launched
+        # while flagged `Banned / Blocked`.
+        #
+        # A property of the *phone*, not of one account on it: an Instagram
+        # challenge is against the device, so dropping the profile here drops
+        # every account that posts from it -- both accounts of a two-account
+        # phone, deliberately.
+        if info.get("needs_human"):
+            plan.skipped.append(SkippedPost(account_name, "profile needs a human check"))
+            continue
+        profile_status = info.get("status")
+        if profile_status is not None and profile_status != at.STATUS_SELECT_ACTIVE:
+            plan.skipped.append(SkippedPost(account_name, f"profile status {profile_status}"))
+            continue
+
+        # --- the hand-off ---
+        # A phone that came off the warm-up is not a posting target until a
+        # person has given it a bio, a picture and one post made by hand. An
+        # account whose first ever post is an automated reel is the one
+        # Instagram acts on, and the warm-up exists precisely so that does not
+        # happen -- posting the moment day 4 completes would throw that away on
+        # the last step.
+        #
+        # Keyed on `Warm-up Started`, so it applies to exactly the cohort that
+        # went through the warm-up and to nobody else: every profile posting
+        # today predates it and has no start date, so this cannot park a
+        # working account. `Status = Inactive` remains the way to hold back
+        # anything else.
+        outstanding = info.get("handoff_outstanding")
+        if info.get("warmup_started") and outstanding:
+            plan.skipped.append(SkippedPost(
+                account_name, f"waiting on a person: {', '.join(outstanding)}"))
+            continue
+
+        launch_id = info.get("launch_id")
         if not launch_id:
             plan.skipped.append(SkippedPost(account_name, "no MLX API ID on linked profile"))
             continue
@@ -158,6 +214,13 @@ def plan_posting_queue(
         except (TypeError, ValueError):
             retry = 0
 
+        # A two-account phone posts as whichever account the row names, and the
+        # name follows suit: two rows for one profile would otherwise be
+        # indistinguishable in the log and in the Run Log.
+        target_handle = at._handle(fields.get(at.F_PQ_TARGET_HANDLE))
+        if target_handle and direct_profile_id and not account_id:
+            account_name = target_handle
+
         plan.to_post.append(PostingItem(
             queue_id=queue_id,
             account_id=account_id,
@@ -168,6 +231,8 @@ def plan_posting_queue(
             variant_id=variant_id,
             scheduled=fields.get(at.F_PQ_SCHEDULED),
             retry_count=retry,
+            target_handle=target_handle,
+            account_slot=at._select_name(fields.get(at.F_PQ_ACCOUNT_SLOT)),
         ))
 
     return plan

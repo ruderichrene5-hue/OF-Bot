@@ -110,6 +110,44 @@ client on the server and keep it running; a working cloud token is not enough.
 `doctor`'s **MultiLogin agent** check tells the two apart: `MultiLogin` PASS with
 `MultiLogin agent` FAIL means the token is fine and the agent isn't running.
 
+#### Keep it running: `adbbot-mlx-agent.service`
+
+Do **not** hand-start the agent. It has died unsupervised twice — once to an OOM
+— and each time every phone launch failed for about an hour before a human read
+the logs, because a loose process reports to nobody and does not survive a
+reboot. `deploy/systemd/adbbot-mlx-agent.service` supervises it: `Restart=always`,
+ordered after the display, and `WantedBy=multi-user.target` so it comes back on
+its own.
+
+```bash
+sudo deploy/systemd/install_mlx_agent.sh      # writes the unit; does not start it
+```
+
+It is deliberately not part of `install_units.sh` — that script installs the loop
+*timers*, and its `--apply` flag means "start posting for real".
+
+**Taking over from an already-running hand-started agent.** The loose process
+owns `:45001`, so it has to go first or the unit crash-loops trying to bind:
+
+```bash
+sudo kill $(pgrep -f '^/opt/mlx/agent\.bin$')   # stop the loose one
+sleep 5 && ss -lntp | grep 45001                # expect NO output
+sudo systemctl enable --now adbbot-mlx-agent    # supervised from here on
+sleep 10 && ss -lntp | grep 45001               # expect a LISTEN line
+```
+
+Killing the agent also drops every phone it has open, so do this between posting
+slots. Afterwards:
+
+```bash
+systemctl status adbbot-mlx-agent
+journalctl -u adbbot-mlx-agent -f
+```
+
+The listener on `:45001` is the agent's `launcher-linux_amd64.bin` **child**, not
+`agent.bin` itself — so `ss -lntp | grep 45001` naming a different binary than the
+unit's `ExecStart` is correct, not a mismatch.
+
 ## 2. Credentials
 
 | Variable | Value |
@@ -117,6 +155,12 @@ client on the server and keep it running; a working cloud token is not enough.
 | `MULTILOGIN_TOKEN` | MLX **workspace Automation Token** — not a regular token (those expire in ~1h) |
 | `AIRTABLE_TOKEN` | Airtable Personal Access Token |
 | `AIRTABLE_BASE_ID` | The base to run against (test base until you're confident) |
+
+Optional, same file/mechanism:
+
+| Variable | Value |
+|---|---|
+| `ADBBOT_MAX_LIVE_PROFILES` | How many phones may be open **across every loop at once** (default 12). This is the real ceiling: `--max-concurrent` is per loop, so posting (10) + warmup (10) + recheck (1) would otherwise be 21 phones. A loop that cannot get a place skips that profile and picks it up next tick — "skipped … global ceiling" in its log. Lower it if the box is tight on RAM; 12 assumes ~215 MB per live phone on 15 GB. |
 
 ### Linux
 
@@ -205,6 +249,72 @@ every account is past Day 4 (they're in the posting phase).
 row. Empty means the `Posting Queue` has no Pending rows due yet — check that
 Airtable's own 5×/day automations are actually creating them.
 
+```bash
+.venv/bin/python -m adb_bot.automation.run_loop recovery
+```
+**Expect:** usually nothing. It lists profiles whose `Needs Human Check` you have
+cleared and whose dead posts it would hand back to the retry loop.
+
+### Resuming a profile you have fixed
+
+Clearing **`Profiles (Cloning).Needs Human Check`** is how you tell the bot you
+looked at a profile and fixed it. The `recovery` loop (every 15 min) is what acts
+on it — before it existed, clearing the box changed nothing at all.
+
+What it does: finds the profile's `Failed` queue rows that the retry pass will
+never touch again (`Retries Exhausted`, or the retry count at the limit, or an
+Issue Type only a person can clear), sets them back to `Failed - Needs Retry`
+with the count at 0, and closes out the profile's `Flagged At` / `Issue Reason`,
+leaving a line in Issue Notes. The retry loop then picks them up on its next tick
+and applies its own **ledger check**, so a reel that may already be live still
+never goes out twice. Recovery makes a row eligible to be *considered*; it never
+decides that a post may go out.
+
+Freeing those rows matters for a second reason: a `Failed` row **owns its clip**
+(`VARIANT_HELD_BY`). Leave the dead rows in place and the variants stay locked to
+a row nobody will ever act on, so the profile only ever posts newly spoofed
+media.
+
+Two things it deliberately leaves to you:
+
+* **Status.** A profile that is un-flagged but `Inactive` is reported with a
+  warning and stays out of every loop. Status is your park switch — the bot will
+  not un-park a profile because a different checkbox changed.
+* **The checkbox itself.** You cleared it; the bot does not write it back.
+
+### Warming up new profiles (the `Created` tag)
+
+New accounts exist as MultiLogin profiles long before anyone writes an Accounts
+row, so the account-driven warm-up above cannot see them. `--targets profiles`
+warms up **the MLX profiles tagged `Created`** instead:
+
+```bash
+.venv/bin/python -m adb_bot.automation.run_loop warmup --targets profiles
+.venv/bin/python -m adb_bot.automation.run_loop warmup --targets profiles --apply
+```
+
+The tag is the whole selection — set it in MultiLogin, and the profile joins the
+warm-up on the next run; change it (to `Active / Posting`) and it drops out.
+`--warmup-tag` picks a different one.
+
+**Day 1 is the first run, not the MLX creation date.** The bot stamps
+`Profiles (Cloning).Warm-up Started` the first time it warms a profile up and
+counts from there, so a profile created a fortnight ago still starts at day 1.
+Clear that date to run a profile through the warm-up again.
+
+Two things it will tell you rather than guess about:
+
+* *"has no Profiles (Cloning) row yet — run the mlx-sync loop"* — MLX has the
+  profile, Airtable doesn't. `mlx-sync` runs nightly; run it by hand to pull a
+  batch created today.
+* *"Airtable Status is Inactive"* — the profile is parked. Set it to Active if
+  it should be warming up.
+
+Reels are never scheduled by the profile warm-up, even on a Warmup Plan day that
+asks for one: a reel needs a spoofed variant, a variant needs a model, and a
+`Created` profile has neither yet. Posting is the Posting Queue's job once the
+profile has been named and assigned to a model.
+
 ## 6. First real run — one account
 
 Don't start the scheduler yet. Pick a single test account and run it by hand:
@@ -217,6 +327,31 @@ Don't start the scheduler yet. Pick a single test account and run it by hand:
 Only once that round-trips should you schedule anything.
 
 ## 7. Schedule
+
+Two different schedules, and they are easy to confuse:
+
+* **When the loops run** — systemd timers / Task Scheduler, below. This is how
+  often the bot *looks* for work.
+* **When a model's reels go out** — Airtable, `Models` → **Reel Post Times**.
+  This is the posting schedule itself, and it is edited in the base, not here.
+
+### Reel post times, per model (Airtable)
+
+Pick the wall-clock times (Europe/Berlin) a model posts at. Each picked time
+becomes one Posting Queue row per account/profile of that model, filled with an
+unused Ready spoof variant — so **the number of times picked is that model's
+reels per day**.
+
+**Leave it empty and the model posts whenever a video is ready.** That is the
+flexible mode, not an off switch: the queue loop gives it a row as soon as it
+has an unused variant, at most 7 a day and no closer than 2 hours apart.
+`Models` → **Reels Per Day** overrides the 7 for one model;
+`--anytime-gap` / `--anytime-max` override both defaults for one run.
+
+The `--slots` grid is only the fallback for a base whose `Models` table has no
+`Reel Post Times` field at all. Once the field exists, every model's own pick
+wins, and `--no-model-times` is the escape hatch that puts everything back on
+one grid for a single run.
 
 The app's **Scheduler** window works on both platforms and drives whichever
 backend is present. Enable the loops, set intervals, tick **dry-run**, press
@@ -279,6 +414,8 @@ Equivalent from PowerShell: `.\deploy\scheduler\install_tasks.ps1 [-Apply]`.
 | Posting plan is empty | no Pending+due `Posting Queue` rows | Check Airtable's slot-creating automations |
 | Pipeline: "no active accounts under model X" | Account's Model link / Lifecycle Stage | Fix in Airtable — accounts must be **Active** and linked to that Model |
 | Pipeline plans but makes no files | spoofer not configured | Set Spoofer python/root (step 3); `doctor` verifies it |
+| CPU pinned at ~100%, nothing looks wrong | almost always a spoof encode holding every core | Dashboard → **Top CPU use** names the process and the clip, **Spoofing** says how much is left. An encode is not a fault |
+| Raw clips sit in Drive and never get spoofed | no *active* profile under that model | Dashboard → **Spoofing** flags these separately from the queue; check the folder name against the model, and Profiles → Status |
 | Flow fails right after launch | ADB didn't connect | Confirm the profile launched in MLX; `adb devices` |
 | Account stopped being picked up | flagged by ban/verification detection | Check `Ban & Flag History` + `Needs Human Verification`; unticking it resumes the account |
 | Timer never fires | unit not enabled, or service still active | `systemctl list-timers 'adbbot-*'`, `systemctl status adbbot-<loop>.service` |
@@ -296,6 +433,61 @@ Equivalent from PowerShell: `.\deploy\scheduler\install_tasks.ps1 [-Apply]`.
 **Running the UI on the server** — it needs a desktop session. Over SSH use
 `ssh -X`, or attach via VNC, then `./run_ui.sh`. Everything except the UI runs
 headlessly.
+
+**The dashboard, two ways** — `adbbot-report.service` renders the report on
+`127.0.0.1:8080`, per request, no password: reach it with
+`ssh -N -L 8080:localhost:8080 <box>`. `adbbot-site.service` is the same page on
+`0.0.0.0:8088` behind a password, rebuilt every five minutes and served from
+memory so a public port cannot spend the Airtable quota. Both carry a **Top CPU
+use** table (which process is burning the box, and what it is doing) and a
+**Spoofing** section (what is on the encoder right now, and how many variants
+are queued behind it, per model) — the two questions a pinned box provokes.
+A **Schedules** tab holds every time on the page: when each loop next runs
+(with the hour for the daily ones) and when each model posts, beside the stock
+each has to post *with*. Mind the two clocks — loop times are the server's
+(UTC here), posting slots are `Europe/Berlin`; the page says so when they
+differ.
+Note that the queue half costs a Drive listing plus two Airtable reads per
+rebuild; on the loopback dashboard, which renders per request, that is the
+slowest thing on the page. Its password hash and
+cookie secret live in `/etc/adbbot/env`
+(`ADBBOT_SITE_PASSWORD_HASH`, `ADBBOT_SITE_SECRET`); make new ones with
+`python -m adb_bot.automation.site --hash-password`, then
+`systemctl restart adbbot-site`. It serves plain HTTP — put Caddy in front of it
+if the box ever gets a domain name. The site runs from a pinned copy at
+`/opt/adbbot-site` (see `DEPLOYED_FROM`), so redeploy it after changing the
+report code:
+
+```
+git -C /root/adb_bot archive HEAD | tar -x -C /opt/adbbot-site && systemctl restart adbbot-site
+```
+
+### The recovery loop runs from a pinned copy (2026-08-06)
+
+`adbbot-recovery` is the one loop whose unit does *not* point at `/root/adb_bot`.
+It runs from `/opt/adbbot-recovery`, pinned the same way the site is. The reason
+is drift, not design: the loop landed on `worktree-daily-run-report`, the live
+checkout was still behind that branch, and it had uncommitted work in flight, so
+it could not be fast-forwarded without overwriting someone mid-edit. A timer
+pointing at a checkout that has no `recovery_runner.py` would just fail every
+15 minutes, so the code went where the timer could reach it.
+
+This is a bridge, not a second home. Redeploy it the same way as the site:
+
+```
+git -C <checkout> archive HEAD | tar -x -C /opt/adbbot-recovery
+```
+
+and once `/root/adb_bot` carries the recovery loop, `install_units.sh --apply`
+rewrites the unit to point back at the checkout with no extra step. Nothing has
+to be undone first — the installer overwrites units in place, which is the end
+state to aim for. `/etc/systemd/system/adbbot-recovery.service` carries the same
+note at the top.
+
+Worth knowing why this mattered: between the loop being written and the timer
+existing, four profiles had their Needs Human Check cleared by a person and
+nothing picked them up. Clearing the box is only half a handoff; the loop is the
+other half, and until it is scheduled the box is a checkbox that does nothing.
 
 **Safety net:** any loop can be reverted to dry-run at any time — Scheduler
 window, tick dry-run, Apply (or re-run the installer without `--apply`). That

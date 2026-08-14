@@ -57,6 +57,12 @@ class ShareRecord:
     caption: str = ""
     queue_id: str = ""
     detail: str = ""
+    # Which Instagram account on the phone this share went to, when the phone
+    # carries two. Not part of `key` -- each account gets its own spoofed encode
+    # of every clip, so the media hash already tells them apart -- but without
+    # it a ledger line for a two-account phone cannot say *whose* post it was,
+    # which is the first question anyone asks when reading it back.
+    target_handle: str = ""
     # The account's post count as it was just before this share. The deferred
     # recheck has no other baseline to work from -- it arrives fifteen minutes
     # later with no memory of the run -- so carrying it here is what turns the
@@ -172,7 +178,7 @@ class PostLedger:
 
     def record_share(self, profile_id: str, media_path, caption: str = "",
                      queue_id: str = "", media_hash: str | None = None,
-                     baseline_count=None) -> ShareRecord | None:
+                     baseline_count=None, target_handle: str = "") -> ShareRecord | None:
         """Note that Share was just tapped. Call this *before* verification.
 
         `baseline_count` is the reel_verify.Count read before the upload (or
@@ -194,6 +200,7 @@ class PostLedger:
             queue_id=str(queue_id or ""),
             baseline_count=int(getattr(baseline_count, "value", -1)),
             baseline_exact=bool(getattr(baseline_count, "exact", False)),
+            target_handle=str(target_handle or ""),
         )
         self._append(record)
         return record
