@@ -112,6 +112,53 @@ The probe cannot spend: without `--apply` it never taps, types or rents. The
 whole point of reading first was that a burned-pool run against nine profiles
 would have cost real money to learn that none of them wanted a number.
 
+## Re-check at 18:00 — and the thing "signed out" was hiding
+
+Profiles had been looked at by hand, so all seven signed-out phones were read
+again. **MultiLogin tags had not moved at all** — the `issue-tags` mirror
+reported `tagged=0 untagged=0 resolved=0 raised=0` against 219 unchanged, so
+nobody had cleared an `Issue` tag. The change was on the phones, not in the
+tags, which is why re-reading the screens was the only way to find it.
+
+Six were unchanged. **`Laila 9` was not.**
+
+At 17:45 it showed the ordinary logged-out landing page. At 18:00, after
+somebody signed back in, the same phone read:
+
+> We disabled your account — you no longer have access to **laila_linksss**.
+> Account disabled on **August 12, 2026**. Your account, or activity on it,
+> doesn't follow our community standards… all your information will be
+> permanently deleted.
+
+**So `signed out` is not a terminal diagnosis — it can be a ban with the login
+screen in front of it.** A logged-out phone shows the same landing page whether
+the account behind it is healthy, challenged or destroyed; the state only
+becomes visible once someone signs in. Six of the seven are still unread in that
+sense, and any of them could be a disabled account too. That is worth saying
+plainly to whoever supplies the credentials: **expect some of these logins to
+fail into a ban notice rather than into a working account.**
+
+Corrected for `Laila 9`, and nothing else touched:
+
+- MLX `logged out` → `Banned / Dead`; `Issue` **kept**, so the posting loop can
+  never pick it up.
+- Airtable `Issue Reason` → `Banned / Blocked`, with the disable date in the
+  note.
+- The other six got a note recording the re-check; their tags were already
+  correct and were left alone.
+
+Nothing was unflagged and no backlog was released. For the record, what a clear
+*would* have released: Luisa 2 **21** pending rows, Luisa 8 **19**, Luisa 3
+**17**, Jil 10 **7** — 64 across the seven, with Jil 2, Laila 9 and Luisa 9 at
+zero.
+
+Dashboard: `adbbot-site` and `adbbot-report` restarted to drop the 300s cache;
+:8088 and :8080 both serve `Laila 9 — Banned / Blocked`. No redeploy was needed,
+because the dashboard's *code* is pinned but its *data* is read live. Note both
+units warn that their unit files changed on disk and want a `daemon-reload`;
+that predates this work and was left alone rather than enact somebody's pending
+unit edits.
+
 ## What actually unblocks these
 
 **Seven of the nine are waiting on credentials nobody has.** Counting the six a
@@ -122,8 +169,10 @@ created, so there is no store to read these from.
 
 The ask for the client, in order of how much it unblocks:
 
-1. **Instagram passwords** for Jil 2, Laila 9, Luisa 2, Luisa 3, Luisa 8,
-   Luisa 9, Jil 10 — seven accounts back in the posting loop.
+1. **Instagram passwords** for Jil 2, Luisa 2, Luisa 3, Luisa 8, Luisa 9 and
+   Jil 10 — six accounts, not seven: `Laila 9` turned out to be disabled and is
+   now `Banned / Blocked`. Expect some of the remaining six to sign in to a ban
+   notice rather than a working account, for the reason in the 18:00 section.
 2. **A decision on Katja 2 and Luisa 7**: supply a selfie / ID document, or
    retire them.
 3. **A `Signed Out` option on `Issue Reason`** so the board stops saying
