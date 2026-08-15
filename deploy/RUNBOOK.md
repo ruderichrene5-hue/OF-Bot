@@ -305,8 +305,8 @@ Clear that date to run a profile through the warm-up again.
 Two things it will tell you rather than guess about:
 
 * *"has no Profiles (Cloning) row yet — run the mlx-sync loop"* — MLX has the
-  profile, Airtable doesn't. `mlx-sync` runs nightly; run it by hand to pull a
-  batch created today.
+  profile, Airtable doesn't. `mlx-sync` runs every 3 hours; run it by hand if
+  you don't want to wait for the next tick.
 * *"Airtable Status is Inactive"* — the profile is parked. Set it to Active if
   it should be warming up.
 
@@ -362,7 +362,7 @@ backend is present. Enable the loops, set intervals, tick **dry-run**, press
 | Posting | every 10 min |
 | Pipeline | every 20 min |
 | Warmup | every 360 min (or 3×/day) |
-| MLX sync | daily (1440) |
+| MLX sync | every 180 min |
 | Cleanup | daily (1440) |
 
 ### Linux — systemd timers

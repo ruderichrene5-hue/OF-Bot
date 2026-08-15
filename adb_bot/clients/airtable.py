@@ -179,6 +179,18 @@ F_PROF_MLX_API_ID = "MLX API ID"          # 18-digit launch/ADB key
 F_PROF_MLX_SERIAL = "MultiLogin Profile ID"  # human serial (not the launch key)
 F_PROF_TIME_ZONE = "Time Zone"            # equipment_info.time_zone, e.g. Europe/Berlin
 F_PROF_STATUS = "Status"                  # singleSelect: Active / Inactive
+# What MultiLogin says about the profile, mirrored by `mlx-sync` so the two
+# tools can be read side by side. MLX is the source of truth for both: a person
+# renames a phone, drops it in a model's folder or tags it in the MultiLogin
+# workspace, and the sync copies that across -- nothing here is ever written
+# back to MLX, and nothing downstream should be edited here by hand.
+#
+# `Status` is deliberately NOT in this group. MLX `status=2` only means the
+# phone is enabled, while Airtable's Status is the human park switch (a banned
+# or challenged account is parked here and still "active" over there), so
+# syncing it would un-park deliberately parked accounts.
+F_PROF_MLX_FOLDER = "MLX Folder"          # the MultiLogin folder the profile sits in
+F_PROF_MLX_TAGS = "MLX Tags"              # multipleSelects, the profile's MLX labels
 F_PROF_APP_PACKAGE = "App Package Name"   # constant com.instagram.android for these
 F_PROF_DEVICE = "Device"                  # link -> Devices
 F_PROF_ACCOUNTS = "Accounts"              # link -> Accounts
@@ -740,23 +752,45 @@ class AirtableClient:
     # new rows for profiles MLX has that Airtable doesn't. See mlx_sync.py.
     # ------------------------------------------------------------------
     def profiles_by_serial(self) -> dict:
-        """MLX serial_no -> {'record_id', 'name', 'api_id', 'time_zone'} for the
-        existing Profiles (Cloning) rows. The serial is the sync's match key."""
+        """MLX serial_no -> the existing Profiles (Cloning) row, as
+        {'record_id', 'name', 'api_id', 'time_zone', 'folder', 'tags',
+        'duplicate'}. The serial is the sync's match key.
+
+        `folder` and `tags` are here so the sync can *diff* them rather than
+        only backfill blanks -- without them a renamed or re-foldered profile
+        reads as "already in sync" forever.
+
+        `duplicate` marks a serial that more than one Airtable row claims
+        (`Katja 5`/`Katja Link` and `Laila 8`/`Laila Link` both do). Only one of
+        them can win this dict, and which one is arbitrary, so the sync must not
+        rename on that basis -- it would put the losing row's name on the
+        winning row and leave the real mismatch untouched.
+        """
         out: dict = {}
         rows = self._list_table(
             TABLE_PROFILES,
-            fields=[F_PROF_NAME, F_PROF_MLX_SERIAL, F_PROF_MLX_API_ID, F_PROF_TIME_ZONE],
+            fields=[F_PROF_NAME, F_PROF_MLX_SERIAL, F_PROF_MLX_API_ID, F_PROF_TIME_ZONE,
+                    F_PROF_MLX_FOLDER, F_PROF_MLX_TAGS],
         )
         for record in rows:
             fields = record.get("fields", {}) or {}
             serial = str(fields.get(F_PROF_MLX_SERIAL) or "").strip()
             if not serial:
                 continue
+            if serial in out:
+                out[serial]["duplicate"] = True
+                continue
             out[serial] = {
                 "record_id": record.get("id"),
-                "name": fields.get(F_PROF_NAME),
+                "name": (str(fields.get(F_PROF_NAME) or "").strip() or None),
                 "api_id": (str(fields.get(F_PROF_MLX_API_ID) or "").strip() or None),
                 "time_zone": (str(fields.get(F_PROF_TIME_ZONE) or "").strip() or None),
+                "folder": (str(fields.get(F_PROF_MLX_FOLDER) or "").strip() or None),
+                # multipleSelects reads back as a list; normalise to a tuple of
+                # non-empty names so the diff never compares None to [].
+                "tags": tuple(sorted(
+                    t for t in (str(x).strip() for x in (fields.get(F_PROF_MLX_TAGS) or [])) if t)),
+                "duplicate": False,
             }
         return out
 

@@ -2558,8 +2558,12 @@ class TimerScheduleDetailTest(unittest.TestCase):
         """"daily" is the one cadence on the table nobody can act on."""
         states = {row["loop"]: row for row in report.timer_states()}
         self.assertEqual(states["cleanup"]["at"], "04:00")
-        self.assertEqual(states["mlx-sync"]["at"], "23:30")
+        self.assertEqual(states["digest"]["at"], "08:00")
         self.assertEqual(states["posting"]["at"], "")
+        # mlx-sync moved off a daily 23:30 run to every 3 h, so it has no hour
+        # to show any more -- it belongs with the interval loops now.
+        self.assertEqual(states["mlx-sync"]["at"], "")
+        self.assertEqual(states["mlx-sync"]["interval_min"], 180)
 
 
 class TimerRenderDetailTest(RenderTest):

@@ -1,20 +1,37 @@
 """MultiLogin -> Airtable profile sync (checklist loop #4).
 
-MultiLogin is the source of truth for which mobile profiles exist; Airtable only
-learns about a new profile when this loop diffs the two and writes the missing
-rows. It never talks to a phone and never touches Instagram -- it's pure data
-plumbing meant to run unattended (Windows Task Scheduler) about once a day.
+MultiLogin is the source of truth for which mobile profiles exist *and* for
+what each one is called, which folder it sits in and how it is tagged. Airtable
+only learns any of that when this loop diffs the two and writes the difference.
+It never talks to a phone and never touches Instagram -- it's pure data
+plumbing meant to run unattended, every few hours.
 
 Design:
 - normalize each MLX `list` item into a small, tolerant dataclass;
 - diff against the existing Profiles (Cloning) rows, keyed by the human
   `serial_no` (`MultiLogin Profile ID`), which is the stable match key --
-  NOT the 18-digit `id`, which is the launch key we *store* but don't match on;
+  NOT the 18-digit `id`, which is the launch key we *store* but don't match on,
+  and not the name, which is the thing that moves;
 - for a profile MLX has and Airtable doesn't: create a Device, a Proxy, and a
   Profile (Cloning) row, linked together (and to its Model when the name
   matches an existing Models row);
-- for a profile Airtable already has but that's missing its 18-digit `MLX API
-  ID` or `Time Zone`: fill those in (never overwrite an existing value).
+- for a profile Airtable already has, reconcile it: `Profile Name`, `MLX
+  Folder` and `MLX Tags` are made to match MultiLogin, and `MLX API ID` /
+  `Time Zone` are backfilled when blank.
+
+**Reconcile vs backfill.** The launch key and time zone are *backfilled* --
+written only into an empty field, never over a value -- because they are
+machine keys somebody may have corrected by hand. Name, folder and tags are
+*reconciled*: MLX wins, every run. That asymmetry is the whole point of the
+loop. Before it, an existing row only ever had blanks filled, so this pass
+reported `unchanged` for a profile that had been renamed and moved to another
+model's folder months earlier, and 63 phones sat in Airtable under names like
+`Blank (24)` that MultiLogin had not used since.
+
+**`Status` is never synced, in either direction.** MLX `status=2` only means
+the phone is enabled; Airtable's `Status` is the human park switch, and a
+banned or challenged account is parked here while MLX still calls it active.
+Syncing it would un-park exactly the accounts somebody parked on purpose.
 
 The planning half (`normalize_mlx_item`, `plan_sync`) is pure and unit-tested.
 The apply half (`apply_sync`) does the Airtable writes and is guarded behind an
@@ -54,6 +71,12 @@ class NormalizedProfile:
     api_id: str
     name: str
     status_active: bool
+    # The MLX folder verbatim, staging buckets included ("Default folder",
+    # "Banned", "logged out"). `model_name` is the same string *filtered* down
+    # to the folders that name a real model -- they are two questions, and
+    # "which folder is this phone in" must still be answerable for a phone
+    # sitting in none of them.
+    folder_name: str | None = None
     model_name: str | None = None
     time_zone: str | None = None
     phone_model_os: str | None = None
@@ -76,7 +99,10 @@ class ProfilePlan:
     action: str  # "create" | "update" | "unchanged"
     reason: str = ""
     record_id: str | None = None          # existing Airtable id, for updates
-    updates: dict = field(default_factory=dict)  # fill-only field patch, for updates
+    updates: dict = field(default_factory=dict)  # the field patch, for updates
+    # What each patched field held before, so the report can say what a change
+    # replaced without re-reading Airtable or re-parsing `reason`.
+    previous: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -116,13 +142,25 @@ def _model_from_serial_name(serial_name: str | None) -> str | None:
     return name or None
 
 
+def _folder_name_from(item: dict, folder_names: dict | None) -> str | None:
+    """The MLX folder this profile sits in, verbatim -- no staging filter.
+
+    Note this is `folder_id` resolved through the folders API, NOT the per-item
+    `group.name`, which on this workspace is the workspace GUID and names
+    nothing a person would recognise.
+    """
+    if not folder_names:
+        return None
+    folder_id = _clean(item.get("folder_id"))
+    return _clean(folder_names.get(folder_id)) if folder_id else None
+
+
 def _model_name_from(item: dict, folder_names: dict | None) -> str | None:
     """Resolve the profile's model from its MLX *folder* name (the authoritative
     grouping the UI uses). Generic buckets -> None. When no folder map is given,
     fall back to parsing the serial_name."""
     if folder_names:
-        folder_id = _clean(item.get("folder_id"))
-        name = _clean(folder_names.get(folder_id)) if folder_id else None
+        name = _folder_name_from(item, folder_names)
         if name and name.lower() not in _STAGING_FOLDERS:
             return name
         return None
@@ -169,6 +207,7 @@ def normalize_mlx_item(item: dict, folder_names: dict | None = None) -> Normaliz
         api_id=api_id,
         name=serial_name or serial_no,
         status_active=(item.get("status") == MLX_STATUS_ACTIVE),
+        folder_name=_folder_name_from(item, folder_names),
         model_name=_model_name_from(item, folder_names),
         time_zone=_clean(equipment.get("time_zone")),
         phone_model_os=_phone_model_os(equipment),
@@ -176,25 +215,110 @@ def normalize_mlx_item(item: dict, folder_names: dict | None = None) -> Normaliz
         proxy_endpoint=_proxy_endpoint(proxy),
         proxy_location=_clean(equipment.get("country_name")),
         created_at=_clean(item.get("created_at")),
-        tags=tuple(t for t in (_clean(tag) for tag in (item.get("tags") or [])) if t),
+        # Sorted, and de-duplicated: this tuple is compared against Airtable's
+        # to decide whether to write, so MLX returning the same set in a
+        # different order must not read as a change every three hours.
+        tags=tuple(sorted({t for t in (_clean(tag) for tag in (item.get("tags") or [])) if t})),
     )
 
 
 # --- planning (pure) ------------------------------------------------------
 
+def _duplicate_mlx_names(mlx_items: list[dict]) -> set:
+    """Names MultiLogin itself uses more than once.
+
+    Renaming Airtable onto one of these would put the same `Profile Name` on
+    several rows, and that name is what variant files, queue rows and log lines
+    are keyed by -- two rows called `Jasmin 11` would overwrite each other's
+    spoofed clips. MultiLogin currently holds three `Jasmin 11` and two
+    `jasmin`; that is a MultiLogin problem to fix in MultiLogin, so the sync
+    leaves those Airtable names alone rather than propagating the collision.
+    """
+    counts: dict = {}
+    for item in mlx_items or []:
+        name = _clean((item or {}).get("serial_name"))
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    return {name for name, n in counts.items() if n > 1}
+
+
+def _plan_reconcile(normalized: NormalizedProfile, existing: dict,
+                    duplicate_names: set, reconcile: bool) -> tuple[dict, dict, list]:
+    """The field patch that would make one existing Airtable row match MLX.
+
+    Returns `(updates, previous, reasons)`; an empty patch means the row already
+    matches. A reason with no matching entry in the patch is a *refusal* --
+    something that differs and was deliberately not written -- so the log says
+    why a mismatch survived instead of silently reporting the row as in sync.
+    """
+    updates: dict = {}
+    previous: dict = {}
+    reasons: list = []
+
+    # --- backfill: write only into an empty field, never over a value -------
+    if not existing.get("api_id") and normalized.api_id:
+        updates[at.F_PROF_MLX_API_ID] = normalized.api_id
+        reasons.append("backfill MLX API ID")
+    if not existing.get("time_zone") and normalized.time_zone:
+        updates[at.F_PROF_TIME_ZONE] = normalized.time_zone
+        reasons.append("backfill Time Zone")
+
+    if not reconcile:
+        return updates, previous, reasons
+
+    # --- reconcile: MLX wins ------------------------------------------------
+    current_name = _clean(existing.get("name"))
+    if normalized.name and normalized.name != current_name:
+        if normalized.name in duplicate_names:
+            reasons.append(f"name kept as {current_name!r}: MLX has several profiles "
+                           f"named {normalized.name!r}")
+        elif existing.get("duplicate"):
+            reasons.append(f"name kept as {current_name!r}: several Airtable rows "
+                           f"claim serial {normalized.serial_no}")
+        else:
+            updates[at.F_PROF_NAME] = normalized.name
+            previous[at.F_PROF_NAME] = current_name
+            reasons.append(f"rename {current_name or '-'} -> {normalized.name}")
+
+    current_folder = _clean(existing.get("folder"))
+    if normalized.folder_name != current_folder:
+        # None becomes "" so a profile moved out of every folder is cleared
+        # rather than keeping the folder it is no longer in.
+        updates[at.F_PROF_MLX_FOLDER] = normalized.folder_name or ""
+        previous[at.F_PROF_MLX_FOLDER] = current_folder
+        reasons.append(f"folder {current_folder or '-'} -> {normalized.folder_name or '-'}")
+
+    current_tags = tuple(existing.get("tags") or ())
+    if normalized.tags != current_tags:
+        updates[at.F_PROF_MLX_TAGS] = list(normalized.tags)
+        previous[at.F_PROF_MLX_TAGS] = current_tags
+        added = [f"+{t}" for t in normalized.tags if t not in current_tags]
+        removed = [f"-{t}" for t in current_tags if t not in normalized.tags]
+        reasons.append("tags " + (", ".join(added + removed) or "cleared"))
+
+    return updates, previous, reasons
+
+
 def plan_sync(mlx_items: list[dict], existing_by_serial: dict, folder_names: dict | None = None,
-              skip_staging: bool = False) -> SyncPlan:
+              skip_staging: bool = False, reconcile: bool = True) -> SyncPlan:
     """Diff the MLX profile list against what Airtable already has.
 
-    `existing_by_serial`: serial_no -> {'record_id', 'api_id', 'time_zone', ...}
-    (as returned by AirtableClient.profiles_by_serial()).
-    `folder_names`: folder_id -> name, used to resolve each profile's model.
+    `existing_by_serial`: serial_no -> {'record_id', 'name', 'api_id',
+    'time_zone', 'folder', 'tags', 'duplicate'} (as returned by
+    AirtableClient.profiles_by_serial()).
+    `folder_names`: folder_id -> name, used to resolve each profile's folder and
+    its model.
     `skip_staging`: don't sync profiles that resolve to no model (MLX's "Default
     folder" staging buckets, e.g. the unnamed "Blank" profiles). Existing rows
-    are still backfilled; only *new* staging profiles are skipped.
+    are still reconciled; only *new* staging profiles are skipped.
+    `reconcile`: bring `Profile Name`, `MLX Folder` and `MLX Tags` in line with
+    MultiLogin. Turning it off degrades this pass to the backfill-only
+    behaviour it had before -- an escape hatch for a run where MultiLogin itself
+    looks wrong, not a mode anything should schedule.
     """
     plan = SyncPlan()
     seen: set[str] = set()
+    duplicate_names = _duplicate_mlx_names(mlx_items) if reconcile else set()
 
     for item in mlx_items:
         normalized = normalize_mlx_item(item, folder_names)
@@ -216,25 +340,25 @@ def plan_sync(mlx_items: list[dict], existing_by_serial: dict, folder_names: dic
             plan.to_create.append(ProfilePlan(normalized, "create", "new profile in MLX"))
             continue
 
-        # Fill-only backfill of the launch key / time zone on an existing row.
-        updates: dict = {}
-        if not existing.get("api_id") and normalized.api_id:
-            updates[at.F_PROF_MLX_API_ID] = normalized.api_id
-        if not existing.get("time_zone") and normalized.time_zone:
-            updates[at.F_PROF_TIME_ZONE] = normalized.time_zone
+        updates, previous, reasons = _plan_reconcile(normalized, existing, duplicate_names, reconcile)
 
         if updates:
             plan.to_update.append(
                 ProfilePlan(
                     normalized,
                     "update",
-                    "backfill " + ", ".join(sorted(updates)),
+                    "; ".join(reasons),
                     record_id=existing.get("record_id"),
                     updates=updates,
+                    previous=previous,
                 )
             )
         else:
-            plan.unchanged.append(ProfilePlan(normalized, "unchanged", "already in sync", record_id=existing.get("record_id")))
+            # `reasons` here can only hold refusals (a guarded rename), so an
+            # unchanged row still carries the reason it stayed unchanged.
+            plan.unchanged.append(ProfilePlan(
+                normalized, "unchanged", "; ".join(reasons) or "already in sync",
+                record_id=existing.get("record_id")))
 
     return plan
 
@@ -281,6 +405,12 @@ def build_profile_fields(p: NormalizedProfile, device_id: str) -> dict:
     }
     if p.time_zone:
         fields[at.F_PROF_TIME_ZONE] = p.time_zone
+    # Set on creation as well as on reconcile, so a new row is not born stale
+    # and waiting three hours for the next pass to describe it.
+    if p.folder_name:
+        fields[at.F_PROF_MLX_FOLDER] = p.folder_name
+    if p.tags:
+        fields[at.F_PROF_MLX_TAGS] = list(p.tags)
     return fields
 
 
@@ -295,12 +425,27 @@ class SyncReport:
     errors: list[tuple[str, str]] = field(default_factory=list)  # (name, message)
     unmatched_models: set = field(default_factory=set)     # model names with no Models row
     dry_run: bool = True
+    # Broken out by kind, because "updated=62" says nothing about whether this
+    # pass renamed 62 phones or only filled in 62 blank folders -- and a rename
+    # is the one change here with a consequence downstream (see `renamed_model`).
+    renamed: list[tuple[str, str]] = field(default_factory=list)   # (old name, new name)
+    refoldered: list[tuple[str, str]] = field(default_factory=list)  # (name, folder)
+    retagged: list[str] = field(default_factory=list)              # profile names
+    # Renames that change the profile's *first word*. That word is the model
+    # `profile_targets_by_model` routes content by, so these are the renames
+    # that move a phone from one model's content to another's -- always worth a
+    # line in the log even when the rename itself is correct.
+    renamed_model: list[tuple[str, str]] = field(default_factory=list)
+    # Mismatches the sync saw and deliberately did not write (guarded renames).
+    refused: list[tuple[str, str]] = field(default_factory=list)   # (name, reason)
 
     def summary(self) -> str:
         mode = "DRY-RUN" if self.dry_run else "APPLIED"
         return (
             f"[{mode}] created={len(self.created)} updated={len(self.updated)} "
-            f"unchanged={self.unchanged} skipped={len(self.skipped)} errors={len(self.errors)}"
+            f"(renamed={len(self.renamed)} refoldered={len(self.refoldered)} "
+            f"retagged={len(self.retagged)}) unchanged={self.unchanged} "
+            f"skipped={len(self.skipped)} errors={len(self.errors)}"
         )
 
 
@@ -314,6 +459,11 @@ def apply_sync(client, plan: SyncPlan, models_by_name: dict, dry_run: bool = Tru
     report = SyncReport(dry_run=dry_run)
     report.unchanged = len(plan.unchanged)
     report.skipped = list(plan.skipped)
+    # A guarded rename lands in `unchanged` with its reason attached; surface it
+    # rather than letting "already in sync" cover a mismatch we chose to keep.
+    for item in plan.unchanged:
+        if item.reason and item.reason != "already in sync":
+            report.refused.append((item.profile.name, item.reason))
 
     for item in plan.to_create:
         p = item.profile
@@ -341,12 +491,29 @@ def apply_sync(client, plan: SyncPlan, models_by_name: dict, dry_run: bool = Tru
 
     for item in plan.to_update:
         p = item.profile
-        if dry_run:
-            report.updated.append(p.name)
-            continue
-        if item.record_id and client.update_profile(item.record_id, item.updates):
-            report.updated.append(p.name)
-        else:
+        if not dry_run and not (item.record_id and client.update_profile(item.record_id, item.updates)):
             report.errors.append((p.name, "profile update failed"))
+            continue
+        report.updated.append(p.name)
+        _record_update_kinds(report, item)
 
     return report
+
+
+def _first_word(name: str | None) -> str:
+    return (name or "").strip().split(" ")[0].lower()
+
+
+def _record_update_kinds(report: SyncReport, item: ProfilePlan) -> None:
+    """Tally one applied patch by what it actually changed."""
+    p = item.profile
+    new_name = item.updates.get(at.F_PROF_NAME)
+    if new_name:
+        old_name = item.previous.get(at.F_PROF_NAME) or "-"
+        report.renamed.append((old_name, new_name))
+        if _first_word(old_name) != _first_word(new_name):
+            report.renamed_model.append((old_name, new_name))
+    if at.F_PROF_MLX_FOLDER in item.updates:
+        report.refoldered.append((new_name or p.name, item.updates[at.F_PROF_MLX_FOLDER] or "-"))
+    if at.F_PROF_MLX_TAGS in item.updates:
+        report.retagged.append(new_name or p.name)

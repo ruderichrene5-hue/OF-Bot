@@ -110,10 +110,18 @@ RECOMMENDED_INTERVALS = {
     # be on it. 15 min is one MLX list plus one Airtable read, then nothing at
     # all unless a flag moved.
     "issue-tags": 15,
-    # Full MultiLogin -> Airtable inventory sweep: expensive, and nothing during
-    # the day depends on it being fresher than daily. Runs at 23:30 (see
-    # DEFAULT_DAILY_START), after the posting day.
-    "mlx-sync": 1440,
+    # Full MultiLogin -> Airtable inventory sweep: every new profile, and every
+    # rename, folder move and tag change on an existing one.
+    #
+    # It ran nightly while it only ever *created* rows -- a phone that appeared
+    # during the day could wait until 23:30 without anyone noticing. Now that it
+    # also reconciles name, folder and tags it is the only thing that carries a
+    # person's edit in the MultiLogin workspace across to Airtable, and a day of
+    # lag there is a day of the dashboard, the spoof pipeline and the queue
+    # working from a name or a model folder that is no longer true. 3 h is the
+    # cadence asked for, and the run is cheap and phone-free: two MLX list calls
+    # and one Airtable list, then nothing at all unless something moved.
+    "mlx-sync": 180,
     # Disk housekeeping (old used media). Once a night, off-peak (04:00).
     "cleanup": 1440,
 
@@ -151,7 +159,11 @@ DEFAULT_INTERVALS = RECOMMENDED_INTERVALS
 FALLBACK_INTERVAL_MIN = 30
 
 # For a daily task (interval a whole number of days) we need a start time.
-DEFAULT_DAILY_START = {"mlx-sync": "23:30", "warmup": "08:00", "cleanup": "04:00",
+# `mlx-sync` is deliberately absent: it moved off a daily schedule to every 3 h,
+# so it has no start time any more. Leaving a stale entry here is harmless to
+# the interval maths but would have the installer keep writing `OnCalendar=
+# *-*-* 23:30:00` into its timer.
+DEFAULT_DAILY_START = {"warmup": "08:00", "cleanup": "04:00",
                        # Before the VAs start, so the backlog is the first thing
                        # in the topic rather than something they scroll back for.
                        "digest": "08:00"}
@@ -215,8 +227,12 @@ WHAT_IT_DOES = {
     "pipeline": "Spoofs new raw clips from Drive — one unique encode per active "
                 "profile, because two accounts posting the same file is what gets "
                 "them flagged. The expensive loop: it is the one that pins the CPU.",
-    "mlx-sync": "Sweeps the MultiLogin inventory into Airtable overnight so the "
-                "Profiles table matches the phones that actually exist.",
+    "mlx-sync": "Copies the MultiLogin workspace into Airtable every 3 hours: new "
+                "phones become Profile rows, and an existing row's name, folder "
+                "and tags are made to match MultiLogin again. MultiLogin wins "
+                "every time — edit a phone there, not here. The one thing it "
+                "never touches is Status, which is your park switch and stays "
+                "yours.",
     "digest": "Sends one message a day to the VAs' Telegram topic: how many phones "
               "are waiting on a person, broken down by reason, how long the oldest "
               "has been waiting, and what posted in the last 24 hours. It reads "

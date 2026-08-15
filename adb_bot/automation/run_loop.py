@@ -6,7 +6,7 @@ checklist's cadence:
     python -m adb_bot.automation.run_loop posting     # every 5-15 min
     python -m adb_bot.automation.run_loop warmup       # 2-3x/day
     python -m adb_bot.automation.run_loop pipeline      # every 15-30 min
-    python -m adb_bot.automation.run_loop mlx-sync      # once a day
+    python -m adb_bot.automation.run_loop mlx-sync      # every 3 hours
 
 Dry-run is the default for every loop: it plans and prints but launches nothing
 and writes nothing device-side. Add --apply to actually run. Credentials come
@@ -85,7 +85,33 @@ def _run_mlx_sync(args, logger) -> int:
     airtable_token = (args.airtable_token or "").strip() or settings.get_saved_airtable_token()
     base_id = (args.base_id or "").strip() or settings.get_saved_airtable_base_id()
     report = sync_cli.run_sync(token, airtable_token, base_id, dry_run=not args.apply,
-                               skip_staging=args.skip_staging)
+                               skip_staging=args.skip_staging,
+                               reconcile=not args.no_reconcile)
+    logger.info("mlx-sync result: %s", report.summary())
+
+    # Every reconciled change, named. This pass now overwrites fields rather
+    # than only filling blanks, and it runs eight times a day: "updated=62" in
+    # the journal is not enough to answer "what did the bot rename last night".
+    for old, new in report.renamed:
+        logger.info("mlx-sync: renamed %r -> %r (MultiLogin is the source of truth)", old, new)
+    for name, folder in report.refoldered:
+        logger.info("mlx-sync: %s now in folder %s", name, folder)
+    if report.retagged:
+        logger.info("mlx-sync: tags updated on %d profile(s): %s",
+                    len(report.retagged), ", ".join(sorted(report.retagged)[:20]))
+
+    # A rename that changes the first word moves the phone between models, and
+    # the first word is what `profile_targets_by_model` routes content by -- so
+    # this one is a warning even though the rename itself is correct.
+    for old, new in report.renamed_model:
+        logger.warning("mlx-sync: %r -> %r changes the model word; this phone will be "
+                       "spoofed and queued for %s from now on", old, new, new.split(" ")[0])
+
+    # A mismatch we saw and chose not to write stays a mismatch until somebody
+    # fixes it in MultiLogin; say so rather than letting it look in sync.
+    for name, reason in report.refused:
+        logger.warning("mlx-sync: %s: %s", name, reason)
+
     # A model folder MLX knows about and Airtable's Models table does not is the
     # first sign of a model nobody finished onboarding. It was print()ed to
     # stdout only, so under systemd it landed in the journal unlabelled and in
@@ -906,6 +932,9 @@ def main(argv=None) -> int:
                              "turn this on having decided those tags are stale.")
     parser.add_argument("--skip-staging", action="store_true",
                         help="mlx-sync: skip staging profiles that belong to no model.")
+    parser.add_argument("--no-reconcile", action="store_true",
+                        help="mlx-sync: only backfill blank fields; do not bring Profile Name, "
+                             "MLX Folder and MLX Tags in line with MultiLogin.")
     parser.add_argument("--out", default=None,
                         help="report: file to write the HTML to (default logs/report.html).")
     parser.add_argument("--raw-root", default=None, help="pipeline: raw-videos root (overrides config).")
