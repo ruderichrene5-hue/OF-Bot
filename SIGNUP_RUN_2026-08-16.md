@@ -254,6 +254,37 @@ is free. A unit test then caught a second one before any phone did: the 2FA
 *chooser* says "get a verification code from the Google Authenticator app", so
 the TOTP markers matched a screen with no code field on it.
 
+## 4b. Where the Play Store chain actually gets to
+
+Four supervised runs, each stopping cleanly -- phone shut down, lock released,
+credentials on disk, nothing on any account touched:
+
+| Run | Got to | Stopped because |
+|---|---|---|
+| caio 1 | 8 screens: sign-in → skip lookup → email typed and **read back** | Google redrew its email form instead of advancing on a `NEXT` tap |
+| caio 2 | Play Store sign-in tapped | 60s on `checking info…`, and the loading budget was 8 waits |
+| caio 2 | its own home screen | the Play Store had not started, and the launcher was an unnamed screen |
+| caio 2 | never connected | relaunched ~3 min after being shut down; MLX had not let go |
+| caio 3 | never booted | 16 readiness attempts of `profile is not running` |
+
+Each of those produced a fix (§4a and the commits). Three things they ruled
+out along the way, so nobody re-investigates them:
+
+* **Not the runtime quota** -- `GET /mobile_profiles/limit` showed 2347 of
+  40835 minutes still available afterwards.
+* **Not the concurrency ceiling** -- `ADBBOT_MAX_LIVE_PROFILES` is 20 and the
+  launcher log showed **two** phones live, while the fleet started ten others
+  in the same few minutes. MLX was working; these profiles specifically were
+  not.
+* **Not the proxies** -- all three were checked from MLX's own network before
+  the profiles existed, and `Blank caio 1` reached Instagram and Google fine.
+
+**The open one is the email form.** The address goes in and reads back, `NEXT`
+is tapped at the bounds the dump reports, nothing covers the button, and
+Google redraws the same screen. The fallback now presses ENTER on the focused
+field with the keyboard still up -- the one submit a tap cannot reproduce --
+and that path has not yet had a phone that both booted and reached it.
+
 ## 5. What it would take to finish
 
 1. **Three more blank profiles** (or a decision to reuse specific ones). Only
