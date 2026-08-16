@@ -98,3 +98,18 @@ def test_no_accounts_reads_as_empty():
             return "Accounts: 0\n"
 
     assert g.accounts_on_device(FakeAdb(), "host:1") == []
+
+
+LAUNCHER = ("search gallery gallery play store play store home telephone "
+            "telephone messaging messaging music music chrome chrome camera "
+            "camera")
+
+
+def test_the_home_screen_is_named_so_the_app_can_be_started_again():
+    """`Blank caio 2` ended on exactly this, called it unknown, and stopped a
+    run whose only problem was that the Play Store had not come up."""
+    assert g.classify_google_screen(LAUNCHER) == g.SCREEN_LAUNCHER
+
+
+def test_the_home_screen_is_not_mistaken_for_the_play_store_being_signed_out():
+    assert g.classify_google_screen(LAUNCHER) != g.SCREEN_PLAY_SIGNIN

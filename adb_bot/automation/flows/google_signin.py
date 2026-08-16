@@ -48,6 +48,7 @@ import re
 import time
 
 from adb_bot.automation import totp
+from adb_bot.automation.flows.verification import looks_like_launcher
 
 PLAY_PACKAGE = "com.android.vending"
 GMAIL_PACKAGE = "com.google.android.gm"
@@ -63,6 +64,7 @@ SCREEN_TOTP = "totp"                      # "Enter code"
 SCREEN_TERMS = "google_terms"
 SCREEN_SAVE_PASSWORD = "save_password"
 SCREEN_PLAY_HOME = "play_home"            # signed in -- done
+SCREEN_LAUNCHER = "launcher"              # the phone's home screen
 SCREEN_WRONG_PASSWORD = "wrong_password"
 SCREEN_LOADING = "loading"
 SCREEN_UNKNOWN = "unknown"
@@ -154,6 +156,14 @@ def classify_google_screen(text: str | None) -> str:
     if not text:
         return SCREEN_UNKNOWN
     haystack = text.lower()
+
+    # Before the markers: the phone's home screen carries none of them, so it
+    # would fall through to `unknown` and stop a run whose only problem is that
+    # the Play Store did not start. `Blank caio 2`, 2026-08-16, ended on
+    # "search gallery play store home telephone messaging music chrome camera".
+    if looks_like_launcher(haystack):
+        return SCREEN_LAUNCHER
+
     for kind, markers in _ORDERED:
         if any(marker in haystack for marker in markers):
             return kind
@@ -183,6 +193,47 @@ LOADING_WAIT_SECONDS = 8
 
 _SKIP = ("Skip", "SKIP", "Not now", "NOT NOW", "Never", "NEVER")
 _NEXT = ("Next", "NEXT", "Continue", "CONTINUE")
+
+
+def _start_play_store(adb_client, target: str, logger=None) -> bool:
+    """Bring the Play Store up, and say whether it actually arrived.
+
+    Two ways round, because neither is reliable alone on these phones:
+    `monkey` returned an empty string and started nothing on three separate
+    runs, and the explicit intent needs an activity name that is not stable
+    across Play Store versions -- so the name is resolved from the phone.
+
+    Confirming matters as much as starting. `Blank caio 2` was left on its home
+    screen with the flow reading "search gallery play store home telephone" and
+    calling it an unnamed screen.
+    """
+    resolved = adb_client.run_command(
+        f"adb -s {target} shell cmd package resolve-activity --brief "
+        f"{PLAY_PACKAGE}") or ""
+    activity = ""
+    for line in resolved.splitlines():
+        line = line.strip()
+        if "/" in line and line.startswith(PLAY_PACKAGE):
+            activity = line
+    if activity:
+        adb_client.run_command(f"adb -s {target} shell am start -n {activity}")
+    else:
+        if logger is not None:
+            logger.warning("google_signin: could not resolve a Play Store "
+                           "activity from %r", resolved.strip()[:160])
+        adb_client.run_command(
+            f"adb -s {target} shell monkey -p {PLAY_PACKAGE} "
+            f"-c android.intent.category.LAUNCHER 1")
+
+    time.sleep(6)
+    focus = adb_client.run_command(
+        f"adb -s {target} shell dumpsys window | grep mCurrentFocus") or ""
+    arrived = PLAY_PACKAGE in focus
+    if logger is not None:
+        logger.info("google_signin: Play Store %s (focus %s)",
+                    "is in front" if arrived else "did NOT come up",
+                    focus.strip()[:120] or "<none>")
+    return arrived
 
 
 def _press_enter(adb_client, target: str) -> None:
@@ -225,20 +276,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
         log("warning", "the phone already carries %s -- adding a second "
                        "account", already)
 
-    adb_client.run_command(
-        f"adb -s {target} shell monkey -p {PLAY_PACKAGE} "
-        f"-c android.intent.category.LAUNCHER 1")
-    # `monkey` is the fallback that does not need an activity name; the
-    # explicit intent is what actually works on these phones.
-    resolved = adb_client.run_command(
-        f"adb -s {target} shell cmd package resolve-activity --brief "
-        f"{PLAY_PACKAGE}") or ""
-    activity = ""
-    for line in resolved.splitlines():
-        if "/" in line and PLAY_PACKAGE in line:
-            activity = line.strip()
-    if activity:
-        adb_client.run_command(f"adb -s {target} shell am start -n {activity}")
+    _start_play_store(adb_client, target, logger=logger)
     sleep(10)
 
     last, repeats, loading_waits = None, 0, 0
@@ -249,6 +287,8 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     MAX_LOOKUP_FAILURES = 2
     email_submits = 0
     password_submits = 0
+    restarts = 0
+    MAX_APP_RESTARTS = 3
 
     for step in range(MAX_STEPS):
         text = driver.read_screen() or ""
@@ -284,6 +324,19 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             log("warning", "Play Store looks signed in but dumpsys says %s",
                 names or "nothing")
             return RESULT_STUCK
+
+        if screen == SCREEN_LAUNCHER:
+            # Not a verdict about anything -- the Play Store simply is not in
+            # front. Starting it again is nearly free.
+            restarts += 1
+            if restarts > MAX_APP_RESTARTS:
+                log("warning", "the Play Store would not stay in front")
+                return RESULT_STUCK
+            log("info", "on the home screen; starting the Play Store again "
+                        "(%d/%d)", restarts, MAX_APP_RESTARTS)
+            _start_play_store(adb_client, target, logger=logger)
+            sleep(8)
+            continue
 
         if screen == SCREEN_WRONG_PASSWORD:
             return RESULT_WRONG_PASSWORD
