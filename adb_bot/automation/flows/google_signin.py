@@ -98,8 +98,12 @@ _2FA_MARKERS = (
     "verify it's you",
     "get a verification code from the google authenticator app",
 )
-_TOTP_MARKERS = ("enter code", "totppin", "authenticator app",
-                 "2-step verification code")
+# Narrow on purpose. The *chooser* offers "get a verification code from the
+# Google Authenticator app", so "authenticator app" and "verification code"
+# both match a screen with no code field on it -- and the flow would then type
+# a code into nothing and call the run stuck. The code screen is the one that
+# asks you to **enter** a code; its field hint is `enter code totppin`.
+_TOTP_MARKERS = ("totppin", "enter code")
 _TERMS_MARKERS = ("google terms of service", "by continuing, you agree",
                   "i agree")
 _SAVE_PASSWORD_MARKERS = ("save password", "google password manager")
@@ -174,6 +178,16 @@ _SKIP = ("Skip", "SKIP", "Not now", "NOT NOW", "Never", "NEVER")
 _NEXT = ("Next", "NEXT", "Continue", "CONTINUE")
 
 
+def _press_enter(adb_client, target: str) -> None:
+    """Submit the focused field with the keyboard's own action key.
+
+    Keyevent 66 is `ENTER`. On Google's sign-in form this is the submit the
+    button tap cannot reproduce: the tap is delivered to the right bounds and
+    the form simply redraws.
+    """
+    adb_client.run_command(f"adb -s {target} shell input keyevent 66")
+
+
 def accounts_on_device(adb_client, target: str) -> list[str]:
     """Every Google account already on the phone.
 
@@ -226,6 +240,8 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     # cannot see. Bounded separately.
     lookup_failures = 0
     MAX_LOOKUP_FAILURES = 2
+    email_submits = 0
+    password_submits = 0
 
     for step in range(MAX_STEPS):
         text = driver.read_screen() or ""
@@ -302,18 +318,34 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             if not driver.fill(("email", "phone"), address, "google email"):
                 log("warning", "the address would not stay in the field")
                 return RESULT_STUCK
-            driver.dismiss_keyboard()
-            driver.tap_label(_NEXT)
-            sleep(8)
+            email_submits += 1
+            if email_submits == 1:
+                driver.dismiss_keyboard()
+                driver.tap_label(_NEXT)
+            else:
+                # The tap lands -- the dump reports the same `NEXT` bounds every
+                # time and the address stays in the field -- and Google simply
+                # redraws the form (`Blank caio 1`, four times running). So the
+                # second attempt submits the field itself with the IME action
+                # instead, **with the keyboard still up**, because that is the
+                # thing the tap route cannot do.
+                log("info", "tapping NEXT did not move the email screen; "
+                            "submitting with the keyboard's own action")
+                _press_enter(adb_client, target)
+            sleep(9)
 
         elif screen == SCREEN_PASSWORD:
-            # Same reasoning as the email screen.
+            # Same reasoning as the email screen, including the fallback.
             if not driver.fill(("password",), password, "google password"):
                 log("warning", "the password would not stay in the field")
                 return RESULT_STUCK
-            driver.dismiss_keyboard()
-            driver.tap_label(_NEXT)
-            sleep(9)
+            password_submits += 1
+            if password_submits == 1:
+                driver.dismiss_keyboard()
+                driver.tap_label(_NEXT)
+            else:
+                _press_enter(adb_client, target)
+            sleep(10)
 
         elif screen == SCREEN_2FA_CHOOSER:
             # The exact-label tap does not advance -- the clickable node is the

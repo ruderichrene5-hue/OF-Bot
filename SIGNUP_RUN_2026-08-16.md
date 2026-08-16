@@ -197,6 +197,63 @@ is 2459 passing; the one failure, `test_report.py::CpuProcessesTest`, samples
 real CPU processes over a 50 ms window and passes on its own — nothing here
 touches `report.py`.
 
+## 4a. Three phones made, and the Play Store chain (same day, after the above)
+
+The supply blocker was lifted by authorisation to create profiles, so three
+now exist in `Caio tests`, each on its **own** German proxy:
+
+```
+Blank caio 1  633141162860872088  Redmi Turbo 5          sid=FirZosZz  Würzburg / Telefónica
+Blank caio 2  633141207085613320  motorola moto g86 5G   sid=8smdUWEN  Regensburg / Vodafone
+Blank caio 3  633141207085678856  HONOR Magic8 Pro Air   sid=tWGedPKH  Grünberg / Vodafone
+```
+
+All Android 16, Europe/Berlin, Bayern, no tags. Each sid was checked through
+`POST /mobile_profiles/proxy/check` **before** the profile was created -- MLX
+refuses to save a profile whose proxy it cannot reach, and checking first turns
+a confusing create failure into a plain answer.
+
+`mobile_profiles/phone/create` is real and undocumented in this repo; the
+payload is in [[adbbot-mlx-profile-create]]. Three traps: `folder_id` is top
+level, the proxy field is **`proxy_information`** (a connection string -- and
+"proxy information error" is also what you get for *no* proxy field, so it
+means "never found it" rather than "yours is bad"), and **`mobile_language`
+must be omitted** -- `en`, `en-US`, `English` and `de` are all
+`language not support`. Also: **the endpoint answers HTTP 200 when every item
+failed**; read `success_amount` and each `details[].msg`.
+
+A new phone arrives with **Gmail, the Play Store and Play Services installed,
+no Instagram, and no Google account**.
+
+**MLX's own installer is not usable here.** `mobile_profiles/app/install`
+targets profile *groups*; `group/get_or_create` says a workspace has exactly
+one, and here that is all 210 profiles, live model accounts included. So it
+installs fleet-wide with no way to name a phone, and a reinstall can log an
+account out. Instagram goes on per phone from the Play Store, opened by deep
+link (`market://details?id=com.instagram.android`) so it is one screen with one
+button rather than a search.
+
+**The Play Store sign-in, driven for the first time.** Three screens had to be
+read off the phone rather than guessed, and one bug was mine:
+
+* the signed-out Play Store says *"sign in to find the latest android apps,
+  games, movies, music & more"*;
+* Google runs a **phone-number account lookup after the email is submitted**,
+  and on a phone with no usable SIM it fails to *"we weren't able to check for
+  accounts connected to your phone number -- sign in another way"*. Matched on
+  that sentence, never on the bare "something went wrong": that string is
+  Google's answer to half a dozen unrelated failures and is exactly how the
+  2026-08-13 run concluded Google refuses these phones outright;
+* a dump of nothing but `skip next` is a screen still drawing.
+
+**The bug:** the flow typed the address once and thereafter only tapped `Next`.
+That failed lookup hands back a **fresh, empty** email form, so it tapped
+`Next` on an empty field four times and called itself stuck. Every field is
+filled every time now -- `fill` clears, types and reads back, so repeating it
+is free. A unit test then caught a second one before any phone did: the 2FA
+*chooser* says "get a verification code from the Google Authenticator app", so
+the TOTP markers matched a screen with no code field on it.
+
 ## 5. What it would take to finish
 
 1. **Three more blank profiles** (or a decision to reuse specific ones). Only
