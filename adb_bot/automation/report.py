@@ -2208,6 +2208,59 @@ def handoff_queue(profiles, warmup_progress: dict, folder_of: dict = None) -> di
     return out
 
 
+#: The MultiLogin tag that says a phone runs two Instagram accounts in one
+#: cloned app. Two spellings, applied by different people to different models
+#: -- `Second Account` on the Jil/Jasmin phones, `2 accounts` on the Nikki ones
+#: -- and anything reading them has to accept both or it silently sees half.
+SECOND_ACCOUNT_TAGS = ("second account", "2 accounts")
+
+
+def second_account_untracked(profiles, mlx_items=None) -> list:
+    """Phones MultiLogin says carry two accounts that Airtable does not.
+
+    `Has Second Account` on the Airtable row is what the bot acts on: it is what
+    gives the second handle its own queue rows and its own spoofed encode. The
+    MultiLogin tag is what a *person* applied when they set the phone up, and
+    nothing carries one to the other.
+
+    So a phone can be tagged in the workspace people work in and be a plain
+    single-account phone everywhere the bot looks -- posting once a slot where it
+    should post twice, with nothing anywhere reporting a fault. On 2026-08-16
+    that was six phones against fourteen ticked, three of them Active.
+
+    Parked phones are listed too, and marked: they produce nothing either way,
+    but they will the moment somebody un-parks them, and finding out then is
+    worse than knowing now.
+    """
+    from adb_bot.automation.mlx_sync import normalize_mlx_item
+
+    by_serial = {p.get("serial") or "": p for p in profiles or []}
+    out = []
+    for item in mlx_items or []:
+        profile = normalize_mlx_item(item)
+        if profile is None:
+            continue
+        tags = [str(t) for t in (profile.tags or ())
+                if str(t).lower() in SECOND_ACCOUNT_TAGS]
+        if not tags:
+            continue
+        row = by_serial.get(profile.serial_no)
+        if row is None or row.get("has_second"):
+            continue
+        out.append({
+            "name": (row.get("name") if row else "") or profile.name,
+            "serial": profile.serial_no,
+            "tag": ", ".join(tags),
+            "status": row.get("status") or "",
+            # A parked phone is not losing posts today; an Active one is losing
+            # every second-account post it should be making, right now.
+            "live": (row.get("status") or "") != "Inactive",
+        })
+    # The Active ones first: those are the ones costing posts.
+    out.sort(key=lambda p: (not p["live"], p["name"].lower()))
+    return out
+
+
 def mlx_only_issues(profiles, mlx_items=None) -> dict:
     """Phones carrying MultiLogin's `Issue` tag that Airtable does not flag.
 
@@ -3551,6 +3604,9 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             # fails: the outlook then reads as it did before, which is wrong but
             # no worse, rather than the schedules tab going down with it.
             blocked_profiles: dict = {}
+            # Same reason as `blocked_profiles`: read off `profile_overview`
+            # below, and empty if that read fails.
+            second_untracked: list = []
             # Its own try, inside this one. Naming the in-flight reels is the
             # only thing on the page that needs Profiles and Spoof Variants, so
             # it is two table reads that nothing else depends on -- and out here
@@ -3603,6 +3659,10 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
                 # below, so the hand-tagged worklist costs no extra call.
                 data["mlx_issues"] = mlx_only_issues(
                     overview, mlx_items=_slow("mlx_inventory", mlx_inventory))
+                # Same listing, same memoised inventory: the second-account tag
+                # is read from the phones already fetched for the line above.
+                second_untracked = second_account_untracked(
+                    overview, mlx_items=_slow("mlx_inventory", mlx_inventory))
                 data["folders"] = folder_breakdown(
                     overview, mlx_items=_slow("mlx_inventory", mlx_inventory),
                     folder_names=_slow("mlx_folders", mlx_folders),
@@ -3612,6 +3672,7 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             # Reuses the same listing: which of a two-account phone's accounts
             # got rows today is already in it.
             data["second_accounts"] = second_accounts(airtable, rows=rows, day=day)
+            data["second_accounts"]["untracked"] = second_untracked
             # After `content`: the schedule table reads its per-model stock from
             # it, and a schedule with no stock beside it is half the answer.
             data["schedules"] = model_schedules(airtable, content=data["content"], now=now)

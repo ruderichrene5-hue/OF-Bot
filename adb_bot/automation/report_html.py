@@ -175,6 +175,15 @@ def _e(value) -> str:
     return html.escape(str(value if value is not None else ""))
 
 
+def _days_since(day: str) -> int:
+    """Whole days from a ``YYYY-MM-DD`` to today, or 0 if it will not parse."""
+    try:
+        then = datetime.strptime(str(day)[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return 0
+    return max(0, (datetime.now().date() - then).days)
+
+
 def _fmt_seconds(seconds: float) -> str:
     seconds = float(seconds or 0)
     if seconds <= 0:
@@ -1436,6 +1445,49 @@ def _section_second_accounts(data: dict) -> str:
             f"<td>{state}</td>"
             f"<td class='mono'>{_e((profile['checked_at'] or '-')[:16].replace('T', ' '))}</td></tr>")
 
+    # The handles are only ever right as of the day somebody read them off the
+    # device, and accounts drop out of these switchers on their own -- that is
+    # what the second-accounts loop keeps catching. An eleven-day-old reading
+    # presented as current is how a phone posts to an account it no longer has.
+    stale = ""
+    oldest = min((p["checked_at"] or "" for p in profiles), default="")
+    if oldest:
+        age = _days_since(oldest[:10])
+        if age >= 3:
+            stale = (f'<p class="sub"><span class="pill warn">handles {age} day(s) old</span> '
+                     f'"Accounts last read" is when somebody last read the account switcher on '
+                     f'the device itself, not a live check. Accounts do fall off these phones '
+                     f'between readings, and a stale handle is posted against until the switch '
+                     f'fails. Re-read them with '
+                     f'<span class="mono">run_loop second-accounts --apply</span>.</p>')
+
+    untracked = data.get("untracked") or []
+    extra = ""
+    if untracked:
+        live = [p for p in untracked if p["live"]]
+        rows_html = "".join(
+            f"<tr><td class='mono'>{_e(p['name'])}</td>"
+            f"<td class='mono'>{_e(p['serial'])}</td>"
+            f"<td class='mono'>{_e(p['tag'])}</td>"
+            f"<td>{_e(p['status'] or '-')}</td>"
+            f"<td>{'<span class=\"pill bad\">posting single</span>' if p['live'] else '<span class=\"pill\">parked</span>'}</td></tr>"
+            for p in untracked)
+        extra = (
+            f'<h3>Tagged as two-account in MultiLogin, not ticked in Airtable</h3>'
+            f'<p class="sub">The MultiLogin tag is what a person applied when they set the '
+            f'phone up; <span class="mono">Has Second Account</span> on the Airtable row is '
+            f'what the bot acts on, and nothing carries one to the other. These '
+            f'{len(untracked)} phone(s) are two-account phones everywhere except where it '
+            f'counts'
+            + (f' — and <strong>{len(live)} of them are Active</strong>, so every post their '
+               f'second account should be making is simply not being planned. '
+               if live else '. ')
+            + f'Tick the box and fill in both handles, or read them off the device with '
+              f'<span class="mono">run_loop second-accounts --apply</span>.</p>'
+            f'<div class="scroll"><table>'
+            f'<tr><th>Phone</th><th>Serial</th><th>MultiLogin tag</th><th>Status</th>'
+            f'<th>What it does today</th></tr>{rows_html}</table></div>')
+
     return (
         '<p class="sub">Both accounts live in one cloned Instagram app on one phone. '
         'The bot posts to each of them separately — its own spoofed video, its own '
@@ -1446,6 +1498,7 @@ def _section_second_accounts(data: dict) -> str:
         '<tr><th>Phone</th><th>Status</th><th>First account</th><th>Its posts today</th>'
         '<th>Second account</th><th>Its posts today</th><th>State</th>'
         '<th>Accounts last read</th></tr>' + "".join(body) + '</table></div>'
+        + stale + extra +
         '<div class="howto"><dl>'
         '<dt>Nothing queued today</dt>'
         '<dd>The second account is set up but has no posts scheduled today. Usually it '
@@ -1614,6 +1667,20 @@ def _section_schedules(schedules: dict) -> str:
     body += ('<p class="sub">"Free videos" is that model\'s spoofed stock that no queue row '
              'has claimed — the same number the Content stock section totals below. A model '
              'posting at a cap it has no content for simply posts less; it does not fail.</p>')
+
+    # The per-prefix notes below each explain one name. Nobody adds them up, and
+    # the total is the number that matters: on 2026-08-16 it was 115 of 224
+    # phones, 83 of them under staging names with no model behind them at all.
+    if stray and schedules.get("per_model"):
+        stray_total = sum(e["profiles"] for e in stray)
+        orphan = sum(e["profiles"] for e in stray if not e.get("raw_folder"))
+        body += (f'<p class="sub"><span class="pill bad">{stray_total} profile(s) match no '
+                 f'Models row</span> across {len(stray)} name(s), so none of them can pick up a '
+                 f'per-model posting time — they stay flexible whatever is set in Airtable. '
+                 + (f'{orphan} of those are under names with no model behind them at all '
+                    f'(staging phones); the rest are a model filed under a second spelling, '
+                    f'named below. ' if orphan and orphan != stray_total else '')
+                 + f'Each name is explained underneath.</p>')
 
     for entry in stray:
         # Two names for one person, not a missing model — say which, because the
@@ -2235,9 +2302,17 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     # The hand-tagged warm-up phones count too: they are somebody's finding that
     # no loop will ever act on, so if the badge ignored them the tab would read
     # 0 with twenty-one phones marked in the workspace people work in.
-    tagged_warmup = len((data.get("mlx_issues") or {}).get("warmup") or [])
-    todo = (len((data.get("needs_human") or {}).get("profiles") or [])
-            + handoff + tagged_warmup)
+    # Counted as distinct phones, not as list entries added together. A profile
+    # can be flagged *and* finished its warm-up -- seven were on 2026-08-16 --
+    # and adding the lists made the badge 86 for 79 phones. The badge is read as
+    # "how many phones need me", so it counts phones.
+    def _names(entries):
+        return {str((entry or {}).get("name") or "").strip()
+                for entry in (entries or [])} - {""}
+
+    todo = len(_names((data.get("needs_human") or {}).get("profiles"))
+               | _names((data.get("handoff") or {}).get("profiles"))
+               | _names((data.get("mlx_issues") or {}).get("warmup")))
     badge = f'<span class="count">{todo}</span>' if todo else ""
     # Only the rows nothing will retry. Pending and Verifying are the loop
     # working; badging them would put a permanent number on a healthy day.

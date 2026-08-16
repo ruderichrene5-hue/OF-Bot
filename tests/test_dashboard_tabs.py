@@ -248,6 +248,54 @@ class FolderBreakdownTest(unittest.TestCase):
         self.assertEqual(out["totals"]["needs_person"], 1)
         self.assertEqual(out["totals"]["handoff"], 0)
 
+    def test_a_phone_tagged_two_account_but_unticked_is_reported(self):
+        """The MultiLogin tag is what a person applied; `Has Second Account` is
+        what the bot acts on, and nothing carries one to the other. Six phones
+        were tagged and unticked on 2026-08-16, three of them Active -- posting
+        once a slot where they should post twice, with nothing reporting it."""
+        out = report.second_account_untracked(
+            [_profile(name="nikki 8", serial="1"),
+             _profile(name="Nikki 12", serial="2")],
+            mlx_items=[
+                {"serial_no": "1", "serial_name": "nikki 8", "id": "L1",
+                 "tags": ["2 accounts"]},
+                {"serial_no": "2", "serial_name": "Nikki 12", "id": "L2",
+                 "tags": ["2 accounts"]},
+            ])
+        # Only the one whose Airtable row does not have the box ticked.
+        self.assertEqual([p["name"] for p in out], ["Nikki 12", "nikki 8"])
+
+    def test_both_spellings_of_the_tag_are_read(self):
+        """`Second Account` on the Jil/Jasmin phones, `2 accounts` on the Nikki
+        ones. Reading one spelling sees half the fleet."""
+        for tag in ("Second Account", "2 accounts", "SECOND ACCOUNT"):
+            out = report.second_account_untracked(
+                [_profile(name="Jil 3", serial="1")],
+                mlx_items=[{"serial_no": "1", "serial_name": "Jil 3", "id": "L1",
+                            "tags": [tag]}])
+            self.assertEqual(len(out), 1, tag)
+
+    def test_a_ticked_phone_is_not_reported(self):
+        profile = _profile(name="Jil 5", serial="1")
+        profile["has_second"] = True
+        out = report.second_account_untracked(
+            [profile],
+            mlx_items=[{"serial_no": "1", "serial_name": "Jil 5", "id": "L1",
+                        "tags": ["Second Account"]}])
+        self.assertEqual(out, [])
+
+    def test_the_active_ones_come_first_and_are_marked_live(self):
+        """A parked phone loses nothing today; an Active one is losing posts."""
+        out = report.second_account_untracked(
+            [_profile(name="Aaa parked", serial="1", status="Inactive"),
+             _profile(name="Zzz active", serial="2")],
+            mlx_items=[{"serial_no": "1", "serial_name": "Aaa parked", "id": "L1",
+                        "tags": ["2 accounts"]},
+                       {"serial_no": "2", "serial_name": "Zzz active", "id": "L2",
+                        "tags": ["2 accounts"]}])
+        self.assertEqual([p["name"] for p in out], ["Zzz active", "Aaa parked"])
+        self.assertEqual([p["live"] for p in out], [True, False])
+
     def test_no_folder_list_still_counts_correctly(self):
         """MultiLogin can be down. The grouping is lost; the numbers are not."""
         out = report.folder_breakdown([_profile(serial="1", queue_rows=1)],

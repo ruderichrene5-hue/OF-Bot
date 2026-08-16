@@ -1515,6 +1515,26 @@ class WarmupBadgeTest(RenderTest):
     def _badge(self, page):
         return page.split('for="tab-warmup">Warm-up')[1].split("</label>")[0]
 
+    def test_a_phone_that_is_both_flagged_and_awaiting_hand_off_counts_once(self):
+        """The badge is read as "how many phones need me". Adding the two lists
+        made it 86 for 79 phones on 2026-08-16 -- seven were on both."""
+        def flagged(name):
+            return {"record_id": f"rec{name}", "name": name, "reason": "(none set)",
+                    "status": "Active", "flagged_at": "2026-08-16 01:00", "note": []}
+
+        def waiting(name):
+            return {"name": name, "serial": name, "folder": "Jil", "launch_id": "L1",
+                    "status": "Active", "day": 4, "finished_at": "2026-08-15 01:00",
+                    "outstanding": ["bio"], "done_tasks": []}
+
+        data = self._data(
+            needs_human={"profiles": [flagged("Katja 7"), flagged("Jil 1")],
+                         "rows": [], "retrying": [], "error": ""},
+            handoff={"profiles": [waiting("Katja 7"), waiting("Nikki 20")],
+                     "done": 0, "plan_days": 4, "finish_day": 4})
+        badge = report_html.render(data).split('for="tab-human">Needs human')[1]
+        self.assertIn('<span class="count">3</span>', badge.split("</label>")[0])
+
     def test_a_stalled_profile_is_work_and_is_counted(self):
         page = report_html.render(self._data(warmup_progress=self._progress(stalled=41)))
         self.assertIn('<span class="count">41</span>', self._badge(page))
