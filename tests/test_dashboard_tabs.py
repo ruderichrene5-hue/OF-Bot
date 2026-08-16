@@ -211,6 +211,91 @@ class FolderBreakdownTest(unittest.TestCase):
             mlx_items=self._items(("1", "f1"), ("2", "f2")), folder_names=self.FOLDERS)
         self.assertEqual(out["totals"]["total"], 2)
 
+    def test_a_phone_finished_by_the_airtable_stage_is_a_hand_off_here_too(self):
+        """The hand-off worklist admits a profile on *either* the campaign's own
+        reading or the Airtable Stage; this table read only the first. A phone
+        that finished last week has dropped out of the campaign window but still
+        carries the Stage, so the worklist asked for 25 profiles while this
+        table filed 19 of them under "Other" -- same page, same refresh."""
+        from adb_bot.automation import warmup_state
+
+        out = report.folder_breakdown(
+            [_profile(serial="9", stage=warmup_state.TAG_FINISHED)],
+            mlx_items=self._items(("9", "f1")), folder_names=self.FOLDERS,
+            warmup_progress=_progress("1"))
+        self.assertEqual(out["totals"]["handoff"], 1)
+        self.assertEqual(out["totals"]["other"], 0)
+
+    def test_the_same_phone_with_its_hand_off_done_is_ready_not_waiting(self):
+        from adb_bot.automation import warmup_state
+
+        out = report.folder_breakdown(
+            [_profile(serial="9", stage=warmup_state.TAG_FINISHED,
+                      bio=True, picture=True, first_post=True)],
+            mlx_items=self._items(("9", "f1")), folder_names=self.FOLDERS,
+            warmup_progress=_progress("1"))
+        self.assertEqual(out["totals"]["ready"], 1)
+
+    def test_a_flagged_phone_still_outranks_having_finished(self):
+        """"Counted in exactly one column, worst first" is what this table says
+        it does, and the flag is the worse fact."""
+        from adb_bot.automation import warmup_state
+
+        out = report.folder_breakdown(
+            [_profile(serial="9", stage=warmup_state.TAG_FINISHED, needs_human=True)],
+            mlx_items=self._items(("9", "f1")), folder_names=self.FOLDERS,
+            warmup_progress=_progress("1"))
+        self.assertEqual(out["totals"]["needs_person"], 1)
+        self.assertEqual(out["totals"]["handoff"], 0)
+
+    def test_a_phone_tagged_two_account_but_unticked_is_reported(self):
+        """The MultiLogin tag is what a person applied; `Has Second Account` is
+        what the bot acts on, and nothing carries one to the other. Six phones
+        were tagged and unticked on 2026-08-16, three of them Active -- posting
+        once a slot where they should post twice, with nothing reporting it."""
+        out = report.second_account_untracked(
+            [_profile(name="nikki 8", serial="1"),
+             _profile(name="Nikki 12", serial="2")],
+            mlx_items=[
+                {"serial_no": "1", "serial_name": "nikki 8", "id": "L1",
+                 "tags": ["2 accounts"]},
+                {"serial_no": "2", "serial_name": "Nikki 12", "id": "L2",
+                 "tags": ["2 accounts"]},
+            ])
+        # Only the one whose Airtable row does not have the box ticked.
+        self.assertEqual([p["name"] for p in out], ["Nikki 12", "nikki 8"])
+
+    def test_both_spellings_of_the_tag_are_read(self):
+        """`Second Account` on the Jil/Jasmin phones, `2 accounts` on the Nikki
+        ones. Reading one spelling sees half the fleet."""
+        for tag in ("Second Account", "2 accounts", "SECOND ACCOUNT"):
+            out = report.second_account_untracked(
+                [_profile(name="Jil 3", serial="1")],
+                mlx_items=[{"serial_no": "1", "serial_name": "Jil 3", "id": "L1",
+                            "tags": [tag]}])
+            self.assertEqual(len(out), 1, tag)
+
+    def test_a_ticked_phone_is_not_reported(self):
+        profile = _profile(name="Jil 5", serial="1")
+        profile["has_second"] = True
+        out = report.second_account_untracked(
+            [profile],
+            mlx_items=[{"serial_no": "1", "serial_name": "Jil 5", "id": "L1",
+                        "tags": ["Second Account"]}])
+        self.assertEqual(out, [])
+
+    def test_the_active_ones_come_first_and_are_marked_live(self):
+        """A parked phone loses nothing today; an Active one is losing posts."""
+        out = report.second_account_untracked(
+            [_profile(name="Aaa parked", serial="1", status="Inactive"),
+             _profile(name="Zzz active", serial="2")],
+            mlx_items=[{"serial_no": "1", "serial_name": "Aaa parked", "id": "L1",
+                        "tags": ["2 accounts"]},
+                       {"serial_no": "2", "serial_name": "Zzz active", "id": "L2",
+                        "tags": ["2 accounts"]}])
+        self.assertEqual([p["name"] for p in out], ["Zzz active", "Aaa parked"])
+        self.assertEqual([p["live"] for p in out], [True, False])
+
     def test_no_folder_list_still_counts_correctly(self):
         """MultiLogin can be down. The grouping is lost; the numbers are not."""
         out = report.folder_breakdown([_profile(serial="1", queue_rows=1)],

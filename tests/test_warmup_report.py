@@ -570,10 +570,12 @@ class WarmupWaitingTest(unittest.TestCase):
         return {"serial_no": serial, "serial_name": name, "id": f"L{serial}",
                 "tags": list(tags), "created_at": f"{created}T01:00:00Z"}
 
-    def _rows(self, serial="100", name="Blank (1)", status="Active", api_id=None):
+    def _rows(self, serial="100", name="Blank (1)", status="Active", api_id=None,
+              needs_human=False):
         return {serial: {"record_id": f"rec{serial}", "name": name,
                          "api_id": api_id if api_id is not None else f"L{serial}",
-                         "status": status, "warmup_started": None}}
+                         "status": status, "warmup_started": None,
+                         "needs_human": needs_human}}
 
     def _waiting(self, items=None, rows=None, in_warmup=()):
         return report.warmup_waiting(items if items is not None else [self._item()],
@@ -591,6 +593,26 @@ class WarmupWaitingTest(unittest.TestCase):
     def test_a_profile_tagged_something_else_says_which(self):
         row = self._waiting([self._item(tags=["gmail"])])[0]
         self.assertIn("gmail", row["reason"])
+        self.assertIn("not Created", row["reason"])
+
+    def test_a_created_profile_is_never_told_it_is_not_created(self):
+        """It carries the tag. `collect_warmup_targets` refused it for the flag,
+        and saying "not Created" sends somebody to add a tag that is already
+        there while the real blocker goes unmentioned. Five phones on
+        2026-08-16, every one of them flagged."""
+        row = self._waiting([self._item(tags=["Created", "Issue"])],
+                            rows=self._rows(needs_human=True))[0]
+        self.assertNotIn("not Created", row["reason"])
+        self.assertIn("flagged", row["reason"])
+
+    def test_a_created_profile_with_nothing_wrong_is_simply_due(self):
+        row = self._waiting([self._item(tags=["Created"])])[0]
+        self.assertNotIn("not Created", row["reason"])
+        self.assertIn("next warm-up tick", row["reason"])
+
+    def test_the_untagged_reason_is_unchanged_for_a_phone_that_is_untagged(self):
+        row = self._waiting([self._item(tags=["Account creation done"])],
+                            rows=self._rows(needs_human=True))[0]
         self.assertIn("not Created", row["reason"])
 
     def test_a_profile_already_posting_is_not_a_candidate(self):
