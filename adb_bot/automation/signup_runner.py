@@ -174,7 +174,7 @@ def cmd_run(args) -> int:
         print("[stop] no staging phone is free.", file=sys.stderr)
         return 2
 
-    chosen = free[:args.limit]
+    chosen = free[:args.limit or 1]
     mode = "APPLY (spends money, creates real accounts)" if args.apply else "DRY RUN"
     print(f"\n{'=' * 66}\n{mode}\n{len(chosen)} phone(s) of {len(free)} free\n"
           f"{'=' * 66}")
@@ -219,7 +219,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mlx-token")
     parser.add_argument("--list", action="store_true",
                         help="show the staging phones that are free, then stop")
-    parser.add_argument("--limit", type=int, default=1,
+    # No default, so `--list` can show the whole free pool while a run still
+    # attempts exactly one account unless asked for more. Sharing a default of
+    # 1 meant `--list` printed one phone and "... and 1 more", which reads like
+    # the pool is smaller than it is.
+    parser.add_argument("--limit", type=int, default=None,
                         help="how many accounts to attempt (default 1)")
     parser.add_argument("--apply", action="store_true",
                         help="actually launch phones, rent numbers and create "
