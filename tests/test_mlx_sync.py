@@ -42,6 +42,26 @@ def mlx_item(**overrides) -> dict:
     return item
 
 
+def existing_row(**overrides) -> dict:
+    """One `profiles_by_serial()` entry, already matching `mlx_item()`.
+
+    Defaults to a fully-reconciled row so a test that cares about one field can
+    override that field alone; anything left at the default must not produce a
+    write.
+    """
+    row = {
+        "record_id": "recX",
+        "name": "Nikki 1",
+        "api_id": "624354174112432228",
+        "time_zone": "Europe/Berlin",
+        "folder": "NIkki",
+        "tags": (),
+        "duplicate": False,
+    }
+    row.update(overrides)
+    return row
+
+
 class NormalizeTest(TestCase):
     def test_full_item(self):
         p = normalize_mlx_item(mlx_item(), FOLDERS)
@@ -104,24 +124,31 @@ class PlanSyncTest(TestCase):
         self.assertFalse(plan.unchanged)
 
     def test_existing_missing_api_id_is_backfilled(self):
-        existing = {"158698": {"record_id": "recX", "api_id": None, "time_zone": "Europe/Berlin"}}
-        plan = plan_sync([mlx_item()], existing)
+        existing = {"158698": existing_row(api_id=None)}
+        plan = plan_sync([mlx_item()], existing, FOLDERS)
         self.assertEqual(len(plan.to_update), 1)
         upd = plan.to_update[0]
         self.assertEqual(upd.record_id, "recX")
         self.assertEqual(upd.updates, {at.F_PROF_MLX_API_ID: "624354174112432228"})
 
     def test_existing_missing_timezone_is_backfilled(self):
-        existing = {"158698": {"record_id": "recX", "api_id": "624354174112432228", "time_zone": None}}
-        plan = plan_sync([mlx_item()], existing)
+        existing = {"158698": existing_row(time_zone=None)}
+        plan = plan_sync([mlx_item()], existing, FOLDERS)
         self.assertEqual(plan.to_update[0].updates, {at.F_PROF_TIME_ZONE: "Europe/Berlin"})
 
+    def test_populated_api_id_and_timezone_are_never_overwritten(self):
+        # Backfill, not reconcile: a value somebody corrected by hand stands,
+        # even when MLX disagrees. Only name/folder/tags are MLX's to win.
+        existing = {"158698": existing_row(api_id="hand-fixed", time_zone="Europe/Lisbon")}
+        plan = plan_sync([mlx_item()], existing, FOLDERS)
+        self.assertFalse(plan.to_update)
+
     def test_fully_synced_is_unchanged(self):
-        existing = {"158698": {"record_id": "recX", "api_id": "624354174112432228", "time_zone": "Europe/Berlin"}}
-        plan = plan_sync([mlx_item()], existing)
+        plan = plan_sync([mlx_item()], {"158698": existing_row()}, FOLDERS)
         self.assertFalse(plan.to_create)
         self.assertFalse(plan.to_update)
         self.assertEqual(len(plan.unchanged), 1)
+        self.assertEqual(plan.unchanged[0].reason, "already in sync")
 
     def test_unnormalizable_item_is_skipped(self):
         plan = plan_sync([mlx_item(serial_no=None, serial_name="Broken")], existing_by_serial={})
@@ -147,14 +174,99 @@ class PlanSyncTest(TestCase):
     def test_skip_staging_still_backfills_existing_rows(self):
         # An already-synced staging profile keeps getting its launch key filled in.
         staging = mlx_item(folder_id="fld-default", serial_name="Blank 1 (6)")
-        existing = {"158698": {"record_id": "recX", "api_id": None, "time_zone": "Europe/Berlin"}}
+        existing = {"158698": existing_row(api_id=None, name="Blank 1 (6)", folder="Default folder")}
         plan = plan_sync([staging], existing, folder_names=FOLDERS, skip_staging=True)
         self.assertEqual(len(plan.to_update), 1)
+        self.assertEqual(plan.to_update[0].updates, {at.F_PROF_MLX_API_ID: "624354174112432228"})
 
     def test_duplicate_serial_in_response_is_skipped_once(self):
         plan = plan_sync([mlx_item(), mlx_item(id="999")], existing_by_serial={})
         self.assertEqual(len(plan.to_create), 1)
         self.assertEqual(len(plan.skipped), 1)
+
+
+class ReconcileTest(TestCase):
+    """MLX wins on name, folder and tags -- and the cases where it must not."""
+
+    def _updates(self, item, row, **kwargs):
+        plan = plan_sync([item], {"158698": row}, FOLDERS, **kwargs)
+        return plan.to_update[0].updates if plan.to_update else {}
+
+    def test_rename_follows_multilogin(self):
+        updates = self._updates(mlx_item(serial_name="Nikki 12"), existing_row())
+        self.assertEqual(updates, {at.F_PROF_NAME: "Nikki 12"})
+
+    def test_blank_style_name_is_replaced_by_the_real_one(self):
+        # The 63-phone case: Airtable stuck on "Blank (24)" while MLX moved on.
+        updates = self._updates(mlx_item(), existing_row(name="Blank (24)"))
+        self.assertEqual(updates, {at.F_PROF_NAME: "Nikki 1"})
+
+    def test_folder_move_follows_multilogin(self):
+        updates = self._updates(mlx_item(folder_id="fld-luisa"), existing_row())
+        self.assertEqual(updates, {at.F_PROF_MLX_FOLDER: "Luisa"})
+
+    def test_staging_folder_is_recorded_even_though_it_is_no_model(self):
+        # "which folder is it in" stays answerable for a phone in no model's
+        # folder -- model resolution is a separate question.
+        updates = self._updates(mlx_item(folder_id="fld-default"), existing_row())
+        self.assertEqual(updates, {at.F_PROF_MLX_FOLDER: "Default folder"})
+
+    def test_profile_in_no_folder_clears_the_field(self):
+        updates = self._updates(mlx_item(folder_id="fld-gone"), existing_row())
+        self.assertEqual(updates, {at.F_PROF_MLX_FOLDER: ""})
+
+    def test_tags_are_mirrored_including_removals(self):
+        item = mlx_item(tags=["Active / Posting", "Second Account"])
+        updates = self._updates(item, existing_row(tags=("Created", "Issue")))
+        self.assertEqual(updates, {at.F_PROF_MLX_TAGS: ["Active / Posting", "Second Account"]})
+
+    def test_untagging_in_mlx_clears_the_field(self):
+        updates = self._updates(mlx_item(), existing_row(tags=("Issue",)))
+        self.assertEqual(updates, {at.F_PROF_MLX_TAGS: []})
+
+    def test_same_tags_in_a_different_order_are_not_a_change(self):
+        item = mlx_item(tags=["Issue", "Created"])
+        self.assertEqual(self._updates(item, existing_row(tags=("Created", "Issue"))), {})
+
+    def test_status_is_never_synced(self):
+        # MLX status=2 means "enabled"; Airtable Status is the human park
+        # switch. Neither direction of disagreement may produce a write.
+        for status in (2, 0):
+            updates = self._updates(mlx_item(status=status), existing_row())
+            self.assertNotIn(at.F_PROF_STATUS, updates)
+
+    def test_name_duplicated_in_mlx_is_not_propagated(self):
+        # Three MLX profiles called "Jasmin 11" -> renaming would collide.
+        items = [mlx_item(serial_name="Jasmin 11"),
+                 mlx_item(serial_no="158699", id="2", serial_name="Jasmin 11")]
+        plan = plan_sync(items, {"158698": existing_row(name="Blank (19)")}, FOLDERS)
+        self.assertFalse(plan.to_update)
+        self.assertIn("several profiles named", plan.unchanged[0].reason)
+
+    def test_serial_claimed_by_two_airtable_rows_is_not_renamed(self):
+        row = existing_row(name="Katja Link", duplicate=True)
+        plan = plan_sync([mlx_item(serial_name="Katja 5")], {"158698": row}, FOLDERS)
+        self.assertFalse(plan.to_update)
+        self.assertIn("several Airtable rows", plan.unchanged[0].reason)
+
+    def test_a_guarded_rename_still_lets_folder_and_tags_through(self):
+        # The rename is the only unsafe part; the row should not be frozen.
+        items = [mlx_item(serial_name="Jasmin 11"),
+                 mlx_item(serial_no="158699", id="2", serial_name="Jasmin 11")]
+        plan = plan_sync(items, {"158698": existing_row(name="Blank (19)", folder="Katja")},
+                         FOLDERS)
+        self.assertEqual(plan.to_update[0].updates, {at.F_PROF_MLX_FOLDER: "NIkki"})
+        self.assertNotIn(at.F_PROF_NAME, plan.to_update[0].updates)
+
+    def test_reconcile_off_falls_back_to_backfill_only(self):
+        row = existing_row(name="Blank (24)", folder="Katja", tags=("Issue",), api_id=None)
+        updates = self._updates(mlx_item(), row, reconcile=False)
+        self.assertEqual(updates, {at.F_PROF_MLX_API_ID: "624354174112432228"})
+
+    def test_previous_values_are_recorded_for_the_report(self):
+        plan = plan_sync([mlx_item(serial_name="Luisa 3")],
+                         {"158698": existing_row(name="Nikki 1")}, FOLDERS)
+        self.assertEqual(plan.to_update[0].previous[at.F_PROF_NAME], "Nikki 1")
 
 
 class FieldBuilderTest(TestCase):
@@ -193,6 +305,9 @@ class FakeClient:
         self.proxies: list[dict] = []
         self.profiles: list[dict] = []
         self.updates: list[tuple[str, dict]] = []
+        # Flip to False to make every patch fail, the way a revoked token or a
+        # field Airtable rejects would.
+        self.update_ok = True
 
     def create_device(self, fields):
         self.devices.append(fields)
@@ -207,6 +322,8 @@ class FakeClient:
         return f"recProf{len(self.profiles)}"
 
     def update_profile(self, record_id, fields):
+        if not self.update_ok:
+            return False
         self.updates.append((record_id, fields))
         return True
 
@@ -239,9 +356,45 @@ class ApplySyncTest(TestCase):
         # device still created, just without a Model link
         self.assertNotIn(at.F_DEV_MODEL, client.devices[0])
 
+    def test_apply_reports_each_kind_of_change(self):
+        row = existing_row(name="Blank (24)", folder="Katja", tags=("Issue",))
+        plan = plan_sync([mlx_item(tags=["Created"])], {"158698": row}, FOLDERS)
+        client = FakeClient()
+        report = apply_sync(client, plan, models_by_name={}, dry_run=False)
+        self.assertEqual(report.renamed, [("Blank (24)", "Nikki 1")])
+        self.assertEqual(report.refoldered, [("Nikki 1", "NIkki")])
+        self.assertEqual(report.retagged, ["Nikki 1"])
+        # "Blank" -> "Nikki" moves the phone between models' content.
+        self.assertEqual(report.renamed_model, [("Blank (24)", "Nikki 1")])
+
+    def test_rename_within_a_model_is_not_a_model_change(self):
+        plan = plan_sync([mlx_item(serial_name="Nikki 12")],
+                         {"158698": existing_row()}, FOLDERS)
+        report = apply_sync(FakeClient(), plan, models_by_name={}, dry_run=False)
+        self.assertEqual(report.renamed, [("Nikki 1", "Nikki 12")])
+        self.assertFalse(report.renamed_model)
+
+    def test_apply_surfaces_a_refused_rename(self):
+        items = [mlx_item(serial_name="Jasmin 11"),
+                 mlx_item(serial_no="158699", id="2", serial_name="Jasmin 11")]
+        plan = plan_sync(items, {"158698": existing_row(name="Blank (19)")}, FOLDERS)
+        report = apply_sync(FakeClient(), plan, models_by_name={}, dry_run=False)
+        self.assertEqual(len(report.refused), 1)
+        self.assertIn("several profiles named", report.refused[0][1])
+
+    def test_a_failed_update_is_not_counted_as_a_change(self):
+        plan = plan_sync([mlx_item(serial_name="Nikki 12")],
+                         {"158698": existing_row()}, FOLDERS)
+        client = FakeClient()
+        client.update_ok = False
+        report = apply_sync(client, plan, models_by_name={}, dry_run=False)
+        self.assertFalse(report.updated)
+        self.assertFalse(report.renamed)
+        self.assertEqual(len(report.errors), 1)
+
     def test_apply_backfills_update(self):
-        existing = {"158698": {"record_id": "recX", "api_id": None, "time_zone": "Europe/Berlin"}}
-        plan = plan_sync([mlx_item()], existing)
+        existing = {"158698": existing_row(api_id=None)}
+        plan = plan_sync([mlx_item()], existing, FOLDERS)
         client = FakeClient()
         report = apply_sync(client, plan, models_by_name={}, dry_run=False)
         self.assertEqual(report.updated, ["Nikki 1"])
