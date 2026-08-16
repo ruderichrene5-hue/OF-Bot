@@ -688,6 +688,11 @@ def _run_recheck(args, logger) -> int:
             if result.get("post_count") is not None:
                 captured["count"] = reel_verify.Count(int(result["post_count"]),
                                                       bool(result.get("post_count_exact")))
+            # Proof the handle is not in this phone's switcher, as opposed to a
+            # screen we lost. The runner turns this into a terminal answer so
+            # the row stops re-launching the phone every fifteen minutes.
+            if result.get("account_absent"):
+                captured["absent"] = True
 
         # This probe opens a phone too, so it takes a slot from the same global
         # ceiling posting and warmup draw on -- one loop that is "only one
@@ -722,6 +727,11 @@ def _run_recheck(args, logger) -> int:
                 # in front, which on a two-account phone is a coin flip.
                 target_handle=at._handle(fields.get(at.F_PQ_TARGET_HANDLE)),
             )
+        if captured.get("absent"):
+            raise recheck_runner.AccountNotOnPhone(
+                f"the account switcher on this phone does not list "
+                f"@{at._handle(fields.get(at.F_PQ_TARGET_HANDLE))}, so its post count "
+                f"cannot be read here -- no number of retries changes that")
         return captured.get("count")
 
     tally = recheck_runner.recheck_pending_posts(airtable, read_post_count, logger=logger)

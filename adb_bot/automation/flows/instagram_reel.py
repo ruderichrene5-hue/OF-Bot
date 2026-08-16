@@ -2449,12 +2449,24 @@ class ReelPostCountProbeFlow(InstagramReelUploadU2Flow):
         # reading none: it is a confident number that disproves a live post and
         # re-queues the reel. So an unswitchable phone reports no count and the
         # row stays in Verifying for the next pass.
+        #
+        # Which *kind* of failure it was has to travel with the answer. "The
+        # switcher does not list this handle" is proof the question can never be
+        # answered here, and a caller that cannot tell it from "we lost the
+        # screen" re-launches the phone every fifteen minutes to be told the
+        # same thing: @jiji.ll12 and @helen_aiscooll cost 122 launches in five
+        # days that way, none of which could have succeeded.
         want_handle = getattr(profile, "target_handle", None)
-        if want_handle and not self._ensure_account_u2(d, target, want_handle, emit, logger=log):
-            emit("warning", "Post-count probe for %s: could not switch to @%s; not reporting a "
-                            "count read off another account", target, want_handle)
-            return {"profile_id": profile.id, "target": target, "aborted": False,
-                    "success": False, "post_count": None}
+        if want_handle:
+            switched, reason = self._ensure_account_state_u2(
+                d, target, want_handle, emit, logger=log)
+            if not switched:
+                emit("warning", "Post-count probe for %s: could not switch to @%s (%s); not "
+                                "reporting a count read off another account",
+                     target, want_handle, reason)
+                return {"profile_id": profile.id, "target": target, "aborted": False,
+                        "success": False, "post_count": None,
+                        "account_absent": reason == self.ACCOUNT_ABSENT}
 
         # Same browse-and-refresh as the in-run probe: leaving for the feed and
         # coming back is what actually re-fetches the counter. Cheap here, since

@@ -38,6 +38,17 @@ OUTCOME_POSTED = "posted"
 OUTCOME_FAILED = "failed"
 OUTCOME_UNKNOWN = "unknown"      # still can't tell; leave it for the next pass
 OUTCOME_ABANDONED = "abandoned"  # too old to keep asking
+OUTCOME_ACCOUNT_ABSENT = "account_absent"  # the phone does not carry this account
+
+
+class AccountNotOnPhone(Exception):
+    """The probe proved the row's handle is not in that phone's switcher.
+
+    Raised by `read_post_count`, because this is the one failure that no
+    amount of retrying fixes: the counter it would have to read belongs to an
+    account the phone does not carry. Distinct from returning None ("we could
+    not read the screen"), which is worth another pass.
+    """
 
 
 def decide_recheck(baseline_count: int, baseline_exact: bool, current, age_seconds: float,
@@ -186,11 +197,19 @@ def apply_recheck_outcome(airtable, queue_id: str, account_id, account_name: str
         airtable.set_account_result(account_id, f"{at.RESULT_DONE}: {flow} (recheck confirmed)")
         return True
 
-    if outcome in (OUTCOME_FAILED, OUTCOME_ABANDONED):
+    if outcome in (OUTCOME_FAILED, OUTCOME_ABANDONED, OUTCOME_ACCOUNT_ABSENT):
         # Now a retry is genuinely safe -- for OUTCOME_FAILED we have positive
         # evidence the reel is not on the account, which is exactly what the
         # in-run check could not establish.
-        issue = at.ISSUE_NEEDS_RETRY if outcome == OUTCOME_FAILED else at.ISSUE_OTHER
+        # `Account Not On Phone` is its own issue code because it is the one
+        # `retry_runner` must not re-queue: the handle is missing, so every
+        # retry costs a launch and a boot to reach the same answer.
+        if outcome == OUTCOME_FAILED:
+            issue = at.ISSUE_NEEDS_RETRY
+        elif outcome == OUTCOME_ACCOUNT_ABSENT:
+            issue = at.ISSUE_ACCOUNT_MISSING
+        else:
+            issue = at.ISSUE_OTHER
         airtable.mark_post_result(queue_id, at.POST_STATUS_FAILED, issue)
         airtable.create_run_log(account_id, account_name, flow, at.RESULT_FAILED,
                                 f"deferred recheck: {detail}")
@@ -219,7 +238,8 @@ def recheck_pending_posts(airtable, read_post_count, ledger=None, logger=None,
             getattr(logger, level, logger.info)(message, *args)
 
     store = ledger or post_ledger.PostLedger()
-    tally = {"checked": 0, "posted": 0, "failed": 0, "unknown": 0, "abandoned": 0}
+    tally = {"checked": 0, "posted": 0, "failed": 0, "unknown": 0, "abandoned": 0,
+             "account_absent": 0}
 
     try:
         rows = airtable.list_posts_awaiting_recheck()
@@ -315,6 +335,19 @@ def recheck_pending_posts(airtable, read_post_count, ledger=None, logger=None,
         tally["checked"] += 1
         try:
             current = read_post_count(entry.profile_id, fields)
+        except AccountNotOnPhone as exc:
+            # Terminal, and on purpose. The ledger is deliberately left blocking
+            # the clip: we never learned whether it posted, only that this phone
+            # can never tell us. Re-sending it on the strength of "no answer" is
+            # how an account gets the same reel twice.
+            detail = str(exc) or "the row's handle is not in this phone's account switcher"
+            log("warning", "Recheck for %s (%s): giving up -- %s",
+                account_name, entry.profile_id, detail)
+            apply_recheck_outcome(airtable, queue_id, account_id, account_name,
+                                  OUTCOME_ACCOUNT_ABSENT, detail, variant_id=variant_id,
+                                  flow=flow, logger=logger)
+            tally["account_absent"] += 1
+            continue
         except Exception as exc:
             log("warning", "Recheck probe failed for %s: %s", entry.profile_id, exc)
             current = None

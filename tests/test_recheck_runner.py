@@ -595,3 +595,70 @@ class RetroConfirmInThePassTest(TestCase):
             self.airtable, lambda pid, fields: Count(107, True), ledger=self.ledger)
         self.assertEqual(tally["posted"], 1)
         self.assertEqual(tally["checked"], 1)
+
+
+class AccountAbsentStopsTheRetryTest(TestCase):
+    """A handle the phone does not carry is a terminal answer, not a retry.
+
+    @jiji.ll12 and @helen_aiscooll cost 122 recheck launches in five days,
+    every one of them re-proving the same thing.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.ledger = PostLedger(root / "ledger.jsonl")
+        self.clip = root / "clip.mp4"
+        self.clip.write_bytes(b"reel bytes")
+        self.airtable = MagicMock()
+        self.airtable.list_posts_awaiting_recheck.return_value = [{
+            "id": "q1",
+            "fields": {
+                at.F_PQ_NAME: "Jil 5 (jiji.ll12)",
+                at.F_PQ_TARGET_ACCOUNT: ["a1"],
+                at.F_PQ_SPOOF_VARIANT: ["v1"],
+            },
+        }]
+        self.ledger.record_share("p1", self.clip, queue_id="q1",
+                                 baseline_count=Count(106, True), target_handle="jiji.ll12")
+
+    def _absent(self, pid, fields):
+        raise recheck_runner.AccountNotOnPhone("the switcher does not list @jiji.ll12")
+
+    def test_the_row_leaves_verifying_with_its_own_issue_code(self):
+        tally = recheck_runner.recheck_pending_posts(
+            self.airtable, self._absent, ledger=self.ledger)
+        self.assertEqual(tally["account_absent"], 1)
+        self.assertEqual(tally["unknown"], 0)
+        self.airtable.mark_post_result.assert_called_once_with(
+            "q1", at.POST_STATUS_FAILED, at.ISSUE_ACCOUNT_MISSING)
+        self.airtable.mark_post_pending_verification.assert_not_called()
+
+    def test_the_clip_stays_blocked_because_we_still_do_not_know(self):
+        """Not disproved: giving up on the question is not answering it."""
+        recheck_runner.recheck_pending_posts(
+            self.airtable, self._absent, ledger=self.ledger)
+        self.assertTrue(self.ledger.already_shared("p1", self.clip))
+        record = self.ledger.lookup("p1", post_ledger.media_fingerprint(self.clip))
+        self.assertNotEqual(record.status, STATUS_DISPROVED)
+
+    def test_an_ordinary_probe_failure_is_still_only_unknown(self):
+        def lost_the_screen(pid, fields):
+            raise RuntimeError("uiautomator2 died")
+
+        tally = recheck_runner.recheck_pending_posts(
+            self.airtable, lost_the_screen, ledger=self.ledger)
+        self.assertEqual(tally["unknown"], 1)
+        self.assertEqual(tally["account_absent"], 0)
+
+    def test_the_watchdog_counts_it_as_produced(self):
+        """Otherwise a pass that resolves only absent rows reads as a stall."""
+        from adb_bot.automation import loop_watchdog
+        verdict = loop_watchdog.observe_recheck(
+            loop_watchdog.LoopWatchdog(),
+            {"checked": 1, "posted": 0, "failed": 0, "unknown": 0,
+             "abandoned": 0, "account_absent": 1})
+        self.assertEqual(verdict.produced, 1)
+        self.assertEqual(verdict.due, 1)
+        self.assertFalse(verdict.stalled)

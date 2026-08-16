@@ -707,7 +707,8 @@ def observe_recheck(watchdog: LoopWatchdog, tally, now=None) -> Verdict:
     counter that only asks whether the pass ran.
     """
     tally = tally or {}
-    resolved = sum(int(tally.get(k, 0) or 0) for k in ("posted", "failed", "abandoned"))
+    resolved = sum(int(tally.get(k, 0) or 0)
+                   for k in ("posted", "failed", "abandoned", "account_absent"))
     unknown = int(tally.get("unknown", 0) or 0)
     due = resolved + unknown
     return watchdog.observe("recheck", due, resolved, now=now,
