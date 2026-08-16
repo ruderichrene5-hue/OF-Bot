@@ -77,6 +77,71 @@ def decide_recheck(baseline_count: int, baseline_exact: bool, current, age_secon
             f"post count went down ({baseline_count} -> {current.value}); not a reliable comparison")
 
 
+def _handle_key(value) -> str:
+    """Normalise a target handle for comparison ('@Jiji.LL12 ' -> 'jiji.ll12')."""
+    return str(value or "").strip().lstrip("@").lower()
+
+
+def confirm_from_later_share(entry, shares) -> tuple | None:
+    """Prove a parked post landed using the *next* post's opening count.
+
+    Returns (OUTCOME_POSTED, detail) or None when this evidence does not apply.
+
+    Every share records the account's post count read moments before Share. So
+    a later share on the same account is a second reading of the same counter,
+    taken under ideal conditions -- no upload in flight, no phone to hold, no
+    15-minute wait. If that later reading is higher, posts landed in between.
+
+    This exists because the device probe is not always available and is not
+    always trustworthy: on a two-account phone it has to switch accounts first,
+    and when the switcher refuses (the account is signed out, or absent) the
+    probe correctly declines to report a count -- forever. Jil 5 sat on three
+    rows in `Verifying` for a day whose own baselines read 106, 107, 109: the
+    proof each one landed was already on disk, in the next row.
+
+    Conservative on purpose:
+
+    * Both readings must be exact, on the same profile *and* the same handle.
+      Profile alone is not enough -- two accounts share a phone, and their
+      counters are unrelated.
+    * A *decrease* proves nothing (a deletion, or a count read off the other
+      account) and returns None rather than a verdict.
+    * The rise must cover every share recorded in the window. Two shares and a
+      +1 means one of them landed and this does not say which.
+    """
+    handle = _handle_key(entry.target_handle)
+    if not handle or entry.baseline_count < 0 or not entry.baseline_exact:
+        return None
+
+    def same_account(share) -> bool:
+        return (str(share.profile_id) == str(entry.profile_id)
+                and _handle_key(share.target_handle) == handle)
+
+    later = [s for s in shares
+             if same_account(s) and (s.shared_at or 0.0) > (entry.shared_at or 0.0)
+             and s.baseline_count >= 0 and s.baseline_exact]
+    if not later:
+        return None
+
+    nxt = min(later, key=lambda s: s.shared_at or 0.0)
+    risen = nxt.baseline_count - entry.baseline_count
+    if risen <= 0:
+        return None
+
+    # Everything shared on this account between the two readings, this one
+    # included. The counter cannot tell two shares apart, so it only proves
+    # this share landed if it accounts for all of them.
+    between = [s for s in shares
+               if same_account(s)
+               and (entry.shared_at or 0.0) <= (s.shared_at or 0.0) < (nxt.shared_at or 0.0)]
+    if risen < len(between):
+        return None
+
+    return (OUTCOME_POSTED,
+            f"the next post on @{handle} opened at {nxt.baseline_count}, up from "
+            f"{entry.baseline_count} before this one -- the counter moved, so this reel landed")
+
+
 def _age_from_recheck_stamp(fields: dict, now_epoch: float):
     """Seconds since this row's `Recheck After` came due, or None if unreadable.
 
@@ -163,6 +228,10 @@ def recheck_pending_posts(airtable, read_post_count, ledger=None, logger=None,
         return tally
 
     entries = {r.queue_id: r for r in store.pending() if r.queue_id}
+    # Every share, not just the unresolved ones: the reading that proves a
+    # parked post landed is usually the next post's, which has itself already
+    # been confirmed and left `pending()`.
+    all_shares = list(store.load().values())
 
     # Profile names are read at most once, and only if a profile-driven row shows
     # up: a pass over ordinary account rows should not pay for a Profiles table
@@ -224,6 +293,23 @@ def recheck_pending_posts(airtable, read_post_count, ledger=None, logger=None,
                 continue
             log("warning", "No local ledger entry for queue row %s; leaving it in Verifying", queue_id)
             tally["unknown"] += 1
+            continue
+
+        # Free evidence first. A later share on the same account already read
+        # the counter, so when that settles the question there is no reason to
+        # open a phone -- and for an account the probe cannot switch to, this is
+        # the only answer that will ever come.
+        settled = confirm_from_later_share(entry, all_shares)
+        if settled is not None:
+            outcome, detail = settled
+            log("info", "Recheck for %s (%s): %s -- %s (no device needed)",
+                account_name, entry.profile_id, outcome, detail)
+            apply_recheck_outcome(airtable, queue_id, account_id, account_name,
+                                  outcome, detail, variant_id=variant_id,
+                                  flow=flow, logger=logger)
+            store.resolve(entry.profile_id, entry.media_hash,
+                          post_ledger.STATUS_CONFIRMED, detail)
+            tally["posted"] += 1
             continue
 
         tally["checked"] += 1

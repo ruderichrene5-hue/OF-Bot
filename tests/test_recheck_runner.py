@@ -459,3 +459,139 @@ class WiringTest(TestCase):
         src = inspect.getsource(workflow.run_profile_workflow)
         self.assertIn("result_callback", src)
         self.assertIn("result_callback(flow_result)", src)
+
+
+class Share:
+    """Just the ledger fields `confirm_from_later_share` reads."""
+
+    def __init__(self, shared_at, baseline_count, handle="jiji.ll12",
+                 profile_id="p1", exact=True):
+        self.shared_at = shared_at
+        self.baseline_count = baseline_count
+        self.baseline_exact = exact
+        self.target_handle = handle
+        self.profile_id = profile_id
+
+
+class ConfirmFromLaterShareTest(TestCase):
+    """The next post's opening count as proof the previous one landed.
+
+    Numbers come from Jil 5 on 2026-08-15, which sat on three rows in
+    `Verifying` for a day while its own ledger read 106, 107, 109.
+    """
+
+    def test_the_next_posts_baseline_confirms_this_one(self):
+        first = Share(1000.0, 106)
+        shares = [first, Share(8000.0, 107), Share(15000.0, 109)]
+        outcome, detail = recheck_runner.confirm_from_later_share(first, shares)
+        self.assertEqual(outcome, OUTCOME_POSTED)
+        self.assertIn("106", detail)
+        self.assertIn("107", detail)
+
+    def test_a_rise_of_more_than_one_still_confirms(self):
+        second = Share(8000.0, 107)
+        shares = [Share(1000.0, 106), second, Share(15000.0, 109)]
+        outcome, _ = recheck_runner.confirm_from_later_share(second, shares)
+        self.assertEqual(outcome, OUTCOME_POSTED)
+
+    def test_the_most_recent_share_has_no_later_reading(self):
+        last = Share(15000.0, 109)
+        shares = [Share(1000.0, 106), Share(8000.0, 107), last]
+        self.assertIsNone(recheck_runner.confirm_from_later_share(last, shares))
+
+    def test_a_flat_count_proves_nothing_here(self):
+        """Silence is `decide_recheck`'s call to make, not this one's."""
+        first = Share(1000.0, 106)
+        self.assertIsNone(
+            recheck_runner.confirm_from_later_share(first, [first, Share(8000.0, 106)]))
+
+    def test_a_dropped_count_is_never_a_confirmation(self):
+        """Jil 6 went 77 -> 15: the phone was showing the other account."""
+        first = Share(1000.0, 77)
+        self.assertIsNone(
+            recheck_runner.confirm_from_later_share(first, [first, Share(8000.0, 15)]))
+
+    def test_another_handle_on_the_same_phone_is_not_evidence(self):
+        first = Share(1000.0, 106, handle="jiji.ll12")
+        shares = [first, Share(8000.0, 107, handle="helenaiscutee")]
+        self.assertIsNone(recheck_runner.confirm_from_later_share(first, shares))
+
+    def test_the_same_handle_on_another_profile_is_not_evidence(self):
+        first = Share(1000.0, 106, profile_id="p1")
+        shares = [first, Share(8000.0, 107, profile_id="p2")]
+        self.assertIsNone(recheck_runner.confirm_from_later_share(first, shares))
+
+    def test_a_share_with_no_handle_is_never_confirmed(self):
+        """On a two-account phone an unlabelled count could be either account."""
+        first = Share(1000.0, 106, handle="")
+        shares = [first, Share(8000.0, 107, handle="")]
+        self.assertIsNone(recheck_runner.confirm_from_later_share(first, shares))
+
+    def test_a_rise_too_small_to_cover_every_share_confirms_nothing(self):
+        """Two posts and a +1: one landed, and this does not say which."""
+        first = Share(1000.0, 106)
+        shares = [first, Share(2000.0, -1, exact=False), Share(8000.0, 107)]
+        self.assertIsNone(recheck_runner.confirm_from_later_share(first, shares))
+
+    def test_an_inexact_baseline_on_either_side_is_refused(self):
+        first = Share(1000.0, 106, exact=False)
+        self.assertIsNone(
+            recheck_runner.confirm_from_later_share(first, [first, Share(8000.0, 107)]))
+        exact_first = Share(1000.0, 106)
+        self.assertIsNone(recheck_runner.confirm_from_later_share(
+            exact_first, [exact_first, Share(8000.0, 107, exact=False)]))
+
+    def test_handles_compare_case_and_at_insensitively(self):
+        first = Share(1000.0, 106, handle="@Jiji.LL12 ")
+        shares = [first, Share(8000.0, 107, handle="jiji.ll12")]
+        outcome, _ = recheck_runner.confirm_from_later_share(first, shares)
+        self.assertEqual(outcome, OUTCOME_POSTED)
+
+
+class RetroConfirmInThePassTest(TestCase):
+    """The pass must take the free answer and leave the phone alone."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.ledger = PostLedger(root / "ledger.jsonl")
+        self.first = root / "first.mp4"
+        self.first.write_bytes(b"first reel")
+        self.second = root / "second.mp4"
+        self.second.write_bytes(b"second reel")
+        self.airtable = MagicMock()
+        self.airtable.list_posts_awaiting_recheck.return_value = [{
+            "id": "q1",
+            "fields": {
+                at.F_PQ_NAME: "Jil 5 (jiji.ll12)",
+                at.F_PQ_TARGET_ACCOUNT: ["a1"],
+                at.F_PQ_SPOOF_VARIANT: ["v1"],
+            },
+        }]
+
+    def test_a_later_share_resolves_the_row_without_a_device(self):
+        self.ledger.record_share("p1", self.first, queue_id="q1",
+                                 baseline_count=Count(106, True), target_handle="jiji.ll12")
+        self.ledger.record_share("p1", self.second, queue_id="q2",
+                                 baseline_count=Count(107, True), target_handle="jiji.ll12")
+
+        def must_not_run(pid, fields):
+            raise AssertionError("a phone was opened for a question already answered")
+
+        tally = recheck_runner.recheck_pending_posts(
+            self.airtable, must_not_run, ledger=self.ledger)
+        self.assertEqual(tally["posted"], 1)
+        self.assertEqual(tally["checked"], 0, "no device probe should have been counted")
+        record = self.ledger.lookup("p1", post_ledger.media_fingerprint(self.first))
+        self.assertEqual(record.status, STATUS_CONFIRMED)
+        self.airtable.mark_post_result.assert_called_once_with(
+            "q1", at.POST_STATUS_POSTED, at.ISSUE_NONE)
+
+    def test_without_a_later_share_the_probe_still_runs(self):
+        self.ledger.record_share("p1", self.first, queue_id="q1",
+                                 baseline_count=Count(106, True), target_handle="jiji.ll12")
+        tally = recheck_runner.recheck_pending_posts(
+            self.airtable, lambda pid, fields: Count(107, True), ledger=self.ledger)
+        self.assertEqual(tally["posted"], 1)
+        self.assertEqual(tally["checked"], 1)
