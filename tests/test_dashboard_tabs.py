@@ -211,6 +211,43 @@ class FolderBreakdownTest(unittest.TestCase):
             mlx_items=self._items(("1", "f1"), ("2", "f2")), folder_names=self.FOLDERS)
         self.assertEqual(out["totals"]["total"], 2)
 
+    def test_a_phone_finished_by_the_airtable_stage_is_a_hand_off_here_too(self):
+        """The hand-off worklist admits a profile on *either* the campaign's own
+        reading or the Airtable Stage; this table read only the first. A phone
+        that finished last week has dropped out of the campaign window but still
+        carries the Stage, so the worklist asked for 25 profiles while this
+        table filed 19 of them under "Other" -- same page, same refresh."""
+        from adb_bot.automation import warmup_state
+
+        out = report.folder_breakdown(
+            [_profile(serial="9", stage=warmup_state.TAG_FINISHED)],
+            mlx_items=self._items(("9", "f1")), folder_names=self.FOLDERS,
+            warmup_progress=_progress("1"))
+        self.assertEqual(out["totals"]["handoff"], 1)
+        self.assertEqual(out["totals"]["other"], 0)
+
+    def test_the_same_phone_with_its_hand_off_done_is_ready_not_waiting(self):
+        from adb_bot.automation import warmup_state
+
+        out = report.folder_breakdown(
+            [_profile(serial="9", stage=warmup_state.TAG_FINISHED,
+                      bio=True, picture=True, first_post=True)],
+            mlx_items=self._items(("9", "f1")), folder_names=self.FOLDERS,
+            warmup_progress=_progress("1"))
+        self.assertEqual(out["totals"]["ready"], 1)
+
+    def test_a_flagged_phone_still_outranks_having_finished(self):
+        """"Counted in exactly one column, worst first" is what this table says
+        it does, and the flag is the worse fact."""
+        from adb_bot.automation import warmup_state
+
+        out = report.folder_breakdown(
+            [_profile(serial="9", stage=warmup_state.TAG_FINISHED, needs_human=True)],
+            mlx_items=self._items(("9", "f1")), folder_names=self.FOLDERS,
+            warmup_progress=_progress("1"))
+        self.assertEqual(out["totals"]["needs_person"], 1)
+        self.assertEqual(out["totals"]["handoff"], 0)
+
     def test_no_folder_list_still_counts_correctly(self):
         """MultiLogin can be down. The grouping is lost; the numbers are not."""
         out = report.folder_breakdown([_profile(serial="1", queue_rows=1)],

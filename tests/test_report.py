@@ -1528,11 +1528,35 @@ class WarmupBadgeTest(RenderTest):
         page = report_html.render(self._data(warmup_progress=self._progress(ok=4)))
         self.assertEqual(self._badge(page), "")
 
-    def test_the_account_side_blockers_are_still_the_fallback(self):
-        """Unchanged: with nothing wrong on the profile-driven side, the badge
-        falls back to the accounts that cannot run."""
+    def test_a_profile_driven_campaign_ignores_the_account_side_blockers(self):
+        """The fallback used to fire whenever the campaign was healthy, which is
+        the normal state -- so a tab with nothing wrong on it wore the count of
+        accounts paused deliberately long ago. Those accounts are a population
+        the profile-driven loop does not run from at all: no tick will ever pick
+        one up, so no number on this tab is waiting on anybody. On 2026-08-16 it
+        read 11 against 0 failed and 0 stalled."""
         page = report_html.render(self._data(
             warmup_progress=self._progress(ok=1),
+            warmup={"plan": [], "accounts": [], "plan_days": 4, "error": "",
+                    "counts": {"blocked": 11}}))
+        self.assertEqual(self._badge(page), "")
+
+    def test_a_real_failure_still_badges_past_the_account_side_count(self):
+        """The profile-driven side is what the badge is for, and it is not
+        silenced by the change above."""
+        page = report_html.render(self._data(
+            warmup_progress=self._progress(failed=3),
+            warmup={"plan": [], "accounts": [], "plan_days": 4, "error": "",
+                    "counts": {"blocked": 11}}))
+        self.assertIn('<span class="count">3</span>', self._badge(page))
+
+    def test_an_account_driven_campaign_still_falls_back(self):
+        """Unchanged where it was right: with the loop reading the account table
+        rather than the MLX tag, the accounts that cannot run are the work."""
+        progress = self._progress(ok=1)
+        progress["account_driven"] = True
+        page = report_html.render(self._data(
+            warmup_progress=progress,
             warmup={"plan": [], "accounts": [], "plan_days": 4, "error": "",
                     "counts": {"blocked": 2}}))
         self.assertIn('<span class="count">2</span>', self._badge(page))
@@ -2650,8 +2674,9 @@ class PostingOutlookTest(unittest.TestCase):
         return {"id": name, "fields": {"Name": name, "Scheduled DateTime": when,
                                        "Post Status": status}}
 
-    def _run(self, rows, schedules=None, at="15:00"):
-        return report.posting_outlook(rows, schedules=schedules, now=self._now(at))
+    def _run(self, rows, schedules=None, at="15:00", blocked=None):
+        return report.posting_outlook(rows, schedules=schedules, now=self._now(at),
+                                      blocked=blocked)
 
     def test_the_next_post_is_the_last_one_plus_the_gap(self):
         # 12:00 Berlin == 10:00 UTC; +2h gap -> 14:00 Berlin.
@@ -2687,6 +2712,50 @@ class PostingOutlookTest(unittest.TestCase):
         rows = [self._row(f"Jil 1 / 0{n}:00", f"2026-08-05T0{n}:00:00.000Z")
                 for n in range(1, 8)]
         self.assertEqual(self._run(rows)["profiles"][0]["today"], 0)
+
+    def test_a_flagged_profiles_row_is_not_going_out_on_the_next_tick(self):
+        """The posting loop checks the flag before it reads the clock, so a due
+        row on a flagged profile is frozen, not imminent. Counting it as due is
+        how this tab described 425 rows as about to move while the loop skipped
+        350 of them on every tick."""
+        out = self._run([self._row("Laila 3 / 09:00", "2026-08-06T07:00:00.000Z", "Pending")],
+                        blocked={"Laila 3": report.BLOCKED_FLAGGED})
+        self.assertEqual(out["queued"][0]["blocked"], report.BLOCKED_FLAGGED)
+        self.assertEqual(out["queued_blocked"], 1)
+        self.assertEqual(out["profiles"][0]["state"], "blocked")
+        self.assertEqual(out["blocked"], 1)
+        self.assertEqual(out["eligible_now"], 0)
+
+    def test_a_parked_profile_is_held_too_and_says_which(self):
+        out = self._run([self._row("Laila 3 / 09:00", "2026-08-06T07:00:00.000Z", "Pending")],
+                        blocked={"Laila 3": report.BLOCKED_PARKED})
+        self.assertEqual(out["queued"][0]["blocked"], report.BLOCKED_PARKED)
+
+    def test_a_second_accounts_row_matches_its_profiles_flag(self):
+        """A two-account phone writes "Nikki 12 (kikittie22) / 04:35" while the
+        Profiles row is plain "Nikki 12". Matching the literal string only let
+        every second-account row past the gate."""
+        out = self._run(
+            [self._row("Nikki 12 (kikittie22) / 09:00", "2026-08-06T07:00:00.000Z", "Pending")],
+            blocked={"Nikki 12": report.BLOCKED_FLAGGED})
+        self.assertEqual(out["queued_blocked"], 1)
+
+    def test_an_unflagged_profile_is_untouched_by_the_gate(self):
+        out = self._run([self._row("Laila 3 / 09:00", "2026-08-06T07:00:00.000Z", "Pending")],
+                        blocked={"Jil 1": report.BLOCKED_FLAGGED})
+        self.assertEqual(out["queued"][0]["blocked"], "")
+        self.assertEqual(out["queued_blocked"], 0)
+        self.assertEqual(out["eligible_now"], 1)
+
+    def test_the_gate_reads_the_same_fields_the_planner_does(self):
+        blocked = report.profiles_blocked_from_posting([
+            {"name": "Jil 1", "status": "Active", "needs_human": True},
+            {"name": "Jil 2", "status": "Inactive", "needs_human": False},
+            {"name": "Jil 3", "status": "Active", "needs_human": False},
+            {"name": "", "status": "Active", "needs_human": True},
+        ])
+        self.assertEqual(blocked, {"Jil 1": report.BLOCKED_FLAGGED,
+                                   "Jil 2": report.BLOCKED_PARKED})
 
     def test_a_pending_row_is_listed_with_the_time_on_it(self):
         out = self._run([self._row("Laila 3 / 20:00", "2026-08-06T16:09:52.000Z", "Pending")])

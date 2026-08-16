@@ -589,7 +589,14 @@ def _section_today(data: dict) -> str:
 
     rate = totals["mlx_rate"]
     tiles = [
-        _tile("Posts today", totals["posts"], f'{totals["runs"]} run(s)'),
+        # Not "Posts today": this is what the posting loop *sent*, counted off
+        # its own run lines, and a run takes every row that is due -- including
+        # rows dated days ago that a flag or a retry held back. The Posts tab
+        # counts the rows *scheduled* for today. Two honest numbers, and while
+        # both were called "Posts today" the page read as though one of them
+        # was wrong: 200 here against 160 there on 2026-08-16.
+        _tile("Sent by the loop", totals["posts"],
+              f'{totals["runs"]} run(s) · any row that came due'),
         _tile("Avg per phone", _fmt_seconds(phone.get("average", 0.0)),
               (f'median {_fmt_seconds(phone.get("median", 0.0))}, '
                f'from {phone.get("samples", 0)} measured post(s)')
@@ -606,6 +613,12 @@ def _section_today(data: dict) -> str:
               "share → resolved"),
     ]
     grid = f'<div class="grid">{"".join(tiles)}</div>'
+    grid += ('<p class="sub" style="margin-top:.7rem">"Sent by the loop" is counted from the '
+             'posting log and covers every row the loop took today, whatever day that row was '
+             'scheduled for — so it runs ahead of the <strong>Posts</strong> tab, which counts '
+             'the rows dated today. A backlog draining is the usual gap between them. '
+             '"Confirmed", "Verifying" and "Failed" beside it are today\'s rows, like that tab.'
+             '</p>')
     if phone.get("samples"):
         note = (f'<p class="sub" style="margin-top:.7rem">"Avg per phone" is how long one '
                 f'phone is actually held — from launching the profile to closing it — '
@@ -864,10 +877,12 @@ ISSUE_GUIDE = {
         "If the account is gone for good, set the profile\u2019s Status to Inactive so "
         "the bot stops choosing it."),
     "Retries Exhausted": (
-        f"The bot tried to post {DEFAULT_MAX_RETRIES} times and failed every time. It has "
-        "stopped trying so it does not keep hammering the account.",
+        f"The retry counter reached {DEFAULT_MAX_RETRIES} and the bot stopped trying, so it "
+        "does not keep hammering the account. This one is a count, not a diagnosis: the same "
+        "label has covered a phone sitting on an SMS checkpoint and a profile MultiLogin no "
+        "longer has. Whatever is actually wrong, the notes below say it and the phone shows it.",
         "Open the phone and see what state Instagram is in — logged out, an update "
-        "prompt, a frozen screen. Fix whatever blocks it, then clear the checkbox."),
+        "prompt, a checkpoint, a frozen screen. Fix that, then untag it."),
     "Repeated Failures": (
         "This profile keeps failing across different runs, so something about it is "
         "consistently wrong rather than unlucky.",
@@ -878,17 +893,44 @@ ISSUE_GUIDE = {
         "trying. Each attempt failed or could not be confirmed, so no single run looks "
         "broken — it is only visible across a day of them.",
         "Post one reel from this phone by hand and watch it through: if it appears on the "
-        "profile, clear Needs Human Check and the bot picks the account back up. If it "
-        "does not, whatever stopped you is what has been stopping the bot, and no amount "
-        "of retrying will get past it."),
+        "profile, untag it and the bot picks the account back up. If it does not, whatever "
+        "stopped you is what has been stopping the bot, and no amount of retrying will get "
+        "past it."),
     "Device Unreachable": (
         "The phone itself did not answer. Instagram may be perfectly fine — the "
         "device never came up.",
         "Check the phone in MultiLogin. Start it manually and see whether it boots; "
         "if it never does, the phone needs recreating."),
+    # Both of these were reaching the page under the generic wording below,
+    # which told somebody to go and look at a screen when the answer was already
+    # written down -- and, for the held ones, to undo a hold put on deliberately.
+    "Account Not On Phone": (
+        "Airtable says this phone carries a handle that its Instagram account switcher does "
+        "not list. Nothing is wrong with the phone or with the account it *is* signed in as; "
+        "the row simply names an account that is not there, and every post planned for that "
+        "handle fails without ever being attempted.",
+        "Open the phone, read the account switcher, and make Airtable match it — correct the "
+        "handle on the profile, or put the missing account back on the device. Retrying "
+        "cannot help: the rows at the front of this profile's queue are the ones starving "
+        "the account that does work."),
+    "Held For Supervised Run": (
+        "Deliberately held. Somebody proved this profile posts, and left the flag on so its "
+        "backlog does not all come due at once — a profile works through everything due on a "
+        "single launch, which can hold a phone for an hour.",
+        "Nothing, unless you are the person draining it. Read the note below: it says what "
+        "was proved and how many rows are waiting. Drain the backlog a post at a time, and "
+        "untag it only when the queue is short enough to release."),
 }
-DEFAULT_GUIDE = ("This profile was flagged for review.",
-                 "Open the phone in MultiLogin and see what state Instagram is in.")
+# No reason was ever written on these. In practice that means the flag came
+# from somebody tagging the phone by hand in MultiLogin -- the tag raises the
+# flag and carries no reason with it -- so the person who tagged it knows
+# something the page does not.
+DEFAULT_GUIDE = ("Flagged with no reason recorded. Almost always this is the "
+                 "MultiLogin Issue tag applied by hand: the tag raises the flag, "
+                 "and whoever applied it is the only record of why.",
+                 "Open the phone in MultiLogin and see what state Instagram is in. "
+                 "If it looks healthy, it probably is — a quarter of the phones "
+                 "flagged this way turned out to have nothing wrong with them.")
 
 
 def _pills(labels, tone: str) -> str:
@@ -1126,9 +1168,16 @@ def _section_needs_human(data: dict) -> str:
         # others name what is wrong, this one only says the account has gone
         # quiet and somebody has to find out why. An account silently posting
         # nothing for a day outranks one whose problem is already understood.
+        # "Held For Supervised Run" sorts below even the unlabelled ones: it is
+        # the one group on this list that is not a fault and not work, and a
+        # deliberate hold at the top of a worklist reads as the worst problem
+        # on it.
         order = ["Banned / Blocked", "Human Verification Required", "No Recent Success",
-                 "Device Unreachable", "Repeated Failures", "Retries Exhausted"]
-        for reason in sorted(reasons, key=lambda r: order.index(r) if r in order else 99):
+                 "Device Unreachable", "Account Not On Phone", "Repeated Failures",
+                 "Retries Exhausted"]
+        held_last = {"Held For Supervised Run": 100}
+        for reason in sorted(reasons, key=lambda r: held_last.get(
+                r, order.index(r) if r in order else 99)):
             group = reasons[reason]
             what, todo = ISSUE_GUIDE.get(reason, DEFAULT_GUIDE)
             names = "".join(
@@ -1143,6 +1192,15 @@ def _section_needs_human(data: dict) -> str:
                 'profile goes back to Active and whatever was stuck is re-queued — you '
                 'do not need to open Airtable. Putting the tag <em>on</em> a profile is '
                 'how one gets onto this list in the first place.')
+            if reason == "Held For Supervised Run":
+                # The same sentence, but it is an instruction not to follow yet:
+                # untagging releases the whole backlog on one launch, which is
+                # the thing the hold exists to prevent.
+                fixed = (
+                    'Only when the backlog is drained. Taking the '
+                    '<span class="mono">Issue</span> tag off releases every row that is due '
+                    'at once, and the profile works through all of them on a single launch — '
+                    'which is what the hold is for. Drain it first, then untag.')
             parts.append(
                 f'<h3>{_e(reason)} — {len(group)} account(s)</h3>'
                 f'<div class="howto"><dl>'
@@ -1921,6 +1979,10 @@ def _section_outlook(outlook: dict) -> str:
     gap_hours = (outlook.get("gap_minutes") or 0) / 60.0
     ready, waiting, capped = (outlook.get("eligible_now", 0), outlook.get("waiting", 0),
                               outlook.get("capped", 0))
+    # Counted apart from the clock states: the posting loop checks the flag
+    # first, so these rows are not due-soon, they are not going anywhere.
+    blocked_profiles = outlook.get("blocked", 0)
+    queued_rows_blocked = outlook.get("queued_blocked", 0)
     # The loop on this box decides one of two ways, and the numbers that answer
     # "when" differ for each. Describing the wrong one is how this page came to
     # report 59 profiles free to post against a gap rule the running loop does
@@ -1952,6 +2014,11 @@ def _section_outlook(outlook: dict) -> str:
             # "Could" and "will" are different words, and the gap between them on
             # this fleet is content -- see the note below.
             _tile("Could post now", ready, "schedule allows it this minute"),
+            # Ahead of the clock tiles: a flag outranks every timing rule below
+            # it, and these rows were being counted as imminent for days.
+            _tile("Held on a flag", blocked_profiles,
+                  f"{queued_rows_blocked} queued row(s) frozen",
+                  "bad" if blocked_profiles else ""),
             _tile("Waiting on the gap", waiting, f"posted within {gap_hours:g}h",
                   "warn" if waiting else ""),
             _tile("Done for today", capped, "hit the daily cap", "warn" if capped else ""),
@@ -1976,23 +2043,43 @@ def _section_outlook(outlook: dict) -> str:
         head = ("<tr><th>Queue row</th><th>Scheduled for</th><th>Goes out</th></tr>")
         rows = []
         for row in queued:
-            when = ("on the next posting tick" if row["due"]
-                    else f'in {_fmt_seconds(row["seconds"])}')
+            if row.get("blocked"):
+                # Never "on the next posting tick": the loop skips this row every
+                # tick and will go on skipping it until the flag is cleared.
+                cell = f'<span class="pill bad">{_e(row["blocked"])}</span>'
+            elif row["due"]:
+                cell = _e("on the next posting tick")
+            else:
+                cell = _e(f'in {_fmt_seconds(row["seconds"])}')
             rows.append(f"<tr><td class='mono'>{_e(row['name'])}</td>"
                         f"<td class='mono'>{_e(row['day'])} {_e(row['when'])}</td>"
-                        f"<td>{_e(when)}</td></tr>")
+                        f"<td>{cell}</td></tr>")
+        held_note = ""
+        if queued_rows_blocked:
+            held_note = (
+                f' <strong>{queued_rows_blocked} of these {len(queued)} row(s) are held</strong> '
+                f'on a flagged or parked profile: the posting loop refuses them before it reads '
+                f'the clock, so they are not a backlog that is about to move — they wait on the '
+                f'Needs human tab, not on a tick. Clearing the flag is what releases them, and '
+                f'the whole of that profile\'s backlog comes due at once when it does.')
         body += (f'<h3>Queued to post</h3><div class="scroll"><table>{head}'
                  f'{"".join(rows)}</table></div>'
                  '<p class="sub">A row exists and carries a real time. Anything already due '
                  'goes out on the next posting tick; a future one is the retry pass holding a '
-                 'failed row back, which is the only thing here that schedules ahead.</p>')
+                 f'failed row back, which is the only thing here that schedules ahead.{held_note}</p>')
 
     # Only the profiles whose answer is a time. When most of the fleet is free to
     # post -- which is the normal state here -- a table of forty rows all saying
     # "now" buries the handful that are actually waiting for something.
     # The gap and the daily cap are the flexible runner's rules; on a grid they
     # are not what anybody is waiting for.
-    held = [] if grid_mode else [entry for entry in profiles if entry["state"] != "ready"]
+    # A blocked profile is not waiting on the gap or the cap, and describing it
+    # with gap arithmetic ("2h left of the 2h gap") reads as a profile that is
+    # about to post. It gets its own table below.
+    held = ([] if grid_mode else
+            [entry for entry in profiles
+             if entry["state"] not in ("ready", "blocked")])
+    frozen = [entry for entry in profiles if entry["state"] == "blocked"]
     if held:
         head = ("<tr><th>Profile</th><th>Last scheduled</th><th>Next possible</th>"
                 "<th class='num'>Today</th><th>Why</th></tr>")
@@ -2021,6 +2108,34 @@ def _section_outlook(outlook: dict) -> str:
     elif not grid_mode:
         body += ('<h3>Waiting on the clock</h3><p class="empty">No profile is waiting on the '
                  'gap or its daily cap.</p>')
+
+    if frozen:
+        head = ("<tr><th>Profile</th><th>Last scheduled</th><th class='num'>Rows queued</th>"
+                "<th>Why it will not post</th></tr>")
+        per_profile: dict = {}
+        for row in queued:
+            if row.get("blocked"):
+                per_profile[row["profile"]] = per_profile.get(row["profile"], 0) + 1
+        # Biggest backlog first, not alphabetical: this list is cut at 20 and
+        # what matters is which profile is sitting on seventeen frozen rows, not
+        # which one comes first in the alphabet. Several here hold none at all --
+        # parked long ago, nothing queued since -- and they belong at the bottom.
+        frozen = sorted(frozen, key=lambda e: (-per_profile.get(e["profile"], 0),
+                                               e["profile"]))
+        rows = []
+        for entry in frozen[:20]:
+            rows.append(f"<tr><td class='mono'>{_e(entry['profile'])}</td>"
+                        f"<td class='mono'>{_e(entry['last_day'])} {_e(entry['last'])}</td>"
+                        f"<td class='num'>{per_profile.get(entry['profile'], 0)}</td>"
+                        f"<td class='sub'>{_e(entry['blocked'])}</td></tr>")
+        body += (f'<h3>Held on a flag</h3><div class="scroll"><table>{head}'
+                 f'{"".join(rows)}</table></div>')
+        if len(frozen) > 20:
+            body += f'<p class="sub">First 20 of {len(frozen)}.</p>'
+        body += ('<p class="sub">These have queue rows and a clock that says now, and the '
+                 'posting loop skips every one of them on every tick — the flag is checked '
+                 'before the schedule. Nothing here is a timing problem; the work is on the '
+                 '<strong>Needs human</strong> tab.</p>')
 
     if ready and not grid_mode:
         body += (f'<p class="sub"><strong>{ready}</strong> profile(s) could post the moment a '
@@ -2142,7 +2257,12 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     # badge reading 0 for two days while the tab called them finished.
     progress_counts = progress.get("counts") or {}
     unattended = int(progress_counts.get("failed", 0)) + int(progress_counts.get("stalled", 0))
-    stuck = unattended or stuck
+    # `or` here read the account-side count whenever the profile-driven campaign
+    # was healthy, which is the normal state -- so a tab with nothing wrong on it
+    # wore a badge of 11 accounts that were paused deliberately months ago and
+    # that no loop has run from since. Only fall back when the campaign really is
+    # account-driven; on a profile-driven fleet 0 failed and 0 stalled means 0.
+    stuck = unattended if not progress.get("account_driven") else (unattended or stuck)
     if progress.get("account_driven") and progress.get("profiles"):
         # Not "a number of profiles need a person" -- one switch does, and every
         # profile is stalled behind it.

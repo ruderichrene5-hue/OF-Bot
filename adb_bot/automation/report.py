@@ -2115,6 +2115,36 @@ def folder_by_serial(mlx_items=None, folder_names=None) -> dict:
     return out
 
 
+def _finished_stage() -> str:
+    """The Airtable Warm-up Stage value that means "done", or "" if unreadable."""
+    try:
+        from adb_bot.automation import warmup_state
+        return warmup_state.TAG_FINISHED
+    except Exception:
+        return ""
+
+
+def warmup_finished(profile: dict, entry: dict, finish_day: int,
+                    finished_stage: str = None) -> bool:
+    """Has this profile finished its warm-up? The one answer the page may give.
+
+    Two sources, and both are needed. The campaign's own reading (`entry`, a row
+    of `warmup_progress`) is the fresher one -- a profile that finished an hour
+    ago should appear at once, before any loop has written anything -- but it
+    only covers the profiles the campaign still tracks. Airtable's Warm-up Stage
+    covers the rest: a phone that finished last week and dropped out of the
+    campaign's window is still finished, and the hand-off work is still waiting.
+
+    Shared because the Profiles tab and the hand-off worklist were each reading
+    one half: the worklist said 25 profiles were waiting on a bio while the
+    folder table counted 6, off the same refresh of the same data.
+    """
+    if entry and warmup_completion.is_finished(int(entry.get("day_done") or 0), finish_day):
+        return True
+    stage = _finished_stage() if finished_stage is None else finished_stage
+    return bool(stage) and (profile or {}).get("warmup_stage") == stage
+
+
 def handoff_queue(profiles, warmup_progress: dict, folder_of: dict = None) -> dict:
     """Profiles that finished their warm-up and are waiting on a person.
 
@@ -2136,12 +2166,7 @@ def handoff_queue(profiles, warmup_progress: dict, folder_of: dict = None) -> di
     that are mostly called "Blank (NN)", and the person doing the hand-off has
     to open MultiLogin and search to find out whose bio they are writing.
     """
-    finished_stage = ""
-    try:
-        from adb_bot.automation import warmup_state
-        finished_stage = warmup_state.TAG_FINISHED
-    except Exception:
-        pass
+    finished_stage = _finished_stage()
 
     plan_days = int((warmup_progress or {}).get("plan_days") or 0)
     # The plan's length is for display; what admits a profile to this list is
@@ -2154,12 +2179,7 @@ def handoff_queue(profiles, warmup_progress: dict, folder_of: dict = None) -> di
     out = {"profiles": [], "done": 0, "plan_days": plan_days, "finish_day": finish_day}
     for profile in profiles or []:
         entry = by_serial.get(profile.get("serial"))
-        # Finished by the campaign's own reading, not by the Airtable Stage
-        # alone: the Stage is written by a loop that may not have run yet, and a
-        # profile that finished an hour ago should appear here at once.
-        done = bool(entry) and warmup_completion.is_finished(
-            int(entry.get("day_done") or 0), finish_day)
-        if not done and profile.get("warmup_stage") != finished_stage:
+        if not warmup_finished(profile, entry, finish_day, finished_stage):
             continue
         outstanding = _handoff_outstanding(profile)
         if not outstanding:
@@ -2292,12 +2312,20 @@ def folder_breakdown(profiles, mlx_items=None, folder_names=None,
     # so a second reading of "finished" here would fix those two tabs and leave
     # this one still counting the same phones as "warming up".
     finish_day = int(progress.get("finish_day") or 0)
-    warming, finished = set(), set()
-    for row in progress.get("profiles") or []:
-        serial = row.get("serial") or ""
-        warming.add(serial)
-        if warmup_completion.is_finished(int(row.get("day_done") or 0), finish_day):
-            finished.add(serial)
+    finished_stage = _finished_stage()
+    by_serial = {row.get("serial") or "": row for row in progress.get("profiles") or []}
+    warming = set(by_serial) - {""}
+    # Read through `warmup_finished` and over the *profiles*, not just over the
+    # campaign's rows: a phone that finished last week has dropped out of the
+    # campaign window but still carries the finished Stage, and counting only
+    # the campaign's own rows filed 19 phones the hand-off worklist was asking
+    # for under "Other" -- 6 against the worklist's 25, same page, same refresh.
+    finished = {
+        (profile.get("serial") or "")
+        for profile in profiles or []
+        if warmup_finished(profile, by_serial.get(profile.get("serial") or ""),
+                           finish_day, finished_stage)
+    } - {""}
 
     # Serial -> folder, from MLX. Airtable has no folder column, so this is the
     # only place the grouping exists. Shared with the hand-off list.
@@ -2631,7 +2659,56 @@ def queue_grid(log_path=None) -> dict:
     return out
 
 
-def posting_outlook(queue_rows, schedules=None, now=None, grid=None) -> dict:
+#: Why the posting loop will refuse a due row before it ever looks at the clock.
+#: The wording is the reader's, not the planner's -- `posting_planner` says
+#: "profile needs a human check", which is not what a person on the schedules
+#: tab is asking.
+BLOCKED_FLAGGED = "held — the profile is flagged, waiting on a person"
+BLOCKED_PARKED = "held — the profile is parked (Status Inactive)"
+
+
+def profiles_blocked_from_posting(profiles) -> dict:
+    """``{profile name: why the posting loop will not take its rows}``.
+
+    `posting_planner` refuses a due row for a flagged or parked profile *before*
+    it looks at the clock, so a queue row belonging to one is not "going out on
+    the next posting tick" and never was -- it is frozen until somebody clears
+    the flag. Without this the outlook counted the whole backlog as imminent:
+    425 rows described as due when the loop skips most of them every tick, which
+    is the same reading that had the fleet's capacity blamed on concurrency.
+
+    Keyed by profile name because that is all a queue row carries: its Name is
+    "<profile> / <slot>" and resolving the link would be a read per row.
+    """
+    out: dict = {}
+    for profile in profiles or []:
+        name = str(profile.get("name") or "").strip()
+        if not name:
+            continue
+        if profile.get("needs_human"):
+            out[name] = BLOCKED_FLAGGED
+        elif str(profile.get("status") or "") == "Inactive":
+            out[name] = BLOCKED_PARKED
+    return out
+
+
+def _blocked_reason(blocked, who: str) -> str:
+    """`blocked[who]`, allowing for the second-account spelling of a row's name.
+
+    A two-account phone writes its rows as "Nikki 12 (kikittie22)" while the
+    Profiles row is plain "Nikki 12". Matching only the literal string let every
+    second-account row past the gate.
+    """
+    if not blocked or not who:
+        return ""
+    if who in blocked:
+        return blocked[who]
+    if who.endswith(")") and "(" in who:
+        return blocked.get(who[:who.rindex("(")].strip(), "")
+    return ""
+
+
+def posting_outlook(queue_rows, schedules=None, now=None, grid=None, blocked=None) -> dict:
     """When the next posts actually happen, as timestamps rather than a policy.
 
     "Any time, up to 7 a day" is what the *rule* is; it is not an answer to "when
@@ -2650,6 +2727,12 @@ def posting_outlook(queue_rows, schedules=None, now=None, grid=None) -> dict:
     carry a real Scheduled DateTime and the posting loop takes them on its next
     tick once it passes. A future-dated one is the retry pass holding a failed
     row back, which is the only thing on this base that schedules ahead.
+
+    `blocked` (see `profiles_blocked_from_posting`) names the profiles the loop
+    refuses outright. Their rows still exist and still carry a due time, so the
+    arithmetic here would call them imminent; they are counted apart instead,
+    because "due" and "going out" are only the same sentence for a profile
+    nobody has flagged.
     """
     from adb_bot.automation import queue_runner
     from adb_bot.clients import airtable as at
@@ -2657,6 +2740,8 @@ def posting_outlook(queue_rows, schedules=None, now=None, grid=None) -> dict:
     out = {"queued": [], "profiles": [], "gap_minutes": queue_runner.DEFAULT_ANYTIME_GAP_MINUTES,
            "default_cap": queue_runner.DEFAULT_ANYTIME_MAX_PER_DAY, "timezone": "",
            "eligible_now": 0, "waiting": 0, "capped": 0, "any_fixed": False,
+           # Rows and profiles the posting loop refuses on a flag, not a clock.
+           "blocked": 0, "queued_blocked": 0,
            "mode": "flexible", "slots": [], "next_slot": "", "next_slot_seconds": 0.0,
            # Slot times are the audience's wall clock; every other timestamp on
            # this page is the server's, and this box runs UTC while the slots are
@@ -2718,12 +2803,16 @@ def posting_outlook(queue_rows, schedules=None, now=None, grid=None) -> dict:
         if when.date() == local_now.date():
             today_count[who] = today_count.get(who, 0) + 1
         if str(fields.get(at.F_PQ_POST_STATUS) or "") == at.POST_STATUS_PENDING:
+            reason = _blocked_reason(blocked, who)
+            if reason:
+                out["queued_blocked"] += 1
             out["queued"].append({
                 "name": name, "profile": who,
                 "when": when.strftime("%H:%M"),
                 "day": when.strftime("%Y-%m-%d"),
                 "due": when <= local_now,
                 "seconds": max(0.0, (when - local_now).total_seconds()),
+                "blocked": reason,
             })
     out["queued"].sort(key=lambda row: (row["day"], row["when"]))
 
@@ -2732,13 +2821,20 @@ def posting_outlook(queue_rows, schedules=None, now=None, grid=None) -> dict:
         cap = caps.get(model, out["default_cap"])
         posted = today_count.get(who, 0)
         nxt = when + gap
-        if cap and posted >= cap:
+        reason = _blocked_reason(blocked, who)
+        if reason:
+            # Ahead of the clock rules on purpose: the flag is checked first by
+            # the planner too, and calling a flagged profile "could post now"
+            # is the single most misread number this tab ever carried.
+            state = "blocked"
+        elif cap and posted >= cap:
             state = "capped"
         elif nxt <= local_now:
             state = "ready"
         else:
             state = "waiting"
-        out[{"capped": "capped", "ready": "eligible_now", "waiting": "waiting"}[state]] += 1
+        out[{"capped": "capped", "ready": "eligible_now", "waiting": "waiting",
+             "blocked": "blocked"}[state]] += 1
         out["profiles"].append({
             "profile": who, "model": who.split()[0] if who.split() else who,
             "last": when.strftime("%H:%M"), "last_day": when.strftime("%Y-%m-%d"),
@@ -2749,11 +2845,16 @@ def posting_outlook(queue_rows, schedules=None, now=None, grid=None) -> dict:
             "ahead": when > local_now,
             "next": "now" if state == "ready" else nxt.strftime("%H:%M"),
             "seconds": 0.0 if state == "ready" else max(0.0, (nxt - local_now).total_seconds()),
-            "today": posted, "cap": cap, "state": state,
+            "today": posted, "cap": cap, "state": state, "blocked": reason,
         })
     # Soonest first, and a profile that could post this second before one that
     # cannot: the top of this list is what the next posting tick will consider.
-    out["profiles"].sort(key=lambda row: (row["state"] == "capped", row["seconds"], row["profile"]))
+    # A blocked profile sorts last whatever its clock says -- its next possible
+    # time is not a time, and letting it sort by seconds put profiles nothing
+    # will launch at the head of a list read as "what happens next".
+    out["profiles"].sort(key=lambda row: (row["state"] == "blocked",
+                                          row["state"] == "capped",
+                                          row["seconds"], row["profile"]))
     return out
 
 
@@ -3134,8 +3235,11 @@ def warmup_waiting(mlx_items, profiles_by_serial, in_warmup=None) -> list:
     and are not being warmed up", so a batch could sit untagged indefinitely
     with every dashboard reading green.
 
-    Each row carries the tag it does have, which is what says whose turn it is.
+    Each row carries the tag it does have, which is what says whose turn it is,
+    and the reason column mirrors `collect_warmup_targets`' own refusals -- the
+    two must agree or this list tells people to do the wrong thing.
     """
+    from adb_bot.automation import warmup_targets
     from adb_bot.automation.mlx_sync import normalize_mlx_item
 
     in_warmup = in_warmup or set()
@@ -3148,6 +3252,14 @@ def warmup_waiting(mlx_items, profiles_by_serial, in_warmup=None) -> list:
         if any(t.lower() in LIVE_TAGS for t in tags):
             continue
 
+        # Whether the phone already carries the tag decides which half of
+        # `collect_warmup_targets` refused it, and the two halves ask for
+        # opposite things. Saying "not Created" to a phone that *is* tagged
+        # Created -- five of them on 2026-08-16, every one of them flagged --
+        # sends somebody to add a tag that is already there and hides the flag
+        # that is the actual blocker.
+        tagged = warmup_targets.has_tag(tags)
+
         row = (profiles_by_serial or {}).get(profile.serial_no)
         if row is None:
             reason = "no Profiles (Cloning) row yet — the mlx-sync loop runs at 23:30"
@@ -3156,6 +3268,14 @@ def warmup_waiting(mlx_items, profiles_by_serial, in_warmup=None) -> list:
             continue
         elif not row.get("api_id"):
             reason = "no MLX API ID on the Airtable row — nothing can launch it"
+        elif tagged and row.get("needs_human"):
+            reason = ("tagged Created, but flagged in Airtable (Needs Human Check) — "
+                      "warm-up skips a flagged phone; clear the flag and it joins")
+        elif tagged:
+            # Tagged, has a row, launchable, unflagged: nothing here refuses it,
+            # so it is between ticks rather than held back. Worth a line anyway
+            # -- if it says this for a day, the warm-up loop is not running.
+            reason = "tagged Created — due to join on the next warm-up tick"
         elif tags:
             reason = f"tagged {', '.join(tags)}, not Created"
         else:
@@ -3383,7 +3503,7 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
                       "error": ""},
         "outlook": {"queued": [], "profiles": [], "gap_minutes": 0, "default_cap": 0,
                     "timezone": "", "eligible_now": 0, "waiting": 0, "capped": 0,
-                    "any_fixed": False},
+                    "any_fixed": False, "blocked": 0, "queued_blocked": 0},
         "warmup": {"plan": [], "accounts": [], "plan_days": 0, "error": "",
                    "counts": {"running": 0, "blocked": 0, "finished": 0,
                               "not_started": 0}},
@@ -3427,6 +3547,10 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             # One listing serves both: the day's rows, and which variants every
             # row (of any age) has already claimed.
             rows = airtable.list_queue_rows()
+            # Filled from `profile_overview` below, and empty if that read
+            # fails: the outlook then reads as it did before, which is wrong but
+            # no worse, rather than the schedules tab going down with it.
+            blocked_profiles: dict = {}
             # Its own try, inside this one. Naming the in-flight reels is the
             # only thing on the page that needs Profiles and Spoof Variants, so
             # it is two table reads that nothing else depends on -- and out here
@@ -3461,6 +3585,10 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
                 # One read serving both people-facing tabs, so they cannot
                 # disagree about the same profile mid-refresh.
                 overview = airtable.profile_overview()
+                # Read here and used by the outlook further down: the same
+                # listing already says which profiles the posting loop refuses,
+                # and asking twice would be a second pass over Profiles.
+                blocked_profiles = profiles_blocked_from_posting(overview)
                 # The same memoised inventory the two panels below use, so
                 # naming each phone's folder on the hand-off list costs no
                 # extra call. Both readers answer {} / [] on failure rather
@@ -3491,7 +3619,7 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             # schedules it needs are the ones just read, not a second copy.
             data["outlook"] = posting_outlook(
                 rows, schedules=_schedules_for_outlook(airtable), now=now,
-                grid=_slow("queue_grid", queue_grid))
+                grid=_slow("queue_grid", queue_grid), blocked=blocked_profiles)
         except Exception as exc:
             # A dashboard that 500s because Airtable is having a moment is worse
             # than one that says so and still shows everything local.
