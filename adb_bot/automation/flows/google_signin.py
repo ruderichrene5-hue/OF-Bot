@@ -170,9 +170,16 @@ RESULT_WRONG_PASSWORD = "wrong_password"
 RESULT_STUCK = "stuck"
 RESULT_UNKNOWN_SCREEN = "unknown_screen"
 
-MAX_STEPS = 26
+MAX_STEPS = 40
 MAX_REPEATS = 4
-MAX_LOADING_WAITS = 8
+
+# Google's sign-in is slow through these proxies -- every request leaves via a
+# German mobile exit. `Blank caio 2` sat on `checking info…` for a full minute
+# and was given up on at eight waits, which is a flow that quit on a screen that
+# was still working. Twenty waits of eight seconds is a bit over two and a half
+# minutes, still comfortably inside the phone's ~15-minute life.
+MAX_LOADING_WAITS = 20
+LOADING_WAIT_SECONDS = 8
 
 _SKIP = ("Skip", "SKIP", "Not now", "NOT NOW", "Never", "NEVER")
 _NEXT = ("Next", "NEXT", "Continue", "CONTINUE")
@@ -251,8 +258,9 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
         if screen == SCREEN_LOADING:
             loading_waits += 1
             if loading_waits > MAX_LOADING_WAITS:
+                log("warning", "still loading after %d waits", loading_waits)
                 return RESULT_STUCK
-            sleep(5)
+            sleep(LOADING_WAIT_SECONDS)
             continue
         loading_waits = 0
 
