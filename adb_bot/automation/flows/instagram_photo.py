@@ -592,6 +592,7 @@ class InstagramPhotoPostU2Flow(InstagramReelUploadU2Flow):
                 timeout=reel_verify.FAST_TIMEOUT_SECONDS,
                 should_stop=should_stop,
                 emit=emit,
+                what="photo post",
             )
         post_confirmed = verdict.confirmed
         mark_step()

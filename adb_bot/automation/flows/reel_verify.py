@@ -260,6 +260,7 @@ def verify_reel_posted(
     emit=None,
     now=time.time,
     sleep=time.sleep,
+    what: str = "reel post",
 ) -> VerifyResult:
     """Watch the phone until the reel is provably posted, provably failed, or the
     timeout expires.
@@ -280,8 +281,11 @@ def verify_reel_posted(
 
     started = now()
     deadline = started + timeout
-    log("info", "Verifying reel post: baseline=%s, min %.0fs / max %.0fs",
-        baseline_count.value if baseline_count else "n/a", min_wait, timeout)
+    # `what` names the thing being verified in the log only -- every signal
+    # this reads (post count, banner, notification) is the same for a reel and
+    # a feed photo. It exists so a photo run does not narrate itself as a reel.
+    log("info", "Verifying %s: baseline=%s, min %.0fs / max %.0fs",
+        what, baseline_count.value if baseline_count else "n/a", min_wait, timeout)
 
     last_negative = None
     saw_upload_in_flight = False
