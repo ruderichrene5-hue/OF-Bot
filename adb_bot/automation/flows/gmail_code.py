@@ -142,6 +142,27 @@ def find_code(text: str | None, address: str = "") -> str:
     return match.group(1) if match else ""
 
 
+_COMPONENT_RE = re.compile(rf"{re.escape(GMAIL_PACKAGE)}/[\w.$]+")
+
+# Words that mark the activity you actually want to land on. `dumpsys package`
+# lists dozens of components; starting each of them in turn would spend more of
+# the phone's life than the whole signup.
+_LIKELY_LAUNCHERS = ("conversation", "main", "mail")
+
+
+def _components(text: str, limit: int = 3) -> list:
+    """Gmail components named anywhere in `text`, likeliest first."""
+    seen, out = set(), []
+    for match in _COMPONENT_RE.findall(text or ""):
+        if match not in seen:
+            seen.add(match)
+            out.append(match)
+    out.sort(key=lambda name: any(word in name.lower()
+                                  for word in _LIKELY_LAUNCHERS),
+             reverse=True)
+    return out[:limit]
+
+
 class PhoneMailbox:
     """Reads one address's Instagram code off one phone.
 
@@ -182,7 +203,9 @@ class PhoneMailbox:
         confirmation page says "we sent to <address>", so even the "is this our
         inbox?" check passed on it.
         """
-        focus = self._shell("dumpsys window windows | grep -E mCurrentFocus")
+        # `dumpsys window`, not `dumpsys window windows` -- the latter answers
+        # nothing on these phones, which reads as "not in front" forever.
+        focus = self._shell("dumpsys window | grep mCurrentFocus")
         return GMAIL_PACKAGE in (focus or "")
 
     def open_gmail(self) -> bool:
@@ -194,17 +217,27 @@ class PhoneMailbox:
         """
         self._log("info", "switching to Gmail")
         self._shell(f"am start -n {GMAIL_ACTIVITY}")
+        time.sleep(6)
         if self.in_front():
             return True
 
-        resolved = self._shell(
-            f"cmd package resolve-activity --brief {GMAIL_PACKAGE}")
-        for line in reversed((resolved or "").splitlines()):
-            if "/" in line and GMAIL_PACKAGE in line:
-                self._log("info", "starting Gmail as %s", line.strip())
-                self._shell(f"am start -n {line.strip()}")
-                break
-        return self.in_front()
+        # The hard-coded activity is gone on these phones -- `am start` answers
+        # "Activity class ... does not exist" -- so ask the package manager
+        # what Gmail's launcher actually is.
+        # Both the resolver and the package dump name the launcher activity,
+        # in different formats and neither reliably, so the component is picked
+        # out of whatever text comes back rather than by line position.
+        # `monkey` is deliberately not a fallback: it starts nothing on these
+        # phones, confirmed four separate times.
+        for query in (f"cmd package resolve-activity --brief {GMAIL_PACKAGE}",
+                      f"dumpsys package {GMAIL_PACKAGE}"):
+            for component in _components(self._shell(query) or ""):
+                self._log("info", "starting Gmail as %s", component)
+                self._shell(f"am start -n {component}")
+                time.sleep(6)
+                if self.in_front():
+                    return True
+        return False
 
     def back_to_instagram(self) -> None:
         self._log("info", "switching back to Instagram")

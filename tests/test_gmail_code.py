@@ -112,6 +112,29 @@ INSTAGRAM_CODE_SCREEN = (
     "code we sent to mia.berg1999@gmail.com. next i didn't receive the code")
 
 
+RESOLVE_OUTPUT = ("priority=0 preferredOrder=0 match=0x108000 isDefault=true\n"
+                  "com.google.android.gm/.ConversationListActivityGmail\n")
+
+
+def test_the_launcher_activity_is_picked_out_of_the_resolver_output():
+    assert gmail_code._components(RESOLVE_OUTPUT) == [
+        "com.google.android.gm/.ConversationListActivityGmail"]
+
+
+def test_the_likely_launcher_is_tried_before_the_rest():
+    """`dumpsys package` lists dozens; starting each in turn would spend more
+    of the phone's life than the whole signup."""
+    dump = ("com.google.android.gm/.provider.SomeService "
+            "com.google.android.gm/.ConversationListActivityGmail "
+            "com.google.android.gm/.WidgetService")
+    assert gmail_code._components(dump)[0].endswith("ConversationListActivityGmail")
+
+
+def test_the_component_list_is_bounded():
+    dump = " ".join(f"com.google.android.gm/.Activity{n}" for n in range(20))
+    assert len(gmail_code._components(dump)) == 3
+
+
 def test_a_missing_gmail_is_reported_at_once_not_waited_out(monkeypatch):
     """Gmail is not preinstalled on these phones. `am start` failed with
     "Activity class ... does not exist", nothing said so, and a launch died."""
