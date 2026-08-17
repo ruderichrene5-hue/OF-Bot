@@ -54,6 +54,23 @@ def test_a_bare_something_went_wrong_is_not_the_phone_lookup():
         "something went wrong") != g.SCREEN_EASE_FAILED
 
 
+SERVER_ERROR = ("something went wrong there was a problem communicating with "
+                "google servers. try again later.")
+
+
+def test_google_being_unreachable_is_named_not_unknown():
+    """Verbatim from `Blank caio 1`, 2026-08-17. It stopped a whole launch."""
+    assert g.classify_google_screen(SERVER_ERROR) == g.SCREEN_SERVER_ERROR
+
+
+def test_the_server_error_is_matched_on_the_servers_sentence():
+    """Not on the "something went wrong" heading it shares with the failed
+    phone lookup -- which must still classify as itself."""
+    assert g.classify_google_screen(LOOKUP_FAILED) == g.SCREEN_EASE_FAILED
+    assert g.classify_google_screen(
+        "something went wrong") != g.SCREEN_SERVER_ERROR
+
+
 def test_searching_for_accounts_is_loading_not_a_screen_to_act_on():
     assert g.classify_google_screen(SEARCHING) == g.SCREEN_LOADING
 
@@ -82,6 +99,37 @@ def test_the_password_screen_does_not_swallow_the_2fa_chooser():
     assert g.classify_google_screen(chooser) == g.SCREEN_2FA_CHOOSER
 
 
+# Verbatim from `Blank caio 1`, 2026-08-17. The chooser and the code screen
+# say the same thing; only the second one has a field.
+TWO_FA_BOTH = ("2-step verification to help keep your account safe, google "
+               "wants to make sure that it's really you trying to sign in "
+               "cicimuammark@gmail.com 2-step verification get a verification "
+               "code from the google authenticator app try another way next")
+
+
+def test_a_2fa_screen_with_a_code_field_is_the_code_screen():
+    assert g.classify_google_screen(
+        TWO_FA_BOTH, ["enter code totppin"]) == g.SCREEN_TOTP
+
+
+def test_the_same_words_with_no_field_are_only_the_chooser():
+    """Read by text alone this bounced chooser -> code -> chooser until the
+    repeat guard stopped the run, having typed nothing."""
+    assert g.classify_google_screen(
+        TWO_FA_BOTH, []) == g.SCREEN_2FA_CHOOSER
+
+
+def test_classification_still_works_with_no_field_information():
+    """`field_hints` is optional; every existing caller passes nothing."""
+    assert g.classify_google_screen(LOOKUP_FAILED) == g.SCREEN_EASE_FAILED
+
+
+def test_a_code_field_does_not_rename_an_unrelated_screen():
+    """The field is what distinguishes the 2FA pair, not a wildcard: a screen
+    with no text at all is still unknown."""
+    assert g.classify_google_screen("", ["enter code totppin"]) == g.SCREEN_UNKNOWN
+
+
 def test_accounts_on_device_reads_dumpsys():
     class FakeAdb:
         def run_command(self, command):
@@ -98,6 +146,82 @@ def test_no_accounts_reads_as_empty():
             return "Accounts: 0\n"
 
     assert g.accounts_on_device(FakeAdb(), "host:1") == []
+
+
+class _StubAdb:
+    """Answers every shell command with nothing, and remembers the backs."""
+
+    def __init__(self):
+        self.commands = []
+        self.backs = 0
+
+    def run_command(self, command):
+        self.commands.append(command)
+        return "Accounts: 0" if "dumpsys account" in command else ""
+
+    def shell_back(self, target):
+        self.backs += 1
+        return ""
+
+
+class _StubDriver:
+    """Shows one screen forever."""
+
+    def __init__(self, text):
+        self.text = text
+        self.taps = []
+
+    def read_screen(self):
+        return self.text
+
+    def tap_label(self, labels):
+        self.taps.append(labels)
+        return True
+
+
+def test_the_code_screen_falls_back_to_the_keyboards_own_action(monkeypatch):
+    """`NEXT` does not submit Google's forms -- four fresh codes were typed and
+    tapped in on 2026-08-17 and the screen simply redrew each time. The email
+    form needed the same fallback."""
+    monkeypatch.setattr(g.totp, "fresh_code", lambda secret: ("123456", 30))
+
+    class CodeDriver(_StubDriver):
+        def __init__(self):
+            super().__init__(TWO_FA_BOTH)
+            self.filled = []
+
+        def input_hints(self):
+            return ["enter code totppin"]
+
+        def fill(self, hints, value, what, **kw):
+            self.filled.append(value)
+            return True
+
+        def dismiss_keyboard(self):
+            pass
+
+    driver, adb = CodeDriver(), _StubAdb()
+    g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "SECRET",
+              sleep=lambda _s: None)
+
+    enters = [c for c in adb.commands if "keyevent 66" in c]
+    assert enters, "never tried the IME action, which is the one thing that works"
+    assert len(driver.filled) > 1, "a retry must type a fresh code, not resubmit"
+
+
+def test_google_being_unreachable_gives_up_rather_than_looping():
+    """The screen has no buttons, so a retry that never stops would spend the
+    phone's whole ~15-minute life backing out of the same page."""
+    driver = _StubDriver(SERVER_ERROR)
+    adb = _StubAdb()
+    slept = []
+
+    verdict = g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "SECRET",
+                        sleep=slept.append)
+
+    assert verdict == g.RESULT_GOOGLE_UNREACHABLE
+    assert adb.backs == g.MAX_SERVER_ERRORS
+    assert sum(slept) < 15 * 60
 
 
 LAUNCHER = ("search gallery gallery play store play store home telephone "

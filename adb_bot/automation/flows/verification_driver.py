@@ -510,6 +510,16 @@ class AdbChallengeDriver:
             })
         return out
 
+    def input_hints(self) -> list:
+        """The hints of every text field on the screen last read.
+
+        Some screens are only told apart by what they let you type into.
+        Google's 2-step-verification chooser and its code-entry screen carry
+        almost the same words -- both say "get a verification code from the
+        Google Authenticator app" -- and only the second has a field.
+        """
+        return [field["hint"] for field in self._edit_fields(self._root)]
+
     def _clickable_labels(self, root) -> list:
         """Exact labels of clickable nodes -- what a tap could legitimately hit."""
         out = []

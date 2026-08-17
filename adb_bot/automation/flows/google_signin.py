@@ -66,6 +66,7 @@ SCREEN_SAVE_PASSWORD = "save_password"
 SCREEN_PLAY_HOME = "play_home"            # signed in -- done
 SCREEN_LAUNCHER = "launcher"              # the phone's home screen
 SCREEN_WRONG_PASSWORD = "wrong_password"
+SCREEN_SERVER_ERROR = "google_server_error"  # transient; retryable
 SCREEN_LOADING = "loading"
 SCREEN_UNKNOWN = "unknown"
 
@@ -114,11 +115,26 @@ _PLAY_HOME_MARKERS = ("search apps & games", "search for apps & games",
 _WRONG_PASSWORD_MARKERS = ("wrong password", "couldn't sign you in",
                            "try again or click forgot password")
 
+# Google could not be reached at all. Seen on `Blank caio 1`, 2026-08-17,
+# straight after `checking info…`: a bare page carrying **no buttons** -- not
+# even "Try again" -- so there is nothing to tap and the only way out is to
+# back out and start the Play Store again.
+#
+# Matched on "communicating with google servers", not on the "something went
+# wrong" heading above it, for the same reason as `_EASE_FAILED_MARKERS`: that
+# heading sits on top of half a dozen unrelated failures. This one says the
+# request never arrived, which is worth retrying; the others are not.
+_SERVER_ERROR_MARKERS = (
+    "problem communicating with google servers",
+    "communicating with google servers",
+)
+
 # Ordered: the specific before the general. `_PASSWORD_MARKERS` carries
 # "welcome", which appears on several Google screens, so anything that can be
 # named more precisely is named first.
 _ORDERED = (
     (SCREEN_WRONG_PASSWORD, _WRONG_PASSWORD_MARKERS),
+    (SCREEN_SERVER_ERROR, _SERVER_ERROR_MARKERS),
     (SCREEN_SAVE_PASSWORD, _SAVE_PASSWORD_MARKERS),
     (SCREEN_TOTP, _TOTP_MARKERS),
     (SCREEN_2FA_CHOOSER, _2FA_MARKERS),
@@ -151,11 +167,23 @@ def _still_drawing(haystack: str) -> bool:
     return bool(words) and set(words) <= _CHROME_ONLY_WORDS
 
 
-def classify_google_screen(text: str | None) -> str:
-    """Name a screen in the Play Store sign-in chain."""
+def classify_google_screen(text: str | None, field_hints=()) -> str:
+    """Name a screen in the Play Store sign-in chain.
+
+    `field_hints` are the hints of the text fields on screen. They settle the
+    one pair these markers cannot: the 2-step-verification **chooser** and the
+    **code entry** screen say nearly the same words -- both offer "get a
+    verification code from the Google Authenticator app" -- but only the code
+    screen has somewhere to type. Read by text alone, `Blank caio 1` bounced
+    between the two on 2026-08-17 until the repeat guard stopped it.
+    """
     if not text:
         return SCREEN_UNKNOWN
     haystack = text.lower()
+
+    if any("totppin" in hint or "enter code" in hint
+           for hint in (field_hints or ())):
+        return SCREEN_TOTP
 
     # Before the markers: the phone's home screen carries none of them, so it
     # would fall through to `unknown` and stop a run whose only problem is that
@@ -179,6 +207,7 @@ RESULT_ALREADY = "already_signed_in"
 RESULT_WRONG_PASSWORD = "wrong_password"
 RESULT_STUCK = "stuck"
 RESULT_UNKNOWN_SCREEN = "unknown_screen"
+RESULT_GOOGLE_UNREACHABLE = "google_unreachable"
 
 MAX_STEPS = 40
 MAX_REPEATS = 4
@@ -190,6 +219,13 @@ MAX_REPEATS = 4
 # minutes, still comfortably inside the phone's ~15-minute life.
 MAX_LOADING_WAITS = 20
 LOADING_WAIT_SECONDS = 8
+
+# Google refusing to talk is worth sitting out -- it cost a whole launch on
+# 2026-08-17 -- but not indefinitely: if it is the proxy rather than a hiccup,
+# three tries establish that at the cost of a minute, and the phone's remaining
+# life is better spent on a different one.
+MAX_SERVER_ERRORS = 3
+SERVER_ERROR_WAIT_SECONDS = 20
 
 _SKIP = ("Skip", "SKIP", "Not now", "NOT NOW", "Never", "NEVER")
 _NEXT = ("Next", "NEXT", "Continue", "CONTINUE")
@@ -287,12 +323,15 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     MAX_LOOKUP_FAILURES = 2
     email_submits = 0
     password_submits = 0
+    totp_submits = 0
     restarts = 0
     MAX_APP_RESTARTS = 3
+    server_errors = 0
 
     for step in range(MAX_STEPS):
         text = driver.read_screen() or ""
-        screen = classify_google_screen(text)
+        hints = driver.input_hints() if hasattr(driver, "input_hints") else ()
+        screen = classify_google_screen(text, hints)
         log("info", "step %d: %s", step + 1, screen)
 
         if screen == SCREEN_LOADING:
@@ -336,6 +375,27 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
                         "(%d/%d)", restarts, MAX_APP_RESTARTS)
             _start_play_store(adb_client, target, logger=logger)
             sleep(8)
+            continue
+
+        if screen == SCREEN_SERVER_ERROR:
+            # Nothing on this screen is tappable, so there is no "try again" to
+            # press: back out of it and start the Play Store over.
+            server_errors += 1
+            if server_errors > MAX_SERVER_ERRORS:
+                log("warning", "Google was unreachable %d times running",
+                    server_errors - 1)
+                return RESULT_GOOGLE_UNREACHABLE
+            log("info", "Google could not be reached; waiting %ds and starting "
+                        "over (%d/%d)", SERVER_ERROR_WAIT_SECONDS,
+                server_errors, MAX_SERVER_ERRORS)
+            sleep(SERVER_ERROR_WAIT_SECONDS)
+            adb_client.shell_back(target)
+            sleep(2)
+            _start_play_store(adb_client, target, logger=logger)
+            sleep(8)
+            # The retry re-enters on the same screen it failed from, and the
+            # repeat guard would count that as going nowhere.
+            last, repeats = None, 0
             continue
 
         if screen == SCREEN_WRONG_PASSWORD:
@@ -429,8 +489,20 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             if not driver.fill(("code", "totppin"), code, "2fa code"):
                 log("warning", "the code did not land in the field")
                 return RESULT_STUCK
-            driver.dismiss_keyboard()
-            driver.tap_label(_NEXT)
+            totp_submits += 1
+            if totp_submits == 1:
+                driver.dismiss_keyboard()
+                driver.tap_label(_NEXT)
+            else:
+                # The same thing the email and password forms do: the code reads
+                # back out of the field, `NEXT` is tapped at the bounds the dump
+                # reports, and Google redraws the screen (`Blank caio 1`, four
+                # codes running, 2026-08-17). Submitting with the IME action is
+                # what actually moves these screens. A fresh code is generated
+                # every pass, so nothing here is retrying a stale one.
+                log("info", "tapping NEXT did not move the code screen; "
+                            "submitting with the keyboard's own action")
+                _press_enter(adb_client, target)
             sleep(10)
 
         elif screen == SCREEN_TERMS:
