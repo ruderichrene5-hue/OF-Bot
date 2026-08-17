@@ -52,8 +52,23 @@ _DISMISS_LABELS = ("No thanks", "NO THANKS", "Skip", "SKIP", "Not now",
 
 # What the listing says while it is working. Seeing any of these means wait
 # rather than tap again -- a second tap on a downloading listing cancels it.
+#
+# Whole words, and no bare "%": a Play Store listing is pages of ratings,
+# reviews and "data safety" text, and a lone percent sign somewhere in all that
+# made Gmail's listing read as a download in progress. It sat there four
+# minutes with an `Install` button on screen the whole time (2026-08-17).
 _WORKING_MARKERS = ("pending", "downloading", "installing", "verifying",
-                    "waiting for", "%")
+                    "waiting for download")
+
+# A listing that still offers a tappable `Install` has not started, whatever
+# else is written on the page. This is the check that decides, because it looks
+# at what is *actionable* rather than at prose.
+_INSTALL_BUTTON_LABELS = {"install", "get"}
+
+
+def offers_install(labels) -> bool:
+    return any(str(label).strip().lower() in _INSTALL_BUTTON_LABELS
+               for label in (labels or ()))
 
 
 def packages_named(out: str) -> set:
@@ -142,7 +157,9 @@ def install(driver, adb_client, target: str, package: str, logger=None,
             sleep(8)
             continue
 
-        if any(marker in text for marker in _WORKING_MARKERS):
+        labels = (driver.clickable_labels()
+                  if hasattr(driver, "clickable_labels") else [])
+        if (says_any(text, _WORKING_MARKERS) and not offers_install(labels)):
             log("info", "still working; waiting")
             sleep(10)
             continue

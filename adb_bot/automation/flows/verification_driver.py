@@ -525,6 +525,10 @@ class AdbChallengeDriver:
         """
         return [field["hint"] for field in self._edit_fields(self._root)]
 
+    def clickable_labels(self) -> list:
+        """The labels of everything tappable on the screen last read."""
+        return list(self._clickable_labels(self._root))
+
     def input_values(self) -> list:
         """What is currently typed into each text field on the screen."""
         return [field["value"] for field in self._edit_fields(self._root)]

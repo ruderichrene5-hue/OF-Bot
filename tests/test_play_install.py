@@ -94,6 +94,26 @@ def test_a_sheet_over_the_listing_is_dismissed_not_waited_out():
     assert verdict == p.RESULT_INSTALLED
 
 
+def test_a_percent_sign_somewhere_on_the_page_is_not_a_download():
+    """A listing is pages of ratings, reviews and data-safety text. A lone "%"
+    in all that made Gmail's listing read as a download in progress, and it sat
+    there four minutes with `Install` on screen the whole time."""
+    listing = "gmail 3.9 stars 97% of reviewers liked this install"
+    assert not p.says_any(listing, p._WORKING_MARKERS)
+
+
+def test_a_real_download_still_reads_as_working():
+    assert p.says_any("downloading 42", p._WORKING_MARKERS)
+    assert p.says_any("installing", p._WORKING_MARKERS)
+
+
+def test_a_tappable_install_means_it_has_not_started():
+    assert p.offers_install(["Google LLC", "Install"])
+    # "Install on more devices" stays on the page while a download runs, so it
+    # must not count as the button.
+    assert not p.offers_install(["Install on more devices", "Cancel"])
+
+
 OFFLINE = ("something went wrong no internet connection. make sure that wi-fi "
            "or mobile data is turned on, then try again. try again navigate up")
 
