@@ -270,6 +270,12 @@ CODE_WAIT_SECONDS = 8
 MAX_RETRY_PAGES = 3
 MAX_SERVICES_TAPS = 8
 
+# A dump that comes back empty. Worth several looks -- these phones produce one
+# while a screen is mid-transition -- but not forever, since a phone that has
+# stopped answering will never answer.
+MAX_BLANK_READS = 5
+BLANK_READ_WAIT_SECONDS = 6
+
 _SKIP = ("Skip", "SKIP", "Not now", "NOT NOW", "Never", "NEVER")
 _NEXT = ("Next", "NEXT", "Continue", "CONTINUE")
 
@@ -373,9 +379,27 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     server_errors = 0
     retry_pages = 0
     services_taps = 0
+    blank_reads = 0
 
     for step in range(MAX_STEPS):
         text = driver.read_screen() or ""
+
+        # An empty read is a dump that failed, not a screen that is unknown.
+        # `Blank caio 3` ended a run on one within two steps of starting
+        # (2026-08-17), and the same mistake -- reading "nothing" as "not what
+        # I expected" -- is the one this codebase keeps warning about.
+        if not text.strip():
+            blank_reads += 1
+            if blank_reads > MAX_BLANK_READS:
+                log("warning", "the screen would not dump anything, %d times "
+                               "running", blank_reads - 1)
+                return RESULT_STUCK
+            log("info", "the screen dumped nothing; looking again (%d/%d)",
+                blank_reads, MAX_BLANK_READS)
+            sleep(BLANK_READ_WAIT_SECONDS)
+            continue
+        blank_reads = 0
+
         hints = driver.input_hints() if hasattr(driver, "input_hints") else ()
         screen = classify_google_screen(text, hints)
         log("info", "step %d: %s", step + 1, screen)

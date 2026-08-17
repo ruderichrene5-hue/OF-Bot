@@ -300,6 +300,33 @@ def test_a_code_still_being_checked_is_not_retyped(monkeypatch):
     assert waits, "never waited for Google to answer the code it was given"
 
 
+def test_a_dump_that_comes_back_empty_is_looked_at_again():
+    """`Blank caio 3` ended a run two steps in on a dump that returned nothing.
+    Nothing is a failed read, not a screen that cannot be named."""
+    class Flaky(_StubDriver):
+        def __init__(self):
+            super().__init__("")
+            self.reads = 0
+
+        def read_screen(self):
+            self.reads += 1
+            # Empty twice, then the Play Store is there all along.
+            return "" if self.reads <= 2 else PLAY_SIGNED_OUT
+
+    driver, adb = Flaky(), _StubAdb()
+    g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "S",
+              sleep=lambda _s: None)
+
+    assert driver.taps, "gave up on an empty dump instead of looking again"
+
+
+def test_a_phone_that_never_answers_still_stops():
+    driver, adb = _StubDriver(""), _StubAdb()
+    verdict = g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "S",
+                        sleep=lambda _s: None)
+    assert verdict == g.RESULT_STUCK
+
+
 def test_google_being_unreachable_gives_up_rather_than_looping():
     """The screen has no buttons, so a retry that never stops would spend the
     phone's whole ~15-minute life backing out of the same page."""
