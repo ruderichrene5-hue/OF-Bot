@@ -227,6 +227,14 @@ LOADING_WAIT_SECONDS = 8
 MAX_SERVER_ERRORS = 3
 SERVER_ERROR_WAIT_SECONDS = 20
 
+# A submitted code leaves the field on screen with the code still in it while
+# Google checks it -- the dump carries a spinner alongside. Typing again there
+# overwrites a submission in flight, which is how `Blank caio 1` lost the one
+# run where the code was actually accepted (2026-08-17, 14:01:15). Waiting is
+# bounded so a genuinely ignored code still gets retyped rather than hanging.
+MAX_CODE_WAITS = 6
+CODE_WAIT_SECONDS = 8
+
 _SKIP = ("Skip", "SKIP", "Not now", "NOT NOW", "Never", "NEVER")
 _NEXT = ("Next", "NEXT", "Continue", "CONTINUE")
 
@@ -324,6 +332,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     email_submits = 0
     password_submits = 0
     totp_submits = 0
+    submitted_code, code_waits = None, 0
     restarts = 0
     MAX_APP_RESTARTS = 3
     server_errors = 0
@@ -333,6 +342,26 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
         hints = driver.input_hints() if hasattr(driver, "input_hints") else ()
         screen = classify_google_screen(text, hints)
         log("info", "step %d: %s", step + 1, screen)
+
+        # Before the repeat guard, and for the same reason as `loading`: a code
+        # that is still being checked is not a screen that failed to advance.
+        if screen == SCREEN_TOTP and submitted_code:
+            values = driver.input_values() if hasattr(driver, "input_values") else []
+            if submitted_code in values:
+                code_waits += 1
+                if code_waits <= MAX_CODE_WAITS:
+                    log("info", "the submitted code is still in the field; "
+                                "giving Google a moment (%d/%d)",
+                        code_waits, MAX_CODE_WAITS)
+                    sleep(CODE_WAIT_SECONDS)
+                    continue
+                # Long enough that it was not accepted: let the handler below
+                # type a fresh one.
+                log("info", "the code has sat unanswered; typing a fresh one")
+                submitted_code, code_waits = None, 0
+            else:
+                # Google cleared it -- that is a rejection, not a wait.
+                submitted_code, code_waits = None, 0
 
         if screen == SCREEN_LOADING:
             loading_waits += 1
@@ -503,6 +532,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
                 log("info", "tapping NEXT did not move the code screen; "
                             "submitting with the keyboard's own action")
                 _press_enter(adb_client, target)
+            submitted_code = code
             sleep(10)
 
         elif screen == SCREEN_TERMS:

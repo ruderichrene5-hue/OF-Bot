@@ -209,6 +209,46 @@ def test_the_code_screen_falls_back_to_the_keyboards_own_action(monkeypatch):
     assert len(driver.filled) > 1, "a retry must type a fresh code, not resubmit"
 
 
+def test_a_code_still_being_checked_is_not_retyped(monkeypatch):
+    """The one run where Google accepted the code, the next dump still showed
+    the field -- with a spinner beside it -- and the flow typed a fresh code
+    straight over the submission in flight (2026-08-17, 14:01:15)."""
+    codes = iter(f"{n:06d}" for n in range(1, 99))
+    monkeypatch.setattr(g.totp, "fresh_code", lambda s: (next(codes), 30))
+
+    class HoldingDriver(_StubDriver):
+        """Keeps whatever was typed, exactly as the real screen did."""
+
+        def __init__(self):
+            super().__init__(TWO_FA_BOTH)
+            self.filled = []
+
+        def input_hints(self):
+            return ["enter code totppin"]
+
+        def input_values(self):
+            return [self.filled[-1]] if self.filled else [""]
+
+        def fill(self, hints, value, what, **kw):
+            self.filled.append(value)
+            return True
+
+        def dismiss_keyboard(self):
+            pass
+
+    driver, adb = HoldingDriver(), _StubAdb()
+    slept = []
+    g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "SECRET",
+              sleep=slept.append)
+
+    # The invariant: every code after the first is preceded by a full wait, so
+    # nothing is ever typed over a submission Google is still checking.
+    waits = slept.count(g.CODE_WAIT_SECONDS)
+    assert waits >= (len(driver.filled) - 1) * g.MAX_CODE_WAITS, \
+        f"typed {len(driver.filled)} codes but only waited {waits} times"
+    assert waits, "never waited for Google to answer the code it was given"
+
+
 def test_google_being_unreachable_gives_up_rather_than_looping():
     """The screen has no buttons, so a retry that never stops would spend the
     phone's whole ~15-minute life backing out of the same page."""

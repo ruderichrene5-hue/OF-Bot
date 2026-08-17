@@ -520,6 +520,10 @@ class AdbChallengeDriver:
         """
         return [field["hint"] for field in self._edit_fields(self._root)]
 
+    def input_values(self) -> list:
+        """What is currently typed into each text field on the screen."""
+        return [field["value"] for field in self._edit_fields(self._root)]
+
     def _clickable_labels(self, root) -> list:
         """Exact labels of clickable nodes -- what a tap could legitimately hit."""
         out = []
