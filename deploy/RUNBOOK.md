@@ -386,6 +386,54 @@ run is dropped — the same protection as Task Scheduler's `IgnoreNew`. Nothing
 there stops *different* loops colliding on one phone; the per-profile locks in
 `core/locks.py` handle that on both platforms.
 
+#### `verification` — the one loop that spends money
+
+Every other timer costs CPU and API calls. This one rents phone numbers (~$0.20
+each) and buys captcha solves, so read this before arming it.
+
+It is the other end of `issue-tags`. That loop turns a flag into a MultiLogin
+`Issue` tag; this one picks the tag up, launches the phone, reads the challenge
+and answers it — and a profile it genuinely clears is untagged, which is the
+signal `issue_tags` reads as "somebody looked" and `recovery_runner` reads as
+"put it back to work". Before it existed the second half of that loop was a
+person running a CLI.
+
+Bounded in four independent places, because an unattended pass with a wallet is
+the thing to be careful with:
+
+| Bound | Default on the timer | What it stops |
+|---|---|---|
+| `--limit-profiles` | 2 per tick | phones tied up, competing with posting |
+| `--max-numbers` | 4 per tick | one bad tick emptying the wallet |
+| `--max-numbers-per-day` | 12 rolling 24 h | **the ceiling that bounds a timer** — ~$2.40/day |
+| `--min-balance` | 1.00 | starting a pass that cannot finish a profile |
+
+Plus a six-hour per-profile cool-off (a week for a result that cannot change
+without a person), so the same phone is never worked twice in a tick cycle.
+
+**What it will never touch.** A profile Airtable records as `Banned / Blocked`
+or `Held For Supervised Run` is skipped outright, whatever its screen says — a
+suspended account keeps rendering a cached feed that reads as perfectly healthy,
+and untagging one hands a dead account back to the posting loop. Neither
+`--only` nor `--ignore-diagnosis` gets past that guard.
+
+Check what it would do before arming it — the dry run costs nothing and reads
+the same Airtable guard the real pass does:
+
+```bash
+python -m adb_bot.automation.run_loop verification --limit-profiles 100
+python -m adb_bot.clients.sms.cli balance      # what is actually in the wallet
+journalctl -u adbbot-verification.service -f
+```
+
+A red unit means a **fleet-level** problem — no numbers to rent, or MultiLogin
+not starting phones — which is a person's job. Hitting a number ceiling, or
+finding every profile needs a human, is the loop working and exits zero.
+
+If you would rather it never ran unattended, move `verification` from
+`RECOMMENDED_LOOPS` to `MANUAL_ONLY_LOOPS` in `automation/schedule_spec.py`:
+the installer then refuses to arm it, and it stays a by-hand command.
+
 ### Windows — Task Scheduler
 
 **Run when logged off** runs the tasks as SYSTEM so they survive RDP
