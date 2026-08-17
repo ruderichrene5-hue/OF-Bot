@@ -351,6 +351,15 @@ class PhoneMailbox:
             if self.in_front():
                 return True
             if waited >= seconds:
+                # What *is* in front, and is Gmail even alive? "Did not come
+                # up" was all the log said for four launches, and it does not
+                # distinguish a crash from a window that never drew.
+                focus = self._shell("dumpsys window | grep mCurrentFocus")
+                alive = self._shell(f"pidof {GMAIL_PACKAGE}")
+                self._log("warning", "Gmail did not reach the front in %ds; "
+                                     "focus=%s pid=%s", seconds,
+                          (focus or "<none>").strip()[:120],
+                          (alive or "<not running>").strip()[:40])
                 return False
             time.sleep(FRONT_POLL_SECONDS)
             waited += FRONT_POLL_SECONDS
