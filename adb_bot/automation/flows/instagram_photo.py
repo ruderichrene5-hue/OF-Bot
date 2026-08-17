@@ -92,6 +92,8 @@ class InstagramPhotoPostU2Flow(InstagramReelUploadU2Flow):
 
     # ---- the three real differences from the reel flow ----------------------
 
+    MODE_LABEL = "POST"
+
     def _reel_tab_selectors(self):
         """The composer mode this flow wants selected. Named for the parent's
         API, not for reels -- the parent calls this to mean "the mode I am
@@ -493,9 +495,35 @@ class InstagramPhotoPostU2Flow(InstagramReelUploadU2Flow):
         mark_step()
 
         # --- Step 4: Share ----------------------------------------------------
+        # The Share step is the one place where losing the phone mid-call is
+        # genuinely ambiguous. uiautomator2 talks to an agent ON the device over
+        # HTTP, and that agent dies (RemoteDisconnected) often enough to matter
+        # -- it happened on the very first live run of this flow, in this exact
+        # call. If it dies while we are only *looking* for the Share button
+        # nothing was posted; if it dies a moment later, mid-click, the tap may
+        # already have registered on the device. From out here those two look
+        # identical, and guessing "nothing happened" is the guess that posts
+        # twice.
+        #
+        # So a transport failure here is treated as a tap that may have landed:
+        # the ledger is written and the run reports `uncertain`, which blocks a
+        # blind re-send and hands the question to the deferred recheck. The
+        # cost of being wrong this way is one photo held back; the cost of the
+        # other way is a duplicate post nobody asked for.
         photo_posted = False
-        if self._tap_share_u2(d, target, emit, log):
-            emit("info", "Tapped Share for %s", target)
+        share_uncertain = False
+        try:
+            share_tapped = self._tap_share_u2(d, target, emit, log)
+        except Exception as exc:
+            emit("warning",
+                 "Lost the phone while tapping Share for %s (%s). Treating this as a post that "
+                 "may have gone out: recording it so nothing re-sends this photo, and handing "
+                 "the question to the recheck.", target, exc)
+            share_tapped, share_uncertain = True, True
+
+        if share_tapped:
+            if not share_uncertain:
+                emit("info", "Tapped Share for %s", target)
             # Ledger FIRST -- before the settle, before verification, before
             # anything that can crash. From this instant a post may exist on the
             # account, and that fact has to outlive this process.
@@ -505,6 +533,19 @@ class InstagramPhotoPostU2Flow(InstagramReelUploadU2Flow):
                                 media_hash=media_hash,
                                 baseline_count=baseline_count,
                                 target_handle=want_handle or "")
+            if share_uncertain:
+                # The phone is gone -- every step below this talks to it, so
+                # they would each raise in turn and the last one would decide
+                # the outcome. Stop here and say the true thing: it may be
+                # live, we cannot see, the recheck owns it now.
+                keep_media_for_retry("lost the phone at Share -- queued for recheck")
+                return {"profile_id": profile.id, "target": target, "aborted": False,
+                        "success": False, "uncertain": True, "post_confirmed": False,
+                        "verify_method": "none",
+                        "verify_strength": 0,
+                        "verify_detail": "lost the uiautomator2 connection while tapping Share",
+                        "media_hash": media_hash, "media_path": media_path,
+                        "posted_as": posted_as}
             waits.settle(8, ready=waits.u2_ready(d, {"resourceId": "com.instagram.android:id/feed_tab"}),
                          logger=log, what="composer closed")
             photo_posted = True

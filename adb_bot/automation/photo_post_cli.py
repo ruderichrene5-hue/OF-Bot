@@ -73,6 +73,20 @@ def resolve_profile_id(token: str, wanted: str) -> tuple[str, str]:
     raise SystemExit(f"[fatal] No MLX profile named {wanted!r}.{hint}")
 
 
+def _already_running(api_client, profile_id: str) -> bool:
+    """True if MLX already has ADB credentials for this profile -- i.e. the
+    phone is up. Any error answers False: the launch path is the safe default,
+    and it is the one that reports its own problems."""
+    try:
+        items = api_client.fetch_adb_credentials([profile_id]).get("data", {}).get("items", [])
+    except Exception:
+        return False
+    return any(str(i.get("id")) == str(profile_id)
+               and str(i.get("status", "")).lower() == "active"
+               and i.get("ip") and i.get("port")
+               for i in items)
+
+
 def _adb(target: str, *args: str, timeout: int = 30) -> str:
     result = subprocess.run(["adb", "-s", target, *args],
                             capture_output=True, text=True, timeout=timeout, check=False)
@@ -165,13 +179,26 @@ def main(argv=None) -> int:
     clients = build_mlx_clients(token)
     automation = build_automation()
 
-    log.info("Launching %s (%s) on MultiLogin", display, profile_id)
-    response = clients.launcher.start_profiles([profile_id])
-    if isinstance(response, dict) and response.get("status") == "error":
-        log.error("Launch failed for %s: %s", display, response)
-        return 2
-    log.info("Launch accepted; waiting %ss for the phone to boot", args.launch_wait)
-    time.sleep(args.launch_wait)
+    if _already_running(clients.api, profile_id):
+        # Launching a profile that is already up answers 500 "failed to get
+        # profiles starting urls" -- MLX will not issue a second start URL for a
+        # live phone. That is not a failure to act on: the phone we wanted is
+        # already there. Skip the launch and go straight to it.
+        log.info("%s is already running; skipping the launch", display)
+    else:
+        log.info("Launching %s (%s) on MultiLogin", display, profile_id)
+        response = clients.launcher.start_profiles([profile_id])
+        if isinstance(response, dict) and response.get("status") == "error":
+            # It may still have come up despite the error, so ask the phone
+            # rather than believing the launcher.
+            if not _already_running(clients.api, profile_id):
+                log.error("Launch failed for %s: %s", display, response)
+                return 2
+            log.warning("Launch reported an error for %s but the phone is up; continuing. (%s)",
+                        display, response.get("error"))
+        else:
+            log.info("Launch accepted; waiting %ss for the phone to boot", args.launch_wait)
+            time.sleep(args.launch_wait)
 
     outcome: dict = {}
 

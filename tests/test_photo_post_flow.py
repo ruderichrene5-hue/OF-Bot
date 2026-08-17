@@ -279,3 +279,107 @@ class PhotoFolderMappingTest(TestCase):
     def test_airtable_may_drive_the_photo_flow(self):
         from adb_bot.automation.airtable_runner import VALID_FLOWS
         self.assertIn("instagram_photo_post_u2", VALID_FLOWS)
+
+
+class ShareTransportFailureTest(TestCase):
+    """Losing the uiautomator2 agent while tapping Share is ambiguous: the tap
+    may already have registered on the device. It happened on the first live
+    run of this flow, in that exact call."""
+
+    def _flow_at_share(self):
+        flow = InstagramPhotoPostU2Flow()
+        return flow
+
+    def test_a_transport_error_is_uncertain_not_a_clean_failure(self):
+        # Reporting "failed" here is what makes the next run post it again.
+        from adb_bot.automation import post_ledger
+
+        flow = self._flow_at_share()
+        recorded = {}
+
+        class FakeLedger:
+            def lookup(self, *a, **k):
+                return None
+
+            def record_share(self, profile_id, media_path, **kw):
+                recorded["profile_id"] = profile_id
+                recorded["media_path"] = media_path
+
+            def resolve(self, *a, **k):
+                recorded["resolved"] = True
+
+        with TemporaryDirectory() as tmp:
+            pic = Path(tmp) / "a.jpg"
+            pic.write_bytes(b"x")
+            result = _run_to_share(
+                flow, str(pic), FakeLedger(),
+                share=lambda *a, **k: (_ for _ in ()).throw(
+                    ConnectionError("Remote end closed connection without response")),
+            )
+
+        self.assertIs(result["success"], False)
+        self.assertIs(result["uncertain"], True)
+        self.assertIn("Share", result["verify_detail"])
+        # The ledger must have been written, or nothing blocks a re-send.
+        self.assertIn("profile_id", recorded)
+        # And it must NOT have been resolved -- resolving a disproved entry is
+        # what would clear the photo for another send.
+        self.assertNotIn("resolved", recorded)
+
+    def test_share_not_found_stays_a_plain_failure(self):
+        # No transport error and no Share button = nothing was posted, and that
+        # IS safe to retry. It must not be dressed up as uncertain.
+        with TemporaryDirectory() as tmp:
+            pic = Path(tmp) / "a.jpg"
+            pic.write_bytes(b"x")
+
+            class FakeLedger:
+                def lookup(self, *a, **k):
+                    return None
+
+                def record_share(self, *a, **k):
+                    raise AssertionError("must not record a share that never happened")
+
+            result = _run_to_share(InstagramPhotoPostU2Flow(), str(pic), FakeLedger(),
+                                   share=lambda *a, **k: False)
+
+        self.assertIs(result["success"], False)
+        self.assertIs(result.get("uncertain"), False)
+
+
+def _run_to_share(flow, photo, ledger, share):
+    """Drive `flow.run` with every device interaction stubbed out, so only the
+    Share branch's decision-making is exercised."""
+    from unittest.mock import MagicMock
+
+    adb = MagicMock()
+    with patch("adb_bot.automation.flows.instagram_photo.u2") as u2mod, \
+            patch("adb_bot.automation.flows.instagram_photo.post_ledger.PostLedger",
+                  return_value=ledger), \
+            patch("adb_bot.automation.flows.instagram_photo.post_ledger.media_fingerprint",
+                  return_value="hash"), \
+            patch("adb_bot.automation.flows.instagram_photo._adb_push_media_to_device",
+                  return_value=True), \
+            patch("adb_bot.automation.flows.instagram_photo._adb_wait_for_media_store_index",
+                  return_value=True), \
+            patch("adb_bot.automation.flows.instagram_photo.waits.settle"), \
+            patch("adb_bot.automation.flows.instagram_photo.waits.u2_ready"), \
+            patch("adb_bot.automation.flows.instagram_photo.waits.any_exists", return_value=True), \
+            patch("adb_bot.automation.flows.instagram_photo.waits.set_speed"), \
+            patch("adb_bot.automation.flows.instagram_photo.waits.speed_factor", return_value=1.0), \
+            patch("adb_bot.automation.flows.instagram_photo.instagram_module"
+                  "._ensure_instagram_home_feed_u2"), \
+            patch.object(flow, "build_launch_commands", return_value=[]), \
+            patch.object(flow, "_ig_is_foreground", return_value=True), \
+            patch.object(flow, "_dismiss_popups_u2"), \
+            patch.object(flow, "_open_profile_tab_u2", return_value=False), \
+            patch.object(flow, "_open_reel_composer_u2", return_value=True), \
+            patch.object(flow, "_select_media_u2", return_value=True), \
+            patch.object(flow, "_dismiss_edit_app_popup_u2"), \
+            patch.object(flow, "_advance_to_caption_u2", return_value=True), \
+            patch.object(flow, "_account_flag_result_u2", return_value=None), \
+            patch.object(flow, "_tap_share_u2", side_effect=share):
+        u2mod.connect.return_value = MagicMock()
+        return flow.run(_profile(media_path=photo, picture=None, caption=None,
+                                 queue_id=None, target_handle=None),
+                        adb_client=adb, logger=None)

@@ -1439,6 +1439,12 @@ class InstagramReelUploadU2Flow:
             return False
         return True
 
+    # Names the composer mode in log lines only. A subclass that targets a
+    # different mode (the photo flow targets POST) overrides it so its logs do
+    # not claim to be selecting REEL. Behaviour comes from the selector lists
+    # below, never from this string.
+    MODE_LABEL = "REEL"
+
     def _reel_tab_selectors(self):
         return [
             {"text": "REEL"}, {"text": "Reel"}, {"text": "Reels"},
@@ -1511,7 +1517,7 @@ class InstagramReelUploadU2Flow:
         # 1) Make REEL visible (swipe the carousel right->left if off-screen).
         if not self._reel_tab_visible_u2(d):
             y = self._mode_carousel_y_ratio_u2(d)
-            _emit(logger, "info", "u2: REEL tab not visible for %s; swiping mode carousel right->left at y=%.2f to reveal it", target, y)
+            _emit(logger, "info", "u2: %s tab not visible for %s; swiping mode carousel right->left at y=%.2f to reveal it", self.MODE_LABEL, target, y)
             for attempt in range(1, max_swipes + 1):
                 try:
                     d.swipe(0.80, y, 0.40, y, 0.2)
@@ -1519,30 +1525,30 @@ class InstagramReelUploadU2Flow:
                     _emit(logger, "warning", "u2: mode-carousel swipe failed for %s: %s", target, exc)
                 time.sleep(1.0)
                 if self._reel_tab_visible_u2(d):
-                    _emit(logger, "info", "u2: REEL tab revealed after %s swipe(s) for %s", attempt, target)
+                    _emit(logger, "info", "u2: %s tab revealed after %s swipe(s) for %s", self.MODE_LABEL, attempt, target)
                     break
             if not self._reel_tab_visible_u2(d):
-                _emit(logger, "warning", "u2: REEL tab never became visible after %s swipe(s) for %s", max_swipes, target)
+                _emit(logger, "warning", "u2: %s tab never became visible after %s swipe(s) for %s", self.MODE_LABEL, max_swipes, target)
                 return False
 
         # 2) Tap REEL, then confirm the carousel switched. Re-tap if it didn't.
         for attempt in range(1, max_confirm + 1):
-            _u2_click(d, selectors, logger=logger, purpose="REEL mode tab")
+            _u2_click(d, selectors, logger=logger, purpose=f"{self.MODE_LABEL} mode tab")
             time.sleep(1.0)
             if self._tab_is_selected_u2(d, selectors):
-                _emit(logger, "info", "u2: REEL mode confirmed selected for %s (attempt %s)", target, attempt)
+                _emit(logger, "info", "u2: %s mode confirmed selected for %s (attempt %s)", self.MODE_LABEL, target, attempt)
                 return True
             if self._tab_is_selected_u2(d, other_mode):
-                _emit(logger, "warning", "u2: a non-REEL mode is still selected after tapping REEL for %s; re-tapping (attempt %s/%s)", target, attempt, max_confirm)
+                _emit(logger, "warning", "u2: a different mode is still selected after tapping %s for %s; re-tapping (attempt %s/%s)", self.MODE_LABEL, target, attempt, max_confirm)
                 continue
-            _emit(logger, "info", "u2: REEL selected-state not readable for %s (attempt %s/%s)", target, attempt, max_confirm)
+            _emit(logger, "info", "u2: %s selected-state not readable for %s (attempt %s/%s)", self.MODE_LABEL, target, attempt, max_confirm)
 
         # Couldn't confirm REEL selected after retries. Block only if we can see
         # we're positively in another mode; otherwise proceed best-effort.
         if self._tab_is_selected_u2(d, other_mode):
-            _emit(logger, "warning", "u2: still in a non-REEL mode after %s attempts for %s; refusing to pick media to avoid posting a non-reel", max_confirm, target)
+            _emit(logger, "warning", "u2: still in the wrong mode after %s attempts for %s; refusing to pick media rather than post as something other than %s", max_confirm, target, self.MODE_LABEL)
             return False
-        _emit(logger, "info", "u2: proceeding best-effort for %s (REEL selected-state unconfirmed, but no wrong mode detected)", target)
+        _emit(logger, "info", "u2: proceeding best-effort for %s (%s selected-state unconfirmed, but no wrong mode detected)", target, self.MODE_LABEL)
         return True
 
     def _select_media_u2(self, d, target, emit, logger=None) -> bool:
@@ -1550,7 +1556,7 @@ class InstagramReelUploadU2Flow:
         # media, so a mis-registered REEL tap can't lead to selecting a thumbnail
         # in POST/STORY mode and posting the wrong type.
         if not self._select_reel_mode_u2(d, target, emit, logger=logger):
-            _emit(logger, "warning", "u2: could not confirm REEL mode for %s; not selecting media to avoid posting a non-reel", target)
+            _emit(logger, "warning", "u2: could not confirm %s mode for %s; not selecting media to avoid posting the wrong type", self.MODE_LABEL, target)
             return False
         # Wait for a gallery cell rather than a flat 1.5s -- the very selectors
         # the click below uses are what "the gallery has repainted" means, so a
