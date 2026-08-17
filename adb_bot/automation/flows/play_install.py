@@ -20,7 +20,13 @@ states; the package manager either has the package or does not.
 
 from __future__ import annotations
 
+import re
 import time
+
+
+def says_any(text: str, words) -> bool:
+    """Is any of `words` on the screen as a whole word?"""
+    return any(re.search(rf"\b{re.escape(word)}\b", text) for word in words)
 
 PLAY_PACKAGE = "com.android.vending"
 
@@ -28,6 +34,15 @@ PLAY_PACKAGE = "com.android.vending"
 # deliberately absent: this is for putting an app on a phone that has none.
 _INSTALL_LABELS = ("Install", "INSTALL", "Get", "GET")
 _OPEN_LABELS = ("Open", "OPEN", "Play")
+
+# What counts as "the listing now offers Open" when reading the *text* of the
+# screen -- which is not the same as what to tap.
+#
+# `Play` cannot be one of them. Every screen in the Play Store says "Google
+# Play" somewhere, and matching it as a substring made `Blank caio 2` sit for
+# five minutes in front of a "Try Google Play Pass" promo sheet, reading it as
+# a finished install (2026-08-17). Whole words only, for the same reason.
+_OPEN_TEXT_WORDS = ("open",)
 
 # The Play Store asks about backups and email updates on a fresh account. Both
 # are declined; neither blocks the install for long if missed.
@@ -91,7 +106,7 @@ def install(driver, adb_client, target: str, package: str, logger=None,
             sleep(10)
             continue
 
-        if any(label.lower() in text for label in _OPEN_LABELS) and taps:
+        if says_any(text, _OPEN_TEXT_WORDS) and taps:
             # `Open` after we asked for the install: give the package manager a
             # moment to catch up rather than believing the button.
             sleep(8)
