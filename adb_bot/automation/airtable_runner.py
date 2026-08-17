@@ -34,7 +34,7 @@ from adb_bot.automation import incidents
 from adb_bot.automation import attachments
 from adb_bot.core.locks import ProfileLocks, live_profile_count, live_profile_slot, max_live_profiles
 from adb_bot.core.batching import LaunchGate, resolve_concurrency, run_rolling
-from adb_bot.config.settings import REEL_FLOWS
+from adb_bot.config.settings import REEL_FLOWS, PHOTO_FLOWS, PHOTO_SUBFOLDER, photo_folder_for
 from adb_bot.clients.airtable import (
     RESULT_DONE,
     RESULT_FAILED,
@@ -50,6 +50,7 @@ VALID_FLOWS = {
     "warm_up_process",
     "instagram_reel_upload",
     "instagram_reel_upload_u2",
+    "instagram_photo_post_u2",
     "instagram_story_upload",
     "instagram_scroll",
     "instagram_like_feed",
@@ -363,6 +364,25 @@ def _launch_and_run_flows(plan, launch_ids, airtable, launcher_client, shutdown_
                 if folder_media:
                     logger.info("Profile %s will take its reel media from %s",
                                 account_plan.launch_id, folder_media)
+
+            # A photo post wants the stills half of the same mapping: the
+            # `photos/` subfolder of the model's media folder. Same rule as
+            # above -- unmapped, or no subfolder yet, resolves to None and the
+            # flow falls back to whatever it was handed directly.
+            elif flow_run.flow in PHOTO_FLOWS and callable(media_path_resolver):
+                try:
+                    folder_media = photo_folder_for(media_path_resolver(account_plan.launch_id))
+                except Exception as exc:
+                    logger.warning("Could not resolve the photo folder for %s: %s",
+                                   account_plan.launch_id, exc)
+                if folder_media:
+                    logger.info("Profile %s will take its photo from %s",
+                                account_plan.launch_id, folder_media)
+                else:
+                    logger.warning(
+                        "Profile %s has no %s/ folder mapped, so its photo post has no picture "
+                        "to send. Create that subfolder inside the model's media folder and "
+                        "drop stills in it.", account_plan.launch_id, PHOTO_SUBFOLDER)
 
             try:
                 run_profile_workflow(

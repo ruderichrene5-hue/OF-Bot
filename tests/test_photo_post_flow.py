@@ -235,3 +235,47 @@ class RemotePathTest(TestCase):
             flow._build_remote_media_path("/local/my holiday.jpg"),
             "/sdcard/Pictures/my_holiday.jpg",
         )
+
+
+class PhotoFolderMappingTest(TestCase):
+    """A scheduled photo post has to find a picture by itself. It reuses the
+    per-model media folder mapping -- the thing that already answers "which
+    model owns this media" -- and takes the `photos/` subfolder of it."""
+
+    def test_photo_flow_is_not_treated_as_a_reel_flow(self):
+        # If it were, a scheduled photo post would be handed the model's clips.
+        from adb_bot.config.settings import PHOTO_FLOWS, REEL_FLOWS
+        self.assertIn("instagram_photo_post_u2", PHOTO_FLOWS)
+        self.assertNotIn("instagram_photo_post_u2", REEL_FLOWS)
+        self.assertEqual(set(PHOTO_FLOWS) & set(REEL_FLOWS), set())
+
+    def test_it_resolves_the_photos_subfolder(self):
+        from adb_bot.config.settings import PHOTO_SUBFOLDER, photo_folder_for
+        with TemporaryDirectory() as tmp:
+            stills = Path(tmp) / PHOTO_SUBFOLDER
+            stills.mkdir()
+            self.assertEqual(photo_folder_for(tmp), str(stills))
+
+    def test_no_subfolder_resolves_to_nothing_rather_than_the_clips(self):
+        # Falling back to the parent folder would post the model's video queue.
+        from adb_bot.config.settings import photo_folder_for
+        with TemporaryDirectory() as tmp:
+            (Path(tmp) / "a_clip.mp4").write_bytes(b"x")
+            self.assertIsNone(photo_folder_for(tmp))
+
+    def test_no_mapping_resolves_to_nothing(self):
+        from adb_bot.config.settings import photo_folder_for
+        self.assertIsNone(photo_folder_for(None))
+        self.assertIsNone(photo_folder_for(""))
+
+    def test_it_does_not_create_the_folder_as_a_side_effect(self):
+        # An empty directory appearing by itself reads as "photos are set up
+        # here" to the next person who looks.
+        from adb_bot.config.settings import PHOTO_SUBFOLDER, photo_folder_for
+        with TemporaryDirectory() as tmp:
+            photo_folder_for(tmp)
+            self.assertFalse((Path(tmp) / PHOTO_SUBFOLDER).exists())
+
+    def test_airtable_may_drive_the_photo_flow(self):
+        from adb_bot.automation.airtable_runner import VALID_FLOWS
+        self.assertIn("instagram_photo_post_u2", VALID_FLOWS)

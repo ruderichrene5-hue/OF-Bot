@@ -85,10 +85,20 @@ def inspect_phone(target: str, log) -> None:
     Everything here is a query. Nothing taps, types, or posts.
     """
     log.info("--- inspect %s ---", target)
-    activity = _adb(target, "shell", "dumpsys", "activity", "activities")
-    focused = [line.strip() for line in activity.splitlines()
-               if "mResumedActivity" in line or "mFocusedActivity" in line]
+    # `dumpsys activity activities` does not carry mResumedActivity on every
+    # build; `dumpsys window` answers on all of them, so try the cheap and
+    # reliable one first and only fall back to parsing the big dump.
+    focus = _adb(target, "shell", "dumpsys", "window", "displays")
+    focused = [line.strip() for line in focus.splitlines()
+               if "mCurrentFocus" in line or "mFocusedApp" in line]
+    if not focused:
+        activity = _adb(target, "shell", "dumpsys", "activity", "activities")
+        focused = [line.strip() for line in activity.splitlines()
+                   if "mResumedActivity" in line or "mFocusedActivity" in line]
     log.info("foreground: %s", focused[0] if focused else "unknown")
+    log.info("instagram installed: %s",
+             "yes" if "com.instagram.android" in
+             _adb(target, "shell", "pm", "list", "packages", "com.instagram.android") else "NO")
 
     for directory in ("/sdcard/Pictures", "/sdcard/DCIM/Camera", "/sdcard/Download"):
         listing = _adb(target, "shell", "ls", "-1", directory)
@@ -101,10 +111,13 @@ def inspect_phone(target: str, log) -> None:
     indexed = _adb(target, "shell", "content", "query",
                    "--uri", "content://media/external/images/media",
                    "--projection", "_display_name")
-    lines = [line for line in indexed.splitlines() if line.strip()]
+    # "No result found." is an empty answer, not a row. Counting it as one is
+    # how an empty gallery reads as "there is already a picture on here".
+    lines = [line.strip() for line in indexed.splitlines()
+             if line.strip() and "no result found" not in line.lower()]
     log.info("images in MediaStore: %s", len(lines))
     for line in lines[:8]:
-        log.info("   %s", line.strip())
+        log.info("   %s", line)
 
 
 def main(argv=None) -> int:

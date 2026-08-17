@@ -297,6 +297,40 @@ REEL_FLOWS = ("instagram_reel_upload", "instagram_reel_upload_u2",
               # same per-folder media. It reads media_path and ignores caption.
               "instagram_reel_intent_probe")
 
+# Flows that post a still, and so want the *photo* half of a model's media
+# folder rather than its clips.
+PHOTO_FLOWS = ("instagram_photo_post_u2",)
+
+# Where those stills live: a subfolder of the model's existing mapped media
+# folder. Reusing the folder mapping rather than adding a second one is
+# deliberate -- that mapping is already the thing that answers "which model
+# owns this media", and a separate photo mapping would be a second place to
+# get that wrong. A clip filed under the wrong model posts to the whole model
+# at once, and stills are no safer.
+#
+# It also keeps the two queues physically apart. The photo flow refuses video
+# and the reel flow ignores stills, but only if they are not competing for the
+# same directory: the shared media queue hands each file out once, so a mixed
+# folder means each flow can consume media meant for the other.
+PHOTO_SUBFOLDER = "photos"
+
+
+def photo_folder_for(media_folder) -> str | None:
+    """The stills folder for a model, given its mapped media folder.
+
+    Returns None when there is no mapping or the subfolder has not been created
+    -- the caller then leaves `media_path` unset and the flow falls back to
+    whatever it was given directly. Deliberately does NOT create the folder:
+    an empty directory appearing by itself would read as "photos are set up
+    here" to the next person who looks.
+    """
+    if not media_folder:
+        return None
+    from pathlib import Path
+
+    candidate = Path(str(media_folder)) / PHOTO_SUBFOLDER
+    return str(candidate) if candidate.is_dir() else None
+
 
 def get_folder_media_paths() -> dict:
     """Per-Multilogin-folder reels media folders: {folder_key: local_path}.
