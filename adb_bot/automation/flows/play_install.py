@@ -84,12 +84,25 @@ def open_listing(adb_client, target: str, package: str) -> None:
         f"-d 'market://details?id={package}'")
 
 
+# The Play Store having lost the network. Its "Try again" is not a clickable
+# node in the dump -- the screen reports zero clickable labels -- so there is
+# nothing to tap, and the way back is to open the listing again. Instagram was
+# talking to its own servers happily either side of this on 2026-08-17, so it
+# is the Play Store's connection, not the phone's.
+_OFFLINE_MARKERS = ("no internet connection", "check your connection",
+                    "you're offline")
+
+RESULT_OFFLINE = "no_network"
 RESULT_INSTALLED = "installed"
 RESULT_ALREADY = "already_installed"
 RESULT_NO_BUTTON = "no_install_button"
 RESULT_TIMEOUT = "timed_out"
 
 MAX_TAPS = 4
+
+# Enough to ride out a hiccup, few enough that a Play Store which simply
+# cannot reach Google gives the phone's remaining life back.
+MAX_OFFLINE = 4
 
 
 def install(driver, adb_client, target: str, package: str, logger=None,
@@ -108,12 +121,26 @@ def install(driver, adb_client, target: str, package: str, logger=None,
 
     deadline = time.monotonic() + timeout
     taps = 0
+    offline = 0
     while time.monotonic() < deadline:
         if is_installed(adb_client, target, package):
             log("info", "%s installed", package)
             return RESULT_INSTALLED
 
         text = (driver.read_screen() or "").lower()
+
+        if any(marker in text for marker in _OFFLINE_MARKERS):
+            offline += 1
+            if offline > MAX_OFFLINE:
+                log("warning", "the Play Store reported no network %d times",
+                    offline - 1)
+                return RESULT_OFFLINE
+            log("info", "the Play Store has no network; reopening the listing "
+                        "(%d/%d)", offline, MAX_OFFLINE)
+            sleep(10)
+            open_listing(adb_client, target, package)
+            sleep(8)
+            continue
 
         if any(marker in text for marker in _WORKING_MARKERS):
             log("info", "still working; waiting")

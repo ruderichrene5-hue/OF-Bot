@@ -94,6 +94,24 @@ def test_a_sheet_over_the_listing_is_dismissed_not_waited_out():
     assert verdict == p.RESULT_INSTALLED
 
 
+OFFLINE = ("something went wrong no internet connection. make sure that wi-fi "
+           "or mobile data is turned on, then try again. try again navigate up")
+
+
+def test_a_play_store_with_no_network_reopens_the_listing():
+    """Its "Try again" is not a clickable node -- the dump reports zero
+    clickable labels -- so there is nothing to tap and the listing has to be
+    opened again. This burned 475 seconds doing nothing on 2026-08-17."""
+    adb = _Adb()
+    driver = _Driver(adb, OFFLINE)
+
+    verdict = p.install(driver, adb, "host:1", PACKAGE, sleep=lambda _s: None)
+
+    assert verdict == p.RESULT_OFFLINE
+    opened = [c for c in adb.commands if "market://details" in c]
+    assert len(opened) == p.MAX_OFFLINE + 1, "did not reopen the listing"
+
+
 def test_an_app_already_on_the_phone_is_left_alone():
     """A reinstall can log an account out, and this runs on phones that have
     just been signed in."""
