@@ -87,6 +87,41 @@ def test_the_retry_page_is_not_confused_with_the_unreachable_servers_page():
     assert g.classify_google_screen(RETRY_PAGE) != g.SCREEN_SERVER_ERROR
 
 
+SERVICES = ("google services cicirahmaputrimu@gmail.com tap to learn more "
+            "about each service, such as how to turn it on or off later. data "
+            "will be used according to google's privacy policy. backup back up "
+            "device data automatically back up your data")
+
+
+def test_the_google_services_consent_page_is_named():
+    """`Blank caio 2` reached it with 2FA and the Terms already behind it --
+    the last screen before the Play Store, and it stopped the run."""
+    assert g.classify_google_screen(SERVICES) == g.SCREEN_SERVICES
+
+
+def test_the_services_page_is_not_read_as_the_terms():
+    """Both are consent pages and the Terms handler taps "I agree", which is
+    not what ends this one."""
+    assert g.classify_google_screen(SERVICES) != g.SCREEN_TERMS
+
+
+def test_the_services_page_taps_are_bounded():
+    """It is a long scrolling page whose button stays "More" until the bottom,
+    so it is exempt from the repeat guard and needs a bound of its own."""
+    class ServicesDriver(_StubDriver):
+        def input_hints(self):
+            return []
+
+    driver, adb = ServicesDriver(SERVICES), _StubAdb()
+    verdict = g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "S",
+                        sleep=lambda _s: None)
+
+    assert verdict == g.RESULT_STUCK
+    taps = [t for t in driver.taps if "Accept" in t]
+    assert len(taps) == g.MAX_SERVICES_TAPS, \
+        f"tapped the consent page {len(taps)} times"
+
+
 def test_searching_for_accounts_is_loading_not_a_screen_to_act_on():
     assert g.classify_google_screen(SEARCHING) == g.SCREEN_LOADING
 

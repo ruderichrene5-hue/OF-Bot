@@ -68,6 +68,7 @@ SCREEN_LAUNCHER = "launcher"              # the phone's home screen
 SCREEN_WRONG_PASSWORD = "wrong_password"
 SCREEN_SERVER_ERROR = "google_server_error"  # transient; retryable
 SCREEN_RETRY = "try_again"                   # Google's own retry page
+SCREEN_SERVICES = "google_services"          # backup/location consents
 SCREEN_LOADING = "loading"
 SCREEN_UNKNOWN = "unknown"
 
@@ -110,6 +111,18 @@ _2FA_MARKERS = (
 _TOTP_MARKERS = ("totppin", "enter code")
 _TERMS_MARKERS = ("google terms of service", "by continuing, you agree",
                   "i agree")
+
+# The consent list that follows the Terms -- backup, location, diagnostics --
+# and the last screen before the Play Store itself. `Blank caio 2` reached it
+# on 2026-08-17 with 2FA and the Terms already behind it.
+#
+# It is a long scrolling page whose only button is `More` until you reach the
+# bottom, where it becomes `Accept`, so the flow taps its way down.
+_SERVICES_MARKERS = (
+    "google services",
+    "back up device data",
+    "tap to learn more about each service",
+)
 _SAVE_PASSWORD_MARKERS = ("save password", "google password manager")
 _PLAY_HOME_MARKERS = ("search apps & games", "search for apps & games",
                       "games apps", "for you top charts")
@@ -152,6 +165,7 @@ _ORDERED = (
     (SCREEN_SAVE_PASSWORD, _SAVE_PASSWORD_MARKERS),
     (SCREEN_TOTP, _TOTP_MARKERS),
     (SCREEN_2FA_CHOOSER, _2FA_MARKERS),
+    (SCREEN_SERVICES, _SERVICES_MARKERS),
     (SCREEN_TERMS, _TERMS_MARKERS),
     (SCREEN_EASE_FAILED, _EASE_FAILED_MARKERS),
     (SCREEN_EASE, _EASE_MARKERS),
@@ -248,6 +262,13 @@ SERVER_ERROR_WAIT_SECONDS = 20
 # bounded so a genuinely ignored code still gets retyped rather than hanging.
 MAX_CODE_WAITS = 6
 CODE_WAIT_SECONDS = 8
+
+# Google's retry page, and the scrolling consent list that follows the Terms.
+# Both sit outside the repeat guard -- one because terms -> retry -> terms is a
+# cycle it cannot see, the other because tapping down the same page *is* the
+# progress -- so each needs a bound of its own.
+MAX_RETRY_PAGES = 3
+MAX_SERVICES_TAPS = 8
 
 _SKIP = ("Skip", "SKIP", "Not now", "NOT NOW", "Never", "NEVER")
 _NEXT = ("Next", "NEXT", "Continue", "CONTINUE")
@@ -351,7 +372,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     MAX_APP_RESTARTS = 3
     server_errors = 0
     retry_pages = 0
-    MAX_RETRY_PAGES = 3
+    services_taps = 0
 
     for step in range(MAX_STEPS):
         text = driver.read_screen() or ""
@@ -568,6 +589,24 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
                 _press_enter(adb_client, target)
             submitted_code = code
             sleep(10)
+
+        elif screen == SCREEN_SERVICES:
+            # `Accept` first: on the last page both buttons may be present, and
+            # tapping `More` there would scroll past the one that finishes.
+            services_taps += 1
+            if services_taps > MAX_SERVICES_TAPS:
+                log("warning", "the Google services page would not end after "
+                               "%d taps", services_taps - 1)
+                return RESULT_STUCK
+            if not driver.tap_label(("Accept", "ACCEPT", "I agree", "AGREE",
+                                     "Agree", "Turn on", "More", "MORE",
+                                     "Next", "NEXT")):
+                log("warning", "nothing to tap on the Google services page")
+                return RESULT_STUCK
+            # Scrolling the same page is progress, not a screen that failed to
+            # advance, so this is bounded by its own counter instead.
+            last, repeats = None, 0
+            sleep(8)
 
         elif screen == SCREEN_TERMS:
             driver.tap_label(("I agree", "I AGREE", "Accept", "ACCEPT"))

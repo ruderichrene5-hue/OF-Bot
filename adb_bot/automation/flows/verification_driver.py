@@ -460,8 +460,13 @@ class AdbChallengeDriver:
                   source, challenge, _snippet(text))
         if source == "ui-dump" and root is not None:
             fields = self._edit_fields(root)
-            self._log("info", "screen has %d input field(s) and %d clickable label(s)",
-                      len(fields), len(self._clickable_labels(root)))
+            labels = self._clickable_labels(root)
+            # The labels themselves, not just how many. Knowing a screen had
+            # "one clickable" says nothing about what to tap, and working that
+            # out otherwise costs a whole launch.
+            self._log("info", "screen has %d input field(s) and %d clickable "
+                              "label(s): %s", len(fields), len(labels),
+                      [str(name)[:40] for name in labels[:12]])
             for field in fields:
                 self._log("info", "  field: hint=%r value=%r at %s",
                           field["hint"], field["value"], field["center"])
