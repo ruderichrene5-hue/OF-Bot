@@ -90,7 +90,9 @@ class InstagramReelUploadFlow:
         media_path = getattr(profile, "media_path", None) or _adb_resolve_story_media_path(logger=log)
         if media_path is None:
             emit("warning", "No reel upload media found for profile %s", profile.id)
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False,
+                    "failure_reason": "no reel upload media found -- the row named no clip and the "
+                                      "media folder setting resolved to nothing"}
 
         media_source = Path(media_path)
         selected_media = None
@@ -100,7 +102,8 @@ class InstagramReelUploadFlow:
             selected_media = media_queue.get_next_media()
             if selected_media is None:
                 emit("warning", "No pending reel media available for profile %s from folder %s", profile.id, media_source)
-                return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+                return {"profile_id": profile.id, "target": target, "aborted": False, "success": False,
+                        "failure_reason": f"no unused clip left in {media_source}"}
             media_path = str(selected_media)
             emit("info", "Assigned reel media %s to profile %s from folder %s", media_path, profile.id, media_source)
         else:
@@ -113,7 +116,9 @@ class InstagramReelUploadFlow:
         pushed = _adb_push_media_to_device(target, media_path, remote_media_path, logger=log)
         if not pushed:
             emit("warning", "adb push failed for profile %s on target %s", profile.id, target)
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False,
+                    "failure_reason": f"adb push of {Path(media_path).name} to the phone failed, so "
+                                      f"the clip never reached the device"}
         emit("info", "adb push succeeded for profile %s on target %s", profile.id, target)
         # Push + media scan only: the on-device file matched the local one on
         # every run we checked, so the ls + sha256sum verification (and its
@@ -722,7 +727,9 @@ class InstagramReelUploadU2Flow:
                 bool(getattr(sys, "frozen", False)),
                 profile.id,
             )
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False,
+                    "failure_reason": "uiautomator2 is not importable in the interpreter running "
+                                      "this app, so the phone could not be driven at all"}
 
         emit("info", "Starting Instagram reel upload (u2) flow for profile %s", profile.id)
 
@@ -732,7 +739,9 @@ class InstagramReelUploadU2Flow:
         media_path = getattr(profile, "media_path", None) or _adb_resolve_story_media_path(logger=log)
         if media_path is None:
             emit("warning", "No reel upload media found for profile %s", profile.id)
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False,
+                    "failure_reason": "no reel upload media found -- the row named no clip and the "
+                                      "media folder setting resolved to nothing"}
 
         media_source = Path(media_path)
         selected_media = None
@@ -742,7 +751,8 @@ class InstagramReelUploadU2Flow:
             selected_media = media_queue.get_next_media()
             if selected_media is None:
                 emit("warning", "No pending reel media available for profile %s from folder %s", profile.id, media_source)
-                return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+                return {"profile_id": profile.id, "target": target, "aborted": False, "success": False,
+                        "failure_reason": f"no unused clip left in {media_source}"}
             media_path = str(selected_media)
             emit("info", "Assigned reel media %s to profile %s from folder %s", media_path, profile.id, media_source)
         else:
@@ -771,7 +781,9 @@ class InstagramReelUploadU2Flow:
         mark_step()
         if not _adb_push_media_to_device(target, media_path, remote_media_path, logger=log):
             emit("warning", "adb push failed for profile %s on target %s", profile.id, target)
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False,
+                    "failure_reason": f"adb push of {Path(media_path).name} to the phone failed, so "
+                                      f"the clip never reached the device"}
         emit("info", "adb push succeeded for profile %s on target %s", profile.id, target)
         # Push + media scan only: the on-device file matched the local one on
         # every run we checked, so the ls + sha256sum verification (and its
@@ -822,7 +834,8 @@ class InstagramReelUploadU2Flow:
             d.implicitly_wait(self.SELECTOR_WAIT_SECONDS)
         except Exception as exc:
             emit("warning", "uiautomator2 could not connect to %s: %s", target, exc)
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False,
+                    "failure_reason": f"uiautomator2 could not connect to the phone: {exc}"}
 
         # Instagram is up, but its first frame may still be loading. Wait for a
         # real piece of UI (bottom nav) rather than a flat 10-second sleep.
@@ -889,8 +902,15 @@ class InstagramReelUploadU2Flow:
                 emit("warning", "Not posting on %s: could not prove it is signed in as @%s. "
                                 "The clip stays queued -- posting it on the wrong account is the "
                                 "one outcome that cannot be undone.", target, want_handle)
+                why_text = ("the switcher does not list it"
+                            if account_why == self.ACCOUNT_ABSENT
+                            else "the account switcher never opened, so who is in front "
+                                 "could not be read")
                 result = {"profile_id": profile.id, "target": target, "aborted": False,
-                          "success": False, "failed": True}
+                          "success": False, "failed": True,
+                          "failure_reason": f"could not prove the phone is signed in as "
+                                            f"@{want_handle} -- {why_text}. The clip was "
+                                            f"deliberately not posted and stays queued."}
                 if account_why == self.ACCOUNT_ABSENT:
                     # Absent and no stand-in readable: still terminal, because no
                     # number of retries puts the account on the phone. Retried as
@@ -923,7 +943,9 @@ class InstagramReelUploadU2Flow:
             if flagged:
                 return flagged
             emit("warning", "Unable to open the Instagram reel composer for %s (leaving Instagram open)", target)
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False, "failed": True}
+            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False,
+                    "failed": True,
+                    "failure_reason": "the reel composer would not open"}
         mark_step()
         if check_abort():
             return {"profile_id": profile.id, "target": target, "aborted": True}
@@ -935,7 +957,9 @@ class InstagramReelUploadU2Flow:
             if flagged:
                 return flagged
             emit("warning", "Unable to select reel media for %s", target)
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False,
+                    "failure_reason": "the composer opened but the pushed clip could not be "
+                                      "selected in the media picker"}
         mark_step()
         # The editor screen is up once its Next/advance control appears.
         waits.settle(3, ready=waits.u2_ready(d, *self._NEXT_SELECTORS),
@@ -1009,7 +1033,8 @@ class InstagramReelUploadU2Flow:
             emit("warning", "Instagram reel upload (u2) did not complete successfully for %s "
                             "(the Share button was never tapped -- nothing was posted)", target)
             return {"profile_id": profile.id, "target": target, "aborted": False,
-                    "success": False, "uncertain": False}
+                    "success": False, "uncertain": False,
+                    "failure_reason": "the Share button was never tapped, so nothing was posted"}
 
         # --- Step 5: confirm the post ----------------------------------------
         # Look at the screen before touching it. Share has just landed and the

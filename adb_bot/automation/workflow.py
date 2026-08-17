@@ -19,6 +19,7 @@ from adb_bot.clients.multilogin import (
     MultiloginAdbEnableClient,
     MultiloginLauncherClient,
     MultiloginShutdownClient,
+    describe_launch_failure,
 )
 
 DEFAULT_PROFILE_IDS = ["626005033091072287", "624310694145163612", "625149430776987991", "622381034276651060", "623102213643829576", "623102253758153032"]
@@ -331,6 +332,7 @@ def prepare_profile_for_adb(
     target_handle: str | None = None,
     launcher_client=None,
     relaunch_after_attempts: int | None = None,
+    failure_out: dict | None = None,
 ):
     """Wait for a launched profile to become ADB-ready.
 
@@ -348,12 +350,25 @@ def prepare_profile_for_adb(
     ``relaunch_after_attempts`` is derived from ``max_attempts`` when left as
     None (see RELAUNCH_ATTEMPT_FRACTION); it stays an explicit parameter so
     callers and tests that pin a threshold keep working.
+
+    ``failure_out`` is how the reason for giving up leaves this function. The
+    return stays ``Profile | None`` -- callers only ever test it for truth, and
+    tests patch it wholesale -- but "not ready" covers two situations with
+    different fixes: MultiLogin never reported the phone running (their launcher,
+    or a dead proxy), versus the phone ran but never handed over ADB credentials
+    in the budget. Both used to arrive at Airtable as the same sentence. When a
+    dict is passed it gets a ``reason`` key describing which one happened.
     """
     if relaunch_after_attempts is None:
         relaunch_after_attempts = relaunch_after_attempts_for(max_attempts)
     profile = None
     consecutive_not_running = 0
+    # Separate from the consecutive counter, which resets on a relaunch: the
+    # failure note wants "how many of the checks said not-running" over the whole
+    # wait, and the reset made that read as half of what it was.
+    not_running_total = 0
     relaunched = False
+    relaunch_problem = ""
     attempt = 0
     budget = max_attempts
 
@@ -368,6 +383,7 @@ def prepare_profile_for_adb(
         logger.info("ADB enable response for %s: %s", profile_id, adb_enable_response)
         if _enable_reported_not_running(adb_enable_response, profile_id):
             consecutive_not_running += 1
+            not_running_total += 1
         else:
             consecutive_not_running = 0
 
@@ -391,8 +407,10 @@ def prepare_profile_for_adb(
                 try:
                     response = launcher_client.start_profiles([profile_id])
                     logger.info("Relaunch response for %s: %s", profile_id, response)
+                    relaunch_problem = describe_launch_failure(response)
                 except Exception as exc:
                     logger.warning("Relaunch failed for profile %s: %s", profile_id, exc)
+                    relaunch_problem = describe_launch_failure(None, error=exc)
                 relaunched = True
                 consecutive_not_running = 0
                 # A relaunched profile needs the same boot time as a fresh one,
@@ -410,6 +428,20 @@ def prepare_profile_for_adb(
             logger.info("Profile %s still not ready after attempt %s; retrying enable and check", profile_id, attempt)
 
     logger.warning("Profile %s is not ready for ADB automation", profile_id)
+    if failure_out is not None:
+        if not_running_total:
+            reason = (f"MultiLogin never reported the phone running "
+                      f"({not_running_total} of {attempt} readiness checks answered "
+                      f"'not running'")
+            reason += "; a relaunch did not take" if relaunched else ""
+            reason += ")"
+            if relaunch_problem:
+                reason += f" -- {relaunch_problem}"
+            reason += ". The phone never came up, so no post was attempted."
+        else:
+            reason = (f"the phone was running but never handed over ADB credentials "
+                      f"within {attempt} readiness checks. No post was attempted.")
+        failure_out["reason"] = reason
     return None
 
 
@@ -583,6 +615,17 @@ def status_detail(result) -> str:
         detail = f"via {method}" + (f" [{strength}]" if strength else "")
         if extra:
             detail += f": {extra}"
+    # A failure has no verification signal to name -- nothing was proven either
+    # way -- so it rendered as an empty detail and reached Airtable as the bare
+    # "flow reported a failure (see app logs)". That sentence is the same for a
+    # phone that never booted, a clip that never pushed, and a switcher that
+    # would not open: three different fixes wearing one label, and the only way
+    # to tell them apart was to open the app log and find the run by hand.
+    # `failure_reason` is what the flow (or the readiness wait) already knew at
+    # the moment it gave up.
+    reason = result.get("failure_reason") or ""
+    if reason:
+        detail = f"{detail}; {reason}" if detail else reason
     # A clip that went out on the phone's own account because the row's handle
     # was not on the phone. Carried through so the note says which account
     # actually posted -- a row reading Posted while naming a handle that never
@@ -647,6 +690,9 @@ def _run_profile_workflow(
 
     emit_status(profile_id, "starting")
 
+    # Filled in by the readiness wait when it gives up, so the failure it reports
+    # can say which kind of not-ready it was.
+    readiness_failure: dict = {}
     profile = prepare_profile_for_adb(
         profile_id,
         api_client,
@@ -661,10 +707,13 @@ def _run_profile_workflow(
         queue_id=queue_id,
         target_handle=target_handle,
         launcher_client=launcher_client,
+        failure_out=readiness_failure,
     )
     if not profile:
-        if callable(status_callback):
-            status_callback(profile_id, "failed")
+        emit_status(profile_id, "failed", {
+            "failure_reason": readiness_failure.get("reason")
+            or "the phone never became ADB-ready. No post was attempted.",
+        })
         return
 
     profile_id_value = get_profile_id(profile)
@@ -686,8 +735,10 @@ def _run_profile_workflow(
             "ADB connection failed for profile %s after %s attempts; leaving the profile open for inspection",
             profile_id_value, connect_max_attempts,
         )
-        if callable(status_callback):
-            status_callback(profile_id_value, "adb_connect_failed")
+        emit_status(profile_id_value, "adb_connect_failed", {
+            "failure_reason": (f"ADB would not connect after {connect_max_attempts} attempts, "
+                               f"though MultiLogin reported the phone ready. No post was attempted."),
+        })
         return
 
     if callable(status_callback):
@@ -790,8 +841,9 @@ def _run_profile_workflow(
                     pass
         except Exception as exc:
             logger.exception("Workflow failed for profile %s: %s", profile_id_value, exc)
-            if callable(status_callback):
-                status_callback(profile_id_value, "failed")
+            emit_status(profile_id_value, "failed", {
+                "failure_reason": f"the flow raised {type(exc).__name__}: {exc}",
+            })
             return
     finally:
         done_event.set()
@@ -824,8 +876,14 @@ def _run_profile_workflow(
             shutdown_client.shutdown_profiles([profile_id_value])
         else:
             logger.info("Workflow aborted for profile %s without shutting it down", profile_id_value)
-        if callable(status_callback):
-            status_callback(profile_id_value, "heartbeat_lost" if heartbeat.stopped else "failed")
+        if heartbeat.stopped:
+            emit_status(profile_id_value, "heartbeat_lost", {
+                "failure_reason": f"the phone stopped mid-run: {heartbeat.reason}",
+            })
+        else:
+            emit_status(profile_id_value, "failed", {
+                "failure_reason": "the run was asked to stop before the flow finished",
+            })
         return
 
     if isinstance(flow_result, dict):
@@ -892,7 +950,9 @@ def _run_profile_workflow(
             return
 
         if flow_result.get("aborted", False) or flow_result.get("failed", False) or flow_result.get("success") is False:
-            logger.info("Workflow failed for profile %s", profile_id_value)
+            failure_reason = flow_result.get("failure_reason") or ""
+            logger.info("Workflow failed for profile %s%s", profile_id_value,
+                        f": {failure_reason}" if failure_reason else "")
             emit_status(profile_id_value, "failed", flow_result)
             return
 

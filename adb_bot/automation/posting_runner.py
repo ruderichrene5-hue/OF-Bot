@@ -27,6 +27,14 @@ from adb_bot.automation.workflow import STAND_IN_NOTE, run_profile_workflow
 POST_FLOW = "instagram_reel_upload_u2"
 
 
+# What a failure's note says when the run had nothing more specific to offer.
+# A constant rather than a literal so `apply_post_result` can recognise it and
+# step aside once a real reason arrives: "the flow reported a failure (adb push
+# of the clip failed...)" is two notes stapled together, and the placeholder is
+# the half that carries no information.
+GENERIC_FAILURE_NOTE = "the flow reported a failure"
+
+
 def _map_post_status(status: str):
     """Map a run_profile_workflow terminal status to
     (post_status, issue_type, incident_kind, run_result, note). None means an
@@ -55,7 +63,7 @@ def _map_post_status(status: str):
     if status == "adb_connect_failed":
         return (at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY, None, at.RESULT_FAILED, "ADB connect failed")
     if status == "failed":
-        return (at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY, None, at.RESULT_FAILED, "flow reported a failure (see app logs)")
+        return (at.POST_STATUS_FAILED, at.ISSUE_NEEDS_RETRY, None, at.RESULT_FAILED, GENERIC_FAILURE_NOTE)
     if status == "already_shared":
         # The ledger stopped a second send of a clip this profile already got.
         # Terminal and NOT retryable: the queue row asks for something that has
@@ -128,7 +136,10 @@ def apply_post_result(airtable, item, status, flow=POST_FLOW, logger=None, detai
     # with no way to tell a post that never happened from one we simply could
     # not see -- which is the difference between "retry" and "go look".
     if detail:
-        note = f"{note} ({detail})" if note else detail
+        if note == GENERIC_FAILURE_NOTE:
+            note = detail
+        else:
+            note = f"{note} ({detail})" if note else detail
 
     airtable.create_run_log(item.account_id, item.account_name, flow, run_result, note)
     airtable.set_account_result(item.account_id, f"{run_result}: {flow} ({note})")

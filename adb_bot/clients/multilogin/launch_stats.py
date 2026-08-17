@@ -102,6 +102,52 @@ def _reported_failure(response) -> bool:
         return False
 
 
+def _refusal_message(response) -> str:
+    """MultiLogin's own words for refusing one profile (`data.fail_details`).
+
+    This is where the useful half of a 200-that-launched-nothing lives: the
+    envelope says `fail_amount: 1` and the reason -- "Proxy connection failed",
+    a bad id, already running -- sits one level down, per profile.
+    """
+    if not isinstance(response, dict):
+        return ""
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return ""
+    details = data.get("fail_details")
+    if not isinstance(details, list):
+        return ""
+    for entry in details:
+        if isinstance(entry, dict) and entry.get("msg"):
+            return str(entry["msg"])
+    return ""
+
+
+def describe_launch_failure(response, error: BaseException | None = None) -> str:
+    """Why this answer is not a launch, in a phrase a person can act on.
+
+    The readiness wait gives up the same way for causes with opposite fixes: a
+    500 from their cloud is theirs and self-heals, a dead proxy is ours and
+    needs a new endpoint, a refused connection means the local agent is down.
+    In the log those are fourteen identical "profile is not running" lines, so
+    the distinction only survives if it is captured here and carried onto the
+    failure note. Empty string when the answer looks like a real launch.
+    """
+    if error is not None:
+        return f"MultiLogin launch raised {type(error).__name__}: {error}"[:200]
+    if classify_launch(response) == OK:
+        return ""
+    if is_mlx_start_urls_failure(response):
+        return "MultiLogin 500: failed to get profiles start urls (their side, self-heals)"
+    refusal = _refusal_message(response)
+    if refusal:
+        return f"MultiLogin refused the launch: {refusal}"
+    code = _status_code(response)
+    if code:
+        return f"MultiLogin launch returned HTTP {code}"
+    return "MultiLogin did not launch the phone"
+
+
 def classify_launch(response, error: BaseException | None = None) -> str:
     """Bucket one launch answer: OK, MLX_500 (their cloud) or OTHER (ours).
 
