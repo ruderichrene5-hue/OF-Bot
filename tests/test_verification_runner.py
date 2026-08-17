@@ -751,3 +751,285 @@ class OnlyByIdTest(unittest.TestCase):
         # than hiding: it is how a typo in a mixed list would show up.
         self.assertTrue(any("luisa 2" in m for m in plan.not_found),
                         plan.not_found)
+
+
+class ProtectedReasonTest(unittest.TestCase):
+    """Profiles Airtable has already settled, which this pass must not overturn.
+
+    The failure this guards is not "wasted a launch". A suspended account goes
+    on rendering a cached feed, so its screen reads healthy, so the chain
+    returns `solved`, so the `Issue` tag comes off and a dead account is handed
+    back to the posting loop. That is what happened to `Laila 5` on 2026-08-13,
+    and an unattended pass would repeat it on every profile in this state.
+    """
+
+    class _Logger:
+        def __init__(self):
+            self.warnings = []
+            self.infos = []
+
+        def info(self, message, *args):
+            self.infos.append(message % args if args else message)
+
+        def warning(self, message, *args):
+            self.warnings.append(message % args if args else message)
+
+        error = warning
+
+    def test_a_banned_profile_is_not_planned(self):
+        plan = vr.plan_verification(
+            [_item("laila 5", launch_id="L1")], now=NOW, limit=10,
+            reasons={"L1": "banned / blocked"})
+        self.assertEqual(plan.to_run, [])
+        self.assertEqual(plan.protected, [("laila 5", "banned / blocked")])
+
+    def test_a_supervised_profile_is_not_planned(self):
+        plan = vr.plan_verification(
+            [_item("katja 2", launch_id="L1")], now=NOW, limit=10,
+            reasons={"L1": "held for supervised run"})
+        self.assertEqual(plan.to_run, [])
+        self.assertEqual(len(plan.protected), 1)
+
+    def test_naming_it_explicitly_does_not_get_past_the_guard(self):
+        """`--only` overrides the tag filter. It must not override this."""
+        plan = vr.plan_verification(
+            [_item("laila 5", launch_id="L1", tags=())], now=NOW, limit=10,
+            only=["L1"], reasons={"L1": "banned / blocked"})
+        self.assertEqual(plan.to_run, [])
+        self.assertEqual(len(plan.protected), 1)
+
+    def test_ignore_diagnosis_does_not_get_past_the_guard_either(self):
+        plan = vr.plan_verification(
+            [_item("laila 5", launch_id="L1")], now=NOW, limit=10,
+            respect_diagnosis=False, reasons={"L1": "banned / blocked"})
+        self.assertEqual(plan.to_run, [])
+
+    def test_an_ordinary_reason_is_still_worked(self):
+        plan = vr.plan_verification(
+            [_item("jil 5", launch_id="L1")], now=NOW, limit=10,
+            reasons={"L1": "human verification required"})
+        self.assertEqual([p.name for p in plan.to_run], ["jil 5"])
+        self.assertEqual(plan.protected, [])
+
+    def test_no_reasons_at_all_plans_exactly_as_before(self):
+        """An Airtable outage degrades to the old behaviour, not to nothing."""
+        plan = vr.plan_verification([_item("jil 5", launch_id="L1")],
+                                    now=NOW, limit=10)
+        self.assertEqual([p.name for p in plan.to_run], ["jil 5"])
+
+    def test_the_write_back_refuses_to_untag_a_protected_profile(self):
+        """The second line of defence, independent of the planner."""
+        class FakeTags:
+            def __init__(self):
+                self.unassigned = []
+
+            def tag_ids_by_name(self):
+                return {"issue": "T1"}
+
+            def unassign(self, profile_id, tag_ids):
+                self.unassigned.append(profile_id)
+                return True
+
+            def assign(self, profile_id, tag_ids):
+                return True
+
+        tags, logger = FakeTags(), self._Logger()
+        outcome = vr.ProfileOutcome(name="laila 5", launch_id="L1",
+                                    status=verification.RESULT_SOLVED,
+                                    detail="no challenge on screen")
+        vr._write_back(None, tags, logger,
+                       vr.PlannedProfile(launch_id="L1", name="laila 5"),
+                       outcome, {"record_id": "rec1", "reason": "Banned / Blocked"})
+
+        self.assertEqual(tags.unassigned, [])
+        self.assertFalse(outcome.untagged)
+        self.assertTrue(any("NOT untagging" in w for w in logger.warnings),
+                        logger.warnings)
+
+    def test_reasons_by_launch_reads_an_overview(self):
+        got = vr.reasons_by_launch([
+            {"launch_id": "L1", "reason": "Banned / Blocked"},
+            {"launch_id": "", "reason": "ignored -- no launch id"},
+            {"reason": "also ignored"},
+        ])
+        self.assertEqual(got, {"L1": "banned / blocked"})
+
+
+class DetectionPriorityTest(unittest.TestCase):
+    """What a detector saw beats what a remark says.
+
+    `Human Verification Required` in Airtable means something *observed*
+    Instagram asking. The MultiLogin remark is hand-typed and says nothing at
+    all on 34 of 70 tagged profiles, so ordering on it alone buries the
+    profiles this flow exists to answer behind ones it cannot help.
+    """
+
+    def test_a_detected_profile_goes_first(self):
+        plan = vr.plan_verification(
+            [_item("zeta", launch_id="L1"), _item("alpha", launch_id="L2")],
+            now=NOW, limit=10,
+            reasons={"L1": "human verification required",
+                     "L2": "no recent success"})
+        self.assertEqual([p.name for p in plan.to_run], ["zeta", "alpha"])
+
+    def test_detection_outranks_the_remark(self):
+        plan = vr.plan_verification(
+            [_item("zeta", launch_id="L1"),
+             _item("alpha", launch_id="L2", remark="needs verification")],
+            now=NOW, limit=10,
+            reasons={"L1": "human verification required"})
+        self.assertEqual([p.name for p in plan.to_run], ["zeta", "alpha"])
+
+    def test_the_remark_still_orders_when_no_reason_is_known(self):
+        plan = vr.plan_verification(
+            [_item("zeta", launch_id="L1"),
+             _item("alpha", launch_id="L2", remark="needs verification")],
+            now=NOW, limit=10)
+        self.assertEqual([p.name for p in plan.to_run], ["alpha", "zeta"])
+
+
+class NumberCeilingTest(unittest.TestCase):
+    """`--limit` bounds phones; `--max-numbers` bounds money.
+
+    They are different bounds: one profile can spend three numbers, so a
+    five-profile pass is a fifteen-number worst case -- more than this wallet
+    has ever held.
+    """
+
+    class _Logger:
+        def info(self, message, *args):
+            pass
+
+        warning = info
+        error = info
+
+    class _Clients:
+        class _Launcher:
+            def start_profiles(self, ids):
+                pass
+
+        class _Shutdown:
+            def shutdown_profiles(self, ids):
+                pass
+
+        def __init__(self):
+            self.launcher = self._Launcher()
+            self.shutdown = self._Shutdown()
+            self.api = None
+            self.adb_enable = None
+
+    def _run(self, items, max_numbers, numbers_each=3, max_per_day=0,
+             ledger=None):
+        worked = []
+
+        def fake_work_one(clients, adb_client, logger, planned, outcome, country,
+                          **kwargs):
+            worked.append(planned.name)
+            outcome.status = verification.RESULT_NEEDS_HUMAN
+            outcome.detail = "no code arrived"
+            outcome.numbers_used = numbers_each
+
+        original = vr._work_one
+        vr._work_one = fake_work_one
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                if ledger is not None:
+                    vr.save_attempts(ledger, Path(tmp))
+                report = vr.run_verification_pass(
+                    self._Clients(), None, None, self._Logger(), items,
+                    dry_run=False, limit=10, app_dir=Path(tmp),
+                    max_numbers=max_numbers, max_per_day=max_per_day)
+        finally:
+            vr._work_one = original
+        return worked, report
+
+    def test_the_pass_stops_once_the_ceiling_is_reached(self):
+        worked, report = self._run(
+            [_item("a", launch_id="L1"), _item("b", launch_id="L2"),
+             _item("c", launch_id="L3")], max_numbers=4)
+
+        # Two profiles at three numbers each: the first starts having spent
+        # nothing, the second starts at 3 (under 4), the third is refused at 6.
+        self.assertEqual(worked, ["a", "b"])
+        self.assertTrue(report.stopped, report.summary())
+        # A ceiling is not a fleet failure -- the unit must not go red for it.
+        self.assertEqual(report.aborted, "")
+
+    def test_no_ceiling_when_it_is_zero(self):
+        worked, report = self._run(
+            [_item("a", launch_id="L1"), _item("b", launch_id="L2")],
+            max_numbers=0)
+        self.assertEqual(worked, ["a", "b"])
+        self.assertEqual(report.stopped, "")
+
+    def test_the_pass_records_what_each_profile_cost(self):
+        """The daily ceiling can only count what the ledger writes down."""
+        with tempfile.TemporaryDirectory() as tmp:
+            def fake_work_one(clients, adb_client, logger, planned, outcome,
+                              country, **kwargs):
+                outcome.status = verification.RESULT_NEEDS_HUMAN
+                outcome.numbers_used = 2
+
+            original = vr._work_one
+            vr._work_one = fake_work_one
+            try:
+                vr.run_verification_pass(
+                    self._Clients(), None, None, self._Logger(),
+                    [_item("a", launch_id="L1")], dry_run=False, limit=10,
+                    app_dir=Path(tmp), max_per_day=0)
+            finally:
+                vr._work_one = original
+
+            self.assertEqual(vr.load_attempts(Path(tmp))["L1"]["numbers"], 2)
+
+
+class DailyCeilingTest(unittest.TestCase):
+    """The ceiling that actually bounds a timer.
+
+    `--max-numbers` bounds one tick, and a tick is not the unit anybody spends
+    in: a 30-minute timer at six numbers a tick is a 288-number day against a
+    wallet that has never held more than ten dollars.
+    """
+
+    def test_yesterdays_spend_does_not_count(self):
+        old = (NOW - timedelta(hours=30)).isoformat()
+        self.assertEqual(
+            vr.numbers_spent_since({"L1": {"at": old, "numbers": 9}},
+                                   NOW - timedelta(hours=24)),
+            0)
+
+    def test_todays_spend_counts(self):
+        recent = (NOW - timedelta(hours=2)).isoformat()
+        self.assertEqual(
+            vr.numbers_spent_since({"L1": {"at": recent, "numbers": 3},
+                                    "L2": {"at": recent, "numbers": 2}},
+                                   NOW - timedelta(hours=24)),
+            5)
+
+    def test_an_entry_from_before_this_was_recorded_counts_as_nothing(self):
+        recent = (NOW - timedelta(hours=1)).isoformat()
+        self.assertEqual(
+            vr.numbers_spent_since({"L1": {"at": recent, "result": "solved"}},
+                                   NOW - timedelta(hours=24)),
+            0)
+
+    def test_junk_in_the_ledger_does_not_raise(self):
+        recent = (NOW - timedelta(hours=1)).isoformat()
+        self.assertEqual(
+            vr.numbers_spent_since({"L1": {"at": recent, "numbers": "three"},
+                                    "L2": {"at": "not a date", "numbers": 5},
+                                    "L3": None},
+                                   NOW - timedelta(hours=24)),
+            0)
+
+    def test_a_pass_refuses_to_start_work_once_the_day_is_spent(self):
+        """Recent spend on other profiles stops this pass before it launches."""
+        ceiling = NumberCeilingTest()
+        recent = (vr._now() - timedelta(hours=1)).isoformat()
+        worked, report = ceiling._run(
+            [_item("a", launch_id="L1")], max_numbers=0, max_per_day=6,
+            ledger={"L9": {"at": recent, "numbers": 6, "result": "needs_human"}})
+
+        self.assertEqual(worked, [])
+        self.assertIn("daily ceiling", report.stopped)
+        self.assertEqual(report.aborted, "")

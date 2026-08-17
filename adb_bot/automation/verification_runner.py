@@ -84,6 +84,59 @@ DEFAULT_LIMIT = 5
 
 LEDGER_FILENAME = "verification_attempts.json"
 
+# Airtable `Issue Reason` values this pass must never work, whatever the screen
+# says. Both are somebody else's finding, and the failure mode is the same: a
+# suspended account goes on rendering a **cached feed**, which reads as healthy,
+# which routes to `solved`, which takes the `Issue` tag off and hands a dead
+# account back to the posting loop. That is exactly how `Laila 5`'s ban was
+# overwritten on 2026-08-13, and it is the one mistake an unattended pass can
+# make that costs more than money.
+#
+# `flag_review` has always filtered its population before launching anything;
+# this pass never did, because it read MultiLogin's tags and MultiLogin has no
+# field for "a person already decided this". Airtable does.
+#
+# Matched lowercased -- `Held For Supervised Run` is written with typecast on,
+# so its casing is whatever first created it.
+PROTECTED_REASONS = {
+    at.PROFILE_ISSUE_BANNED.lower(),        # "banned / blocked"
+    "held for supervised run",
+}
+
+# The Airtable reason that means a detector -- not a person, not a guess --
+# saw Instagram ask for verification on this profile. Those go first: they are
+# the ones this flow exists to answer, and the MultiLogin remark that used to
+# order the queue says nothing at all on 34 of 70 tagged profiles.
+DETECTED_VERIFICATION_REASON = at.PROFILE_ISSUE_VERIFICATION.lower()
+
+# Hard ceiling on rented numbers per pass, independent of `--limit`. The limit
+# bounds *profiles*; this bounds *money*, and they are not the same bound: one
+# profile can spend three numbers, so `--limit 5` is a 15-number worst case.
+# Checked between profiles, so a pass stops at the first profile boundary after
+# the ceiling rather than mid-chain -- abandoning a half-answered challenge
+# would waste the numbers already spent on it.
+DEFAULT_MAX_NUMBERS_PER_PASS = 6
+
+# ...and the ceiling that actually matters once a timer is driving this. The
+# per-pass ceiling bounds one tick; nothing bounds *the day* except how often
+# the timer fires, and a 30-minute timer at 6 numbers a tick is a 288-number
+# day against a wallet that has never held more than ten dollars.
+#
+# Counted from the attempt ledger over a rolling 24 hours, not from a counter
+# that resets at midnight: a run at 23:50 and another at 00:10 are twenty
+# minutes apart and would otherwise both get a full day's budget.
+#
+# 12 numbers is roughly $2.40 -- about four profiles' worth of a real challenge
+# chain, which is more than a healthy day ever needs, and survivable when a bad
+# pool eats three numbers for nothing.
+DEFAULT_MAX_NUMBERS_PER_DAY = 12
+
+# Refuse to start a paid pass under this much credit with the active provider.
+# One number is ~$0.20 and a profile can want three, so starting a pass under
+# this cannot finish even one profile -- it can only burn launches discovering
+# that the wallet is empty.
+MIN_BALANCE_TO_START = 1.00
+
 # Stop the pass after this many failures in a row that another phone will not
 # fix. Every profile costs a launch and about four minutes, so grinding through
 # the whole limit against an empty wallet or a MultiLogin outage spends half an
@@ -239,6 +292,32 @@ def load_attempts(app_dir=None) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def numbers_spent_since(attempts: dict, since: datetime) -> int:
+    """Rented numbers recorded in the ledger at or after `since`.
+
+    The ledger is keyed by launch id and holds one entry per profile, so this
+    counts *the last attempt on each profile*, not every attempt ever made --
+    which is the right number anyway: an entry is overwritten only when that
+    profile is worked again, and the cool-off means that cannot happen twice
+    inside six hours.
+
+    An entry with no `numbers` key predates this being recorded and counts as
+    zero. That undercounts for one cool-off period after an upgrade and then
+    never again, which is the cheap direction to be wrong in for a ceiling that
+    is about not spending tomorrow's money today.
+    """
+    total = 0
+    for entry in (attempts or {}).values():
+        stamp = _parse((entry or {}).get("at"))
+        if stamp is None or stamp < since:
+            continue
+        try:
+            total += int((entry or {}).get("numbers") or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
 def save_attempts(attempts: dict, app_dir=None) -> bool:
     try:
         path = ledger_path(app_dir)
@@ -255,6 +334,7 @@ class PlannedProfile:
     launch_id: str
     name: str
     remark: str = ""
+    reason: str = ""   # lowercased Airtable `Issue Reason`, "" if unknown
 
 
 @dataclass
@@ -262,6 +342,7 @@ class VerificationPlan:
     to_run: list = field(default_factory=list)      # PlannedProfile
     cooling_off: list = field(default_factory=list)  # (name, hours remaining)
     diagnosed: list = field(default_factory=list)    # (name, the tag that says so)
+    protected: list = field(default_factory=list)    # (name, the Airtable reason)
     not_found: list = field(default_factory=list)    # names asked for that do not exist
     over_limit: int = 0
     flagged: int = 0
@@ -270,7 +351,7 @@ class VerificationPlan:
         parts = [f"{self.flagged} flagged", f"{len(self.to_run)} to run",
                  f"{len(self.cooling_off)} cooling off",
                  f"{len(self.diagnosed)} already diagnosed by a person",
-                 f"{self.over_limit} over the limit"]
+                 f"{len(self.protected)} protected", f"{self.over_limit} over the limit"]
         if self.not_found:
             parts.append(f"{len(self.not_found)} not found")
         return ", ".join(parts)
@@ -282,20 +363,44 @@ def _wanted_key(name: str) -> str:
     return " ".join(str(name or "").split()).lower()
 
 
+def reasons_by_launch(profile_records) -> dict:
+    """`{launch_id: lowercased Airtable Issue Reason}` from `profile_overview()`.
+
+    Its own function because both halves of this module need it and neither
+    should have to know the shape of an Airtable row to ask "what did somebody
+    already decide about this profile?".
+    """
+    out: dict = {}
+    for record in profile_records or []:
+        launch_id = str(record.get("launch_id") or "").strip()
+        if launch_id:
+            out[launch_id] = str(record.get("reason") or "").strip().lower()
+    return out
+
+
 def plan_verification(mlx_items, attempts=None, now=None,
                       limit: int = DEFAULT_LIMIT,
                       cooloff_hours: float = DEFAULT_COOLOFF_HOURS,
                       only=None, respect_diagnosis: bool = True,
-                      match: str | None = None) -> VerificationPlan:
+                      match: str | None = None,
+                      reasons=None) -> VerificationPlan:
     """Which flagged profiles this pass should work, and which it should not.
 
-    Ordering matters more than it looks: profiles whose MultiLogin remark
-    already mentions verification go first. The remarks badly understate the
-    problem -- only 10 of 70 tagged profiles say "human verification" and 34 say
-    nothing at all -- so this is a *priority*, never a filter. A pass that
-    filtered on the remark would skip most of the real work.
+    Ordering matters more than it looks. Profiles Airtable has recorded as
+    `Human Verification Required` go first -- that is a detector saying it *saw*
+    Instagram ask, which is the signal this whole flow exists to answer.
+    MultiLogin's remark is the weaker second key: it understates the problem
+    badly (only 10 of 70 tagged profiles say "human verification" and 34 say
+    nothing at all), so it is a *priority*, never a filter. A pass that filtered
+    on either would skip most of the real work -- the tag is what selects, and
+    the reason only decides who goes first.
+
+    `reasons` is `{launch_id: issue reason}` from `reasons_by_launch()`. Passing
+    it also switches on the `PROTECTED_REASONS` guard; without it this plans
+    exactly as it did before, which is what the pure unit tests still assert.
     """
     now = now or _now()
+    reasons = reasons or {}
     attempts = attempts or {}
     plan = VerificationPlan()
     wanted = {_wanted_key(n) for n in only} if only else None
@@ -351,6 +456,17 @@ def plan_verification(mlx_items, attempts=None, now=None,
         name = str(item.get("serial_name") or launch_id)
         remark = str(item.get("remark") or "")
 
+        # Somebody -- or an earlier pass -- has already settled this profile in
+        # Airtable, and the answer is one this flow must not overturn. Checked
+        # BEFORE the cool-off and before `--only`, because unlike every other
+        # skip here this one is not about saving a launch: working the profile
+        # at all risks reading a banned account's cached feed as healthy and
+        # untagging it. `--ignore-diagnosis` deliberately does not reach it.
+        reason = reasons.get(launch_id, "")
+        if reason in PROTECTED_REASONS:
+            plan.protected.append((name, reason))
+            continue
+
         # A person has already looked and said what is wrong. Believe them:
         # `logged out` needs credentials and `unable to verify` means somebody
         # tried. Launching either costs two minutes to rediscover the tag.
@@ -372,9 +488,11 @@ def plan_verification(mlx_items, attempts=None, now=None,
                 plan.cooling_off.append(
                     (name, (ready_at - now).total_seconds() / 3600.0))
                 continue
-        candidates.append(PlannedProfile(launch_id=launch_id, name=name, remark=remark))
+        candidates.append(PlannedProfile(launch_id=launch_id, name=name, remark=remark,
+                                        reason=reason))
 
-    candidates.sort(key=lambda p: (0 if "verif" in p.remark.lower() else 1,
+    candidates.sort(key=lambda p: (0 if p.reason == DETECTED_VERIFICATION_REASON else 1,
+                                   0 if "verif" in p.remark.lower() else 1,
                                    p.name.lower()))
     plan.to_run = candidates[:limit]
     plan.over_limit = max(0, len(candidates) - limit)
@@ -411,7 +529,8 @@ class VerificationReport:
     outcomes: list = field(default_factory=list)    # ProfileOutcome
     plan: VerificationPlan | None = None
     dry_run: bool = True
-    aborted: str = ""      # why the pass stopped early, if it did
+    aborted: str = ""      # a fleet-level problem stopped the pass -- an error
+    stopped: str = ""      # the pass hit its own ceiling -- not an error
 
     def counts(self) -> dict:
         out: dict = {}
@@ -426,7 +545,9 @@ class VerificationReport:
         spent = sum(o.numbers_used for o in self.outcomes)
         summary = (f"[{mode}] verification: {counts}; {spent} number(s) rented, "
                    f"{sum(1 for o in self.outcomes if o.untagged)} profile(s) handed back")
-        return f"{summary} -- ABORTED: {self.aborted}" if self.aborted else summary
+        if self.aborted:
+            return f"{summary} -- ABORTED: {self.aborted}"
+        return f"{summary} -- {self.stopped}" if self.stopped else summary
 
 
 def route_result(status: str) -> tuple:
@@ -457,7 +578,10 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
                           readiness_attempts: int = READINESS_ATTEMPTS,
                           readiness_wait: int = READINESS_WAIT_SECONDS,
                           only=None, respect_diagnosis: bool = True,
-                          match: str | None = None) -> VerificationReport:
+                          match: str | None = None,
+                          max_numbers: int = DEFAULT_MAX_NUMBERS_PER_PASS,
+                          max_per_day: int = DEFAULT_MAX_NUMBERS_PER_DAY,
+                          ) -> VerificationReport:
     """Work up to `limit` flagged profiles. Returns what happened to each.
 
     `dry_run` names the profiles it would work and rents nothing -- the money is
@@ -466,11 +590,16 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
     from adb_bot.core import locks
 
     attempts = load_attempts(app_dir)
+    reasons = reasons_by_launch(profile_records)
     plan = plan_verification(mlx_items, attempts=attempts, limit=limit,
                              cooloff_hours=cooloff_hours, only=only,
-                             respect_diagnosis=respect_diagnosis, match=match)
+                             respect_diagnosis=respect_diagnosis, match=match,
+                             reasons=reasons)
     report = VerificationReport(plan=plan, dry_run=dry_run)
     logger.info("verification pass: %s", plan.summary())
+    for name, reason in plan.protected:
+        logger.info("verification pass: skipping %s -- Airtable records it as %r, "
+                    "which this pass must not overturn", name, reason)
     for name, tag in plan.diagnosed:
         logger.info("verification pass: skipping %s -- somebody tagged it %r, "
                     "which verification cannot fix", name, tag)
@@ -488,8 +617,39 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
 
     by_launch = {str(r.get("launch_id") or ""): r for r in (profile_records or [])}
 
+    # What the last 24 hours already cost, before this pass adds to it.
+    spent_today = numbers_spent_since(attempts, _now() - timedelta(hours=24))
+    if max_per_day and spent_today:
+        logger.info("verification pass: %d number(s) rented in the last 24 hours, "
+                    "ceiling %d", spent_today, max_per_day)
+
     consecutive_fleet_failures = 0
     for planned in plan.to_run:
+        # Money, checked at the profile boundary. `--limit` bounds phones and
+        # this bounds spend; a five-profile pass is a fifteen-number worst case,
+        # which is more than the wallet has ever held. Checked here rather than
+        # inside the chain on purpose: stopping mid-challenge would throw away
+        # the numbers already spent answering it.
+        spent = sum(o.numbers_used for o in report.outcomes)
+        if max_per_day and (spent_today + spent) >= max_per_day:
+            report.stopped = (
+                f"stopped on the daily ceiling: {spent_today + spent} number(s) "
+                f"rented in the last 24 hours, limit {max_per_day}. The flagged "
+                f"profiles are still flagged and tomorrow's ticks take them.")
+            logger.info("verification pass: %s", report.stopped)
+            break
+        if max_numbers and spent >= max_numbers:
+            # `stopped`, not `aborted`: reaching the ceiling is the ceiling
+            # working, and a timer that painted itself red for it would train
+            # everyone to ignore a red verification unit. Only a fleet-level
+            # abort is an error -- see `main`'s exit code.
+            report.stopped = (f"stopped after {spent} rented number(s), the "
+                              f"per-pass ceiling of {max_numbers}. The profiles "
+                              f"left are still flagged and the next tick takes "
+                              f"them.")
+            logger.info("verification pass: %s", report.stopped)
+            break
+
         outcome = ProfileOutcome(name=planned.name, launch_id=planned.launch_id)
         report.outcomes.append(outcome)
 
@@ -548,6 +708,11 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
             # anyone later whether this was a bad SMS pool or a video selfie.
             "detail": outcome.detail or "",
             "terminal": is_terminal_outcome(outcome),
+            # What this profile cost, so the rolling daily ceiling has something
+            # to count. Kept here rather than in a counter of its own: the
+            # ledger is already the file that survives a restart, and a second
+            # spend file could disagree with it.
+            "numbers": int(outcome.numbers_used or 0),
         }
         _write_back(airtable, tag_client, logger, planned, outcome,
                     by_launch.get(planned.launch_id))
@@ -676,6 +841,21 @@ def _write_back(airtable, tag_client, logger, planned, outcome, record) -> None:
         return
 
     untag, flag_banned = route_result(outcome.status)
+
+    # The same guard as the planner's, applied to the write instead of the
+    # selection. Deliberately duplicated rather than trusted once: the planner
+    # only sees the reasons it was given, and `--only` plus a stale Airtable
+    # read is enough to put a protected profile in front of this line. Refusing
+    # here costs a wasted launch; the alternative costs a banned account handed
+    # back to the posting loop, which is what happened to `Laila 5`.
+    reason = str((record or {}).get("reason") or "").strip().lower()
+    if untag and reason in PROTECTED_REASONS:
+        logger.warning(
+            "verification pass: %s read as %s, but Airtable records it as %r -- "
+            "NOT untagging. A suspended account renders a cached feed, so a "
+            "clean screen is not evidence the ban is gone.",
+            planned.name, outcome.status, reason)
+        return
     _record_diagnosis_tag(tag_client, logger, planned, outcome)
 
     if untag and tag_client is not None:
@@ -770,6 +950,21 @@ def main(argv=None) -> int:
     parser.add_argument("--readiness-wait", type=int, default=READINESS_WAIT_SECONDS,
                         help=f"seconds per readiness attempt "
                              f"(default {READINESS_WAIT_SECONDS}).")
+    parser.add_argument("--max-numbers", type=int, default=DEFAULT_MAX_NUMBERS_PER_PASS,
+                        help=f"stop the pass once this many numbers have been "
+                             f"rented (default {DEFAULT_MAX_NUMBERS_PER_PASS}). "
+                             f"Bounds money the way --limit bounds phones; 0 "
+                             f"means no ceiling.")
+    parser.add_argument("--max-numbers-per-day", type=int,
+                        default=DEFAULT_MAX_NUMBERS_PER_DAY,
+                        help=f"stop once this many numbers have been rented in "
+                             f"the last 24 hours, across every pass (default "
+                             f"{DEFAULT_MAX_NUMBERS_PER_DAY}). This is the one "
+                             f"that bounds a timer; 0 means no ceiling.")
+    parser.add_argument("--min-balance", type=float, default=MIN_BALANCE_TO_START,
+                        help=f"refuse to start a paid pass under this much "
+                             f"credit (default {MIN_BALANCE_TO_START}). 0 skips "
+                             f"the check.")
     parser.add_argument("--mlx-token", default=None)
     args = parser.parse_args(argv)
 
@@ -779,16 +974,48 @@ def main(argv=None) -> int:
 
     airtable = None
     profile_records = None
-    if args.apply:
-        # Only needed to flag a banned profile, so a dry run does not read
-        # Airtable at all -- and an Airtable outage cannot stop the pass that
-        # matters, only the write-back for the one result that needs it.
+    # Read in BOTH modes now. It used to be apply-only, on the reasoning that a
+    # dry run needs nothing from Airtable -- but the `PROTECTED_REASONS` guard
+    # lives there, so without it a dry run lists profiles the real pass would
+    # refuse, which is the one thing a dry run must not do. An Airtable outage
+    # still cannot stop the pass: it degrades to the old behaviour, loudly.
+    try:
+        airtable = _airtable()
+        profile_records = airtable.profile_overview()
+    except Exception as exc:
+        logger.warning("verification pass: no Airtable (%s); running without the "
+                       "protected-reason guard and without banned write-back", exc)
+    # Ask the wallet before launching anything. A pass that starts broke cannot
+    # do its job and does not fail cleanly either: it launches a phone, reads a
+    # challenge, fails to rent, and books that as a *fleet-level* failure -- so
+    # two profiles in, it aborts having spent four minutes and two launches to
+    # discover a balance one HTTP call would have told it. Free to ask, and the
+    # only preflight that can save a whole tick.
+    if args.apply and args.min_balance > 0:
         try:
-            airtable = _airtable()
-            profile_records = airtable.profile_overview()
+            from adb_bot.clients.sms.router import build_router
+            # The best of them, not the active one: the breaker will switch to
+            # whichever still has credit, so a flat 5sim does not mean a pass
+            # cannot run when SMSPool is funded.
+            best = 0.0
+            for provider in build_router(logger=logger).providers:
+                try:
+                    best = max(best, float(provider.balance()))
+                except Exception as exc:
+                    logger.warning("verification pass: %s balance unreadable (%s)",
+                                   provider.name, exc)
+            if best < args.min_balance:
+                print(f"REFUSED: best provider balance is {best:.2f}, under the "
+                      f"{args.min_balance:.2f} floor. Top up before running; "
+                      f"nothing was launched.")
+                logger.warning("verification pass: refusing to start -- best balance "
+                               "%.2f is under the %.2f floor", best, args.min_balance)
+                return 1
         except Exception as exc:
-            logger.warning("verification pass: no Airtable (%s); a banned profile "
-                           "will be reported but not flagged", exc)
+            # Never a reason to refuse: the balance check is an optimisation,
+            # and a provider whose API is down may still rent.
+            logger.warning("verification pass: could not read balances (%s); "
+                           "starting anyway", exc)
 
     only = [n for n in (args.only or "").split(",") if n.strip()] or None
     # An explicit list is a request for those profiles, so the default limit
@@ -806,7 +1033,8 @@ def main(argv=None) -> int:
         readiness_attempts=args.readiness_attempts,
         readiness_wait=args.readiness_wait,
         only=only, respect_diagnosis=not args.ignore_diagnosis,
-        match=args.match)
+        match=args.match, max_numbers=args.max_numbers,
+        max_per_day=args.max_numbers_per_day)
 
     plan = report.plan
     print(f"\n{'=' * 70}")
@@ -814,8 +1042,11 @@ def main(argv=None) -> int:
     print(f"flagged     : {plan.flagged}")
     print(f"cooling off : {len(plan.cooling_off)}")
     print(f"diagnosed   : {len(plan.diagnosed)}  (a person already said what is wrong)")
+    print(f"protected   : {len(plan.protected)}  (Airtable says do not touch)")
     print(f"over limit  : {plan.over_limit}")
     print(f"{'=' * 70}")
+    for name, reason in plan.protected:
+        print(f"  {name:24} PROTECTED -- Airtable reason {reason!r}")
     for name, tag in plan.diagnosed:
         print(f"  {name:24} skipped -- tagged {tag!r}")
     for missing in plan.not_found:
@@ -836,6 +1067,8 @@ def main(argv=None) -> int:
     print(f"{'=' * 70}")
     if report.aborted:
         print(f"STOPPED EARLY: {report.aborted}")
+    if report.stopped:
+        print(f"CEILING: {report.stopped}")
     print(report.summary())
     # Non-zero when the pass gave up on a fleet-level problem, so a timer or a
     # watchdog can tell "worked through five profiles" from "could not rent a

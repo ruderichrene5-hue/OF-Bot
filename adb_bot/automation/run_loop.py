@@ -28,6 +28,7 @@ from pathlib import Path
 
 from adb_bot.automation import loop_watchdog, schedule_spec
 from adb_bot.automation.flows import reel_verify
+from adb_bot.automation import verification_runner
 from adb_bot.automation.retry_runner import DEFAULT_MAX_RETRIES
 from adb_bot.clients import airtable as at
 from adb_bot.clients.airtable import AirtableClient
@@ -37,7 +38,7 @@ from adb_bot.core.logger import get_logger
 
 LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery", "warmup",
          "warmup-state", "issue-tags", "mlx-sync", "cleanup", "second-accounts",
-         "digest")
+         "digest", "verification")
 # `doctor` isn't a loop -- it's the preflight check, runnable the same way.
 # `report` renders the operational page; like `doctor` it is a command rather
 # than a loop, and unlike `doctor` it is not in the recommended set, so it never
@@ -357,6 +358,53 @@ def _run_digest(args, logger) -> int:
     airtable = _airtable(args.base_id, args.airtable_token)
     digest_mod.run_digest(airtable, dry_run=not args.apply, logger=logger)
     return 0
+
+
+def _run_verification(args, logger) -> int:
+    """`verification`: answer Instagram's challenge on the profiles flagged for it.
+
+    The other end of `issue-tags`. That pass turns a detection into an `Issue`
+    tag; this one picks the tag up, drives the challenge chain on the phone, and
+    -- when it actually solves one -- takes the tag off again, which is the
+    signal `issue_tags` reads as "somebody looked" and `recovery_runner` reads
+    as "put it back to work". Before this the second half of that loop was a
+    person running a CLI by hand, so a profile flagged at 02:00 stayed flagged
+    until somebody noticed.
+
+    **This is the only loop that spends money**, which is why it is not simply
+    `--apply` like the rest:
+
+    - `--limit` bounds phones per tick and `--max-numbers` bounds rented
+      numbers, because one profile can want three of them;
+    - it refuses to start under `--min-balance`, rather than discovering an
+      empty wallet two launches in;
+    - profiles Airtable records as `Banned / Blocked` or `Held For Supervised
+      Run` are never worked at all -- a suspended account renders a cached feed
+      that reads as healthy, and untagging one hands a dead account back to the
+      posting loop.
+
+    Exit code follows `issue-tags`: non-zero only for a fleet-level problem (no
+    numbers, MultiLogin not starting phones), because that is the state a person
+    has to fix. Reaching the number ceiling, or finding every profile needs a
+    human, is the pass working.
+    """
+    from adb_bot.automation import verification_runner
+
+    argv = ["--limit", str(args.limit_profiles), "--max-numbers", str(args.max_numbers),
+            "--max-numbers-per-day", str(args.max_numbers_per_day),
+            "--min-balance", str(args.min_balance)]
+    if args.apply:
+        argv.append("--apply")
+    if args.country:
+        argv += ["--country", args.country]
+    if args.mlx_token:
+        argv += ["--mlx-token", args.mlx_token]
+    # Deliberately delegating to the module's own `main` rather than calling
+    # `run_verification_pass` here. Everything this loop needs -- the balance
+    # preflight, the Airtable read that feeds the protected-reason guard, the
+    # printed per-profile report -- already lives there, and a second assembly
+    # of the same clients is a second place for the guard to be forgotten.
+    return verification_runner.main(argv)
 
 
 def _run_issue_tags(args, logger) -> int:
@@ -844,6 +892,7 @@ _DISPATCH = {
     "warmup": _run_warmup,
     "warmup-state": _run_warmup_state,
     "issue-tags": _run_issue_tags,
+    "verification": _run_verification,
     "digest": _run_digest,
     "pipeline": _run_pipeline,
     "queue": _run_queue,
@@ -940,6 +989,35 @@ def main(argv=None) -> int:
                              "parked profiles that were never flagged in Airtable, and which "
                              "of those were deliberate is not recoverable from Airtable. Only "
                              "turn this on having decided those tags are stale.")
+    # `verification`. Named `--limit-profiles` rather than `--limit` because
+    # `--limit` is already taken here by another loop, and a money-spending flag
+    # is the last one that should silently mean something else.
+    parser.add_argument("--limit-profiles", type=int,
+                        default=verification_runner.DEFAULT_LIMIT,
+                        help=f"verification: phones to work per tick (default "
+                             f"{verification_runner.DEFAULT_LIMIT}).")
+    parser.add_argument("--max-numbers", type=int,
+                        default=verification_runner.DEFAULT_MAX_NUMBERS_PER_PASS,
+                        help=f"verification: stop the tick after this many rented "
+                             f"numbers (default "
+                             f"{verification_runner.DEFAULT_MAX_NUMBERS_PER_PASS}). "
+                             f"Bounds money the way --limit-profiles bounds phones: "
+                             f"one profile can want three numbers. 0 removes the "
+                             f"ceiling.")
+    parser.add_argument("--max-numbers-per-day", type=int,
+                        default=verification_runner.DEFAULT_MAX_NUMBERS_PER_DAY,
+                        help=f"verification: rolling 24-hour ceiling on rented "
+                             f"numbers across every tick (default "
+                             f"{verification_runner.DEFAULT_MAX_NUMBERS_PER_DAY}). "
+                             f"This is the ceiling that actually bounds a timer -- "
+                             f"--max-numbers only bounds one tick. 0 removes it.")
+    parser.add_argument("--min-balance", type=float,
+                        default=verification_runner.MIN_BALANCE_TO_START,
+                        help=f"verification: refuse to start under this much credit "
+                             f"(default {verification_runner.MIN_BALANCE_TO_START}).")
+    parser.add_argument("--country", default=None,
+                        help="verification: country to rent numbers from "
+                             "(default DE -- the phones and the forms are German).")
     parser.add_argument("--skip-staging", action="store_true",
                         help="mlx-sync: skip staging profiles that belong to no model.")
     parser.add_argument("--no-reconcile", action="store_true",
