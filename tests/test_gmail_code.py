@@ -73,9 +73,14 @@ def test_sync_off_is_not_the_same_as_an_empty_inbox():
 class FakeDriver:
     def __init__(self, screens):
         self._screens = list(screens)
+        self.taps = []
 
     def read_screen(self):
         return self._screens.pop(0) if self._screens else ""
+
+    def tap_label(self, labels):
+        self.taps.append(labels)
+        return True
 
 
 class FakeAdb:
@@ -133,6 +138,38 @@ def test_the_likely_launcher_is_tried_before_the_rest():
 def test_the_component_list_is_bounded():
     dump = " ".join(f"com.google.android.gm/.Activity{n}" for n in range(20))
     assert len(gmail_code._components(dump)) == 3
+
+
+WELCOME_TOUR = ("new in gmail all the features you love with a fresh new look "
+                "got it")
+
+
+def test_gmails_welcome_tour_is_recognised():
+    """A Gmail installed a minute ago opens on this, not on an inbox."""
+    assert gmail_code.is_onboarding(WELCOME_TOUR)
+
+
+def test_an_inbox_is_not_mistaken_for_the_tour():
+    assert not gmail_code.is_onboarding(INBOX)
+
+
+def test_the_welcome_tour_is_clicked_through_then_the_inbox_is_read(monkeypatch):
+    """Without this the tour reads as somebody else's mailbox and the run
+    stops one screen short of the code."""
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    box, _ = _mailbox([WELCOME_TOUR, WELCOME_TOUR, INBOX])
+    assert box.wait_for_code(timeout=60) == "418902"
+
+
+def test_a_tour_that_never_ends_is_reported_not_waited_out(monkeypatch):
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    box, _ = _mailbox([WELCOME_TOUR] * 40)
+    try:
+        box.wait_for_code(timeout=600)
+    except gmail_code.MailboxNotReady as exc:
+        assert "welcome tour" in str(exc)
+    else:
+        raise AssertionError("tapped at a tour forever")
 
 
 def test_a_missing_gmail_is_reported_at_once_not_waited_out(monkeypatch):

@@ -144,6 +144,32 @@ def find_code(text: str | None, address: str = "") -> str:
     return match.group(1) if match else ""
 
 
+# A Gmail installed one minute ago opens on a welcome tour, not on an inbox.
+# `Blank caio 2` landed on "new in gmail -- all the features you love with a
+# fresh new look -- got it" (2026-08-17), which the ownership check read as
+# somebody else's mailbox, correctly refusing to trust it.
+_ONBOARDING_MARKERS = (
+    "new in gmail",
+    "welcome to gmail",
+    "all the features you love",
+    "take me to gmail",
+    "meet the new gmail",
+)
+
+_TOUR_BUTTONS = ("Got it", "GOT IT", "Take me to Gmail", "TAKE ME TO GMAIL",
+                 "Next", "NEXT", "OK", "Continue", "CONTINUE", "Done")
+
+# Enough for a multi-page tour, few enough that a screen which simply will not
+# move on ends the run instead of eating the phone.
+MAX_TOUR_TAPS = 6
+
+
+def is_onboarding(text: str) -> bool:
+    """Is this Gmail's welcome tour rather than a mailbox?"""
+    haystack = (text or "").lower()
+    return any(marker in haystack for marker in _ONBOARDING_MARKERS)
+
+
 _COMPONENT_RE = re.compile(rf"{re.escape(GMAIL_PACKAGE)}/[\w.$]+")
 
 # Words that mark the activity you actually want to land on. `dumpsys package`
@@ -275,7 +301,7 @@ class PhoneMailbox:
                 "screen, which is still Instagram's")
 
         try:
-            checked_owner = False
+            checked_owner, tours = False, 0
             while time.monotonic() < deadline:
                 # Re-checked every pass, not once: Instagram's confirmation
                 # page names the address too, so a read taken while it is in
@@ -288,6 +314,22 @@ class PhoneMailbox:
                     continue
 
                 text = self._read()
+
+                # A freshly installed Gmail opens on its own welcome tour, not
+                # on an inbox. Click through it before judging whose mail this
+                # is -- otherwise the tour reads as "somebody else's inbox".
+                if is_onboarding(text):
+                    tours += 1
+                    if tours > MAX_TOUR_TAPS:
+                        raise MailboxNotReady(
+                            f"Gmail is still showing its welcome tour after "
+                            f"{MAX_TOUR_TAPS} taps: {text[:160]}")
+                    self._log("info", "clicking through Gmail's welcome tour "
+                                      "(%d/%d)", tours, MAX_TOUR_TAPS)
+                    if self.driver is not None:
+                        self.driver.tap_label(_TOUR_BUTTONS)
+                    time.sleep(5)
+                    continue
 
                 if not checked_owner:
                     if inbox_shows_address(text, self.address):
