@@ -18,6 +18,7 @@ from adb_bot.clients.multilogin import (
 from adb_bot.automation.flows import (
     InstagramLikeFeedFlow,
     InstagramNotificationsFlow,
+    InstagramPhotoPostU2Flow,
     InstagramReelIntentProbeFlow,
     InstagramReelUploadFlow,
     InstagramReelUploadU2Flow,
@@ -43,6 +44,7 @@ def build_automation() -> AutomationRunner:
         InstagramStoryUploadFlow(),
         InstagramReelUploadFlow(),
         InstagramReelUploadU2Flow(),
+        InstagramPhotoPostU2Flow(),
         InstagramUpdateBioFlow(),
         InstagramUpdateBioU2Flow(),
         InstagramUpdateProfilePictureU2Flow(),

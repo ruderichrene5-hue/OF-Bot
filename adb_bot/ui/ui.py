@@ -34,7 +34,7 @@ from adb_bot.clients.multilogin import (
     MultiloginMobileListClient,
     MultiloginShutdownClient,
 )
-from adb_bot.automation.flows import InstagramLikeFeedFlow, InstagramNotificationsFlow, InstagramScrollFlow, InstagramStoryUploadFlow, InstagramReelUploadFlow, InstagramReelUploadU2Flow, InstagramReelIntentProbeFlow, InstagramUpdateBioFlow, InstagramUpdateBioU2Flow, InstagramUpdateProfilePictureU2Flow, InstagramWarmUpDay1Flow, PushMediaTestFlow
+from adb_bot.automation.flows import InstagramLikeFeedFlow, InstagramNotificationsFlow, InstagramScrollFlow, InstagramStoryUploadFlow, InstagramReelUploadFlow, InstagramReelUploadU2Flow, InstagramPhotoPostU2Flow, InstagramReelIntentProbeFlow, InstagramUpdateBioFlow, InstagramUpdateBioU2Flow, InstagramUpdateProfilePictureU2Flow, InstagramWarmUpDay1Flow, PushMediaTestFlow
 from adb_bot.ui.helpers import (
     REEL_FLOWS,
     build_foldered_profile_groups,
@@ -1600,6 +1600,7 @@ class WorkflowUI:
             automation.register_flow(InstagramStoryUploadFlow())
             automation.register_flow(InstagramReelUploadFlow())
             automation.register_flow(InstagramReelUploadU2Flow())
+            automation.register_flow(InstagramPhotoPostU2Flow())
             automation.register_flow(InstagramUpdateBioFlow())
             automation.register_flow(InstagramUpdateBioU2Flow())
             automation.register_flow(InstagramUpdateProfilePictureU2Flow())
@@ -1675,6 +1676,7 @@ class WorkflowUI:
             automation.register_flow(InstagramStoryUploadFlow())
             automation.register_flow(InstagramReelUploadFlow())
             automation.register_flow(InstagramReelUploadU2Flow())
+            automation.register_flow(InstagramPhotoPostU2Flow())
             automation.register_flow(InstagramUpdateBioFlow())
             automation.register_flow(InstagramUpdateBioU2Flow())
             automation.register_flow(InstagramUpdateProfilePictureU2Flow())

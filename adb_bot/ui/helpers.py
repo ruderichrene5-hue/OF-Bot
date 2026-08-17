@@ -173,6 +173,7 @@ def get_available_flows() -> list[dict[str, str]]:
         {"value": "warm_up_process", "label": "Warm Up Process (BETA)"},
         {"value": "instagram_story_upload", "label": "Instagram Story Upload (BETA)"},
         {"value": "instagram_reel_upload_u2", "label": "Instagram Reels Upload (BETA)"},
+        {"value": "instagram_photo_post_u2", "label": "Instagram Photo Post (BETA)"},
         {"value": "update_bio_u2", "label": "Update Bio (BETA)"},
         {"value": "update_profile_picture", "label": "Update Profile Picture (BETA)"},
         # Diagnostic, not a posting flow: it pushes a video, fires the share

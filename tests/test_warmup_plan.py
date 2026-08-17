@@ -50,13 +50,36 @@ class RowMappingTest(TestCase):
         self.assertEqual(actions, [])
         self.assertEqual(warnings, [])
 
-    def test_feed_posts_warns_rather_than_silently_doing_nothing(self):
-        # No flow implements feed posts. A silent drop would look like success.
+    def test_feed_posts_schedule_one_photo_post_each(self):
+        # Feed Posts is a count, and every one of them is a photo-post run. This
+        # column was parsed and then dropped-with-a-warning for as long as no
+        # flow implemented it; `instagram_photo_post_u2` is that flow.
         actions, warnings = lifecycle.plan_actions_from_row(2, _row(scroll=True, feed_posts=2))
+        self.assertEqual(
+            [a.flow for a in actions],
+            [lifecycle.FLOW_SCROLL_ONLY,
+             lifecycle.FLOW_PHOTO_POST, lifecycle.FLOW_PHOTO_POST],
+        )
+        self.assertEqual(warnings, [])
+
+    def test_zero_feed_posts_schedules_none(self):
+        actions, warnings = lifecycle.plan_actions_from_row(2, _row(scroll=True, feed_posts=0))
         self.assertEqual([a.flow for a in actions], [lifecycle.FLOW_SCROLL_ONLY])
+        self.assertEqual(warnings, [])
+
+    def test_absurd_feed_post_count_is_clamped_not_obeyed(self):
+        # A mistyped cell should cost one capability, not a phone's whole day.
+        actions, warnings = lifecycle.plan_actions_from_row(2, _row(feed_posts=40))
+        self.assertEqual(len(actions), lifecycle.MAX_FEED_POSTS_PER_DAY)
+        self.assertTrue(all(a.flow == lifecycle.FLOW_PHOTO_POST for a in actions))
         self.assertEqual(len(warnings), 1)
-        self.assertIn("feed posts", warnings[0])
-        self.assertIn("2", warnings[0])
+        self.assertIn("40", warnings[0])
+
+    def test_unparseable_feed_post_count_warns_and_plans_nothing(self):
+        actions, warnings = lifecycle.plan_actions_from_row(2, _row(feed_posts="two"))
+        self.assertEqual(actions, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Feed Posts", warnings[0])
 
 
 class TableLookupTest(TestCase):

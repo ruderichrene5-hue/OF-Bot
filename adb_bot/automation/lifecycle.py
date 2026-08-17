@@ -35,6 +35,7 @@ FLOW_WARMUP = "warm_up_process"
 FLOW_UPDATE_PICTURE = "update_profile_picture"
 FLOW_UPDATE_BIO = "update_bio_u2"
 FLOW_REEL = "instagram_reel_upload_u2"
+FLOW_PHOTO_POST = "instagram_photo_post_u2"
 
 STAGE_NOT_STARTED = "not_started"
 STAGE_WARMUP = "warmup"
@@ -91,7 +92,16 @@ FLOW_SCROLL_ONLY = "instagram_scroll"
 # Plan-row capabilities with no flow behind them. Surfaced as warnings rather
 # than dropped, so a row asking for something the bot cannot do is visible
 # instead of silently doing nothing.
-UNSUPPORTED_PLAN_KEYS = {"feed_posts": "feed posts"}
+#
+# `feed_posts` lived here until the photo-post flow existed. It no longer does:
+# a Feed Posts count now schedules that many `instagram_photo_post_u2` runs.
+UNSUPPORTED_PLAN_KEYS: dict[str, str] = {}
+
+# A Feed Posts count is a per-day number, not a checkbox, and a plan row that
+# asks for a wild number of them is far more likely to be a typo than a real
+# instruction. Anything above this is clamped and warned about rather than
+# obeyed -- one mistyped cell should not spend a phone's whole day of launches.
+MAX_FEED_POSTS_PER_DAY = 5
 
 
 def plan_actions_from_row(day: int, row: dict) -> tuple[list[PlannedAction], list[str]]:
@@ -107,7 +117,7 @@ def plan_actions_from_row(day: int, row: dict) -> tuple[list[PlannedAction], lis
       Profile Picture Update -> update_profile_picture
       Bio Update             -> update_bio_u2
       Reel Post              -> instagram_reel_upload_u2
-      Feed Posts             -> nothing; warned
+      Feed Posts (count N)   -> N x instagram_photo_post_u2
     """
     actions: list[PlannedAction] = []
     warnings: list[str] = []
@@ -126,6 +136,25 @@ def plan_actions_from_row(day: int, row: dict) -> tuple[list[PlannedAction], lis
         actions.append(PlannedAction(FLOW_UPDATE_BIO, f"Update bio (day {day})"))
     if row.get("reel"):
         actions.append(PlannedAction(FLOW_REEL, f"Post reel (day {day})"))
+
+    # Feed Posts is a count, not a checkbox: N photo posts for the day. A
+    # negative or unparseable cell means zero rather than an exception -- a bad
+    # cell should cost that one capability, not the whole row's warm-up.
+    try:
+        feed_posts = int(row.get("feed_posts") or 0)
+    except (TypeError, ValueError):
+        warnings.append(f"day {day}: Feed Posts is not a number ({row.get('feed_posts')!r}) -- ignored")
+        feed_posts = 0
+    if feed_posts > MAX_FEED_POSTS_PER_DAY:
+        warnings.append(
+            f"day {day} asks for {feed_posts} feed posts, above the {MAX_FEED_POSTS_PER_DAY}/day "
+            f"ceiling -- scheduling {MAX_FEED_POSTS_PER_DAY}"
+        )
+        feed_posts = MAX_FEED_POSTS_PER_DAY
+    for index in range(1, max(0, feed_posts) + 1):
+        label = (f"Post photo {index} of {feed_posts} (day {day})"
+                 if feed_posts > 1 else f"Post photo (day {day})")
+        actions.append(PlannedAction(FLOW_PHOTO_POST, label))
 
     for key, label in UNSUPPORTED_PLAN_KEYS.items():
         if row.get(key):

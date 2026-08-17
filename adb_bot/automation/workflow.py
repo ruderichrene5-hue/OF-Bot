@@ -11,6 +11,7 @@ from adb_bot.automation import AutomationRunner
 from adb_bot.config.config import get_bearer_token, get_profile_ids
 from adb_bot.automation.flows.instagram import InstagramLikeFeedFlow, InstagramNotificationsFlow, InstagramScrollFlow, InstagramStoryUploadFlow, InstagramReelUploadFlow, InstagramUpdateBioFlow, InstagramUpdateBioU2Flow, InstagramUpdateProfilePictureU2Flow, InstagramWarmUpDay1Flow
 from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
+from adb_bot.automation.flows.instagram_photo import InstagramPhotoPostU2Flow
 from adb_bot.automation.heartbeat import DEFAULT_INTERVAL_SECONDS, ProfileHeartbeat
 from adb_bot.core import shutdown as _shutdown_register
 from adb_bot.core.logger import get_logger
@@ -933,6 +934,7 @@ def main() -> None:
     automation.register_flow(InstagramStoryUploadFlow())
     automation.register_flow(InstagramReelUploadFlow())
     automation.register_flow(InstagramReelUploadU2Flow())
+    automation.register_flow(InstagramPhotoPostU2Flow())
     automation.register_flow(InstagramUpdateProfilePictureU2Flow())
 
     logger.info("Launching profiles %s on Multilogin", profile_ids)
