@@ -1806,7 +1806,64 @@ SETTLED_STATUSES = ("Posted", "Failed")
 DAILY_HISTORY_DAYS = 30
 
 
-def daily_success(rows=None, limit: int = DAILY_HISTORY_DAYS) -> dict:
+def row_is_parked(row, profiles_by_recid) -> bool:
+    """Whether an unsettled row is waiting on a *person* rather than on a turn.
+
+    "Not settled" lumped two very different things together, and the difference
+    is the whole question anyone asks of that number: a row queued behind
+    throughput goes out on its own, and a row whose phone is flagged never does.
+    On 2026-08-16 the split was 207 parked against 14 that would post -- read as
+    one figure, "221 still to settle" sounds like a busy evening rather than a
+    backlog nobody is working.
+
+    Deliberately the *posting planner's* gates, in its order, because the
+    planner is what decides: `needs_human`, then Status, then the warm-up
+    hand-off, then a missing MLX id. Anything this returns False for is a row
+    the planner would accept today.
+
+    Two limits worth stating rather than hiding:
+
+    * a row with no profile link at all is parked -- the planner skips it for
+      exactly that reason, and no amount of waiting fixes it;
+    * a row linked to an Accounts row instead is counted as postable, because
+      its guards live on that row and this summary does not read it. On this
+      base every target is a profile, so that branch is currently unused.
+    """
+    from adb_bot.clients import airtable as at
+
+    fields = row.get("fields") or {}
+
+    # A `Verifying` row has already been posted and is only waiting to be
+    # proven, so it is never parked however its phone looks *now* -- a phone
+    # flagged after its post went out would otherwise drag that post into the
+    # parked column and make a finished job look stuck.
+    if at._select_name(fields.get(at.F_PQ_POST_STATUS)) == at.POST_STATUS_VERIFYING:
+        return False
+
+    profile_links = fields.get(at.F_PQ_TARGET_PROFILE) or []
+    if not profile_links:
+        # No profile link. An account-linked row is judged elsewhere; a row with
+        # neither link is one the planner throws away every tick.
+        return not (fields.get(at.F_PQ_TARGET_ACCOUNT) or [])
+
+    info = (profiles_by_recid or {}).get(profile_links[0])
+    if info is None:
+        # Linked to a profile the map does not hold. Unknown, not clear -- and
+        # an unknown phone has never posted anything on its own.
+        return True
+
+    if info.get("needs_human"):
+        return True
+    status = info.get("status")
+    if status is not None and status != at.STATUS_SELECT_ACTIVE:
+        return True
+    if info.get("warmup_started") and info.get("handoff_outstanding"):
+        return True
+    return not info.get("launch_id")
+
+
+def daily_success(rows=None, limit: int = DAILY_HISTORY_DAYS,
+                  profiles_by_recid=None) -> dict:
     """Confirmed vs failed posts per day, newest first.
 
     Grouped by the day a post was *due* (`Scheduled DateTime`), not the day the
@@ -1814,6 +1871,13 @@ def daily_success(rows=None, limit: int = DAILY_HISTORY_DAYS) -> dict:
     the one worth reporting: it answers "of the posts that day owed, how many
     landed?", and it keeps a row's retries on the day whose slot they were
     filling instead of smearing one clip across two rates.
+
+    `profiles_by_recid` is `profile_launch_map()`. Given it, each unsettled row
+    is split into **parked** (waiting on a person -- see `row_is_parked`) and
+    **to_post** (the valid ones, which go out on their own). Without it both
+    keys are None and the caller shows the old single figure: a missing column
+    on Profiles (Cloning) must cost this table its new detail, not the rate it
+    has always shown.
     """
     from adb_bot.clients import airtable as at
 
@@ -1821,6 +1885,7 @@ def daily_success(rows=None, limit: int = DAILY_HISTORY_DAYS) -> dict:
     fields = lambda r: (r.get("fields") or {})            # noqa: E731
 
     by_day = defaultdict(Counter)
+    parked_by_day: dict = defaultdict(int)
     undated = 0
     for row in rows:
         day = str(fields(row).get(at.F_PQ_SCHEDULED, ""))[:10]
@@ -1829,7 +1894,13 @@ def daily_success(rows=None, limit: int = DAILY_HISTORY_DAYS) -> dict:
             # silently: the count is reported so the totals can be reconciled.
             undated += 1
             continue
-        by_day[day][fields(row).get(at.F_PQ_POST_STATUS) or "(empty)"] += 1
+        status = fields(row).get(at.F_PQ_POST_STATUS) or "(empty)"
+        by_day[day][status] += 1
+        # Only unsettled rows can be parked: a Posted row went out and a Failed
+        # one is the retry pass's business, whatever its phone looks like now.
+        if profiles_by_recid is not None and status not in SETTLED_STATUSES:
+            if row_is_parked(row, profiles_by_recid):
+                parked_by_day[day] += 1
 
     days = []
     for day in sorted(by_day, reverse=True):
@@ -1838,11 +1909,17 @@ def daily_success(rows=None, limit: int = DAILY_HISTORY_DAYS) -> dict:
         settled = posted + failed
         unsettled = sum(n for status, n in counts.items()
                         if status not in SETTLED_STATUSES)
+        parked = parked_by_day[day] if profiles_by_recid is not None else None
         days.append({
             "day": day,
             "posted": posted,
             "failed": failed,
             "unsettled": unsettled,
+            "parked": parked,
+            # The valid ones: unsettled minus parked. `Verifying` rows count
+            # here rather than as parked -- they have been posted and are
+            # waiting to be proven, which is the opposite of stuck.
+            "to_post": (None if parked is None else unsettled - parked),
             "total": settled + unsettled,
             # None, not 0.0: a day with nothing settled has no rate yet, and
             # rendering that as "0%" would read as a total wipeout.
@@ -1861,6 +1938,10 @@ def daily_success(rows=None, limit: int = DAILY_HISTORY_DAYS) -> dict:
             "posted": posted,
             "failed": failed,
             "unsettled": sum(d["unsettled"] for d in days),
+            "parked": (None if profiles_by_recid is None
+                       else sum(d["parked"] for d in days)),
+            "to_post": (None if profiles_by_recid is None
+                        else sum(d["to_post"] for d in days)),
             "rate": (100.0 * posted / settled) if settled else None,
         },
         "omitted": omitted,
@@ -3626,7 +3707,17 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             data["queue"] = queue_today(airtable, day, rows=rows)
             # Same listing again: the history is every row Airtable still holds,
             # which is exactly what was just fetched for today.
-            data["daily"] = daily_success(rows)
+            #
+            # The profile map splits each day's unsettled rows into parked and
+            # to-post. Its own try: this table showed a success rate for months
+            # before it had the split, and one missing column on Profiles
+            # (Cloning) must cost the new columns rather than the whole section
+            # -- the same failure that `annotate_live_reels` caused once here.
+            try:
+                daily_profiles = airtable.profile_launch_map()
+            except Exception:
+                daily_profiles = None
+            data["daily"] = daily_success(rows, profiles_by_recid=daily_profiles)
             data["content"] = content_stock(airtable, claimed=claimed_variant_ids(rows))
             data["needs_human"] = needs_human(airtable)
             data["posts_today"] = todays_posts(

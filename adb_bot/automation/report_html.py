@@ -817,37 +817,60 @@ def _section_daily(daily: dict) -> str:
             'was <em>due</em>. A post that failed and was retried until it went out counts once, '
             'as confirmed — only a post that ran out of retries counts as failed. So this is the '
             'share of each day’s planned posts that actually reached Instagram, not the '
-            'share of attempts that worked.</p>')
+            'share of attempts that worked.</p>'
+            '<p class="sub"><strong>Will post</strong> is the valid remainder: rows whose phone '
+            'is healthy, so they go out on their own as the fleet works through them. '
+            '<strong>Parked rows</strong> are waiting on a <em>person</em> — the phone is flagged, '
+            'parked, or still needs its bio, picture and first post — and they will never post '
+            'on their own however long they are left. A day whose remainder is nearly all parked '
+            'has not had a slow evening; it has a backlog nobody is working.</p>')
 
     head = ("<tr><th>Day</th><th class='num'>Confirmed</th><th class='num'>Failed</th>"
-            "<th class='num'>Success rate</th><th class='num'>Not settled</th></tr>")
+            "<th class='num'>Success rate</th><th class='num'>Will post</th>"
+            "<th class='num'>Parked rows</th></tr>")
 
     body = []
     for entry in days:
         rate, unsettled = entry["rate"], entry["unsettled"]
+        parked, to_post = entry.get("parked"), entry.get("to_post")
         if rate is None:
             cell = '<span class="dim">—</span>'
         else:
             cell = f'<span class="pill {_rate_tone(rate)}">{rate:.0f}%</span>'
-        # A day with rows still in flight has a rate that can only move, so say
-        # so rather than letting a half-finished day be read as a verdict.
-        pending = (f"<span class='dim'>{unsettled} still to settle</span>"
-                   if unsettled else "")
+        # Two columns, because the old single "still to settle" answered the
+        # wrong question. A parked row is waiting on a person and will not go
+        # out on its own however long anyone leaves it; a will-post row is just
+        # waiting its turn. Read together they said "busy evening" when the
+        # truth was a backlog nobody was working.
+        if parked is None:
+            # No profile map this render -- show the old single figure rather
+            # than two columns that would both be guesses.
+            to_post_cell = ""
+            parked_cell = (f"<span class='dim'>{unsettled} unsettled</span>"
+                           if unsettled else "")
+        else:
+            to_post_cell = (f"<span class='ok'>{to_post}</span>" if to_post else "")
+            parked_cell = (f"<span class='warn'>{parked} parked</span>"
+                           if parked else "")
         body.append(
             f"<tr><td class='mono'>{_e(entry['day'])}</td>"
             f"<td class='num'>{entry['posted']}</td>"
             f"<td class='num'>{entry['failed'] or ''}</td>"
             f"<td class='num'>{cell}</td>"
-            f"<td class='num'>{pending}</td></tr>")
+            f"<td class='num'>{to_post_cell}</td>"
+            f"<td class='num'>{parked_cell}</td></tr>")
 
     overall = totals.get("rate")
     total_cell = ('<span class="dim">—</span>' if overall is None
                   else f'<span class="pill {_rate_tone(overall)}">{overall:.0f}%</span>')
+    total_parked, total_to_post = totals.get("parked"), totals.get("to_post")
     body.append(
         f"<tr><td><strong>All {len(days)} day(s)</strong></td>"
         f"<td class='num'><strong>{totals.get('posted', 0)}</strong></td>"
         f"<td class='num'><strong>{totals.get('failed', 0) or ''}</strong></td>"
-        f"<td class='num'>{total_cell}</td><td class='num'></td></tr>")
+        f"<td class='num'>{total_cell}</td>"
+        f"<td class='num'><strong>{total_to_post if total_to_post else ''}</strong></td>"
+        f"<td class='num'><strong>{total_parked if total_parked else ''}</strong></td></tr>")
 
     notes = ""
     if daily.get("omitted"):
