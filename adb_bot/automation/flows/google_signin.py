@@ -321,6 +321,16 @@ def _start_play_store(adb_client, target: str, logger=None) -> bool:
     return arrived
 
 
+def _wake(adb_client, target: str) -> None:
+    """Wake the phone and get past the keyguard.
+
+    KEYCODE_WAKEUP rather than POWER, which would toggle a screen that is
+    already on back off.
+    """
+    adb_client.run_command(f"adb -s {target} shell input keyevent 224")
+    adb_client.run_command(f"adb -s {target} shell wm dismiss-keyguard")
+
+
 def _press_enter(adb_client, target: str) -> None:
     """Submit the focused field with the keyboard's own action key.
 
@@ -394,6 +404,15 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
                 log("warning", "the screen would not dump anything, %d times "
                                "running", blank_reads - 1)
                 return RESULT_STUCK
+            if blank_reads == 1:
+                # `mCurrentFocus=null` and nothing to dump is what a sleeping
+                # or locked phone looks like, and it is the state `Blank caio
+                # 3` was in when the Play Store would not start. Waking it
+                # costs two commands and is worth trying before spending the
+                # rest of the budget looking at nothing.
+                log("info", "nothing on screen and no focused window; waking "
+                            "the phone")
+                _wake(adb_client, target)
             log("info", "the screen dumped nothing; looking again (%d/%d)",
                 blank_reads, MAX_BLANK_READS)
             sleep(BLANK_READ_WAIT_SECONDS)

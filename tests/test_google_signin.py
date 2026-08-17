@@ -327,6 +327,18 @@ def test_a_phone_that_never_answers_still_stops():
     assert verdict == g.RESULT_STUCK
 
 
+def test_a_screen_with_nothing_on_it_gets_the_phone_woken():
+    """Nothing to dump and no focused window is what a sleeping phone looks
+    like, and waking it costs two commands."""
+    driver, adb = _StubDriver(""), _StubAdb()
+    g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "S",
+              sleep=lambda _s: None)
+
+    assert any("keyevent 224" in c for c in adb.commands), "never woke it"
+    # Not POWER, which would switch off a screen that is already on.
+    assert not any("keyevent 26" in c for c in adb.commands)
+
+
 def test_google_being_unreachable_gives_up_rather_than_looping():
     """The screen has no buttons, so a retry that never stops would spend the
     phone's whole ~15-minute life backing out of the same page."""
