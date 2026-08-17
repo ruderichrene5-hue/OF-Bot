@@ -30,8 +30,27 @@ def test_open_is_matched_as_a_whole_word():
     assert not p.says_any("opening the store", p._OPEN_TEXT_WORDS)
 
 
+def test_play_services_is_not_gmail():
+    """`pm list packages com.google.android.gm` matches com.google.android.gm*S*
+    -- Play Services, on every phone. Read as a substring it says Gmail is
+    installed on a phone that has never had it, which is what sent three
+    launches looking for a mail app that was not there."""
+    play_services_only = "package:com.google.android.gms"
+    assert "com.google.android.gm" not in p.packages_named(play_services_only)
+    assert "com.google.android.gms" in p.packages_named(play_services_only)
+
+
+def test_gmail_itself_is_still_found():
+    out = "package:com.google.android.gms\npackage:com.google.android.gm\n"
+    assert "com.google.android.gm" in p.packages_named(out)
+
+
 class _Adb:
-    """`pm list packages` answers empty until the install is let through."""
+    """`pm list packages` answers empty until the install is let through.
+
+    Play Services is always listed, because it always is on the phone -- a
+    substring test would call every com.google.android.* package installed.
+    """
 
     def __init__(self):
         self.installed = False
@@ -40,7 +59,10 @@ class _Adb:
     def run_command(self, command):
         self.commands.append(command)
         if "pm list packages" in command:
-            return f"package:{PACKAGE}" if self.installed else ""
+            lines = ["package:com.google.android.gms"]
+            if self.installed:
+                lines.append(f"package:{PACKAGE}")
+            return "\n".join(lines)
         return ""
 
 

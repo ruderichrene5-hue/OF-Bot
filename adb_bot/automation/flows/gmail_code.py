@@ -39,6 +39,8 @@ from __future__ import annotations
 import re
 import time
 
+from adb_bot.automation.flows import play_install
+
 GMAIL_PACKAGE = "com.google.android.gm"
 GMAIL_ACTIVITY = f"{GMAIL_PACKAGE}/.ConversationListActivityGmail"
 INSTAGRAM_PACKAGE = "com.instagram.android"
@@ -189,9 +191,13 @@ class PhoneMailbox:
             f"adb -s {self.target} shell {command}") or ""
 
     def installed(self) -> bool:
-        """Is Gmail on this phone at all?"""
+        """Is Gmail on this phone at all?
+
+        Exact name: `pm list packages com.google.android.gm` also matches
+        **com.google.android.gms**, Play Services, which every phone has.
+        """
         out = self._shell(f"pm list packages {GMAIL_PACKAGE}")
-        return GMAIL_PACKAGE in out
+        return GMAIL_PACKAGE in play_install.packages_named(out)
 
     def in_front(self) -> bool:
         """Is Gmail the window actually being drawn?

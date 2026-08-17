@@ -56,11 +56,25 @@ _WORKING_MARKERS = ("pending", "downloading", "installing", "verifying",
                     "waiting for", "%")
 
 
+def packages_named(out: str) -> set:
+    """The package names in `pm list packages` output, exactly."""
+    return {line.split(":", 1)[1].strip()
+            for line in (out or "").splitlines()
+            if line.startswith("package:") and ":" in line}
+
+
 def is_installed(adb_client, target: str, package: str) -> bool:
-    """The only trustworthy answer to "is it on the phone"."""
+    """The only trustworthy answer to "is it on the phone".
+
+    Exact names, never a substring. `pm list packages com.google.android.gm`
+    matches **com.google.android.gms** -- Google Play Services, which is on
+    every phone -- so a substring test says Gmail is installed on a phone that
+    has never had it. That answer sent three launches looking for a mail app
+    that was not there (2026-08-17).
+    """
     out = adb_client.run_command(
         f"adb -s {target} shell pm list packages {package}") or ""
-    return package in out
+    return package in packages_named(out)
 
 
 def open_listing(adb_client, target: str, package: str) -> None:
