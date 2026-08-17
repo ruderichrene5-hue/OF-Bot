@@ -95,6 +95,30 @@ def get_saved_airtable_token() -> str:
     return _get_saved_or_env("airtable_token", "AIRTABLE_TOKEN")
 
 
+# --- SMS verification providers ----------------------------------------------
+# Credentials for the disposable-number providers the human-verification flow
+# rents from (adb_bot/clients/sms/). Both are optional: with neither set the
+# flow refuses to start, and with only one set it runs without a fallback
+# provider to switch to.
+def get_saved_smspool_key() -> str:
+    """SMSPool API key -- the primary number provider."""
+    return _get_saved_or_env("smspool_api_key", "SMSPOOL_API_KEY")
+
+
+def get_saved_fivesim_token() -> str:
+    """5sim bearer token -- the fallback provider the breaker switches to."""
+    return _get_saved_or_env("fivesim_token", "FIVESIM_TOKEN")
+
+
+def get_saved_2captcha_key() -> str:
+    """2captcha API key -- reads the image captcha that usually opens the chain.
+
+    Optional in the same way the number providers are: with no key the image
+    challenge is left for a human instead of being guessed at.
+    """
+    return _get_saved_or_env("twocaptcha_api_key", "TWOCAPTCHA_API_KEY")
+
+
 # There is deliberately NO default base id.
 #
 # Until 2026-08-10 this fell back to the test base `appNAm6iTuzmOn4ib`. The bot
