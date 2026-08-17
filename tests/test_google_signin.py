@@ -71,6 +71,22 @@ def test_the_server_error_is_matched_on_the_servers_sentence():
         "something went wrong") != g.SCREEN_SERVER_ERROR
 
 
+RETRY_PAGE = ("something went wrong sorry, something went wrong there. please "
+              "try again. next")
+
+
+def test_googles_retry_page_is_named_not_unknown():
+    """It appeared right after the Terms on `Blank caio 1` -- by which point
+    2FA had already passed, so stopping there threw away a finished sign-in."""
+    assert g.classify_google_screen(RETRY_PAGE) == g.SCREEN_RETRY
+
+
+def test_the_retry_page_is_not_confused_with_the_unreachable_servers_page():
+    """Different pages, different handling: one has a button, one has none."""
+    assert g.classify_google_screen(SERVER_ERROR) == g.SCREEN_SERVER_ERROR
+    assert g.classify_google_screen(RETRY_PAGE) != g.SCREEN_SERVER_ERROR
+
+
 def test_searching_for_accounts_is_loading_not_a_screen_to_act_on():
     assert g.classify_google_screen(SEARCHING) == g.SCREEN_LOADING
 

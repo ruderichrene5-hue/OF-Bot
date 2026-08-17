@@ -67,6 +67,7 @@ SCREEN_PLAY_HOME = "play_home"            # signed in -- done
 SCREEN_LAUNCHER = "launcher"              # the phone's home screen
 SCREEN_WRONG_PASSWORD = "wrong_password"
 SCREEN_SERVER_ERROR = "google_server_error"  # transient; retryable
+SCREEN_RETRY = "try_again"                   # Google's own retry page
 SCREEN_LOADING = "loading"
 SCREEN_UNKNOWN = "unknown"
 
@@ -129,12 +130,25 @@ _SERVER_ERROR_MARKERS = (
     "communicating with google servers",
 )
 
+# Google's own retry page: one sentence and a single `Next`. Seen straight
+# after accepting the Terms on `Blank caio 1`, 2026-08-17 -- the sign-in had
+# succeeded by then, so treating this as fatal threw away a finished 2FA.
+#
+# Matched on "something went wrong **there**", the retry page's own wording,
+# rather than the bare heading it shares with the failed phone lookup and the
+# unreachable-servers page.
+_RETRY_MARKERS = (
+    "sorry, something went wrong there",
+    "something went wrong there. please try again",
+)
+
 # Ordered: the specific before the general. `_PASSWORD_MARKERS` carries
 # "welcome", which appears on several Google screens, so anything that can be
 # named more precisely is named first.
 _ORDERED = (
     (SCREEN_WRONG_PASSWORD, _WRONG_PASSWORD_MARKERS),
     (SCREEN_SERVER_ERROR, _SERVER_ERROR_MARKERS),
+    (SCREEN_RETRY, _RETRY_MARKERS),
     (SCREEN_SAVE_PASSWORD, _SAVE_PASSWORD_MARKERS),
     (SCREEN_TOTP, _TOTP_MARKERS),
     (SCREEN_2FA_CHOOSER, _2FA_MARKERS),
@@ -336,6 +350,8 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     restarts = 0
     MAX_APP_RESTARTS = 3
     server_errors = 0
+    retry_pages = 0
+    MAX_RETRY_PAGES = 3
 
     for step in range(MAX_STEPS):
         text = driver.read_screen() or ""
@@ -425,6 +441,24 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             # The retry re-enters on the same screen it failed from, and the
             # repeat guard would count that as going nowhere.
             last, repeats = None, 0
+            continue
+
+        if screen == SCREEN_RETRY:
+            # One button, and taking it is the whole point of the page. The
+            # repeat guard cannot see terms -> retry -> terms as going nowhere,
+            # so this is bounded on its own.
+            retry_pages += 1
+            if retry_pages > MAX_RETRY_PAGES:
+                log("warning", "Google offered its retry page %d times",
+                    retry_pages - 1)
+                return RESULT_STUCK
+            log("info", "taking Google's retry page (%d/%d)", retry_pages,
+                MAX_RETRY_PAGES)
+            if not driver.tap_label(_NEXT + ("Try again", "TRY AGAIN",
+                                             "Retry", "RETRY")):
+                log("warning", "nothing to tap on the retry page")
+                return RESULT_STUCK
+            sleep(10)
             continue
 
         if screen == SCREEN_WRONG_PASSWORD:

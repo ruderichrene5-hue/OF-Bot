@@ -101,8 +101,14 @@ def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
             out["status"] = "not-ready"
             return out
 
+        # Eight, not five. A freshly launched phone answers `adb connect` well
+        # before it leaves `offline`, and five attempts is 50 seconds of
+        # backoff: on 2026-08-17 one run got in on the fifth and the next used
+        # all five and gave up. Eight is a little over two minutes, which is
+        # cheap against a launch, and costs nothing when the phone is healthy
+        # because the ladder stops at the first success.
         target = connect_with_retries(adb_client, profile, logger, profile_id,
-                                      max_attempts=5, retry_delay_seconds=5)
+                                      max_attempts=8, retry_delay_seconds=5)
         if not target:
             out["status"] = "unreachable"
             return out
