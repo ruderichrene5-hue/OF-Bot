@@ -194,6 +194,49 @@ def test_a_real_inbox_is_not_read_as_compose():
     assert not gmail_code.looks_like_compose(INBOX)
 
 
+def test_a_permission_dialog_in_front_of_gmail_is_cleared(monkeypatch):
+    """This is what actually blocked Gmail for five launches: it starts, asks
+    for a runtime permission, and its own dialog holds the focus -- so Gmail
+    never "arrives" and every later candidate starts behind the same dialog."""
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+
+    class Blocked(FakeAdb):
+        def __init__(self):
+            super().__init__()
+            self.dialog = True
+
+        def run_command(self, command):
+            if "mCurrentFocus" in command:
+                if self.dialog:
+                    return ("mCurrentFocus=Window{1 u0 "
+                            f"{gmail_code.PERMISSION_PACKAGE}/x}}")
+                return f"mCurrentFocus=Window{{1 u0 {gmail_code.GMAIL_PACKAGE}/x}}"
+            return super().run_command(command)
+
+    adb = Blocked()
+
+    class Allowing(FakeDriver):
+        def tap_label(self, labels):
+            super().tap_label(labels)
+            adb.dialog = False          # "Allow" dismisses it
+            return True
+
+    box = gmail_code.PhoneMailbox("host:1", adb, "a@gmail.com",
+                                  driver=Allowing([]))
+    assert box._wait_in_front(seconds=6)
+
+
+def test_notification_permission_is_granted_without_a_dialog(monkeypatch):
+    """The shade read depends on it, and granting beats tapping."""
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    adb = FakeAdb()
+    box = gmail_code.PhoneMailbox("host:1", adb, "a@gmail.com",
+                                  driver=FakeDriver([]))
+    box.open_gmail()
+    assert any("pm grant" in c and gmail_code.NOTIFICATION_PERMISSION in c
+               for c in adb.commands)
+
+
 def test_gmail_is_given_time_to_come_up():
     """Six seconds was not enough for a just-installed Gmail: the check said
     "not in front", the next candidate was started over the top of it, and

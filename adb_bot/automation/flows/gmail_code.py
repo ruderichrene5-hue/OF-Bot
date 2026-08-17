@@ -219,6 +219,23 @@ _NOT_A_MAILBOX = ("compose", "widget", "settings", "provider", "service",
 FRONT_WAIT_SECONDS = 24
 FRONT_POLL_SECONDS = 3
 
+# What was actually blocking Gmail for five launches: it starts, immediately
+# asks for a runtime permission, and its own dialog sits in front of it. The
+# focused window is the permission controller's, so Gmail never "arrives" and
+# every candidate activity after it is started behind the same dialog.
+PERMISSION_PACKAGE = "com.android.permissioncontroller"
+
+# Notifications are the permission that matters here -- the code is read from
+# the shade -- and it can be granted without a dialog at all.
+NOTIFICATION_PERMISSION = "android.permission.POST_NOTIFICATIONS"
+
+_ALLOW_BUTTONS = ("Allow", "ALLOW", "While using the app", "Only this time",
+                  "Continue", "CONTINUE", "OK")
+
+# Gmail asks for a couple of permissions in a row. More than a few means the
+# dialog is not going away.
+MAX_PERMISSION_DIALOGS = 4
+
 
 def _components(text: str, limit: int = 3) -> list:
     """Gmail components named anywhere in `text`, likeliest first."""
@@ -304,6 +321,9 @@ class PhoneMailbox:
         Gmail's launch activity has been renamed before.
         """
         self._log("info", "switching to Gmail")
+        # Granted outright rather than tapped: the dialog is the thing that
+        # blocks Gmail, and this is the permission the shade read depends on.
+        self._shell(f"pm grant {GMAIL_PACKAGE} {NOTIFICATION_PERMISSION}")
         self._start(GMAIL_ACTIVITY)
         if self._wait_in_front():
             return True
@@ -346,10 +366,21 @@ class PhoneMailbox:
 
     def _wait_in_front(self, seconds: int = FRONT_WAIT_SECONDS) -> bool:
         """Give Gmail time to arrive before deciding it did not."""
-        waited = 0
+        waited, dialogs = 0, 0
         while True:
             if self.in_front():
                 return True
+            # A permission dialog in front is Gmail's own, and Gmail is right
+            # behind it. Clearing it is progress, so it does not count against
+            # the wait -- but only a few times, since a dialog that will not go
+            # away is its own kind of stuck.
+            if dialogs < MAX_PERMISSION_DIALOGS and self._clear_permission_dialog():
+                dialogs += 1
+                self._log("info", "cleared a permission dialog in front of "
+                                  "Gmail (%d/%d)", dialogs,
+                          MAX_PERMISSION_DIALOGS)
+                time.sleep(FRONT_POLL_SECONDS)
+                continue
             if waited >= seconds:
                 # What *is* in front, and is Gmail even alive? "Did not come
                 # up" was all the log said for four launches, and it does not
@@ -372,6 +403,17 @@ class PhoneMailbox:
         if self.driver is None:
             return ""
         return self.driver.read_screen() or ""
+
+    def permission_dialog_in_front(self) -> bool:
+        focus = self._shell("dumpsys window | grep mCurrentFocus")
+        return PERMISSION_PACKAGE in (focus or "")
+
+    def _clear_permission_dialog(self) -> bool:
+        """Allow whatever Gmail is asking for. True if a dialog was cleared."""
+        if self.driver is None or not self.permission_dialog_in_front():
+            return False
+        self.driver.read_screen()
+        return bool(self.driver.tap_label(_ALLOW_BUTTONS))
 
     def notification_code(self) -> str:
         """Instagram's code from the notification shade, or ""."""
