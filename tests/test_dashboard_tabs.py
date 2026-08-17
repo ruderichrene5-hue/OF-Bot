@@ -305,9 +305,11 @@ class FolderBreakdownTest(unittest.TestCase):
 
 
 def _queue_row(name="Jasmin 5 / 09:00", when="2026-08-08T09:00:00.000Z", status="Pending",
-               variant="v1", handle=None, slot=None, issue=None, retries=0):
+               variant="v1", handle=None, slot=None, issue=None, retries=0, profile=None):
     fields = {"Name": name, "Scheduled DateTime": when, "Post Status": status,
               "Retry Count": retries}
+    if profile:
+        fields["Target Profile"] = [profile]
     if variant:
         fields["Spoof Variant"] = [variant]
     if handle:
@@ -398,6 +400,100 @@ class TodaysPostsTest(unittest.TestCase):
         self.assertEqual(out["posts"][0]["clip"], "")
 
 
+HEALTHY_PHONE = {"launch_id": "L1", "status": "Active", "needs_human": False,
+                 "warmup_started": None, "handoff_outstanding": []}
+
+
+class PendingSplitTest(unittest.TestCase):
+    """"Still to go" is a promise the tab could not keep.
+
+    On 2026-08-17 it read 181 while only 64 rows had a phone able to send them:
+    109 sat behind a flag and 28 behind an unfinished hand-off. One number made
+    a backlog nobody was working look like a busy evening -- and the Technical
+    tab, which had already been split, was read as disagreeing with it.
+    """
+
+    DAY = "2026-08-08"
+
+    def _split(self, *rows, profiles=None):
+        out = report.todays_posts(list(rows), self.DAY, variants=VARIANTS,
+                                  profiles_by_recid=profiles)
+        return out
+
+    def test_a_healthy_phones_pending_row_will_post(self):
+        out = self._split(_queue_row(profile="rec1"),
+                          profiles={"rec1": dict(HEALTHY_PHONE)})
+        self.assertEqual((out["to_post"], out["parked"]), (1, 0))
+        self.assertEqual(out["posts"][0]["parked_reason"], "")
+
+    def test_a_flagged_phones_row_names_the_flag_as_the_reason(self):
+        out = self._split(_queue_row(profile="rec1"),
+                          profiles={"rec1": dict(HEALTHY_PHONE, needs_human=True)})
+        self.assertEqual((out["to_post"], out["parked"]), (0, 1))
+        self.assertEqual(out["posts"][0]["parked_reason"], "flagged for a person")
+        self.assertEqual(out["parked_reasons"], {"flagged for a person": 1})
+
+    def test_an_unfinished_hand_off_is_its_own_reason(self):
+        """The other half of the backlog, and a different person's job."""
+        out = self._split(_queue_row(profile="rec1"),
+                          profiles={"rec1": dict(HEALTHY_PHONE, warmup_started="2026-08-01",
+                                                 handoff_outstanding=["bio"])})
+        self.assertEqual(out["parked_reasons"], {"warm-up hand-off unfinished": 1})
+
+    def test_a_parked_phone_says_which_status_parked_it(self):
+        out = self._split(_queue_row(profile="rec1"),
+                          profiles={"rec1": dict(HEALTHY_PHONE, status="Inactive")})
+        self.assertEqual(out["posts"][0]["parked_reason"], "phone is Inactive")
+
+    def test_the_split_adds_up_to_the_pending_tile_beside_it(self):
+        out = self._split(_queue_row(name="A / 09:00", profile="rec1"),
+                          _queue_row(name="B / 10:00", when="2026-08-08T10:00:00.000Z",
+                                     profile="rec2"),
+                          _queue_row(name="C / 11:00", when="2026-08-08T11:00:00.000Z",
+                                     status="Posted", profile="rec2"),
+                          profiles={"rec1": dict(HEALTHY_PHONE),
+                                    "rec2": dict(HEALTHY_PHONE, needs_human=True)})
+        self.assertEqual(out["to_post"] + out["parked"], out["pending"])
+        self.assertEqual(out["pending"], 2)
+
+    def test_a_posted_row_is_never_asked_whether_it_will_post(self):
+        """Its phone may well be flagged now. The post already went out, and
+        counting it as stuck would make a finished job look like work."""
+        out = self._split(_queue_row(status="Posted", profile="rec1"),
+                          profiles={"rec1": dict(HEALTHY_PHONE, needs_human=True)})
+        self.assertEqual((out["to_post"], out["parked"]), (0, 0))
+        self.assertEqual(out["posts"][0]["parked_reason"], "")
+
+    def test_a_verifying_row_is_not_stuck_it_is_already_on_instagram(self):
+        out = self._split(_queue_row(status="Verifying", profile="rec1"),
+                          profiles={"rec1": dict(HEALTHY_PHONE, needs_human=True)})
+        self.assertEqual((out["to_post"], out["parked"]), (0, 0))
+        self.assertEqual(out["posts"][0]["parked_reason"], "")
+
+    def test_without_the_profile_map_it_guesses_nothing(self):
+        """A missing column on Profiles (Cloning) costs the new detail, not the
+        day's posts."""
+        out = self._split(_queue_row(profile="rec1"))
+        self.assertEqual((out["to_post"], out["parked"]), (None, None))
+        self.assertEqual(out["total"], 1)
+
+    def test_the_per_profile_row_counts_its_own_stuck_rows(self):
+        out = self._split(_queue_row(name="Jil 8 / 09:00", profile="rec1"),
+                          _queue_row(name="Jil 8 / 10:00", when="2026-08-08T10:00:00.000Z",
+                                     profile="rec1"),
+                          profiles={"rec1": dict(HEALTHY_PHONE, needs_human=True)})
+        self.assertEqual(out["by_profile"][0]["parked"], 2)
+
+    def test_the_reasons_are_ordered_biggest_job_first(self):
+        rows = [_queue_row(name=f"P{i} / 09:00", profile="rec1") for i in range(3)]
+        rows.append(_queue_row(name="P9 / 09:00", profile="rec2"))
+        out = self._split(*rows,
+                          profiles={"rec1": dict(HEALTHY_PHONE, needs_human=True),
+                                    "rec2": dict(HEALTHY_PHONE, launch_id=None)})
+        self.assertEqual(list(out["parked_reasons"]),
+                         ["flagged for a person", "no MultiLogin id"])
+
+
 class HandoffRenderTest(unittest.TestCase):
     def _render(self, **kw):
         base = {"profiles": [], "done": 0, "plan_days": 4}
@@ -470,6 +566,55 @@ class PostsRenderTest(unittest.TestCase):
     def test_a_clip_name_is_escaped(self):
         page = self._render(posts=[self._post(clip="<script>x</script>")], total=1)
         self.assertNotIn("<script>x</script>", page)
+
+    def _split_render(self, **kw):
+        base = dict(posts=[self._post()], total=10, pending=6, to_post=2, parked=4,
+                    by_status={"Pending": 6, "Verifying": 3, "Posted": 1},
+                    parked_reasons={"flagged for a person": 3,
+                                    "warm-up hand-off unfinished": 1})
+        base.update(kw)
+        return self._render(**base)
+
+    def test_still_to_go_is_split_into_what_will_go_out_and_what_will_not(self):
+        page = self._split_render()
+        self.assertIn("Will post", page)
+        self.assertIn("Waiting on a person", page)
+        self.assertNotIn("Still to go</div>", page)
+
+    def test_it_says_on_the_page_why_the_two_numbers_differ(self):
+        """The question this tab kept generating: 6 to go, 2 will post."""
+        page = self._split_render()
+        self.assertIn("Still to go is 6, but only 2 of it will go out", page)
+        self.assertIn("waiting on a", page)
+        self.assertIn("3 flagged for a person", page)
+
+    def test_it_reconciles_itself_with_the_technical_tab(self):
+        """Its Will post counts the Verifying rows too, so it reads 2 + 3."""
+        page = self._split_render()
+        self.assertIn("5 will post", page)
+        self.assertIn("Verifying", page)
+
+    def test_a_backlog_bigger_than_the_days_work_is_red_not_amber(self):
+        self.assertIn("bad", self._split_render())
+        self.assertNotIn("pill bad", self._split_render(to_post=5, parked=1))
+
+    def test_each_stuck_row_says_which_gate_it_is_behind(self):
+        page = self._split_render(
+            posts=[self._post(parked_reason="flagged for a person")])
+        self.assertIn("Why it is stuck", page)
+        self.assertIn("flagged for a person", page)
+
+    def test_a_parked_reason_is_escaped(self):
+        page = self._split_render(
+            posts=[self._post(parked_reason="<script>x</script>")])
+        self.assertNotIn("<script>x</script>", page)
+
+    def test_without_the_profile_map_it_shows_the_old_tile_and_says_why(self):
+        page = self._render(posts=[self._post()], total=1,
+                            by_status={"Pending": 1}, pending=1)
+        self.assertIn("Still to go", page)
+        self.assertNotIn("Waiting on a person", page)
+        self.assertIn("could not be split", page)
 
 
 class FolderRenderTest(unittest.TestCase):

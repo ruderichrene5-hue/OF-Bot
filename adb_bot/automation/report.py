@@ -1806,20 +1806,19 @@ SETTLED_STATUSES = ("Posted", "Failed")
 DAILY_HISTORY_DAYS = 30
 
 
-def row_is_parked(row, profiles_by_recid) -> bool:
-    """Whether an unsettled row is waiting on a *person* rather than on a turn.
+def parked_reason(row, profiles_by_recid) -> str:
+    """*Why* an unsettled row is waiting on a person, or "" if it is not.
 
-    "Not settled" lumped two very different things together, and the difference
-    is the whole question anyone asks of that number: a row queued behind
-    throughput goes out on its own, and a row whose phone is flagged never does.
-    On 2026-08-16 the split was 207 parked against 14 that would post -- read as
-    one figure, "221 still to settle" sounds like a busy evening rather than a
-    backlog nobody is working.
+    The reason, not just the fact, because "137 waiting on a person" is a number
+    nobody can act on: a flagged phone, a phone mid hand-off and a phone with no
+    MultiLogin id are three different jobs for three different people. The
+    string is shown on the page as-is, so it names the gate in the words someone
+    fixing it would use.
 
     Deliberately the *posting planner's* gates, in its order, because the
     planner is what decides: `needs_human`, then Status, then the warm-up
-    hand-off, then a missing MLX id. Anything this returns False for is a row
-    the planner would accept today.
+    hand-off, then a missing MLX id. Anything this returns "" for is a row the
+    planner would accept today.
 
     Two limits worth stating rather than hiding:
 
@@ -1838,28 +1837,45 @@ def row_is_parked(row, profiles_by_recid) -> bool:
     # flagged after its post went out would otherwise drag that post into the
     # parked column and make a finished job look stuck.
     if at._select_name(fields.get(at.F_PQ_POST_STATUS)) == at.POST_STATUS_VERIFYING:
-        return False
+        return ""
 
     profile_links = fields.get(at.F_PQ_TARGET_PROFILE) or []
     if not profile_links:
         # No profile link. An account-linked row is judged elsewhere; a row with
         # neither link is one the planner throws away every tick.
-        return not (fields.get(at.F_PQ_TARGET_ACCOUNT) or [])
+        return "" if (fields.get(at.F_PQ_TARGET_ACCOUNT) or []) else "linked to no profile"
 
     info = (profiles_by_recid or {}).get(profile_links[0])
     if info is None:
         # Linked to a profile the map does not hold. Unknown, not clear -- and
         # an unknown phone has never posted anything on its own.
-        return True
+        return "phone not in the profile list"
 
     if info.get("needs_human"):
-        return True
+        return "flagged for a person"
     status = info.get("status")
     if status is not None and status != at.STATUS_SELECT_ACTIVE:
-        return True
+        return f"phone is {status}"
     if info.get("warmup_started") and info.get("handoff_outstanding"):
-        return True
-    return not info.get("launch_id")
+        return "warm-up hand-off unfinished"
+    return "" if info.get("launch_id") else "no MultiLogin id"
+
+
+def row_is_parked(row, profiles_by_recid) -> bool:
+    """Whether an unsettled row is waiting on a *person* rather than on a turn.
+
+    "Not settled" lumped two very different things together, and the difference
+    is the whole question anyone asks of that number: a row queued behind
+    throughput goes out on its own, and a row whose phone is flagged never does.
+    On 2026-08-16 the split was 207 parked against 14 that would post -- read as
+    one figure, "221 still to settle" sounds like a busy evening rather than a
+    backlog nobody is working.
+
+    The gates live in `parked_reason`, which this only reduces to a yes/no: two
+    copies of the planner's rules would drift, and the day they disagreed the
+    two tabs would each be confidently wrong about the same row.
+    """
+    return bool(parked_reason(row, profiles_by_recid))
 
 
 def daily_success(rows=None, limit: int = DAILY_HISTORY_DAYS,
@@ -2483,18 +2499,34 @@ def folder_breakdown(profiles, mlx_items=None, folder_names=None,
     return {"folders": rows, "totals": totals, "known_folders": len(folder_names or {})}
 
 
-def todays_posts(rows, day: str, variants=None, variants_fn=None, now=None) -> dict:
+def todays_posts(rows, day: str, variants=None, variants_fn=None, now=None,
+                 profiles_by_recid=None) -> dict:
     """Today's Posting Queue, one line per post: which clip, on which profile.
 
     The Schedules tab answers "when", per model and as policy. This answers
     "what" -- the reel each profile is actually sending today and how that went
     -- which until now existed nowhere: the queue was only ever shown as five
     status counts.
+
+    `profiles_by_recid` is `profile_launch_map()`, and splits the Pending rows
+    into the ones a healthy phone will send on its own (`to_post`) and the ones
+    waiting on a person (`parked`), with `parked_reasons` counting why. Without
+    it both are None and the page shows the old single "Still to go" tile: a
+    missing column on Profiles (Cloning) costs this tab its new detail, not the
+    day's posts.
+
+    The split covers **Pending only**, unlike `daily_success`, which splits
+    everything unsettled. This tab already shows Verifying as its own tile, so
+    folding those rows into `to_post` here would count them twice on one screen
+    -- the two tabs then differ by exactly the Verifying count, which is what
+    `_section_posts_today` says on the page rather than leaving anyone to
+    rediscover it.
     """
     from adb_bot.clients import airtable as at
 
     out = {"posts": [], "by_status": {}, "by_profile": [], "total": 0,
-           "clips": 0, "day": day, "reused_clips": []}
+           "clips": 0, "day": day, "reused_clips": [],
+           "parked": None, "to_post": None, "parked_reasons": {}}
     now = now or datetime.now()
 
     today_rows = [r for r in (rows or [])
@@ -2510,8 +2542,10 @@ def todays_posts(rows, day: str, variants=None, variants_fn=None, now=None) -> d
     variants = variants or {}
 
     per_profile: dict = defaultdict(lambda: {"profile": "", "total": 0, "posted": 0,
-                                             "failed": 0, "pending": 0, "verifying": 0})
+                                             "failed": 0, "pending": 0, "verifying": 0,
+                                             "parked": 0})
     clips = set()
+    reasons: Counter = Counter()
     for record in today_rows:
         fields = record.get("fields", {}) or {}
         scheduled = str(fields.get(at.F_PQ_SCHEDULED) or "")
@@ -2531,6 +2565,17 @@ def todays_posts(rows, day: str, variants=None, variants_fn=None, now=None) -> d
                 clips.add(clip)
 
         handle = at._handle(fields.get(at.F_PQ_TARGET_HANDLE))
+        key = {"Posted": "posted", "Failed": "failed",
+               "Verifying": "verifying"}.get(status, "pending")
+        # Only the Pending ones. A Posted row went out, a Failed one is the
+        # retry pass's business, and a Verifying one is already on Instagram --
+        # asking "will this go out?" of any of the three answers a question
+        # nobody asked and would make the tiles sum to more than the day.
+        reason = (parked_reason(record, profiles_by_recid)
+                  if profiles_by_recid is not None and key == "pending" else "")
+        if reason:
+            reasons[reason] += 1
+
         out["posts"].append({
             "name": name,
             "profile": who,
@@ -2541,18 +2586,35 @@ def todays_posts(rows, day: str, variants=None, variants_fn=None, now=None) -> d
             "slot": at._select_name(fields.get(at.F_PQ_ACCOUNT_SLOT)) or "",
             "issue": at._select_name(fields.get(at.F_PQ_ISSUE_TYPE)) or "",
             "retries": fields.get(at.F_PQ_RETRY_COUNT) or 0,
+            "parked_reason": reason,
         })
         out["by_status"][status] = out["by_status"].get(status, 0) + 1
         tally = per_profile[who]
         tally["profile"] = who
         tally["total"] += 1
-        key = {"Posted": "posted", "Failed": "failed",
-               "Verifying": "verifying"}.get(status, "pending")
         tally[key] += 1
+        if reason:
+            tally["parked"] += 1
 
     out["posts"].sort(key=lambda p: (p["when"], p["profile"]))
     out["total"] = len(out["posts"])
     out["clips"] = len(clips)
+    # The same bucket the per-profile "To go" column counts, which is not quite
+    # `by_status["Pending"]`: a row with any other unsettled status is still a
+    # post that has not gone out, and the tile it sits under has to be the one
+    # the split adds up to.
+    pending = sum(1 for p in out["posts"]
+                  if p["status"] not in ("Posted", "Failed", "Verifying"))
+    out["pending"] = pending
+    if profiles_by_recid is not None:
+        out["parked"] = sum(reasons.values())
+        # Not counted independently: the two must add up to the Pending tile
+        # beside them, and a remainder is the only definition that cannot drift
+        # from it.
+        out["to_post"] = pending - out["parked"]
+        # Biggest job first -- 109 rows behind a flag and 28 behind a hand-off
+        # are two different people's afternoons.
+        out["parked_reasons"] = dict(reasons.most_common())
     # Busiest first: on a fleet this size the question is which profile is
     # carrying the day and which has one row and failed it.
     out["by_profile"] = sorted(per_profile.values(),
@@ -3629,7 +3691,8 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
                        "counts": {"tagged": 0, "flagged": 0, "unflagged": 0}},
         "folders": {"folders": [], "totals": {}, "known_folders": 0, "error": ""},
         "posts_today": {"posts": [], "by_status": {}, "by_profile": [], "total": 0,
-                        "clips": 0, "day": day, "reused_clips": []},
+                        "clips": 0, "day": day, "reused_clips": [],
+                        "parked": None, "to_post": None, "parked_reasons": {}},
         "second_accounts": {"profiles": [], "supported": True, "error": "",
                             "counts": {"phones": 0, "usable": 0, "incomplete": 0,
                                        "posted_today": 0, "expected_today": 0}},
@@ -3720,8 +3783,13 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
             data["daily"] = daily_success(rows, profiles_by_recid=daily_profiles)
             data["content"] = content_stock(airtable, claimed=claimed_variant_ids(rows))
             data["needs_human"] = needs_human(airtable)
+            # `daily_profiles` again, deliberately: it was just read for the
+            # day history, and the two tabs splitting the same rows by two
+            # reads of the same map is how they end up disagreeing mid-refresh.
+            # It is None when that read failed, which this handles.
             data["posts_today"] = todays_posts(
-                rows, day, variants_fn=airtable.variants_by_id, now=now)
+                rows, day, variants_fn=airtable.variants_by_id, now=now,
+                profiles_by_recid=daily_profiles)
             # Its own try. These two tabs are the only readers of
             # `profile_overview`, and they sit ahead of the schedules and the
             # outlook in this block -- so without it, one missing column on
