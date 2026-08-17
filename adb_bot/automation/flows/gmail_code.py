@@ -98,6 +98,28 @@ def inbox_shows_address(text: str | None, address: str) -> bool:
     return address.lower() in text.lower()
 
 
+def code_from_notifications(dump: str | None) -> str:
+    """Instagram's code out of a `dumpsys notification` dump, or "".
+
+    The cheapest and least ambiguous place to look: no app has to be in front,
+    so there is no welcome tour, no compose window and no "is this our inbox?"
+    to get wrong. Gmail posts the mail's subject -- "123456 is your Instagram
+    code" -- and the shade keeps it whatever else is on screen.
+
+    Only ever a code on the same line as Instagram's name. A `dumpsys` dump is
+    thousands of lines of numbers, so there is deliberately no fallback to
+    "any six digits somewhere in the text".
+    """
+    if not dump:
+        return ""
+    for line in dump.splitlines():
+        if "instagram" in line.lower():
+            match = _CODE_RE.search(line)
+            if match:
+                return match.group(1)
+    return ""
+
+
 def sync_is_off(text: str | None) -> bool:
     """Whether Gmail is telling us the account is not syncing.
 
@@ -342,6 +364,11 @@ class PhoneMailbox:
             return ""
         return self.driver.read_screen() or ""
 
+    def notification_code(self) -> str:
+        """Instagram's code from the notification shade, or ""."""
+        return code_from_notifications(
+            self._shell("dumpsys notification --noredact"))
+
     def wait_for_code(self, timeout: int = 180, poll_seconds: int = 15) -> str:
         """The code, or "" if none arrived inside `timeout`.
 
@@ -355,16 +382,30 @@ class PhoneMailbox:
             raise MailboxNotReady(
                 f"Gmail is not installed on this phone, so {self.address} "
                 f"cannot be read here")
-        arrived = self.open_gmail()
-        time.sleep(8)
-        if not arrived and not self.in_front():
-            raise MailboxNotReady(
-                "Gmail would not come to the front; refusing to read the "
-                "screen, which is still Instagram's")
+
+        # Gmail not coming to the front is no longer fatal: the notification
+        # shade carries the same code and needs nothing in front at all. Four
+        # launches on 2026-08-17 ended here with the mail very likely already
+        # delivered.
+        on_screen = self.open_gmail()
+        if not on_screen:
+            self._log("warning", "Gmail would not come to the front; reading "
+                                 "the notification shade only")
 
         try:
             checked_owner, tours, escapes = False, 0, 0
             while time.monotonic() < deadline:
+                # The shade first, every pass. It is the one place that cannot
+                # be a welcome tour, a compose window or somebody else's inbox.
+                code = self.notification_code()
+                if code:
+                    self._log("info", "code found in the notification shade")
+                    return code
+
+                if not on_screen:
+                    time.sleep(poll_seconds)
+                    continue
+
                 # Re-checked every pass, not once: Instagram's confirmation
                 # page names the address too, so a read taken while it is in
                 # front looks exactly like the right inbox.

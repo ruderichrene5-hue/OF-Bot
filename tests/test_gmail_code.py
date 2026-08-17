@@ -145,6 +145,36 @@ def test_the_component_list_is_bounded():
     assert len(gmail_code._components(dump)) == 3
 
 
+NOTIFICATION_DUMP = """\
+NotificationRecord(0x1: pkg=com.android.systemui id=123 tag=null
+      android.title=Battery
+      android.text=42% remaining until 18:30
+NotificationRecord(0x2: pkg=com.google.android.gm id=456 tag=null
+      android.title=418902 is your Instagram code
+      android.text=Confirm your account with this code
+"""
+
+
+def test_the_code_is_read_from_the_notification_shade():
+    """No app has to be in front, so there is no tour, no compose window and
+    no "is this our inbox?" to get wrong."""
+    assert gmail_code.code_from_notifications(NOTIFICATION_DUMP) == "418902"
+
+
+def test_numbers_elsewhere_in_the_dump_are_not_the_code():
+    """A dumpsys dump is thousands of lines of numbers. Only a code on the
+    same line as Instagram's name counts -- there is no "any six digits"
+    fallback."""
+    no_instagram = ("android.title=Battery\n"
+                    "android.text=123456 steps today\n")
+    assert gmail_code.code_from_notifications(no_instagram) == ""
+
+
+def test_an_empty_notification_dump_yields_nothing():
+    assert gmail_code.code_from_notifications("") == ""
+    assert gmail_code.code_from_notifications(None) == ""
+
+
 WELCOME_TOUR = ("new in gmail all the features you love with a fresh new look "
                 "got it")
 
@@ -250,17 +280,38 @@ def test_a_missing_gmail_is_reported_at_once_not_waited_out(monkeypatch):
         raise AssertionError("waited for a code from an app that is not there")
 
 
-def test_instagrams_own_screen_is_never_read_as_the_inbox(monkeypatch):
-    """It names the address, so "is this our inbox?" passes on it."""
+def test_a_gmail_that_will_not_come_up_still_reads_the_shade(monkeypatch):
+    """Four launches ended on "Gmail would not come to the front" with the
+    mail very likely already delivered. The shade needs nothing in front."""
     monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
-    box, _ = _mailbox([INSTAGRAM_CODE_SCREEN],
-                      adb=FakeAdb(comes_to_front=False))
-    try:
-        box.wait_for_code(timeout=30)
-    except gmail_code.MailboxNotReady as exc:
-        assert "front" in str(exc)
-    else:
-        raise AssertionError("read Instagram's screen as the mailbox")
+
+    class NoUi(FakeAdb):
+        def __init__(self):
+            super().__init__(comes_to_front=False)
+
+        def run_command(self, command):
+            if "dumpsys notification" in command:
+                return NOTIFICATION_DUMP
+            return super().run_command(command)
+
+    box, _ = _mailbox([], address="mia.berg1999@gmail.com", adb=NoUi())
+    assert box.wait_for_code(timeout=60) == "418902"
+
+
+def test_instagrams_own_screen_is_never_read_as_the_inbox(monkeypatch):
+    """It names the address, so "is this our inbox?" would pass on it.
+
+    With Gmail not in front the screen is not read at all -- the run gives no
+    code rather than a wrong one, and never touches Instagram's page.
+    """
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    driver = FakeDriver([INSTAGRAM_CODE_SCREEN])
+    adb = FakeAdb(comes_to_front=False)
+    box = gmail_code.PhoneMailbox("host:1", adb, "mia.berg1999@gmail.com",
+                                  driver=driver)
+
+    assert box.wait_for_code(timeout=30) == ""
+    assert driver._screens, "read the screen while Gmail was not in front"
 
 
 def test_reading_a_code_switches_to_gmail_and_back(monkeypatch):
