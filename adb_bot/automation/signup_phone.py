@@ -31,7 +31,7 @@ from pathlib import Path
 
 from adb_bot.automation.bootstrap import build_mlx_clients
 from adb_bot.automation.flows import google_signin, play_install, signup
-from adb_bot.automation.flows.gmail_code import PhoneMailbox
+from adb_bot.automation.flows.gmail_code import GMAIL_PACKAGE, PhoneMailbox
 from adb_bot.automation.flows.signup_driver import AdbSignupDriver
 from adb_bot.automation.signup_identity import make_identity, record_account
 from adb_bot.automation.verification_probe import (
@@ -129,16 +129,22 @@ def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
             out["status"] = f"mailbox-{verdict}"
             return out
 
-        # --- 2. Instagram -----------------------------------------------------
-        verdict = play_install.install(driver, adb_client, target,
-                                       INSTAGRAM_PACKAGE, logger=logger)
-        out["steps"]["install"] = verdict
-        print(f"  instagram install: {verdict} "
-              f"({int(time.monotonic() - started)}s)")
-        if verdict not in (play_install.RESULT_INSTALLED,
-                           play_install.RESULT_ALREADY):
-            out["status"] = f"install-{verdict}"
-            return out
+        # --- 2. Instagram, and Gmail to read its code out of -------------------
+        # Gmail is *not* preinstalled on these phones -- `Blank caio 2` spent a
+        # whole launch on 2026-08-17 waiting for a code from an app that was
+        # not there. Instagram first: it is the one the run cannot proceed
+        # without, and the phone's life is finite.
+        for package, what in ((INSTAGRAM_PACKAGE, "instagram"),
+                              (GMAIL_PACKAGE, "gmail")):
+            verdict = play_install.install(driver, adb_client, target,
+                                           package, logger=logger)
+            out["steps"][f"install-{what}"] = verdict
+            print(f"  {what} install: {verdict} "
+                  f"({int(time.monotonic() - started)}s)")
+            if verdict not in (play_install.RESULT_INSTALLED,
+                               play_install.RESULT_ALREADY):
+                out["status"] = f"install-{what}-{verdict}"
+                return out
 
         # --- 3. the account ---------------------------------------------------
         adb_client.run_command(

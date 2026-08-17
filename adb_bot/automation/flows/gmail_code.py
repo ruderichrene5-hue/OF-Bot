@@ -167,10 +167,44 @@ class PhoneMailbox:
         return self.adb_client.run_command(
             f"adb -s {self.target} shell {command}") or ""
 
-    def open_gmail(self) -> None:
-        """Bring Gmail up. `am start`, never `monkey`, never `force-stop`."""
+    def installed(self) -> bool:
+        """Is Gmail on this phone at all?"""
+        out = self._shell(f"pm list packages {GMAIL_PACKAGE}")
+        return GMAIL_PACKAGE in out
+
+    def in_front(self) -> bool:
+        """Is Gmail the window actually being drawn?
+
+        The check that matters, and the one whose absence cost a whole launch
+        on 2026-08-17. Gmail was not installed, `am start` failed with "Activity
+        class ... does not exist", nothing said so, and the flow spent 210
+        seconds reading **Instagram's** screen instead. Instagram's own
+        confirmation page says "we sent to <address>", so even the "is this our
+        inbox?" check passed on it.
+        """
+        focus = self._shell("dumpsys window windows | grep -E mCurrentFocus")
+        return GMAIL_PACKAGE in (focus or "")
+
+    def open_gmail(self) -> bool:
+        """Bring Gmail up, and say whether it arrived.
+
+        `am start`, never `monkey`, never `force-stop`. The hard-coded activity
+        is tried first and the package manager asked only if that fails --
+        Gmail's launch activity has been renamed before.
+        """
         self._log("info", "switching to Gmail")
         self._shell(f"am start -n {GMAIL_ACTIVITY}")
+        if self.in_front():
+            return True
+
+        resolved = self._shell(
+            f"cmd package resolve-activity --brief {GMAIL_PACKAGE}")
+        for line in reversed((resolved or "").splitlines()):
+            if "/" in line and GMAIL_PACKAGE in line:
+                self._log("info", "starting Gmail as %s", line.strip())
+                self._shell(f"am start -n {line.strip()}")
+                break
+        return self.in_front()
 
     def back_to_instagram(self) -> None:
         self._log("info", "switching back to Instagram")
@@ -190,12 +224,30 @@ class PhoneMailbox:
         report an unknown screen and end a run that was fine.
         """
         deadline = time.monotonic() + timeout
-        self.open_gmail()
+        if not self.installed():
+            raise MailboxNotReady(
+                f"Gmail is not installed on this phone, so {self.address} "
+                f"cannot be read here")
+        arrived = self.open_gmail()
         time.sleep(8)
+        if not arrived and not self.in_front():
+            raise MailboxNotReady(
+                "Gmail would not come to the front; refusing to read the "
+                "screen, which is still Instagram's")
 
         try:
             checked_owner = False
             while time.monotonic() < deadline:
+                # Re-checked every pass, not once: Instagram's confirmation
+                # page names the address too, so a read taken while it is in
+                # front looks exactly like the right inbox.
+                if not self.in_front():
+                    self._log("info", "Gmail slipped out of the front; "
+                                      "bringing it back")
+                    self.open_gmail()
+                    time.sleep(6)
+                    continue
+
                 text = self._read()
 
                 if not checked_owner:

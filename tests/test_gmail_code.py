@@ -79,19 +79,63 @@ class FakeDriver:
 
 
 class FakeAdb:
-    def __init__(self):
+    """A phone with Gmail installed that comes to the front when started."""
+
+    def __init__(self, installed=True, comes_to_front=True):
         self.commands = []
+        self.installed = installed
+        self.comes_to_front = comes_to_front
 
     def run_command(self, command):
         self.commands.append(command)
+        if "pm list packages" in command:
+            return f"package:{gmail_code.GMAIL_PACKAGE}" if self.installed else ""
+        if "mCurrentFocus" in command:
+            front = (gmail_code.GMAIL_PACKAGE if self.comes_to_front
+                     else gmail_code.INSTAGRAM_PACKAGE)
+            return f"  mCurrentFocus=Window{{a1 u0 {front}/x}}"
         return ""
 
 
-def _mailbox(screens, address="mia.berg1999@gmail.com"):
-    adb = FakeAdb()
+def _mailbox(screens, address="mia.berg1999@gmail.com", adb=None):
+    adb = adb or FakeAdb()
     box = gmail_code.PhoneMailbox("host:1", adb, address,
                                   driver=FakeDriver(screens))
     return box, adb
+
+
+# Instagram's own confirmation page, which names the address it mailed. This is
+# what the flow actually read for 210 seconds on 2026-08-17 while believing it
+# was reading the inbox.
+INSTAGRAM_CODE_SCREEN = (
+    "enter the confirmation code to confirm your profile, enter the 6-digit "
+    "code we sent to mia.berg1999@gmail.com. next i didn't receive the code")
+
+
+def test_a_missing_gmail_is_reported_at_once_not_waited_out(monkeypatch):
+    """Gmail is not preinstalled on these phones. `am start` failed with
+    "Activity class ... does not exist", nothing said so, and a launch died."""
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    box, _ = _mailbox([INBOX], adb=FakeAdb(installed=False))
+    try:
+        box.wait_for_code(timeout=300)
+    except gmail_code.MailboxNotReady as exc:
+        assert "not installed" in str(exc)
+    else:
+        raise AssertionError("waited for a code from an app that is not there")
+
+
+def test_instagrams_own_screen_is_never_read_as_the_inbox(monkeypatch):
+    """It names the address, so "is this our inbox?" passes on it."""
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    box, _ = _mailbox([INSTAGRAM_CODE_SCREEN],
+                      adb=FakeAdb(comes_to_front=False))
+    try:
+        box.wait_for_code(timeout=30)
+    except gmail_code.MailboxNotReady as exc:
+        assert "front" in str(exc)
+    else:
+        raise AssertionError("read Instagram's screen as the mailbox")
 
 
 def test_reading_a_code_switches_to_gmail_and_back(monkeypatch):
