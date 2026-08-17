@@ -429,7 +429,13 @@ MAIL_WAIT_SECONDS = 210
 # calling it stuck. Bounded so a genuinely blank screen -- one appeared after a
 # code was accepted and never rendered anything -- ends the run instead of
 # spinning until the phone dies.
-MAX_LOADING_WAITS = 8
+#
+# Fifteen, not eight. Instagram turns the `Next` button into a spinner while it
+# submits, and everything here leaves via a German mobile exit: the same email
+# screen answered in about thirty seconds on one run and was still spinning
+# after ninety on the next (`Blank caio 2`, 2026-08-17). Eight waits is under a
+# minute, which called a working screen stuck.
+MAX_LOADING_WAITS = 15
 LOADING_WAIT_SECONDS = 6
 
 # Same reasoning as verification's: an app that was backgrounded is worth
