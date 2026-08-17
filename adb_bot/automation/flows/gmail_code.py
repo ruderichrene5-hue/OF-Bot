@@ -282,7 +282,7 @@ class PhoneMailbox:
         Gmail's launch activity has been renamed before.
         """
         self._log("info", "switching to Gmail")
-        self._shell(f"am start -n {GMAIL_ACTIVITY}")
+        self._start(GMAIL_ACTIVITY)
         if self._wait_in_front():
             return True
 
@@ -294,14 +294,33 @@ class PhoneMailbox:
         # out of whatever text comes back rather than by line position.
         # `monkey` is deliberately not a fallback: it starts nothing on these
         # phones, confirmed four separate times.
-        for query in (f"cmd package resolve-activity --brief {GMAIL_PACKAGE}",
-                      f"dumpsys package {GMAIL_PACKAGE}"):
+        # Ask about the *launcher* intent specifically. A bare
+        # `resolve-activity` resolves an empty intent and hands back whatever
+        # matches that, which is not necessarily something `am start` can even
+        # open -- three runs on 2026-08-17 chased components that were never
+        # going to come up.
+        launcher = ("cmd package resolve-activity --brief "
+                    "-a android.intent.action.MAIN "
+                    "-c android.intent.category.LAUNCHER " + GMAIL_PACKAGE)
+        for query in (launcher, f"dumpsys package {GMAIL_PACKAGE}"):
             for component in _components(self._shell(query) or ""):
                 self._log("info", "starting Gmail as %s", component)
-                self._shell(f"am start -n {component}")
+                self._start(component)
                 if self._wait_in_front():
                     return True
         return False
+
+    def _start(self, component: str) -> None:
+        """`am start`, saying so when the phone refuses.
+
+        The output used to be thrown away, so "Activity class ... does not
+        exist" -- the single most useful line in the whole chain -- never
+        reached the log.
+        """
+        out = self._shell(f"am start -n {component}") or ""
+        if "does not exist" in out or "Error" in out:
+            self._log("warning", "the phone would not start %s: %s",
+                      component, out.strip()[:160])
 
     def _wait_in_front(self, seconds: int = FRONT_WAIT_SECONDS) -> bool:
         """Give Gmail time to arrive before deciding it did not."""
