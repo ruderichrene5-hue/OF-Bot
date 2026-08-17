@@ -297,6 +297,48 @@ def test_the_second_promo_behind_the_first_is_also_a_tour():
     assert gmail_code.is_onboarding(MEET_PROMO)
 
 
+SYNC_OFF_INBOX = ("open navigation drawer search in emails signed in as cici "
+                  "rahmaputrimu mia.berg1999@gmail.com account and settings. "
+                  "primary account sync is off. turn it on in account "
+                  "settings. dismiss")
+
+
+def test_gmails_sync_banner_is_followed_to_the_switch(monkeypatch):
+    """The account was on the phone and the inbox was open, and Gmail simply
+    was not fetching mail. The banner saying so is itself the way to fix it."""
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+
+    class Settings(FakeDriver):
+        def __init__(self):
+            # The banner, then the settings screen `_turn_sync_on` reads, then
+            # the inbox it comes back to.
+            super().__init__([SYNC_OFF_INBOX, "sync gmail data usage", INBOX])
+            self.tapped = []
+
+        def tap_label(self, labels):
+            self.tapped.append(labels)
+            return True
+
+    driver = Settings()
+    adb = FakeAdb()
+    box = gmail_code.PhoneMailbox("host:1", adb, "mia.berg1999@gmail.com",
+                                  driver=driver)
+
+    assert box.wait_for_code(timeout=60) == "418902"
+    assert any(gmail_code._SYNC_BANNER_LABELS == t for t in driver.tapped), \
+        "never followed the sync banner"
+    assert any(gmail_code._SYNC_SWITCH_LABELS == t for t in driver.tapped), \
+        "never reached the sync switch"
+
+
+def test_the_inbox_tip_over_the_message_list_is_dismissed():
+    """"Welcome to your new inbox" sits over the only part of the screen worth
+    reading."""
+    tip = ("welcome to your new inbox mail categories group messages of the "
+           "same type for reading all at once dismiss tip")
+    assert gmail_code.is_onboarding(tip)
+
+
 def test_an_inbox_is_not_mistaken_for_the_tour():
     assert not gmail_code.is_onboarding(INBOX)
 
@@ -395,8 +437,11 @@ def test_somebody_elses_inbox_is_refused_rather_than_read(monkeypatch):
 
 
 def test_a_mailbox_that_is_not_syncing_is_reported_not_waited_on(monkeypatch):
+    """Still reported -- but only after the switch has been tried, so the
+    screen has to keep saying it, which is what a phone that will not sync
+    does."""
     monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
-    box, _ = _mailbox([SYNC_OFF])
+    box, _ = _mailbox([SYNC_OFF] * 12)
     try:
         box.wait_for_code(timeout=30)
     except gmail_code.MailboxNotReady as exc:

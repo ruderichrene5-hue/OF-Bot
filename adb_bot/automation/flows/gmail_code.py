@@ -181,11 +181,27 @@ _ONBOARDING_MARKERS = (
     # people" (`Blank caio 2`, 2026-08-17). Gmail stacks these.
     "now in gmail",
     "video meetings with live captioning",
+    # And a third, on the inbox itself: "welcome to your new inbox -- mail
+    # categories group messages of the same type". It sits over the message
+    # list, which is the only part of the screen worth reading.
+    "welcome to your new inbox",
+    "mail categories group messages",
 )
 
 _TOUR_BUTTONS = ("Got it", "GOT IT", "Take me to Gmail", "TAKE ME TO GMAIL",
-                 "Close", "CLOSE", "Dismiss", "No thanks", "NO THANKS",
-                 "Next", "NEXT", "OK", "Continue", "CONTINUE", "Done")
+                 "Close", "CLOSE", "Dismiss tip", "Dismiss", "No thanks",
+                 "NO THANKS", "Next", "NEXT", "OK", "Continue", "CONTINUE",
+                 "Done")
+
+# The banner Gmail shows when the account is on the phone but not syncing --
+# tappable, and it leads to the switch that fixes it.
+_SYNC_BANNER_LABELS = ("Account sync is off. Turn it on in Account settings.",
+                       "Account sync is off", "Turn it on", "TURN ON")
+_SYNC_SWITCH_LABELS = ("Sync Gmail", "Sync mail", "Sync")
+
+# Two goes at turning sync on. If the switch cannot be found twice, the run is
+# better off saying so than tapping around Android's settings.
+MAX_SYNC_ATTEMPTS = 2
 
 # Enough for a multi-page tour, few enough that a screen which simply will not
 # move on ends the run instead of eating the phone.
@@ -421,6 +437,28 @@ class PhoneMailbox:
         self.driver.read_screen()
         return bool(self.driver.tap_label(_ALLOW_BUTTONS))
 
+    def _turn_sync_on(self) -> bool:
+        """Follow Gmail's own "account sync is off" banner to the switch.
+
+        The banner is tappable and leads to the account's settings, where
+        `Sync Gmail` is a checkbox. Returns whether the switch was found and
+        tapped -- and always comes back to Gmail, so a failed attempt leaves
+        the phone where it started rather than in Android's settings.
+        """
+        if self.driver is None:
+            return False
+        if not self.driver.tap_label(_SYNC_BANNER_LABELS):
+            return False
+        time.sleep(6)
+        self.driver.read_screen()
+        turned = bool(self.driver.tap_label(_SYNC_SWITCH_LABELS))
+        time.sleep(3)
+        self.adb_client.shell_back(self.target)
+        time.sleep(4)
+        if not self.in_front():
+            self.open_gmail()
+        return turned
+
     def notification_code(self) -> str:
         """Instagram's code from the notification shade, or ""."""
         return code_from_notifications(
@@ -450,7 +488,7 @@ class PhoneMailbox:
                                  "the notification shade only")
 
         try:
-            checked_owner, tours, escapes = False, 0, 0
+            checked_owner, tours, escapes, syncs = False, 0, 0, 0
             while time.monotonic() < deadline:
                 # The shade first, every pass. It is the one place that cannot
                 # be a welcome tour, a compose window or somebody else's inbox.
@@ -511,6 +549,10 @@ class PhoneMailbox:
                         checked_owner = True
                         self._log("info", "reading %s", self.address)
                     elif sync_is_off(text):
+                        if syncs < MAX_SYNC_ATTEMPTS and self._turn_sync_on():
+                            syncs += 1
+                            time.sleep(poll_seconds)
+                            continue
                         raise MailboxNotReady(
                             f"{self.address} is on the phone but Gmail is not "
                             f"syncing it -- account settings, Data usage, "
@@ -529,6 +571,14 @@ class PhoneMailbox:
                     return code
 
                 if sync_is_off(text):
+                    # Gmail says so on a banner that is itself the way to fix
+                    # it, so try the switch before giving up on the mailbox.
+                    if syncs < MAX_SYNC_ATTEMPTS and self._turn_sync_on():
+                        syncs += 1
+                        self._log("info", "turned Gmail's sync on (%d/%d)",
+                                  syncs, MAX_SYNC_ATTEMPTS)
+                        time.sleep(poll_seconds)
+                        continue
                     raise MailboxNotReady(
                         f"{self.address} is not syncing -- turn 'Sync Gmail' on")
 
