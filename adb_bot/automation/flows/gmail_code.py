@@ -163,6 +163,10 @@ _TOUR_BUTTONS = ("Got it", "GOT IT", "Take me to Gmail", "TAKE ME TO GMAIL",
 # move on ends the run instead of eating the phone.
 MAX_TOUR_TAPS = 6
 
+# Backing out of a compose window should take one press. More than a few means
+# Gmail is not going to show a mailbox on this phone.
+MAX_COMPOSE_ESCAPES = 3
+
 
 def is_onboarding(text: str) -> bool:
     """Is this Gmail's welcome tour rather than a mailbox?"""
@@ -175,20 +179,43 @@ _COMPONENT_RE = re.compile(rf"{re.escape(GMAIL_PACKAGE)}/[\w.$]+")
 # Words that mark the activity you actually want to land on. `dumpsys package`
 # lists dozens of components; starting each of them in turn would spend more of
 # the phone's life than the whole signup.
-_LIKELY_LAUNCHERS = ("conversation", "main", "mail")
+#
+# "mail" is deliberately not among them: every component of Gmail contains it,
+# including `.ComposeActivityGmailExternal`, which is what this actually opened
+# on 2026-08-17 -- and a compose window shows the address in its `From` field,
+# so it passed for the right inbox and was read for 210 seconds.
+_LIKELY_LAUNCHERS = ("conversationlist", "conversation", "main")
+
+# Components that are Gmail but are not a mailbox. Never started.
+_NOT_A_MAILBOX = ("compose", "widget", "settings", "provider", "service",
+                  "receiver", "share", "search", "account")
 
 
 def _components(text: str, limit: int = 3) -> list:
     """Gmail components named anywhere in `text`, likeliest first."""
     seen, out = set(), []
     for match in _COMPONENT_RE.findall(text or ""):
-        if match not in seen:
-            seen.add(match)
-            out.append(match)
+        name = match.lower()
+        if match in seen or any(word in name for word in _NOT_A_MAILBOX):
+            continue
+        seen.add(match)
+        out.append(match)
     out.sort(key=lambda name: any(word in name.lower()
                                   for word in _LIKELY_LAUNCHERS),
              reverse=True)
     return out[:limit]
+
+
+# What a compose window says. It carries the address in its `From` field, so
+# nothing that merely looks for the address can tell it from an inbox.
+_COMPOSE_MARKERS = ("compose email", "attach files", "add cc/bcc",
+                    "to add cc")
+
+
+def looks_like_compose(text: str) -> bool:
+    """Is this Gmail's compose window rather than a list of mail?"""
+    haystack = (text or "").lower()
+    return sum(marker in haystack for marker in _COMPOSE_MARKERS) >= 2
 
 
 class PhoneMailbox:
@@ -301,7 +328,7 @@ class PhoneMailbox:
                 "screen, which is still Instagram's")
 
         try:
-            checked_owner, tours = False, 0
+            checked_owner, tours, escapes = False, 0, 0
             while time.monotonic() < deadline:
                 # Re-checked every pass, not once: Instagram's confirmation
                 # page names the address too, so a read taken while it is in
@@ -314,6 +341,21 @@ class PhoneMailbox:
                     continue
 
                 text = self._read()
+
+                # A compose window is Gmail, is in front, and carries the
+                # address in its `From` field -- everything the ownership check
+                # looks for, and no mail on it at all. Back out of it.
+                if looks_like_compose(text):
+                    escapes += 1
+                    if escapes > MAX_COMPOSE_ESCAPES:
+                        raise MailboxNotReady(
+                            "Gmail keeps opening its compose window instead of "
+                            "a mailbox")
+                    self._log("info", "backing out of Gmail's compose window "
+                                      "(%d/%d)", escapes, MAX_COMPOSE_ESCAPES)
+                    self.adb_client.shell_back(self.target)
+                    time.sleep(4)
+                    continue
 
                 # A freshly installed Gmail opens on its own welcome tour, not
                 # on an inbox. Click through it before judging whose mail this

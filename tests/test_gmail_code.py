@@ -90,6 +90,11 @@ class FakeAdb:
         self.commands = []
         self.installed = installed
         self.comes_to_front = comes_to_front
+        self.backs = 0
+
+    def shell_back(self, target):
+        self.backs += 1
+        return ""
 
     def run_command(self, command):
         self.commands.append(command)
@@ -142,6 +147,38 @@ def test_the_component_list_is_bounded():
 
 WELCOME_TOUR = ("new in gmail all the features you love with a fresh new look "
                 "got it")
+
+# Verbatim from `Blank caio 2`, 2026-08-17. Read for 210 seconds as an inbox.
+COMPOSE = ("navigate up attach files send more options from from "
+           "mia.berg1999@gmail.com to add cc/bcc subject compose email")
+
+
+def test_a_compose_window_is_not_an_inbox():
+    """It carries the address in its `From` field, so everything that merely
+    looks for the address passes on it."""
+    assert gmail_code.looks_like_compose(COMPOSE)
+    assert gmail_code.inbox_shows_address(COMPOSE, "mia.berg1999@gmail.com")
+
+
+def test_a_real_inbox_is_not_read_as_compose():
+    assert not gmail_code.looks_like_compose(INBOX)
+
+
+def test_compose_activities_are_never_started():
+    """Ranking by "mail" put `.ComposeActivityGmailExternal` first -- every
+    component of Gmail contains "mail"."""
+    dump = ("com.google.android.gm/.ComposeActivityGmailExternal "
+            "com.google.android.gm/.ConversationListActivityGmail")
+    picked = gmail_code._components(dump)
+    assert all("compose" not in c.lower() for c in picked)
+    assert picked[0].endswith("ConversationListActivityGmail")
+
+
+def test_the_compose_window_is_backed_out_of_not_read(monkeypatch):
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    box, adb = _mailbox([COMPOSE, INBOX])
+    assert box.wait_for_code(timeout=60) == "418902"
+    assert adb.backs == 1, "read the compose window instead of leaving it"
 
 
 def test_gmails_welcome_tour_is_recognised():
