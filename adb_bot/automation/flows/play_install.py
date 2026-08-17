@@ -119,6 +119,11 @@ MAX_TAPS = 4
 # cannot reach Google gives the phone's remaining life back.
 MAX_OFFLINE = 4
 
+# How many unchanged "pending…" reads before cancelling and asking again.
+# About a minute -- long enough that a queue which is merely busy gets to
+# clear itself, short enough to try twice inside one phone.
+PENDING_BEFORE_RETRY = 6
+
 
 def install(driver, adb_client, target: str, package: str, logger=None,
             timeout: int = 240, sleep=time.sleep) -> str:
@@ -137,6 +142,7 @@ def install(driver, adb_client, target: str, package: str, logger=None,
     deadline = time.monotonic() + timeout
     taps = 0
     offline = 0
+    pending = 0
     while time.monotonic() < deadline:
         if is_installed(adb_client, target, package):
             log("info", "%s installed", package)
@@ -160,9 +166,27 @@ def install(driver, adb_client, target: str, package: str, logger=None,
         labels = (driver.clickable_labels()
                   if hasattr(driver, "clickable_labels") else [])
         if (says_any(text, _WORKING_MARKERS) and not offers_install(labels)):
+            # "pending…" is the Play Store's queue, not a download. Gmail sat
+            # in it for a full four minutes without ever starting
+            # (2026-08-17). Waiting longer does not clear it; cancelling and
+            # asking again does.
+            if "pending" in text:
+                pending += 1
+                if pending >= PENDING_BEFORE_RETRY and taps < MAX_TAPS:
+                    log("info", "stuck in the download queue; cancelling and "
+                                "asking again")
+                    pending = 0
+                    driver.tap_label(("Cancel", "CANCEL"))
+                    sleep(6)
+                    open_listing(adb_client, target, package)
+                    sleep(8)
+                    continue
+            else:
+                pending = 0
             log("info", "still working; waiting")
             sleep(10)
             continue
+        pending = 0
 
         if says_any(text, _OPEN_TEXT_WORDS) and taps:
             # `Open` after we asked for the install: give the package manager a

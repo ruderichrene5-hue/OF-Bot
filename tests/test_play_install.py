@@ -132,6 +132,67 @@ def test_a_play_store_with_no_network_reopens_the_listing():
     assert len(opened) == p.MAX_OFFLINE + 1, "did not reopen the listing"
 
 
+PENDING = ("pending… cancel cancel auto-open when ready jump into the app "
+           "after it installs installed on all devices")
+
+
+def test_a_stuck_download_queue_is_cancelled_and_asked_again():
+    """Gmail sat on "pending…" for four minutes without ever starting.
+    Waiting longer does not clear that; cancelling and asking again does."""
+    adb = _Adb()
+
+    class Pending(_Driver):
+        def __init__(self):
+            super().__init__(adb, PENDING)
+            self.cancelled = False
+
+        def clickable_labels(self):
+            return ["Cancel"]
+
+        def tap_label(self, labels):
+            if any("Cancel" == label for label in labels):
+                self.cancelled = True
+                # Asking again is what gets the download moving.
+                self.adb.installed = True
+                return True
+            return False
+
+    driver = Pending()
+    verdict = p.install(driver, adb, "host:1", PACKAGE, sleep=lambda _s: None)
+
+    assert driver.cancelled, "waited out a queue that was not moving"
+    assert verdict == p.RESULT_INSTALLED
+
+
+def test_a_download_that_is_actually_moving_is_left_alone():
+    """Cancelling a real download would throw away the progress."""
+    adb = _Adb()
+
+    class Downloading(_Driver):
+        def __init__(self):
+            super().__init__(adb, "downloading 45 of 90 mb cancel")
+            self.cancelled = False
+            self.reads = 0
+
+        def clickable_labels(self):
+            return ["Cancel"]
+
+        def read_screen(self):
+            self.reads += 1
+            if self.reads > 10:      # it finishes on its own
+                self.adb.installed = True
+            return self.text
+
+        def tap_label(self, labels):
+            if any("Cancel" == label for label in labels):
+                self.cancelled = True
+            return False
+
+    driver = Downloading()
+    p.install(driver, adb, "host:1", PACKAGE, sleep=lambda _s: None)
+    assert not driver.cancelled
+
+
 def test_an_app_already_on_the_phone_is_left_alone():
     """A reinstall can log an account out, and this runs on phones that have
     just been signed in."""
