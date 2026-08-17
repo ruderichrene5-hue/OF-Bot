@@ -176,9 +176,15 @@ _ONBOARDING_MARKERS = (
     "all the features you love",
     "take me to gmail",
     "meet the new gmail",
+    # A second promo, behind the first: "close google meet, now in gmail --
+    # video meetings with live captioning and screen sharing for up to 100
+    # people" (`Blank caio 2`, 2026-08-17). Gmail stacks these.
+    "now in gmail",
+    "video meetings with live captioning",
 )
 
 _TOUR_BUTTONS = ("Got it", "GOT IT", "Take me to Gmail", "TAKE ME TO GMAIL",
+                 "Close", "CLOSE", "Dismiss", "No thanks", "NO THANKS",
                  "Next", "NEXT", "OK", "Continue", "CONTINUE", "Done")
 
 # Enough for a multi-page tour, few enough that a screen which simply will not

@@ -287,6 +287,16 @@ def test_gmails_welcome_tour_is_recognised():
     assert gmail_code.is_onboarding(WELCOME_TOUR)
 
 
+MEET_PROMO = ("close google meet, now in gmail video meetings with live "
+              "captioning and screen sharing for up to 100 people")
+
+
+def test_the_second_promo_behind_the_first_is_also_a_tour():
+    """Gmail stacks these: the Meet promo sits behind the welcome tour, and
+    stopped a run one screen further on."""
+    assert gmail_code.is_onboarding(MEET_PROMO)
+
+
 def test_an_inbox_is_not_mistaken_for_the_tour():
     assert not gmail_code.is_onboarding(INBOX)
 
