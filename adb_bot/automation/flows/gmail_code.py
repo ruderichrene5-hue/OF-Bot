@@ -188,7 +188,14 @@ _LIKELY_LAUNCHERS = ("conversationlist", "conversation", "main")
 
 # Components that are Gmail but are not a mailbox. Never started.
 _NOT_A_MAILBOX = ("compose", "widget", "settings", "provider", "service",
-                  "receiver", "share", "search", "account")
+                  "receiver", "share", "search", "account", "send")
+
+# How long to let Gmail take. A just-installed Gmail is unpacking and doing its
+# first sync, and six seconds was not enough: the check said "not in front",
+# the next candidate was started over the top of it, and the one that finally
+# won was whatever started fastest rather than the mailbox (2026-08-17).
+FRONT_WAIT_SECONDS = 24
+FRONT_POLL_SECONDS = 3
 
 
 def _components(text: str, limit: int = 3) -> list:
@@ -276,8 +283,7 @@ class PhoneMailbox:
         """
         self._log("info", "switching to Gmail")
         self._shell(f"am start -n {GMAIL_ACTIVITY}")
-        time.sleep(6)
-        if self.in_front():
+        if self._wait_in_front():
             return True
 
         # The hard-coded activity is gone on these phones -- `am start` answers
@@ -293,10 +299,20 @@ class PhoneMailbox:
             for component in _components(self._shell(query) or ""):
                 self._log("info", "starting Gmail as %s", component)
                 self._shell(f"am start -n {component}")
-                time.sleep(6)
-                if self.in_front():
+                if self._wait_in_front():
                     return True
         return False
+
+    def _wait_in_front(self, seconds: int = FRONT_WAIT_SECONDS) -> bool:
+        """Give Gmail time to arrive before deciding it did not."""
+        waited = 0
+        while True:
+            if self.in_front():
+                return True
+            if waited >= seconds:
+                return False
+            time.sleep(FRONT_POLL_SECONDS)
+            waited += FRONT_POLL_SECONDS
 
     def back_to_instagram(self) -> None:
         self._log("info", "switching back to Instagram")

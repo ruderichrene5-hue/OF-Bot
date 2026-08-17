@@ -164,6 +164,34 @@ def test_a_real_inbox_is_not_read_as_compose():
     assert not gmail_code.looks_like_compose(INBOX)
 
 
+def test_gmail_is_given_time_to_come_up():
+    """Six seconds was not enough for a just-installed Gmail: the check said
+    "not in front", the next candidate was started over the top of it, and
+    whatever started fastest won instead of the mailbox."""
+    class Slow(FakeAdb):
+        def __init__(self):
+            super().__init__()
+            self.looks = 0
+
+        def run_command(self, command):
+            if "mCurrentFocus" in command:
+                self.looks += 1
+                if self.looks < 4:      # not up yet
+                    return "mCurrentFocus=Window{a1 u0 com.android.launcher/x}"
+            return super().run_command(command)
+
+    adb = Slow()
+    box = gmail_code.PhoneMailbox("host:1", adb, "a@gmail.com")
+    assert box._wait_in_front(seconds=30)
+
+
+def test_autosend_is_not_a_mailbox():
+    dump = ("com.google.android.gm/.AutoSendActivity "
+            "com.google.android.gm/.ConversationListActivityGmail")
+    assert all("autosend" not in c.lower()
+               for c in gmail_code._components(dump))
+
+
 def test_compose_activities_are_never_started():
     """Ranking by "mail" put `.ComposeActivityGmailExternal` first -- every
     component of Gmail contains "mail"."""
