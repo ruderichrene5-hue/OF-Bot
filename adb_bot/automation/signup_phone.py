@@ -31,6 +31,7 @@ from pathlib import Path
 
 from adb_bot.automation.bootstrap import build_mlx_clients
 from adb_bot.automation.flows import google_signin, play_install, signup
+from adb_bot.automation.flows import gmail_code
 from adb_bot.automation.flows.gmail_code import GMAIL_PACKAGE, PhoneMailbox
 from adb_bot.automation.flows.signup_driver import AdbSignupDriver
 from adb_bot.automation.signup_identity import make_identity, record_account
@@ -146,14 +147,31 @@ def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
                 out["status"] = f"install-{what}-{verdict}"
                 return out
 
-        # --- 3. the account ---------------------------------------------------
+        # --- 3. the mailbox has to actually fetch mail -------------------------
+        # A freshly signed-in Google account arrives with Gmail's sync off, and
+        # nothing on the phone says so -- the inbox just looks empty. Instagram
+        # then mails a code that never reaches the device, and the run reports
+        # "no code arrived". Settled here, before Instagram is touched, because
+        # it costs one `dumpsys` when sync is already on and the phone only
+        # lives about fifteen minutes once the signup starts.
+        mailbox = PhoneMailbox(target, adb_client, box["address"],
+                               logger=logger, driver=driver)
+        verdict = mailbox.ensure_sync_on()
+        out["steps"]["gmail_sync"] = verdict
+        print(f"  gmail sync: {verdict} "
+              f"({int(time.monotonic() - started)}s)")
+        if verdict == gmail_code.RESULT_SYNC_FAILED:
+            # No code can arrive, so the signup would spend the phone proving
+            # it. Stop while the account has not been started.
+            out["status"] = "mailbox-sync-off"
+            return out
+
+        # --- 4. the account ---------------------------------------------------
         adb_client.run_command(
             f"adb -s {target} shell am start -n "
             f"{INSTAGRAM_PACKAGE}/.activity.MainTabActivity")
         time.sleep(12)
 
-        mailbox = PhoneMailbox(target, adb_client, box["address"],
-                               logger=logger, driver=driver)
         result = signup.run_signup(driver, None, identity, logger=logger,
                                    mailbox=mailbox)
         out["steps"]["signup"] = result.status

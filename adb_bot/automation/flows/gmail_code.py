@@ -40,6 +40,7 @@ import re
 import time
 
 from adb_bot.automation.flows import play_install
+from adb_bot.core import adb_commands
 
 GMAIL_PACKAGE = "com.google.android.gm"
 GMAIL_ACTIVITY = f"{GMAIL_PACKAGE}/.ConversationListActivityGmail"
@@ -234,9 +235,33 @@ _SYNC_BANNER_LABELS = ("Account sync is off. Turn it on in Account settings.",
                        "Account sync is off", "Turn it on", "TURN ON")
 _SYNC_SWITCH_LABELS = ("Sync Gmail", "Sync mail", "Sync")
 
+# Only this one on the settings route. `_SYNC_SWITCH_LABELS` ends in a bare
+# "Sync", which is safe next to a banner that has already named the account but
+# not on a settings page where several rows start with the word.
+_SYNC_GMAIL_LABEL = ("Sync Gmail",)
+
+# Gmail's own settings, reached without needing the banner. Read off
+# `Blank caio 2` on 2026-08-18: Gmail's `.Gmail2PreferenceActivity` is **not
+# exported** and `am start` throws on it, so the way in is this public alias,
+# which lands on `GmailPreferenceActivity` anyway.
+GMAIL_SETTINGS_COMPONENT = (
+    f"{GMAIL_PACKAGE}/com.android.mail.ui.settings.PublicPreferenceActivity")
+
+# The per-account settings page is long -- Gmail's own rows, then Meet's -- and
+# `Sync Gmail` sits under a `Data usage` heading near the bottom. Eight pages
+# is more than it took by hand and few enough that a page which does not scroll
+# ends the attempt instead of eating the phone.
+MAX_SYNC_SCROLLS = 8
+
 # Two goes at turning sync on. If the switch cannot be found twice, the run is
 # better off saying so than tapping around Android's settings.
 MAX_SYNC_ATTEMPTS = 2
+
+# What `ensure_sync_on` can conclude.
+RESULT_SYNC_ALREADY_ON = "already_on"
+RESULT_SYNC_TURNED_ON = "turned_on"
+RESULT_SYNC_UNKNOWN = "unknown"      # the authority row was not there to read
+RESULT_SYNC_FAILED = "failed"
 
 # Enough for a multi-page tour, few enough that a screen which simply will not
 # move on ends the run instead of eating the phone.
@@ -493,6 +518,93 @@ class PhoneMailbox:
         if not self.in_front():
             self.open_gmail()
         return turned
+
+    def _scroll_to_sync_switch(self) -> bool:
+        """Page down the account's settings until `Sync Gmail` is on screen."""
+        for page in range(MAX_SYNC_SCROLLS):
+            text = (self._read() or "").lower()
+            if "sync gmail" in text:
+                return True
+            # Down a page, not to the bottom: the switch sits above Meet's own
+            # rows, and a swipe to the end scrolls straight past it.
+            self._shell(adb_commands.swipe(610, 1900, 610, 800, 300))
+            time.sleep(2)
+            self._log("info", "looking for the sync switch (%d/%d)",
+                      page + 1, MAX_SYNC_SCROLLS)
+        return False
+
+    def ensure_sync_on(self) -> str:
+        """Make sure Gmail will actually fetch mail for this address.
+
+        A Google account signed into one of these phones arrives with mail sync
+        **off**, and nothing about the phone says so: Gmail opens on the right
+        account and reports "Nothing in Primary", which is what an inbox with
+        no mail in it looks like too. Instagram's code then never arrives, the
+        notification shade and the inbox are empty for the same reason, and the
+        run reports "no code arrived" -- which reads as Instagram's fault.
+        `Blank caio 2` lost a launch to exactly that on 2026-08-18; the switch
+        was all that was wrong, and six Instagram codes landed the moment it
+        went on.
+
+        Done here rather than mid-signup because the phone only lives about
+        fifteen minutes and the signup cannot be resumed: this costs nothing
+        when sync is already on (one `dumpsys`, no UI at all) and the whole
+        walk is off the critical path.
+
+        Not driven from Gmail's "account sync is off" banner, which is what
+        `_turn_sync_on` does: that banner is offered **once**, on the same
+        screen as the welcome tip, and dismissing the tip takes the banner with
+        it. This route needs neither.
+        """
+        state = self.sync_enabled()
+        if state is True:
+            self._log("info", "%s is already syncing", self.address)
+            return RESULT_SYNC_ALREADY_ON
+        if state is None:
+            # Not "off" -- the authority row was not in the dump to read. Say
+            # so and let the run continue; `wait_for_code` refuses only on a
+            # proven False, and stopping on "could not tell" would abandon
+            # phones that were fine.
+            self._log("warning", "cannot tell whether %s syncs (%s missing "
+                                 "from dumpsys content)",
+                      self.address, GMAIL_SYNC_AUTHORITY)
+            return RESULT_SYNC_UNKNOWN
+        if self.driver is None:
+            self._log("warning", "%s is not syncing and there is no driver to "
+                                 "turn it on with", self.address)
+            return RESULT_SYNC_FAILED
+
+        self._log("info", "%s is not syncing; turning Gmail's sync on",
+                  self.address)
+        try:
+            self._start(GMAIL_SETTINGS_COMPONENT)
+            time.sleep(6)
+            if not self.driver.tap_label((self.address,)):
+                self._log("warning", "Gmail's settings do not list %s",
+                          self.address)
+                return RESULT_SYNC_FAILED
+            time.sleep(5)
+            if not self._scroll_to_sync_switch():
+                self._log("warning", "no 'Sync Gmail' row after %d pages",
+                          MAX_SYNC_SCROLLS)
+                return RESULT_SYNC_FAILED
+            if not self.driver.tap_label(_SYNC_GMAIL_LABEL):
+                return RESULT_SYNC_FAILED
+
+            # Ask the sync manager, not the checkbox: the tick is drawn before
+            # the setting is stored, so the screen agrees a moment early.
+            for _ in range(4):
+                time.sleep(3)
+                if self.sync_enabled() is True:
+                    self._log("info", "%s is syncing now", self.address)
+                    return RESULT_SYNC_TURNED_ON
+            self._log("warning", "tapped 'Sync Gmail' but %s is still off",
+                      GMAIL_SYNC_AUTHORITY)
+            return RESULT_SYNC_FAILED
+        finally:
+            # Never leave the phone in Android's settings, whatever happened.
+            self.back_to_instagram()
+            time.sleep(4)
 
     def notification_code(self) -> str:
         """Instagram's code from the notification shade, or ""."""

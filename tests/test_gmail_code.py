@@ -523,3 +523,133 @@ def test_an_empty_primary_tab_reads_as_empty():
     so a synced-but-empty inbox was indistinguishable from a dead one."""
     assert gmail_code.looks_empty("Nothing in Primary") is True
     assert gmail_code.looks_empty("You've finished!") is True
+
+
+# --- turning Gmail's sync on as a prep step -----------------------------------
+
+class SyncFlipAdb(FakeAdb):
+    """A phone whose `gmail-ls` row flips to enabled once the switch is tapped.
+
+    The dump is what `dumpsys content` really prints; the flip is what really
+    happened on `Blank caio 2` when `Sync Gmail` was ticked.
+    """
+
+    def __init__(self, enabled=False, flips=True, **kw):
+        super().__init__(**kw)
+        self.enabled = enabled
+        self.flips = flips
+        self.swipes = 0
+        self.started = []
+
+    def flip_on(self):
+        if self.flips:
+            self.enabled = True
+
+    def run_command(self, command):
+        if "dumpsys content" in command:
+            row = "true " if self.enabled else "false"
+            return ("com.google.android.gms.reminders  -1  false  Total 0\n"
+                    f"gmail-ls                         -1  {row}  Total 0\n")
+        if "input swipe" in command:
+            self.swipes += 1
+            return ""
+        if "am start" in command:
+            self.started.append(command)
+            return ""
+        return super().run_command(command)
+
+
+class SyncDriver(FakeDriver):
+    """Taps `Sync Gmail`, which flips the phone's authority on."""
+
+    def __init__(self, screens, adb, switch_label="Sync Gmail"):
+        super().__init__(screens)
+        self.adb = adb
+        self.switch_label = switch_label
+
+    def tap_label(self, labels):
+        self.taps.append(labels)
+        if self.switch_label in labels:
+            self.adb.flip_on()
+            return True
+        return True
+
+
+def test_sync_already_on_costs_no_ui_at_all():
+    """The common case once a phone has been prepared: one dumpsys, no taps."""
+    adb = SyncFlipAdb(enabled=True)
+    box, _ = _mailbox([], adb=adb)
+    box.driver = SyncDriver([], adb)
+    assert box.ensure_sync_on() == gmail_code.RESULT_SYNC_ALREADY_ON
+    assert box.driver.taps == []
+    assert adb.started == []
+
+
+def test_sync_off_is_turned_on_and_confirmed_by_the_sync_manager(monkeypatch):
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    adb = SyncFlipAdb(enabled=False)
+    box, _ = _mailbox([], adb=adb)
+    # settings list, then the account page already showing the switch
+    box.driver = SyncDriver(
+        ["Settings General settings mia.berg1999@gmail.com Add account",
+         "Data usage Sync Gmail Days of emails to sync"], adb)
+    assert box.ensure_sync_on() == gmail_code.RESULT_SYNC_TURNED_ON
+    assert ("Sync Gmail",) in box.driver.taps
+    assert any("PublicPreferenceActivity" in c for c in adb.started)
+
+
+def test_a_tap_that_does_not_flip_the_authority_is_a_failure(monkeypatch):
+    """The tick is drawn before the setting is stored, so the checkbox agrees a
+    moment early. Only the sync manager is believed."""
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    adb = SyncFlipAdb(enabled=False, flips=False)
+    box, _ = _mailbox([], adb=adb)
+    box.driver = SyncDriver(
+        ["Settings mia.berg1999@gmail.com",
+         "Data usage Sync Gmail"], adb)
+    assert box.ensure_sync_on() == gmail_code.RESULT_SYNC_FAILED
+
+
+def test_the_switch_is_scrolled_to_rather_than_assumed_on_screen(monkeypatch):
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    adb = SyncFlipAdb(enabled=False)
+    box, _ = _mailbox([], adb=adb)
+    # Reads start on the account page, the account row having just been tapped.
+    box.driver = SyncDriver(
+        ["Inbox type Inbox categories Notifications",
+         "Smart Compose Smart Reply Nudges",
+         "Data usage Sync Gmail Days of emails to sync"], adb)
+    assert box.ensure_sync_on() == gmail_code.RESULT_SYNC_TURNED_ON
+    assert adb.swipes == 2
+
+
+def test_a_page_that_never_shows_the_switch_stops_instead_of_scrolling_forever(monkeypatch):
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    adb = SyncFlipAdb(enabled=False)
+    box, _ = _mailbox([], adb=adb)
+    box.driver = SyncDriver(["Settings mia.berg1999@gmail.com"]
+                            + ["nothing useful here"] * 40, adb)
+    assert box.ensure_sync_on() == gmail_code.RESULT_SYNC_FAILED
+    assert adb.swipes == gmail_code.MAX_SYNC_SCROLLS
+
+
+def test_an_unreadable_authority_is_not_read_as_sync_being_off(monkeypatch):
+    """None and False mean different things: stopping on "could not tell" would
+    abandon phones that were fine."""
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    adb = SyncFlipAdb(enabled=False)
+    adb.run_command = lambda command: ""      # dumpsys says nothing at all
+    box, _ = _mailbox([], adb=adb)
+    box.driver = SyncDriver([], adb)
+    assert box.ensure_sync_on() == gmail_code.RESULT_SYNC_UNKNOWN
+    assert box.driver.taps == []
+
+
+def test_the_phone_is_never_left_sitting_in_gmails_settings(monkeypatch):
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    adb = SyncFlipAdb(enabled=False, flips=False)
+    box, _ = _mailbox([], adb=adb)
+    box.driver = SyncDriver(["Settings mia.berg1999@gmail.com",
+                             "Data usage Sync Gmail"], adb)
+    box.ensure_sync_on()
+    assert any(gmail_code.INSTAGRAM_ACTIVITY in c for c in adb.started)
