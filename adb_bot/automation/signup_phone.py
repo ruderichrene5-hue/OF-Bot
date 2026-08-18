@@ -30,9 +30,12 @@ import time
 from pathlib import Path
 
 from adb_bot.automation.bootstrap import build_mlx_clients
-from adb_bot.automation.flows import google_signin, play_install, signup
+from adb_bot.automation.flows import (
+    google_signin, play_install, signup, verification,
+)
 from adb_bot.automation.flows.gmail_code import GMAIL_PACKAGE, PhoneMailbox
 from adb_bot.automation.flows.signup_driver import AdbSignupDriver
+from adb_bot.automation.flows.verification_driver import AdbChallengeDriver
 from adb_bot.automation.signup_identity import make_identity, record_account
 from adb_bot.automation.verification_probe import (
     _find_profile, _profiles, _resolve_token,
@@ -43,6 +46,18 @@ from adb_bot.core import locks
 from adb_bot.core.logger import get_logger
 
 INSTAGRAM_PACKAGE = "com.instagram.android"
+
+# How long one of these phones is worth planning around. They die by themselves
+# at about fifteen minutes with no exit line anywhere, and there is no resuming
+# a half-made account, so everything a run intends to do has to fit inside this.
+PHONE_LIFE_SECONDS = 13 * 60
+
+# The least time worth starting a verification chain in. Below this the run
+# would rent a number -- real money, and 45 seconds before it is even usable --
+# on a phone that will die before the code can be typed. Skipping and saying so
+# leaves an account somebody can verify later; starting and dying wastes the
+# number and tells nobody.
+MIN_VERIFY_SECONDS = 150
 
 # Which mailbox belongs to which phone. Written by whoever reserved them, so a
 # rerun uses the same address rather than burning a second one.
@@ -113,6 +128,7 @@ def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
             out["status"] = "unreachable"
             return out
         out["target"] = target
+        driver_target = target
 
         driver = AdbSignupDriver(target, adb_client, logger=logger, act=True,
                                  screenshots=args.screenshots)
@@ -164,6 +180,25 @@ def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
         record_account(profile_id, name, identity, status=result.status)
         if result.ok:
             print(f"  CREATED @{identity.username} on {box['address']}")
+
+        # --- 4. the checkpoint ------------------------------------------------
+        # Instagram holds a brand-new account behind "confirm you're human"
+        # within seconds of creating it, so an account that stops here is real
+        # but unusable. This has to happen in the *same* launch: a restarted
+        # Instagram comes back to "Join Instagram" and the account cannot be
+        # picked up again from a later run.
+        if result.status == signup.RESULT_CREATED_UNVERIFIED and args.verify:
+            left = seconds_left_for_verification(time.monotonic() - started)
+            if left is None:
+                spent = int(time.monotonic() - started)
+                out["steps"]["verification"] = "skipped-no-time"
+                print(f"  verification: skipped, {spent}s of the phone already "
+                      f"spent and fewer than {MIN_VERIFY_SECONDS}s left")
+                return out
+            verdict = verify_account(profile_id, name, identity, driver_target,
+                                     adb_client, args, logger, seconds=left)
+            out["steps"]["verification"] = verdict["verification"]
+            out.update(verdict)
         return out
     except Exception as exc:
         logger.warning("signup_phone: %s failed (%s)", name, exc)
@@ -180,6 +215,67 @@ def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
         locks.release(profile_id)
 
 
+def seconds_left_for_verification(elapsed: float) -> float | None:
+    """How long verification may run, or None if it must not start.
+
+    Not a fixed budget: what is left of the phone. `run_verification` defaults
+    to fifteen minutes, which is longer than these phones live, so left alone it
+    would still be renting numbers after the device had gone.
+
+    None rather than a small number, because "start and die" is the expensive
+    outcome -- a rented number costs money and 45 seconds before it is even
+    usable, and one abandoned mid-chain tells nobody it was wasted. An account
+    left at its checkpoint can still be verified later; a burned number cannot
+    be got back.
+    """
+    left = PHONE_LIFE_SECONDS - elapsed
+    return left if left >= MIN_VERIFY_SECONDS else None
+
+
+def verify_account(profile_id: str, name: str, identity, target: str,
+                   adb_client, args, logger, seconds: float) -> dict:
+    """Clear the checkpoint Instagram just put the new account behind.
+
+    Separated from `run_phone` only so the budget arithmetic above stays
+    readable. Returns the keys to merge into that run's result.
+
+    `seconds` is what is left of the phone, not a fixed budget:
+    `run_verification` defaults to fifteen minutes, which is longer than these
+    phones live, so left alone it would still be renting numbers after the
+    device had gone.
+    """
+    from adb_bot.clients.sms.base import DEFAULT_COUNTRY
+    from adb_bot.clients.sms.router import build_router
+
+    out: dict = {}
+    country = getattr(args, "country", None) or DEFAULT_COUNTRY
+    print(f"  verification: starting, {int(seconds)}s of phone left "
+          f"(numbers cost money)")
+    challenge_driver = AdbChallengeDriver(target, adb_client, logger=logger,
+                                          act=True,
+                                          screenshots=args.screenshots)
+    verdict = verification.run_verification(
+        challenge_driver, build_router(logger=logger), logger=logger,
+        country=country, max_seconds=seconds)
+
+    out["verification"] = verdict.status
+    out["verification_detail"] = verdict.detail[:300]
+    out["numbers_used"] = verdict.numbers_used
+    print(f"  verification: {verdict.status}  {verdict.detail[:120]}")
+
+    # The account file is the only record of this, and "created but held" and
+    # "created and usable" are different things to whoever reads it next.
+    if verdict.ok:
+        record_account(profile_id, name, identity, status=signup.RESULT_CREATED)
+        out["status"] = signup.RESULT_CREATED
+        print(f"  VERIFIED @{identity.username} -- usable")
+    else:
+        record_account(profile_id, name, identity,
+                       status=f"created_unverified-{verdict.status}")
+        out["status"] = signup.RESULT_CREATED_UNVERIFIED
+    return out
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="One blank phone to one Instagram account, in one launch.")
@@ -190,6 +286,11 @@ def main(argv=None) -> int:
                         help=f"mailbox assignments (default {ASSIGNMENTS})")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--screenshots", action="store_true")
+    parser.add_argument("--no-verify", dest="verify", action="store_false",
+                        help="stop at the checkpoint instead of clearing it. "
+                             "Verification rents SMS numbers, which cost money")
+    parser.add_argument("--country", default=None,
+                        help="country to rent verification numbers from")
     parser.add_argument("--readiness-attempts", type=int, default=10)
     parser.add_argument("--readiness-wait", type=int, default=15)
     args = parser.parse_args(argv)
