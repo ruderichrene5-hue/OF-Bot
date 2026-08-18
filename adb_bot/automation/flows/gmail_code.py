@@ -241,6 +241,12 @@ GMAIL_SETTINGS_ACTIVITY = (
     f"{GMAIL_PACKAGE}/com.android.mail.ui.settings.PublicPreferenceActivity")
 _DATA_USAGE_LABELS = ("Data usage", "DATA USAGE")
 
+# How many screens down to look for a settings row. The account page opens on
+# inbox and notification settings and `Data usage` is well below the fold --
+# three swipes covered it on `Blank caio 2`, and a page that has not shown the
+# row by then is not the page we think it is.
+MAX_SETTINGS_SCROLLS = 4
+
 # Two goes at turning sync on. If the switch cannot be found twice, the run is
 # better off saying so than tapping around Android's settings.
 MAX_SYNC_ATTEMPTS = 2
@@ -528,8 +534,7 @@ class PhoneMailbox:
         # tapping stale bounds here lands on a neighbouring row.
         for labels in ((self.address,), _DATA_USAGE_LABELS,
                        _SYNC_SWITCH_LABELS):
-            self.driver.read_screen()
-            if not self._tap_row(labels):
+            if not self._find_and_tap(labels):
                 self._log("warning", "no %s row in Gmail's settings",
                           labels[0])
                 break
@@ -545,6 +550,34 @@ class PhoneMailbox:
         self._log("info", "Gmail sync for %s is now %s", self.address,
                   {True: "on", False: "still off"}.get(enabled, "unreadable"))
         return enabled
+
+    def _find_and_tap(self, labels) -> bool:
+        """Tap a settings row, scrolling down until it appears.
+
+        The account's own settings page opens on inbox and notification
+        options; `Data usage` -- and the `Sync Gmail` switch under it -- are
+        below the fold. Looking only at the first screenful found the address
+        and then declared the rest missing, which read as "Gmail has no such
+        setting" when it was simply further down.
+        """
+        for attempt in range(MAX_SETTINGS_SCROLLS + 1):
+            self.driver.read_screen()
+            if self._tap_row(labels):
+                return True
+            if attempt < MAX_SETTINGS_SCROLLS:
+                self._scroll_down()
+        return False
+
+    def _scroll_down(self) -> None:
+        """One screenful down the settings list.
+
+        Fixed coordinates rather than a node's bounds: the list fills the page,
+        and the thing being scrolled towards is by definition not on screen to
+        measure.
+        """
+        self.adb_client.shell_swipe(self.target, 540, 1600, 540, 700,
+                                    duration_ms=350)
+        time.sleep(2)
 
     def _tap_row(self, labels) -> bool:
         """Tap a settings row, strictly first and then by its own bounds.

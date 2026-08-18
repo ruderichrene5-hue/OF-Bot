@@ -643,3 +643,92 @@ def test_a_driver_without_the_argument_does_not_break_the_run():
     box.driver = OldDriver([GMAIL_SETTINGS])
 
     assert box._tap_row(("cicireynaamelia@gmail.com",)) is False
+
+
+# Gmail's account settings page as `Blank caio 2` dumped it: it opens on inbox
+# and notification options, and `Data usage` is below the fold.
+ACCOUNT_PAGE_TOP = ("account manage your google account inbox inbox type "
+                    "default inbox inbox categories primary, promotions, "
+                    "social, updates notifications notifications all inbox "
+                    "notifications notify once manage labels")
+ACCOUNT_PAGE_LOWER = "data usage sync gmail days of mail to sync download attachments"
+
+
+class _ScrollingDriver(FakeDriver):
+    """A settings page whose lower half only appears after a swipe."""
+
+    def __init__(self, wanted):
+        super().__init__([])
+        self.wanted = wanted
+        self.scrolled = False
+        self.taps = []
+
+    def read_screen(self):
+        return ACCOUNT_PAGE_LOWER if self.scrolled else ACCOUNT_PAGE_TOP
+
+    def tap_label(self, labels, require_clickable=True):
+        if self.scrolled and any(str(l) == self.wanted for l in labels):
+            self.taps.append(labels)
+            return True
+        return False
+
+
+def test_a_settings_row_below_the_fold_is_scrolled_to():
+    """Looking only at the first screenful found the address and then declared
+    `Data usage` missing -- which reads as "Gmail has no such setting" when it
+    is simply further down, and it cost a run that had reached the code screen."""
+    class Adb(_SyncAdb):
+        def __init__(self, driver):
+            super().__init__()
+            self.driver = driver
+
+        def shell_swipe(self, target, x1, y1, x2, y2, duration_ms=300):
+            self.driver.scrolled = True
+            return ""
+
+    driver = _ScrollingDriver("Data usage")
+    adb = Adb(driver)
+    box = gmail_code.PhoneMailbox("host:1", adb, "a@gmail.com", driver=driver)
+
+    assert box._find_and_tap(("Data usage",)) is True
+    assert driver.scrolled, "never scrolled"
+
+
+def test_the_scrolling_is_bounded():
+    """A page that never shows the row is not the page we think it is, and an
+    unbounded search would spend the phone's whole life swiping."""
+    class Adb(_SyncAdb):
+        def __init__(self):
+            super().__init__()
+            self.swipes = 0
+
+        def shell_swipe(self, target, x1, y1, x2, y2, duration_ms=300):
+            self.swipes += 1
+            return ""
+
+    driver = _ScrollingDriver("never-present")
+    adb = Adb()
+    box = gmail_code.PhoneMailbox("host:1", adb, "a@gmail.com", driver=driver)
+
+    assert box._find_and_tap(("Data usage",)) is False
+    assert adb.swipes == gmail_code.MAX_SETTINGS_SCROLLS
+
+
+def test_a_row_already_on_screen_is_not_scrolled_past():
+    """Scrolling first would push a visible row off the top."""
+    class Adb(_SyncAdb):
+        def __init__(self):
+            super().__init__()
+            self.swipes = 0
+
+        def shell_swipe(self, target, x1, y1, x2, y2, duration_ms=300):
+            self.swipes += 1
+            return ""
+
+    driver = _ScrollingDriver("Data usage")
+    driver.scrolled = True                    # already showing the lower half
+    adb = Adb()
+    box = gmail_code.PhoneMailbox("host:1", adb, "a@gmail.com", driver=driver)
+
+    assert box._find_and_tap(("Data usage",)) is True
+    assert adb.swipes == 0
