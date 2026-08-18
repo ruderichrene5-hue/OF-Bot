@@ -43,17 +43,30 @@ from adb_bot.clients import airtable as at
 DEFAULT_SLOT_TIMES = ("09:00", "11:00", "13:00", "15:00", "17:00", "19:00", "21:00")
 
 # A model with no times picked is not "off" -- it posts whenever a spoofed video
-# is available. Two bounds keep that from emptying the whole variant pool in an
-# afternoon, because the queue loop runs every 15 minutes and the posting loop
-# takes any row whose Scheduled DateTime has passed:
+# is available, and **everything spoofed for it goes out the same day**, whether
+# that is two clips or nine. The clips are the schedule; holding one back to
+# tomorrow only ages it, and the spoofer already only makes what the day needs.
 #
-# - a minimum gap between one flexible post and the next, matching the two hours
-#   the standing grid puts between slots;
-# - a daily cap, defaulting to the number of slots that grid has, so a flexible
-#   model posts the same volume per day as a scheduled one, just at times the
-#   bot chooses. Models.Reels Per Day overrides it per model.
+# So the gap below is a *preference*, not a bound: rows are spread this far apart
+# when the rest of the posting window has room for it, and closer together when
+# it does not. There is no daily cap. `--anytime-max` survives as an operator
+# escape hatch (0 = off, the default); `Models.Reels Per Day` no longer caps
+# creation, because a per-model number would quietly re-break the same-day rule.
 DEFAULT_ANYTIME_GAP_MINUTES = 120
-DEFAULT_ANYTIME_MAX_PER_DAY = len(DEFAULT_SLOT_TIMES)
+DEFAULT_ANYTIME_MAX_PER_DAY = 0
+
+# Posting hours, in DEFAULT_TIMEZONE: nothing is scheduled outside them and
+# posting_planner refuses to fire outside them. A row that falls behind (the
+# fleet was down, the profile was flagged) waits for the morning rather than
+# going out at 04:00 to nobody.
+POSTING_WINDOW_START = time(9, 0)
+POSTING_WINDOW_END = time(23, 0)
+
+# Scheduling stops this far short of the window's end. The posting loop picks a
+# row up on its next tick, so a row written for 23:00 exactly would come round
+# at 23:02 and be refused by the guard -- every day, silently, for the last clip
+# of the evening. Fifteen minutes is three ticks of headroom.
+LAST_SCHEDULE_MARGIN = timedelta(minutes=15)
 
 # Slots are wall-clock times for the audience, not for the server: the same
 # 09:00 has to mean 09:00 in Berlin whether the box runs on UTC or local time.
@@ -246,10 +259,67 @@ def due_slots(now: datetime, slot_times, tz) -> list:
     local_now = now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
     out: list = []
     for slot in parse_slot_times(slot_times):
+        # A picked time outside posting hours is not a time we may post at, so
+        # it is dropped rather than clamped: clamping would silently pile every
+        # out-of-hours pick onto 09:00.
+        if not (POSTING_WINDOW_START <= slot < POSTING_WINDOW_END):
+            continue
         moment = local_now.replace(hour=slot.hour, minute=slot.minute,
                                    second=0, microsecond=0)
         if moment <= local_now:
             out.append((slot.strftime("%H:%M"), moment))
+    return out
+
+
+def upcoming_slots(now: datetime, slot_times, tz) -> list:
+    """Today's picked slots still ahead of `now` -- the mirror of `due_slots`.
+
+    A fixed-slot model's surplus is counted against these: a clip that one of
+    today's later times will serve is not surplus, so a model that picked 14:00
+    does not get its only video fanned out at 13:00.
+    """
+    local_now = now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
+    out: list = []
+    for slot in parse_slot_times(slot_times):
+        if not (POSTING_WINDOW_START <= slot < POSTING_WINDOW_END):
+            continue
+        moment = local_now.replace(hour=slot.hour, minute=slot.minute,
+                                   second=0, microsecond=0)
+        if moment > local_now:
+            out.append((slot.strftime("%H:%M"), moment))
+    return out
+
+
+def window_bounds(local_now: datetime) -> tuple:
+    """Today's posting window as (start, end) in `local_now`'s timezone."""
+    start = local_now.replace(hour=POSTING_WINDOW_START.hour,
+                              minute=POSTING_WINDOW_START.minute,
+                              second=0, microsecond=0)
+    end = local_now.replace(hour=POSTING_WINDOW_END.hour,
+                            minute=POSTING_WINDOW_END.minute,
+                            second=0, microsecond=0) - LAST_SCHEDULE_MARGIN
+    return start, end
+
+
+def spread_across(count: int, first: datetime, end: datetime,
+                  preferred_gap: timedelta) -> list:
+    """`count` minute-resolution moments from `first`, never past `end`.
+
+    They sit `preferred_gap` apart while the window has room for that, and get
+    packed tighter once it does not -- the same-day rule outranks the spacing,
+    so nine clips at 20:00 go out twenty minutes apart rather than three of them
+    going out and six waiting for tomorrow. Never returns a moment after `end`.
+    """
+    if count <= 0 or first > end:
+        return []
+    if count == 1:
+        return [first]
+    span = (end - first).total_seconds()
+    step = min(preferred_gap.total_seconds(), span / (count - 1))
+    out = []
+    for i in range(count):
+        moment = first + timedelta(seconds=round(i * step))
+        out.append(min(moment, end).replace(second=0, microsecond=0))
     return out
 
 
@@ -375,7 +445,6 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
     tz = tz or _zone(DEFAULT_TIMEZONE)
     now = now or datetime.now(tz)
     local_now = now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
-    now_utc = _as_utc(now, tz)
     today = local_now.strftime("%Y-%m-%d")
     report = QueueReport(dry_run=True)
     report.targets = len(targets)
@@ -492,6 +561,32 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
 
     gap = timedelta(minutes=max(0, int(anytime_gap_minutes or 0)))
 
+    def day_plan(target, count: int) -> list:
+        """Where `count` more of today's clips go for one target.
+
+        Everything ready goes out today, so this is a fan-out across what is
+        left of the posting window rather than a single "post it now". Rows this
+        target already has scheduled push the start later, so a second run adds
+        to the end of its day instead of landing on top of it.
+        """
+        window_start, window_end = window_bounds(local_now)
+        first = max(local_now.replace(second=0, microsecond=0), window_start)
+        last = last_scheduled.get(target.key)
+        if last is not None:
+            after_last = last.astimezone(tz) + timedelta(minutes=1)
+            if after_last > first:
+                first = after_last
+        return spread_across(count, first, window_end, gap)
+
+    def add_rows(target, moments, pool) -> None:
+        for moment in moments:
+            report.planned.append(PlannedRow(
+                target=target,
+                slot=moment.strftime("%H:%M"),
+                scheduled=moment.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+                variant_id=pool.pop(0),
+            ))
+
     # --- one row per unfilled due slot -------------------------------------
     for target in sorted(targets, key=lambda t: (t.name or "", t.record_id)):
         pool = pools.get(target.key, [])
@@ -501,28 +596,23 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
         # times are empty: a target nobody has scheduled still posts.
         if schedules is not None and (schedule is None or schedule.is_flexible):
             report.flexible_targets += 1
-            cap = schedule.per_day if (schedule and schedule.per_day) else anytime_max_per_day
-            if cap and rows_on_day.get((target.key, today), 0) >= cap:
-                report.skipped.append((target.name, f"no fixed post times, and today's {cap} post(s) are queued already"))
-                continue
-            last = last_scheduled.get(target.key)
-            if last is not None and now_utc - last < gap:
-                wait = int((gap - (now_utc - last)).total_seconds() // 60) + 1
-                report.skipped.append((target.name, "no fixed post times; the last post is too "
-                                                    f"recent (next one in ~{wait} min)"))
+            if anytime_max_per_day and rows_on_day.get((target.key, today), 0) >= anytime_max_per_day:
+                report.skipped.append((target.name, "no fixed post times, and the --anytime-max "
+                                                    f"ceiling of {anytime_max_per_day} is already queued today"))
                 continue
             if not pool:
                 report.skipped.append((target.name, no_content_reason(target, "no fixed post times, nothing ready to post now")))
                 continue
-            # Scheduled for now, so the posting loop takes it on its next tick --
-            # "whenever a video is available" is the whole point of this mode.
-            moment = local_now.replace(second=0, microsecond=0)
-            report.planned.append(PlannedRow(
-                target=target,
-                slot=moment.strftime("%H:%M"),
-                scheduled=moment.astimezone(timezone.utc).isoformat(),
-                variant_id=pool.pop(0),
-            ))
+            # Every free clip, today: one row each, spread across what is left of
+            # the posting window. The first lands now (or at 09:00 if the day has
+            # not opened yet), so "whenever there is a video" still holds.
+            moments = day_plan(target, len(pool))
+            if not moments:
+                report.skipped.append((target.name, "no fixed post times; today's posting window is "
+                                                    f"over ({POSTING_WINDOW_END.strftime('%H:%M')}) "
+                                                    "-- these go out when it opens again"))
+                continue
+            add_rows(target, moments, pool)
             continue
 
         for label, moment in due_for(schedule.times if schedule is not None else slot_times):
@@ -543,6 +633,19 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
                 scheduled=moment.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
                 variant_id=pool.pop(0),
             ))
+
+        # Picked times are anchors, not a ration: a model that picked three
+        # times and has nine clips ready still posts nine today. Only the clips
+        # today's remaining picks cannot serve count as surplus, so a model that
+        # picked 14:00 and has one clip is left alone at 13:00.
+        #
+        # `schedules is None` is the legacy one-grid-for-everyone mode, which no
+        # base in production runs any more; it keeps its old volume exactly.
+        if schedules is not None:
+            upcoming = len(upcoming_slots(now, schedule.times if schedule is not None else slot_times, tz))
+            surplus = len(pool) - upcoming
+            if surplus > 0:
+                add_rows(target, day_plan(target, surplus), pool)
 
     if schedules is not None:
         # Every distinct time that came round today across the models' own grids.

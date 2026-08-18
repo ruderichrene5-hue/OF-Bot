@@ -14,9 +14,30 @@ returns) rather than calling the client itself.
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dc_field
-from datetime import datetime
+from datetime import datetime, time, timezone
+from zoneinfo import ZoneInfo
 
 from adb_bot.clients import airtable as at
+
+# Posting hours, as wall clock for the audience. The queue never schedules
+# outside them, but a row can still arrive here out of hours -- it fell behind
+# while the fleet was down, or a person re-dated it -- and "Scheduled DateTime
+# has passed" would happily fire it at 04:00. This is the guard that says no.
+# Kept in step with queue_runner.POSTING_WINDOW_*.
+POSTING_WINDOW_START = time(9, 0)
+POSTING_WINDOW_END = time(23, 0)
+POSTING_TIMEZONE = "Europe/Berlin"
+
+
+def within_posting_window(now: datetime, tz_name: str = POSTING_TIMEZONE) -> bool:
+    """True when `now` is inside posting hours in `tz_name`.
+
+    A naive `now` is read as UTC, which is what this server's clock is and what
+    Airtable hands back; an aware one is converted.
+    """
+    moment = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    local = moment.astimezone(ZoneInfo(tz_name)).time()
+    return POSTING_WINDOW_START <= local < POSTING_WINDOW_END
 
 
 @dataclass
@@ -101,6 +122,16 @@ def plan_posting_queue(
     """
     now = now or datetime.now()
     plan = PostingPlan()
+
+    # The window is a property of the clock, not of any one row, so it is one
+    # decision for the whole plan rather than the same skip line 700 times.
+    if not within_posting_window(now):
+        plan.skipped.append(SkippedPost(
+            "all targets",
+            f"outside posting hours ({POSTING_WINDOW_START.strftime('%H:%M')}-"
+            f"{POSTING_WINDOW_END.strftime('%H:%M')} {POSTING_TIMEZONE}); "
+            f"{len(queue_rows)} row(s) held until it opens"))
+        return plan
 
     for row in queue_rows:
         fields = row.get("fields", {}) or {}

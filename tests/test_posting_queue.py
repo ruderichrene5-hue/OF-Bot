@@ -384,3 +384,44 @@ class HandoffGateTest(TestCase):
             variants_by_id={"recV1": {"file_path": "/tmp/a.mp4"}}, captions_by_id={},
             now=datetime(2026, 8, 7, 12, 0))
         self.assertEqual(len(plan.to_post), 1)
+
+
+class PostingWindowTest(TestCase):
+    """Posts go out between 09:00 and 23:00 Berlin and at no other hour.
+
+    The queue no longer schedules outside those hours, but rows arrive here from
+    other routes -- they fell behind while the fleet was down, the retry pass
+    moved one, a person re-dated a batch -- and "Scheduled DateTime has passed"
+    on its own would fire them at 04:00.
+    """
+
+    def _plan_at(self, now):
+        """One row, long overdue, so the only thing under test is the clock."""
+        data = base_lookups()
+        row = queue_row(scheduled="2026-01-01T00:00:00.000Z")
+        return plan_posting_queue([row], data["accounts"], data["profiles"],
+                                  data["variants"], data["captions"], now=now)
+
+    def test_a_due_row_posts_inside_the_window(self):
+        # 12:00 UTC is 14:00 Berlin in July.
+        self.assertEqual(len(self._plan_at(datetime(2026, 7, 28, 12, 0)).to_post), 1)
+
+    def test_an_overdue_row_does_not_go_out_at_four_in_the_morning(self):
+        plan = self._plan_at(datetime(2026, 7, 28, 2, 0))     # 04:00 Berlin
+        self.assertEqual(plan.to_post, [])
+        self.assertIn("outside posting hours", plan.skipped[0].reason)
+
+    def test_the_window_opens_at_nine_berlin(self):
+        self.assertEqual(self._plan_at(datetime(2026, 7, 28, 6, 59)).to_post, [])   # 08:59
+        self.assertEqual(len(self._plan_at(datetime(2026, 7, 28, 7, 0)).to_post), 1)  # 09:00
+
+    def test_the_window_closes_at_eleven_berlin(self):
+        self.assertEqual(len(self._plan_at(datetime(2026, 7, 28, 20, 59)).to_post), 1)  # 22:59
+        self.assertEqual(self._plan_at(datetime(2026, 7, 28, 21, 0)).to_post, [])       # 23:00
+
+    def test_the_window_is_berlin_wall_clock_not_utc(self):
+        """Same UTC instant, both sides of the line: 07:30 UTC is 09:30 Berlin
+        in August (open) and 08:30 in January (shut). Comparing against UTC
+        would post an hour early all winter."""
+        self.assertEqual(len(self._plan_at(datetime(2026, 8, 3, 7, 30)).to_post), 1)
+        self.assertEqual(self._plan_at(datetime(2026, 1, 5, 7, 30)).to_post, [])

@@ -416,8 +416,10 @@ class ModelPostTimesTest(TestCase):
 
     def _plan_nikki(self, schedule, queue_rows=()):
         """Only nikki is in play: jil is parked on a time that is still hours
-        away, so anything planned here is a decision about nikki."""
-        return self._plan({"nikki": schedule, "jil": queue_runner.ModelSchedule(times=("23:00",))},
+        away, so anything planned here is a decision about nikki. 22:00 rather
+        than 23:00 because 23:00 is the close of posting hours, not a time a
+        model may post at -- see `test_a_pick_outside_posting_hours_is_dropped`."""
+        return self._plan({"nikki": schedule, "jil": queue_runner.ModelSchedule(times=("22:00",))},
                           queue_rows=queue_rows)
 
     def test_each_model_posts_at_its_own_times(self):
@@ -449,39 +451,56 @@ class ModelPostTimesTest(TestCase):
         report = self._plan({"jil": queue_runner.ModelSchedule(times=("12:00",))})
         self.assertIn("nikki_1", {row.target.name for row in report.planned})
 
-    def test_a_flexible_model_waits_out_the_gap(self):
-        """Its last post was 30 min ago and the gap is 120, so not yet."""
+    def test_a_recent_post_no_longer_holds_the_next_one_back(self):
+        """The 120-min gap used to block this. It is a spacing preference now,
+        not a bound: the clip is spoofed and today is when it goes out."""
         rows = [_queue_row("pq1", at.POST_STATUS_POSTED, "2026-08-03T10:30:00+00:00",
                            variant_id="v0", account_id="acc1", name="nikki_1 / 12:30",
                            created_time="2026-08-03T10:30:00.000Z")]
         report = self._plan_nikki(queue_runner.ModelSchedule(), queue_rows=rows)
-        self.assertEqual([r.target.name for r in report.planned], [])
-        self.assertIn("too recent", dict(report.skipped)["nikki_1"])
-
-    def test_a_flexible_model_posts_again_once_the_gap_has_passed(self):
-        rows = [_queue_row("pq1", at.POST_STATUS_POSTED, "2026-08-03T08:00:00+00:00",
-                           variant_id="v0", account_id="acc1", name="nikki_1 / 10:00",
-                           created_time="2026-08-03T08:00:00.000Z")]
-        report = self._plan_nikki(queue_runner.ModelSchedule(), queue_rows=rows)
         self.assertEqual([r.target.name for r in report.planned], ["nikki_1"])
 
-    def test_a_flexible_model_stops_at_its_daily_cap(self):
-        """Two posts today and Reels Per Day = 2: done until tomorrow, even
-        though a Ready variant and the gap would both allow another."""
+    def test_a_new_row_lands_after_the_ones_already_scheduled(self):
+        """A row scheduled for later today pushes the fan-out past it, so a
+        second run adds to the end of the day instead of on top of it."""
+        rows = [_queue_row("pq1", at.POST_STATUS_PENDING, "2026-08-03T16:00:00+00:00",
+                           variant_id="v0", account_id="acc1", name="nikki_1 / 18:00",
+                           created_time="2026-08-03T10:00:00.000Z")]
+        report = self._plan_nikki(queue_runner.ModelSchedule(), queue_rows=rows)
+        planned = [r for r in report.planned if r.target.name == "nikki_1"]
+        self.assertEqual([r.scheduled for r in planned], ["2026-08-03T16:01:00+00:00"])
+
+    def test_reels_per_day_no_longer_caps_the_day(self):
+        """Two posts today and Reels Per Day = 2: it used to stop here. Every
+        spoofed clip goes out the day it was spoofed, so the third one goes."""
         rows = [_queue_row(f"pq{i}", at.POST_STATUS_POSTED, f"2026-08-03T0{i}:00:00+00:00",
                            variant_id=f"v0{i}", account_id="acc1", name=f"nikki_1 / 0{i + 2}:00",
                            created_time=f"2026-08-03T0{i}:00:00.000Z")
                 for i in (1, 2)]
         report = self._plan_nikki(queue_runner.ModelSchedule(per_day=2), queue_rows=rows)
-        self.assertEqual([r.target.name for r in report.planned], [])
-        self.assertIn("today's 2 post(s) are queued already", dict(report.skipped)["nikki_1"])
+        self.assertEqual([r.target.name for r in report.planned], ["nikki_1"])
 
-    def test_yesterdays_posts_do_not_count_against_todays_cap(self):
+    def test_the_anytime_max_escape_hatch_still_caps_when_asked(self):
+        """Nobody passes --anytime-max now, but an operator who does gets the
+        old ceiling back rather than a flag that quietly does nothing."""
+        rows = [_queue_row(f"pq{i}", at.POST_STATUS_POSTED, f"2026-08-03T0{i}:00:00+00:00",
+                           variant_id=f"v0{i}", account_id="acc1", name=f"nikki_1 / 0{i + 2}:00",
+                           created_time=f"2026-08-03T0{i}:00:00.000Z")
+                for i in (1, 2)]
+        report = self._plan({"nikki": queue_runner.ModelSchedule(),
+                             "jil": queue_runner.ModelSchedule(times=("22:00",))},
+                            queue_rows=rows, anytime_max_per_day=2)
+        self.assertEqual([r.target.name for r in report.planned], [])
+        self.assertIn("ceiling of 2", dict(report.skipped)["nikki_1"])
+
+    def test_yesterdays_posts_do_not_count_against_that_ceiling(self):
         rows = [_queue_row(f"pq{i}", at.POST_STATUS_POSTED, f"2026-08-02T0{i}:00:00+00:00",
                            variant_id=f"v0{i}", account_id="acc1", name=f"nikki_1 / 0{i + 2}:00",
                            created_time=f"2026-08-02T0{i}:00:00.000Z")
                 for i in (1, 2)]
-        report = self._plan_nikki(queue_runner.ModelSchedule(per_day=2), queue_rows=rows)
+        report = self._plan({"nikki": queue_runner.ModelSchedule(),
+                             "jil": queue_runner.ModelSchedule(times=("22:00",))},
+                            queue_rows=rows, anytime_max_per_day=2)
         self.assertEqual([r.target.name for r in report.planned], ["nikki_1"])
 
     def test_a_flexible_model_with_nothing_spoofed_is_skipped_not_queued(self):
@@ -490,14 +509,72 @@ class ModelPostTimesTest(TestCase):
         self.assertEqual(report.planned, [])
         self.assertIn("no unused Ready Spoof Variant", dict(report.skipped)["nikki_1"])
 
-    def test_only_one_flexible_row_per_run(self):
-        """Two Ready variants, one run: the second waits for the gap rather than
-        both going out at once."""
+    def test_every_ready_clip_gets_a_row_the_same_day(self):
+        """Two Ready variants, one run: both go out today. This is the rule --
+        two clips or nine, the day they are spoofed is the day they post."""
         report = plan_slot_rows(
             [SlotTarget(TARGET_ACCOUNT, "acc1", "nikki_1", "nikki")],
             [_variant("v1", account_id="acc1"), _variant("v2", account_id="acc1")],
             [], now=_now(13), tz=BERLIN, schedules={"nikki": queue_runner.ModelSchedule()})
-        self.assertEqual(len(report.planned), 1)
+        self.assertEqual([r.scheduled for r in report.planned],
+                         # 13:00 Berlin now, window closes 22:45: two hours apart
+                         # because the preferred gap fits.
+                         ["2026-08-03T11:00:00+00:00", "2026-08-03T13:00:00+00:00"])
+
+    def test_nine_clips_late_in_the_day_still_all_go_out_today(self):
+        """The spacing gives way, not the same-day rule: at 20:00 there is no
+        room for 2-hour gaps, so nine clips pack into what is left."""
+        report = plan_slot_rows(
+            [SlotTarget(TARGET_ACCOUNT, "acc1", "nikki_1", "nikki")],
+            [_variant(f"v{i}", account_id="acc1") for i in range(9)],
+            [], now=_now(20), tz=BERLIN, schedules={"nikki": queue_runner.ModelSchedule()})
+        self.assertEqual(len(report.planned), 9)
+        stamps = [r.scheduled for r in report.planned]
+        self.assertEqual(stamps[0], "2026-08-03T18:00:00+00:00")   # 20:00 Berlin
+        self.assertEqual(stamps[-1], "2026-08-03T20:45:00+00:00")  # 22:45 Berlin
+
+    def test_nothing_is_scheduled_once_the_window_has_closed(self):
+        """23:00 Berlin: the day is over, so these wait for the morning rather
+        than being posted at midnight to nobody."""
+        report = plan_slot_rows(
+            [SlotTarget(TARGET_ACCOUNT, "acc1", "nikki_1", "nikki")],
+            [_variant("v1", account_id="acc1")],
+            [], now=_now(23), tz=BERLIN, schedules={"nikki": queue_runner.ModelSchedule()})
+        self.assertEqual(report.planned, [])
+        self.assertIn("posting window is over", dict(report.skipped)["nikki_1"])
+
+    def test_the_first_row_of_the_morning_waits_for_the_window_to_open(self):
+        report = plan_slot_rows(
+            [SlotTarget(TARGET_ACCOUNT, "acc1", "nikki_1", "nikki")],
+            [_variant("v1", account_id="acc1")],
+            [], now=_now(7), tz=BERLIN, schedules={"nikki": queue_runner.ModelSchedule()})
+        self.assertEqual([r.scheduled for r in report.planned],
+                         ["2026-08-03T07:00:00+00:00"])   # 09:00 Berlin
+
+    def test_a_pick_outside_posting_hours_is_dropped(self):
+        """A model that picked 02:00 does not post at 02:00. The clip is not
+        lost -- it comes back as surplus and goes out inside the window."""
+        report = plan_slot_rows(
+            [SlotTarget(TARGET_ACCOUNT, "acc1", "nikki_1", "nikki")],
+            [_variant("v1", account_id="acc1")],
+            [], now=_now(13), tz=BERLIN,
+            schedules={"nikki": queue_runner.ModelSchedule(times=("02:00",))})
+        self.assertEqual([r.scheduled for r in report.planned],
+                         ["2026-08-03T11:00:00+00:00"])   # 13:00 Berlin, not 02:00
+
+    def test_picked_times_are_anchors_not_a_ration(self):
+        """Three picked times, nine clips: the model still clears its day. The
+        due 09:00 slot is served as a slot, the surplus is fanned out."""
+        report = plan_slot_rows(
+            [SlotTarget(TARGET_ACCOUNT, "acc1", "nikki_1", "nikki")],
+            [_variant(f"v{i}", account_id="acc1") for i in range(9)],
+            [], now=_now(13), tz=BERLIN,
+            schedules={"nikki": queue_runner.ModelSchedule(times=("09:00", "14:00", "19:00"))})
+        # 09:00 came round, so it is served as a slot. 14:00 and 19:00 are still
+        # ahead, so two clips are left for them and the other six are fanned out
+        # now -- nine posts today between the three routes.
+        self.assertEqual(len(report.planned), 7)
+        self.assertEqual(report.planned[0].slot, "09:00")
 
     def test_no_schedules_at_all_keeps_the_global_grid(self):
         """A base with no Reel Post Times field must behave exactly as before --
