@@ -121,11 +121,36 @@ Eight tests added, written from the real dump text. Full suite green.
    where the code is read. So `Blank caio 2` is now spent: a second account
    there needs a different Google account signed in first. That, not the
    signup chain, is what limits how many accounts a day this can make.
-3. **Check sync before spending a launch** on `Blank caio 1` / `Blank caio 3`
-   (and on any newly prepared phone). It is one shell command and it is the
-   difference between a 210-second dead poll and a working run:
+3. **Check sync before spending a launch** on any newly prepared phone. It is
+   one shell command and it is the difference between a 210-second dead poll
+   and a working run:
 
        adb -s <target> shell dumpsys content | grep '^gmail-ls'
 
-   `Blank caio 1` still has the Google-unreachable exit IP problem and
-   `Blank caio 3` still would not render, both unchanged from yesterday.
+## 6. `Blank caio 1` is now signed in, and is the next candidate
+
+A second attempt went to `Blank caio 1`, whose mailbox is
+`cicimuammark@gmail.com`. It was **not** signed in, so the run did the whole
+Google chain from scratch and **completed it**: `google sign-in: signed_in`
+after 571s. That sign-in persists on the profile, so the next run there starts
+from `already_signed_in`.
+
+**Yesterday's diagnosis of that phone is out of date.** It was written off as
+"Google unreachable through that profile's exit IP, three times running". Today
+it walked email → password → 2FA → consent and finished. The exit IP was a
+transient, not a property of the profile.
+
+Two things worth knowing before the next attempt:
+
+- **It is slow, and it looks stuck when it is not.** The email form and the
+  password form each took two passes, and the TOTP screen sat on step 27 for
+  several minutes with the code typed and the screen static. That is the flow
+  deliberately *not* retyping a code Google is still checking. It resolved.
+  Budget ten minutes for a cold sign-in and do not kill it early -- this run
+  was interrupted at minute nine, seconds after it had actually succeeded.
+- **Its Gmail sync will be off**, because every freshly signed-in account
+  starts that way (§2). Expect the new `MailboxNotReady` to fire in seconds on
+  the next run; turn the switch on via Gmail > Settings > the address >
+  Data usage > `Sync Gmail`, then rerun.
+
+`Blank caio 3` still would not render, unchanged from yesterday.
