@@ -283,3 +283,65 @@ class WarmupRunLogTest(TestCase):
         from adb_bot.clients import airtable as at
 
         self.assertEqual(at.WARMUP_RUN_FLOWS, warmup_completion.WARMUP_RUN_FLOWS)
+
+
+class AccountsTableAbsentTest(TestCase):
+    """The Accounts table was deleted from the production base on 2026-08-18.
+
+    Airtable answers an unknown table name with 403, so this arrived looking
+    like an auth failure and stopped every posting tick for seven hours with
+    711 rows due. Posting is profile-driven, so the table's absence must cost
+    the planner nothing.
+    """
+
+    @staticmethod
+    def _http_error(status):
+        import requests
+        response = Mock()
+        response.status_code = status
+        return requests.HTTPError(f"{status} Client Error", response=response)
+
+    def setUp(self):
+        AirtableClient._accounts_absent_logged = False
+
+    def test_absent_accounts_table_reads_as_empty(self):
+        client = AirtableClient("tok", "app123", "Profiles")
+        for status in (403, 404):
+            with self.subTest(status=status):
+                AirtableClient._accounts_absent_logged = False
+                with patch.object(AirtableClient, "_list_table",
+                                  side_effect=self._http_error(status)):
+                    self.assertEqual(client.list_accounts(), [])
+                    self.assertEqual(client.accounts_by_id(), {})
+
+    def test_dead_token_still_raises(self):
+        # 401 is a real credentials failure and must not be swallowed, or a
+        # broken token would look like an ordinary schema change.
+        import requests
+        client = AirtableClient("tok", "app123", "Profiles")
+        with patch.object(AirtableClient, "_list_table",
+                          side_effect=self._http_error(401)):
+            with self.assertRaises(requests.HTTPError):
+                client.list_accounts()
+
+    def test_absence_is_explained_once_per_process(self):
+        client = AirtableClient("tok", "app123", "Profiles")
+        with patch.object(AirtableClient, "_list_table",
+                          side_effect=self._http_error(403)):
+            with patch("builtins.print") as printed:
+                client.list_accounts()
+                client.list_accounts()
+                client.list_accounts()
+        self.assertEqual(printed.call_count, 1)
+
+    def test_queue_loops_account_read_is_tolerant_too(self):
+        # active_accounts_by_model is a *second*, separate read of the same
+        # table, and it is what the queue loop uses to create posting rows.
+        # Patching only list_accounts left the queue loop still dying on the
+        # 403 and quietly creating nothing, which would have drained the
+        # backlog and then stopped the fleet again a day later.
+        client = AirtableClient("tok", "app123", "Profiles")
+        with patch.object(AirtableClient, "models_by_recid", return_value={}):
+            with patch.object(AirtableClient, "_list_table",
+                              side_effect=self._http_error(403)):
+                self.assertEqual(client.active_accounts_by_model(), {})

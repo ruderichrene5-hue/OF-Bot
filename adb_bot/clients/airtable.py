@@ -351,6 +351,11 @@ class AirtableClient:
     """Minimal Airtable Web API client for reading the profile queue and writing
     results back. Auth is a Personal Access Token (PAT)."""
 
+    #: Set the first time the Accounts table is found missing, so the
+    #: explanation is printed once per process instead of on every loop tick.
+    #: Class-level on purpose: each loop builds its own client.
+    _accounts_absent_logged = False
+
     def __init__(self, token: str, base_id: str, table_name: str) -> None:
         self.token = token
         self.base_id = base_id
@@ -478,15 +483,54 @@ class AirtableClient:
             return False
 
     def list_accounts(self) -> list:
-        """All account rows with the fields the planner needs."""
-        return self._list_table(
-            TABLE_ACCOUNTS,
-            fields=[
-                F_ACC_NAME, F_ACC_AUTOMATION_MODE, F_ACC_LIFECYCLE_STAGE,
-                F_ACC_CREATION_DATE, F_ACC_NEEDS_VERIFICATION, F_ACC_PROFILE, F_ACC_BIO,
-                F_ACC_PROFILE_PICTURE,
-            ],
-        )
+        """All account rows with the fields the planner needs, or `[]` if the
+        table is not in the base at all.
+
+        The Accounts table was removed from the production base on 2026-08-18.
+        Airtable answers an unknown table name with **403, not 404**, so that
+        surfaced everywhere as an auth failure: `posting_runner` could not build
+        a plan, every tick died before planning anything, and the fleet stopped
+        for seven hours with 711 rows due while `doctor` reported "Airtable:
+        auth rejected" and nobody suspected a deleted table.
+
+        Posting has been profile-driven since the cut-over -- 2825 of 2826 queue
+        rows link a Target Profile and exactly one links an Account -- so an
+        absent Accounts table costs the planner nothing. It must therefore not
+        be able to stop posting. Rows that name *only* an account still get
+        skipped by the planner, visibly, in its `skipped` list.
+
+        Only a missing/forbidden **table** is swallowed, and only for this one
+        lookup. A dead token answers 401 and still raises, so "the base changed
+        shape" is never confused with "the credentials are gone".
+        """
+        return self._list_accounts_or_empty([
+            F_ACC_NAME, F_ACC_AUTOMATION_MODE, F_ACC_LIFECYCLE_STAGE,
+            F_ACC_CREATION_DATE, F_ACC_NEEDS_VERIFICATION, F_ACC_PROFILE, F_ACC_BIO,
+            F_ACC_PROFILE_PICTURE,
+        ])
+
+    def _list_accounts_or_empty(self, fields: list) -> list:
+        """Read the Accounts table, or `[]` if it is not in the base.
+
+        One helper rather than a try/except per call site, so "the table may be
+        gone" is defined in exactly one place. Every caller of it treats an
+        empty account list as "no account-driven work", which is the correct
+        reading of a base that no longer has the table.
+        """
+        try:
+            return self._list_table(TABLE_ACCOUNTS, fields=fields)
+        except requests.HTTPError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status not in (403, 404):
+                raise
+            if not AirtableClient._accounts_absent_logged:
+                AirtableClient._accounts_absent_logged = True
+                print(f"[!] Airtable table {TABLE_ACCOUNTS!r} is not readable in base "
+                      f"{self.base_id} (HTTP {status}). Treating it as absent: posting is "
+                      f"profile-driven, so account-linked rows are skipped and everything "
+                      f"else continues. If this is unexpected, the table was renamed or "
+                      f"deleted -- it is not a token problem (that would be 401).")
+            return []
 
     def profile_launch_map(self) -> dict:
         """record_id -> {'name', 'launch_id', 'serial', 'needs_human', 'status'}
@@ -1521,9 +1565,8 @@ class AirtableClient:
         are live (Lifecycle Stage = Active, not paused, not needs-verification).
         These are the accounts a new raw video gets spoofed for."""
         models = self.models_by_recid()
-        rows = self._list_table(
-            TABLE_ACCOUNTS,
-            fields=[F_ACC_NAME, F_ACC_LIFECYCLE_STAGE, F_ACC_AUTOMATION_MODE, F_ACC_NEEDS_VERIFICATION, F_ACC_MODEL],
+        rows = self._list_accounts_or_empty(
+            [F_ACC_NAME, F_ACC_LIFECYCLE_STAGE, F_ACC_AUTOMATION_MODE, F_ACC_NEEDS_VERIFICATION, F_ACC_MODEL],
         )
         out: dict = {}
         for record in rows:
