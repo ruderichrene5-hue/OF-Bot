@@ -2081,7 +2081,7 @@ def needs_human(airtable, max_retries: int = DEFAULT_MAX_RETRIES) -> dict:
     """
     from adb_bot.clients import airtable as at
 
-    out = {"rows": [], "retrying": [], "profiles": [], "error": ""}
+    out = {"rows": [], "retrying": [], "profiles": [], "retired": [], "error": ""}
     field = lambda record, key: (record.get("fields") or {}).get(key)   # noqa: E731
 
     try:
@@ -2126,7 +2126,7 @@ def needs_human(airtable, max_retries: int = DEFAULT_MAX_RETRIES) -> dict:
         return out
 
     for record in profiles:
-        out["profiles"].append({
+        entry = {
             # Carried so the site can offer a "somebody looked at this" button.
             # Nothing else needs it, and the page never shows it.
             "record_id": record.get("id") or "",
@@ -2137,9 +2137,49 @@ def needs_human(airtable, max_retries: int = DEFAULT_MAX_RETRIES) -> dict:
             # Newest entry first in the field itself, so the first line is the
             # current story and the rest is history nobody needs on a dashboard.
             "note": str(field(record, at.F_PROF_ISSUE_NOTES) or "").splitlines()[:1],
-        })
+        }
+        # A flag on a phone MultiLogin no longer has is not work anybody can do.
+        # The flag is left ticked in Airtable on purpose -- it protects the
+        # hand-written diagnosis in Issue Notes -- so the filtering has to happen
+        # here rather than by clearing the box.
+        if profile_retired(entry):
+            out["retired"].append(entry["name"])
+            continue
+        out["profiles"].append(entry)
     out["profiles"].sort(key=lambda e: (e["reason"], e["name"]))
+    out["retired"].sort()
     return out
+
+
+def profile_retired(profile) -> bool:
+    """Is this profile's phone gone from MultiLogin?
+
+    `Issue Reason = Profile Deleted From MLX` means the MLX profile no longer
+    exists, so no loop can ever launch, post or recover it. Twenty rows were in
+    that state on 2026-08-18 and eleven of them were *also* flagged, which put
+    them on the VA worklist under labels like "Human Verification Required" --
+    asking a person to sign in to a phone that is not there.
+
+    Retired rows are dropped from the people-facing tabs rather than deleted:
+    keeping the row is deliberate (retiring a phone is a client decision), and
+    the count is still reported, because a worklist that silently shrinks is
+    the same failure as one padded with impossible work.
+
+    Read off `Issue Reason` and not off a live MultiLogin diff: the tabs must
+    classify the same way when MultiLogin is unreachable, and an inventory that
+    failed to load looks exactly like every phone having been deleted.
+    """
+    from adb_bot.clients import airtable as at
+
+    return str((profile or {}).get("reason") or "").strip() == at.PROFILE_ISSUE_DELETED
+
+
+def drop_retired(profiles) -> tuple:
+    """``(kept, retired_names)`` -- split a profile listing on `profile_retired`."""
+    kept, retired = [], []
+    for profile in profiles or []:
+        (retired if profile_retired(profile) else kept).append(profile)
+    return kept, sorted(str(p.get("name") or "(unnamed)") for p in retired)
 
 
 # How a profile is classified on the Profiles tab, worst-first. A profile is in
@@ -2861,6 +2901,10 @@ def queue_grid(log_path=None) -> dict:
 #: tab is asking.
 BLOCKED_FLAGGED = "held — the profile is flagged, waiting on a person"
 BLOCKED_PARKED = "held — the profile is parked (Status Inactive)"
+#: Retired: the phone itself is gone from MultiLogin. Its own wording because
+#: the remedy is not the same -- a flag can be cleared and a park can be
+#: un-parked, while these rows can only ever be cancelled.
+BLOCKED_RETIRED = "held — its MultiLogin profile no longer exists"
 
 
 def profiles_blocked_from_posting(profiles) -> dict:
@@ -2881,7 +2925,11 @@ def profiles_blocked_from_posting(profiles) -> dict:
         name = str(profile.get("name") or "").strip()
         if not name:
             continue
-        if profile.get("needs_human"):
+        # Retired first: it outranks both of the others, because a flagged or
+        # parked phone can come back and a deleted one cannot.
+        if profile_retired(profile):
+            out[name] = BLOCKED_RETIRED
+        elif profile.get("needs_human"):
             out[name] = BLOCKED_FLAGGED
         elif str(profile.get("status") or "") == "Inactive":
             out[name] = BLOCKED_PARKED
@@ -3685,11 +3733,16 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
         "daily": {"days": [], "totals": {"posted": 0, "failed": 0, "unsettled": 0,
                                          "rate": None}, "omitted": 0, "undated": 0},
         "content": {"ready": 0, "drawable": 0, "held": 0, "by_model": {}, "held_by_model": {}},
-        "needs_human": {"rows": [], "retrying": [], "profiles": [], "error": ""},
+        "needs_human": {"rows": [], "retrying": [], "profiles": [], "retired": [],
+                        "error": ""},
         "handoff": {"profiles": [], "done": 0, "plan_days": 0, "finish_day": 0},
         "mlx_issues": {"warmup": [], "parked": [], "other": [], "error": "",
                        "counts": {"tagged": 0, "flagged": 0, "unflagged": 0}},
         "folders": {"folders": [], "totals": {}, "known_folders": 0, "error": ""},
+        # Names of profiles whose MLX phone is gone (Issue Reason =
+        # Profile Deleted From MLX). Kept as a list, not a count, so the page
+        # can name them on request without a second read.
+        "retired": [],
         "posts_today": {"posts": [], "by_status": {}, "by_profile": [], "total": 0,
                         "clips": 0, "day": day, "reused_clips": [],
                         "parked": None, "to_post": None, "parked_reasons": {}},
@@ -3803,7 +3856,20 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
                 # Read here and used by the outlook further down: the same
                 # listing already says which profiles the posting loop refuses,
                 # and asking twice would be a second pass over Profiles.
+                #
+                # Built from the FULL listing, deliberately before the retired
+                # rows are dropped below. A retired phone's queue rows outlive
+                # it, still carry a due time, and the outlook's arithmetic would
+                # call them imminent -- so dropping the profile from this map is
+                # how the dead rows would come back reading as "going out on the
+                # next tick", which is the exact misreading the map exists to
+                # prevent.
                 blocked_profiles = profiles_blocked_from_posting(overview)
+                # Phones MultiLogin no longer has come out here, once, so every
+                # panel below is spared them and none can disagree about whether
+                # a retired phone counts. They are reported as a number on the
+                # Profiles tab rather than dropped in silence.
+                overview, data["retired"] = drop_retired(overview)
                 # The same memoised inventory the two panels below use, so
                 # naming each phone's folder on the hand-off list costs no
                 # extra call. Both readers answer {} / [] on failure rather

@@ -456,8 +456,12 @@ class FlagIsIdempotentTest(TestCase):
                 inner._base_id = "app1"
                 inner._table = "Accounts"
 
-            def _get_field(inner, table, rec, field):
-                return self.notes
+            def _get_fields(inner, table, rec):
+                # `flag_profile_for_human` reads the notes and the current
+                # Issue Reason in one call now, so the fake has to answer the
+                # plural. No reason set here: this row is an ordinary flagged
+                # profile, not a retired one.
+                return {at.F_PROF_ISSUE_NOTES: self.notes}
 
             def _patch_in(inner, table, rec, fields, typecast=True):
                 self.patch_calls.append(fields)

@@ -1196,6 +1196,10 @@ def _section_needs_human(data: dict) -> str:
         _section_handoff(handoff),
         _section_mlx_issues(tagged),
     ]
+    # Flagged phones MultiLogin no longer has. They stay flagged in Airtable on
+    # purpose -- the flag protects the diagnosis written in Issue Notes -- so
+    # this worklist has to drop them itself, and say that it did.
+    parts.append(_retired_note(triage.get("retired")))
 
     if not profiles:
         parts.append('<h2>Nothing broken</h2><p class="empty">No account is flagged for '
@@ -1422,7 +1426,27 @@ def _section_posts_today(posts: dict) -> str:
             + f'<div class="scroll"><table>{tally_head}{tally}</table></div>')
 
 
-def _section_folders(folders: dict) -> str:
+def _retired_note(retired) -> str:
+    """One line naming the phones MultiLogin no longer has.
+
+    They are off every table on this page, which is the point -- but a count
+    that shrank with no explanation is how the last blind spot started, so the
+    page says how many went and what they were called.
+    """
+    names = list(retired or ())
+    if not names:
+        return ""
+    shown = ", ".join(_e(name) for name in names[:12])
+    rest = f" and {len(names) - 12} more" if len(names) > 12 else ""
+    return (f'<p class="sub"><span class="pill">{len(names)} retired</span> '
+            f'not counted anywhere on this page: their MultiLogin profile no longer '
+            f'exists, so nothing can launch for them. Parked in Airtable with '
+            f'<span class="mono">Issue Reason = Profile Deleted From MLX</span>; the row '
+            f'is kept because retiring a phone for good is a client decision. '
+            f'{shown}{rest}.</p>')
+
+
+def _section_folders(folders: dict, retired=()) -> str:
     """Every MultiLogin folder, and what its phones are doing."""
     if folders.get("error"):
         return (f'<p class="sub"><span class="pill warn">could not read the profiles</span> '
@@ -1459,7 +1483,8 @@ def _section_folders(folders: dict) -> str:
             f'grouping that survives 46 phones all called "Blank (NN)". A phone is counted '
             f'in exactly one column, worst first: a flagged phone that is also posting is '
             f'somebody\'s job, not a healthy row.</p>'
-            + f'<div class="scroll"><table>{head}{body}</table></div>')
+            + f'<div class="scroll"><table>{head}{body}</table></div>'
+            + _retired_note(retired))
 
 
 def _counts_cell(counts: dict) -> str:
@@ -2507,7 +2532,7 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
 
     <section class="panel" id="panel-profiles">
       <h2>Phones by folder</h2>
-      {_section_folders(data.get('folders') or {})}
+      {_section_folders(data.get('folders') or {}, data.get('retired') or [])}
 
       <h2>Phones with two accounts</h2>
       {_section_second_accounts(data.get('second_accounts') or {})}

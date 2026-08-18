@@ -274,6 +274,15 @@ PROFILE_ISSUE_UNREACHABLE = "Device Unreachable"
 # adds the option to the select the first time it is used.
 PROFILE_ISSUE_NO_SUCCESS = "No Recent Success"
 
+# The phone itself is gone from the MultiLogin workspace, so nothing can ever
+# launch for it. Deliberately its own reason: every other value here describes
+# an account that still has a device to fix, and a deleted profile used to
+# inherit whatever label it carried last -- which read as a credentials problem
+# forever. Rows carrying this are retired, not work: the dashboard drops them
+# from its worklists and counts them separately. Retiring or re-creating the
+# phone is a client decision, so the row is parked and kept, never deleted.
+PROFILE_ISSUE_DELETED = "Profile Deleted From MLX"
+
 # Written to a queue row whose Retry Count hit the limit. Distinct from
 # `Failed - Needs Retry`, which is the only value the retry pass re-queues: an
 # exhausted row left on that value reads as "still queued for another go" when
@@ -471,6 +480,22 @@ class AirtableClient:
         except Exception as exc:  # pragma: no cover - network/diagnostic path
             print(f"[-] Airtable read failed on {table}/{record_id}: {exc}")
             return None
+
+    def _get_fields(self, table: str, record_id: str) -> dict:
+        """Every field on one record, or {} if the read fails.
+
+        The plural of `_get_field`, for callers that need two values off the
+        same row: asking twice costs two HTTP round trips to say one thing, and
+        the two answers can disagree if a loop writes between them.
+        """
+        url = f"{self._url_for_table(table)}/{record_id}"
+        try:
+            response = requests.get(url, headers=self._headers, timeout=30)
+            response.raise_for_status()
+            return (response.json().get("fields") or {}) or {}
+        except Exception as exc:  # pragma: no cover - network/diagnostic path
+            print(f"[-] Airtable read failed on {table}/{record_id}: {exc}")
+            return {}
 
     def _patch_in(self, table: str, record_id: str, fields: dict, typecast: bool = True) -> bool:
         url = f"{self._url_for_table(table)}/{record_id}"
@@ -912,12 +937,18 @@ class AirtableClient:
         body = f"{reason}: {note}".strip()
         entry = f"[{stamp}] {body}"
         existing = ""
+        current_reason = ""
         try:
-            existing = str(self._get_field(TABLE_PROFILES, record_id, F_PROF_ISSUE_NOTES) or "")
+            # One read for both: the note we are appending to, and the reason
+            # already on the row (see the retirement guard below).
+            current = self._get_fields(TABLE_PROFILES, record_id)
+            existing = str(current.get(F_PROF_ISSUE_NOTES) or "")
+            current_reason = _select_name(current.get(F_PROF_ISSUE_REASON)) or ""
         except Exception:
             # A failed read must not cost the flag -- the checkbox is the part
             # that actually surfaces the profile to a person.
             existing = ""
+            current_reason = ""
 
         # The retry pass reconsiders every Failed row on every tick, so without
         # this the same unchanged problem is re-recorded every 30 minutes: ~48
@@ -929,12 +960,23 @@ class AirtableClient:
         combined = f"{entry}\n{existing}".strip() if existing else entry
         if len(combined) > max_notes_chars:
             combined = combined[:max_notes_chars].rsplit("\n", 1)[0] + "\n[older entries trimmed]"
-        return self._patch_in(TABLE_PROFILES, record_id, {
+        fields = {
             F_PROF_NEEDS_HUMAN: True,
             F_PROF_ISSUE_REASON: reason,
             F_PROF_ISSUE_NOTES: combined,
             F_PROF_FLAGGED_AT: stamp,
-        })
+        }
+        # A retired profile keeps its reason. The phone is gone from MultiLogin,
+        # so no queue-row outcome can say anything truer about it than that --
+        # and the outcomes keep coming, because the rows it left behind still
+        # fail. Overwriting here is what put `Jil 2` and `Jil 10` back on the VA
+        # worklist as "Human Verification Required" within minutes of being
+        # retired on 2026-08-18, asking somebody to sign in to a phone that does
+        # not exist. The note still appends and the flag stays ticked: only the
+        # label is protected.
+        if current_reason == PROFILE_ISSUE_DELETED and reason != PROFILE_ISSUE_DELETED:
+            fields.pop(F_PROF_ISSUE_REASON)
+        return self._patch_in(TABLE_PROFILES, record_id, fields)
 
     def flag_profile_from_tag(self, record_id: str, note: str,
                               when_iso: str | None = None,
