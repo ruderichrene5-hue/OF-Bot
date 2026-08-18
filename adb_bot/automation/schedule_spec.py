@@ -37,7 +37,7 @@ PLANNED_LOOPS = ("queue", "retry")
 # was actually for.
 RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery",
                      "warmup", "warmup-state", "mlx-sync", "cleanup", "digest",
-                     "doctor", "reap-phones", "second-accounts")
+                     "doctor", "reap-phones", "second-accounts", "verification")
 
 # Loops the CLI can run that are deliberately NOT scheduled: arming them has to
 # be a separate, deliberate act by a person, not a side effect of running the
@@ -148,6 +148,19 @@ RECOMMENDED_INTERVALS = {
     # the state it reads changes at posting speed, the run is three Airtable
     # reads and a log grep, and its alerts are about a trend rather than a tick.
     "second-accounts": 60,
+    # Answers Instagram's verification challenge on the profiles flagged for it
+    # -- the other end of `issue-tags`, which until now had no other end but a
+    # person running a CLI. A profile flagged at 02:00 stayed flagged.
+    #
+    # 30 minutes, and the pacing is not about latency. This is the only loop
+    # that spends money and the only one that drives a phone through somebody
+    # else's challenge flow, so the cadence is set by what a bad half-hour may
+    # cost: two profiles a tick, six numbers a tick, twelve numbers a rolling
+    # day (`LOOP_EXTRA_ARGS` below), which is ~$2.40 against a wallet that has
+    # held about ten dollars. Faster would not clear the backlog any sooner
+    # either -- a worked profile has a six-hour cool-off, so the population of
+    # things this loop *can* do is refilled by flags arriving, not by ticks.
+    "verification": 30,
 }
 
 # Historical name -- the UI, both backends and install_units.sh read this.
@@ -188,6 +201,7 @@ DESCRIPTIONS = {
     "doctor": "ADB bot preflight checks (alerts on failures)",
     "reap-phones": "ADB bot orphan-phone reaper (closes abandoned phones)",
     "second-accounts": "ADB bot two-account watch (both accounts of a phone posting?)",
+    "verification": "ADB bot verification loop (flagged profiles -> challenge answered)",
 }
 
 # The same loops in words, for a person rather than a unit file. DESCRIPTIONS
@@ -253,6 +267,15 @@ WHAT_IT_DOES = {
     "reap-phones": "Closes phones no loop owns any more. Nothing else does — the "
                    "run that would have closed them died — and a leaked phone holds "
                    "a MultiLogin session open on a real account for hours.",
+    "verification": "Answers Instagram's verification challenge on the phones flagged "
+                    "for it: launches each one, reads the screen, and where the ask "
+                    "is an SMS code or an image captcha, rents a number or buys a "
+                    "solve and types it in. A phone it genuinely clears is untagged, "
+                    "which hands it back to posting. This is the only loop that "
+                    "spends money, so it is bounded twice — a few numbers per tick "
+                    "and a dozen per day — and it never touches a profile already "
+                    "recorded as banned or held for a supervised run, because a "
+                    "suspended account still renders a feed that looks healthy.",
 }
 
 
@@ -325,9 +348,25 @@ def python_exe() -> str:
 # queue_runner): drop the "--slots" pair below and re-run
 # `sudo deploy/systemd/install_units.sh --apply`. Do that tomorrow morning --
 # left in place, these three times are the only slots that will ever fill.
+#
+# `verification` is the one whose defaults are deliberately *tighter* on a timer
+# than on the command line. Run by hand, a person is watching the balance and
+# can afford `--limit 5`; run every 30 minutes with nobody watching, the numbers
+# below are the whole safety argument, so they are written here rather than left
+# to the module defaults:
+#   --limit-profiles 2      two phones a tick. Each takes ~2-4 minutes and
+#                           competes with posting for ADBBOT_MAX_LIVE_PROFILES,
+#                           so this is about the fleet as much as the wallet.
+#   --max-numbers 4         one tick cannot spend more than ~$0.80.
+#   --max-numbers-per-day 12  the ceiling that actually bounds a timer: ~$2.40
+#                           across every tick in a rolling 24 hours.
+#   --min-balance 1.00      refuse to start rather than discover an empty
+#                           wallet two launches in.
 LOOP_EXTRA_ARGS = {
     "pipeline": ("--targets", "profiles"),
     "queue": ("--targets", "profiles", "--slots", "18:00,20:00,22:00"),
+    "verification": ("--limit-profiles", "2", "--max-numbers", "4",
+                     "--max-numbers-per-day", "12", "--min-balance", "1.00"),
 }
 
 

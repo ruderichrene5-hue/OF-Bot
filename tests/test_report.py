@@ -463,6 +463,115 @@ class DailySuccessTest(unittest.TestCase):
         self.assertIsNone(data["totals"]["rate"])
 
 
+def _prow(day, status, profile="rec1"):
+    """An unsettled queue row linked to a profile."""
+    return _row(day, status, **{"Target Profile": [profile]})
+
+
+HEALTHY = {"launch_id": "L1", "status": "Active", "needs_human": False,
+           "warmup_started": None, "handoff_outstanding": []}
+
+
+class ParkedVsToPostTest(unittest.TestCase):
+    """Splitting the unsettled bucket into "waiting on a person" and "waiting
+    its turn".
+
+    The single "still to settle" figure answered the wrong question: on
+    2026-08-16 it read 221, of which 207 were parked behind a flag or a hand-off
+    and would never post at all. One number made a dead backlog look like a busy
+    evening.
+    """
+
+    def _split(self, rows, profiles):
+        day = report.daily_success(rows, profiles_by_recid=profiles)["days"][0]
+        return day["parked"], day["to_post"]
+
+    def test_a_healthy_phones_pending_row_will_post(self):
+        self.assertEqual(
+            self._split([_prow("2026-08-16", "Pending")], {"rec1": dict(HEALTHY)}),
+            (0, 1))
+
+    def test_a_flagged_phones_row_is_parked(self):
+        profiles = {"rec1": dict(HEALTHY, needs_human=True)}
+        self.assertEqual(
+            self._split([_prow("2026-08-16", "Pending")], profiles), (1, 0))
+
+    def test_a_parked_phones_row_is_parked(self):
+        profiles = {"rec1": dict(HEALTHY, status="Inactive")}
+        self.assertEqual(
+            self._split([_prow("2026-08-16", "Pending")], profiles), (1, 0))
+
+    def test_a_phone_still_waiting_on_its_hand_off_is_parked(self):
+        profiles = {"rec1": dict(HEALTHY, warmup_started="2026-08-10",
+                                 handoff_outstanding=["bio", "profile picture"])}
+        self.assertEqual(
+            self._split([_prow("2026-08-16", "Pending")], profiles), (1, 0))
+
+    def test_a_finished_hand_off_is_not_parked(self):
+        """`warmup_started` alone must not park a phone that is ready."""
+        profiles = {"rec1": dict(HEALTHY, warmup_started="2026-08-10",
+                                 handoff_outstanding=[])}
+        self.assertEqual(
+            self._split([_prow("2026-08-16", "Pending")], profiles), (0, 1))
+
+    def test_a_profile_with_no_mlx_id_is_parked(self):
+        profiles = {"rec1": dict(HEALTHY, launch_id=None)}
+        self.assertEqual(
+            self._split([_prow("2026-08-16", "Pending")], profiles), (1, 0))
+
+    def test_a_verifying_row_counts_as_to_post_not_parked(self):
+        """It has been posted and is waiting to be proven -- the opposite of
+        stuck -- so it must never land in the parked column."""
+        profiles = {"rec1": dict(HEALTHY, needs_human=True)}
+        parked, to_post = self._split(
+            [_prow("2026-08-16", "Verifying")], profiles)
+        self.assertEqual((parked, to_post), (0, 1))
+
+    def test_a_row_linked_to_no_profile_at_all_is_parked(self):
+        self.assertEqual(
+            self._split([_row("2026-08-16", "Pending")], {}), (1, 0))
+
+    def test_a_row_whose_profile_is_unknown_is_parked(self):
+        """Unknown is not clear: an unmapped phone has never posted by itself."""
+        self.assertEqual(
+            self._split([_prow("2026-08-16", "Pending", "recMISSING")],
+                        {"rec1": dict(HEALTHY)}),
+            (1, 0))
+
+    def test_settled_rows_are_never_parked(self):
+        profiles = {"rec1": dict(HEALTHY, needs_human=True)}
+        day = report.daily_success(
+            [_prow("2026-08-16", "Posted"), _prow("2026-08-16", "Failed")],
+            profiles_by_recid=profiles)["days"][0]
+        self.assertEqual((day["parked"], day["to_post"]), (0, 0))
+
+    def test_parked_plus_to_post_always_equals_unsettled(self):
+        profiles = {"rec1": dict(HEALTHY), "rec2": dict(HEALTHY, needs_human=True)}
+        rows = [_prow("2026-08-16", "Pending", "rec1"),
+                _prow("2026-08-16", "Pending", "rec2"),
+                _prow("2026-08-16", "Verifying", "rec2"),
+                _prow("2026-08-16", "Posted", "rec1")]
+        day = report.daily_success(rows, profiles_by_recid=profiles)["days"][0]
+        self.assertEqual(day["parked"] + day["to_post"], day["unsettled"])
+        self.assertEqual((day["parked"], day["to_post"]), (1, 2))
+
+    def test_without_a_profile_map_both_columns_are_none(self):
+        """An Airtable outage costs the split, not the rate the table has always
+        shown."""
+        day = report.daily_success([_prow("2026-08-16", "Pending")])["days"][0]
+        self.assertIsNone(day["parked"])
+        self.assertIsNone(day["to_post"])
+        self.assertEqual(day["unsettled"], 1)
+
+    def test_totals_carry_the_split(self):
+        profiles = {"rec1": dict(HEALTHY), "rec2": dict(HEALTHY, needs_human=True)}
+        totals = report.daily_success(
+            [_prow("2026-08-15", "Pending", "rec1"),
+             _prow("2026-08-16", "Pending", "rec2")],
+            profiles_by_recid=profiles)["totals"]
+        self.assertEqual((totals["parked"], totals["to_post"]), (1, 1))
+
+
 class DailySuccessRenderTest(unittest.TestCase):
     def _daily(self, days, **kw):
         base = {"days": days, "totals": {"posted": 0, "failed": 0, "unsettled": 0,
@@ -484,10 +593,32 @@ class DailySuccessRenderTest(unittest.TestCase):
         self.assertEqual(report_html._rate_tone(40.0), "bad")
 
     def test_a_day_still_in_flight_says_so(self):
+        """With no profile map there is no split, so the day falls back to the
+        one figure -- worded `unsettled` rather than the old "still to settle",
+        which promised a settlement that never comes for a parked row."""
         page = report_html._section_daily(self._daily(
             [{"day": "2026-08-06", "posted": 2, "failed": 0, "unsettled": 5,
               "total": 7, "rate": 100.0}]))
-        self.assertIn("5 still to settle", page)
+        self.assertIn("5 unsettled", page)
+        self.assertNotIn("still to settle", page)
+
+    def test_the_split_is_shown_in_its_two_columns(self):
+        page = report_html._section_daily(self._daily(
+            [{"day": "2026-08-06", "posted": 2, "failed": 0, "unsettled": 5,
+              "parked": 4, "to_post": 1, "total": 7, "rate": 100.0}]))
+        self.assertIn("Parked rows", page)
+        self.assertIn("Will post", page)
+        self.assertIn("4 parked", page)
+        self.assertNotIn("still to settle", page)
+
+    def test_a_day_with_nothing_parked_shows_no_parked_cell(self):
+        """An empty cell, not a bare `0` -- the column is a warning, and a zero
+        warning in every row is how a column stops being read."""
+        page = report_html._section_daily(self._daily(
+            [{"day": "2026-08-06", "posted": 2, "failed": 0, "unsettled": 1,
+              "parked": 0, "to_post": 1, "total": 3, "rate": 100.0}]))
+        self.assertNotIn("parked<", page)
+        self.assertNotIn("0 parked", page)
 
     def test_a_day_with_no_rate_shows_a_dash_not_zero_percent(self):
         page = report_html._section_daily(self._daily(

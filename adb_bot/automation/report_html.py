@@ -817,37 +817,69 @@ def _section_daily(daily: dict) -> str:
             'was <em>due</em>. A post that failed and was retried until it went out counts once, '
             'as confirmed — only a post that ran out of retries counts as failed. So this is the '
             'share of each day’s planned posts that actually reached Instagram, not the '
-            'share of attempts that worked.</p>')
+            'share of attempts that worked.</p>'
+            '<p class="sub"><strong>Will post</strong> is the valid remainder: rows whose phone '
+            'is healthy, so they go out on their own as the fleet works through them. '
+            '<strong>Parked rows</strong> are waiting on a <em>person</em> — the phone is flagged, '
+            'parked, or still needs its bio, picture and first post — and they will never post '
+            'on their own however long they are left. A day whose remainder is nearly all parked '
+            'has not had a slow evening; it has a backlog nobody is working.</p>'
+            # The two tabs are read side by side and their two "will post"
+            # figures never match, because this one folds in the Verifying
+            # rows and the Posts tab shows those as their own tile. Said here
+            # so nobody has to reconcile it a second time.
+            '<p class="sub">Today’s <strong>Will post</strong> reads higher than the same '
+            'figure on the Posts tab: this column also counts the <em>Verifying</em> rows — '
+            'already on Instagram, waiting to be proved — while the Posts tab keeps them in '
+            'their own tile and splits only the pending ones. The two differ by exactly the '
+            'Verifying count.</p>')
 
     head = ("<tr><th>Day</th><th class='num'>Confirmed</th><th class='num'>Failed</th>"
-            "<th class='num'>Success rate</th><th class='num'>Not settled</th></tr>")
+            "<th class='num'>Success rate</th><th class='num'>Will post</th>"
+            "<th class='num'>Parked rows</th></tr>")
 
     body = []
     for entry in days:
         rate, unsettled = entry["rate"], entry["unsettled"]
+        parked, to_post = entry.get("parked"), entry.get("to_post")
         if rate is None:
             cell = '<span class="dim">—</span>'
         else:
             cell = f'<span class="pill {_rate_tone(rate)}">{rate:.0f}%</span>'
-        # A day with rows still in flight has a rate that can only move, so say
-        # so rather than letting a half-finished day be read as a verdict.
-        pending = (f"<span class='dim'>{unsettled} still to settle</span>"
-                   if unsettled else "")
+        # Two columns, because the old single "still to settle" answered the
+        # wrong question. A parked row is waiting on a person and will not go
+        # out on its own however long anyone leaves it; a will-post row is just
+        # waiting its turn. Read together they said "busy evening" when the
+        # truth was a backlog nobody was working.
+        if parked is None:
+            # No profile map this render -- show the old single figure rather
+            # than two columns that would both be guesses.
+            to_post_cell = ""
+            parked_cell = (f"<span class='dim'>{unsettled} unsettled</span>"
+                           if unsettled else "")
+        else:
+            to_post_cell = (f"<span class='ok'>{to_post}</span>" if to_post else "")
+            parked_cell = (f"<span class='warn'>{parked} parked</span>"
+                           if parked else "")
         body.append(
             f"<tr><td class='mono'>{_e(entry['day'])}</td>"
             f"<td class='num'>{entry['posted']}</td>"
             f"<td class='num'>{entry['failed'] or ''}</td>"
             f"<td class='num'>{cell}</td>"
-            f"<td class='num'>{pending}</td></tr>")
+            f"<td class='num'>{to_post_cell}</td>"
+            f"<td class='num'>{parked_cell}</td></tr>")
 
     overall = totals.get("rate")
     total_cell = ('<span class="dim">—</span>' if overall is None
                   else f'<span class="pill {_rate_tone(overall)}">{overall:.0f}%</span>')
+    total_parked, total_to_post = totals.get("parked"), totals.get("to_post")
     body.append(
         f"<tr><td><strong>All {len(days)} day(s)</strong></td>"
         f"<td class='num'><strong>{totals.get('posted', 0)}</strong></td>"
         f"<td class='num'><strong>{totals.get('failed', 0) or ''}</strong></td>"
-        f"<td class='num'>{total_cell}</td><td class='num'></td></tr>")
+        f"<td class='num'>{total_cell}</td>"
+        f"<td class='num'><strong>{total_to_post if total_to_post else ''}</strong></td>"
+        f"<td class='num'><strong>{total_parked if total_parked else ''}</strong></td></tr>")
 
     notes = ""
     if daily.get("omitted"):
@@ -1287,14 +1319,53 @@ def _section_posts_today(posts: dict) -> str:
         return (f'<p class="empty">No posts are scheduled for {_e(posts.get("day") or "today")}. '
                 f'The queue loop fills the day as each model\'s slots come round.</p>')
 
+    pending = posts.get("pending", by_status.get("Pending", 0))
+    parked, to_post = posts.get("parked"), posts.get("to_post")
+    verifying = by_status.get("Verifying", 0)
+
+    if parked is None:
+        # No profile map this render. The old single tile rather than two
+        # columns that would both be guesses.
+        pending_tiles = [_tile("Still to go", pending, "scheduled, not sent yet")]
+        split = ('<p class="sub"><strong>Still to go</strong> could not be split this '
+                 'refresh — the profile list did not read, so the page cannot say which '
+                 'of those rows a phone will actually send.</p>')
+    else:
+        # Two tiles, because "scheduled, not sent yet" reads as a promise. Most
+        # of that number is usually a phone nobody has touched, and on a tab
+        # that lists the day's posts one by one, the count that will never
+        # become a post is the one worth its own tile.
+        pending_tiles = [
+            _tile("Will post", to_post, "phone healthy, goes out on its own",
+                  "ok" if to_post else ""),
+            _tile("Waiting on a person", parked, "flagged, parked or mid hand-off",
+                  "bad" if parked > to_post else ("warn" if parked else "")),
+        ]
+        reasons = posts.get("parked_reasons") or {}
+        detail = ", ".join(f"{n} {_e(why)}" for why, n in reasons.items())
+        split = (f'<p class="sub"><strong>Still to go is {pending}, but only '
+                 f'{to_post} of it will go out.</strong> The other {parked} '
+                 f'{"is" if parked == 1 else "are"} waiting on a <em>person</em> — the '
+                 f'posting loop skips {"it" if parked == 1 else "them"} every tick and '
+                 f'will keep skipping {"it" if parked == 1 else "them"} however long '
+                 f'{"it is" if parked == 1 else "they are"} left'
+                 + (f': {detail}' if detail else '') + '. '
+                 'Each stuck row says which gate it is behind in the '
+                 '<em>Why it is stuck</em> column below.</p>'
+                 '<p class="sub">The Technical tab counts the same day as '
+                 f'<strong>{to_post + verifying} will post</strong>, not {to_post}: its '
+                 f'column also holds the {verifying} <em>Verifying</em> row(s), which are '
+                 'already on Instagram and only waiting to be proved. Same rows, and the '
+                 'two tabs differ by exactly that count — nothing is missing from either.')
+
     tiles = [
         _tile("Posts today", posts.get("total", 0),
               f'{len(posts.get("by_profile") or [])} profile(s)'),
         _tile("Posted", by_status.get("Posted", 0), "confirmed live",
               "ok" if by_status.get("Posted") else ""),
-        _tile("Still to go", by_status.get("Pending", 0), "scheduled, not sent yet"),
-        _tile("Verifying", by_status.get("Verifying", 0), "sent, not yet proved",
-              "warn" if by_status.get("Verifying") else ""),
+    ] + pending_tiles + [
+        _tile("Verifying", verifying, "sent, not yet proved",
+              "warn" if verifying else ""),
         _tile("Failed", by_status.get("Failed", 0), "see abandoned posts below",
               "bad" if by_status.get("Failed") else "ok"),
         _tile("Distinct clips", posts.get("clips", 0), "one file per account, ideally"),
@@ -1312,28 +1383,39 @@ def _section_posts_today(posts: dict) -> str:
                 f'profile</span> {detail}. Each account is supposed to get its own spoofed '
                 f'encode — the same file on two accounts is what gets them flagged.</p>')
 
+    # Its own column rather than folded into Issue: Issue is what the *queue
+    # row* recorded when it last ran, and this is what the *phone* looks like
+    # now. A row can carry both, and reading one as the other sent someone to
+    # re-run a post whose phone was flagged.
     head = ("<tr><th class='num'>Due</th><th>Profile</th><th>Reel</th><th>Account</th>"
-            "<th>Status</th><th>Issue</th><th class='num'>Tries</th></tr>")
+            "<th>Status</th><th>Why it is stuck</th><th>Issue</th>"
+            "<th class='num'>Tries</th></tr>")
     body = "".join(
         f"<tr><td class='num mono'>{_e(p['when'])}</td>"
         f"<td class='mono'>{_e(p['profile'])}</td>"
         f"<td class='mono wrap-cell'>{_e(p['clip'] or '—')}</td>"
         f"<td class='mono'>{_e(p['handle'] or ('second account' if p['slot'] == 'Second' else '—'))}</td>"
         f"<td>{_status_pill(p['status'])}</td>"
+        f"<td>" + (f'<span class="pill warn">{_e(p.get("parked_reason"))}</span>'
+                   if p.get("parked_reason") else '<span class="dim">—</span>') + "</td>"
         f"<td>{_e(p['issue'] or '—')}</td>"
         f"<td class='num'>{_e(p['retries'])}</td></tr>" for p in rows)
 
     per_profile = posts.get("by_profile") or []
+    # "To go" split the same way as the tiles: a profile with 6 to go and 6 of
+    # them parked is the one to open, and one column could not say so.
     tally_head = ("<tr><th>Profile</th><th class='num'>Posts</th><th class='num'>Posted</th>"
-                  "<th class='num'>To go</th><th class='num'>Verifying</th>"
-                  "<th class='num'>Failed</th></tr>")
+                  "<th class='num'>To go</th><th class='num'>Stuck</th>"
+                  "<th class='num'>Verifying</th><th class='num'>Failed</th></tr>")
     tally = "".join(
         f"<tr><td class='mono'>{_e(p['profile'])}</td><td class='num'>{p['total']}</td>"
         f"<td class='num'>{p['posted']}</td><td class='num'>{p['pending']}</td>"
-        f"<td class='num'>{p['verifying']}</td><td class='num'>{p['failed']}</td></tr>"
+        + ("<td class='num'>" + (f"<span class='warn'>{p['parked']}</span>"
+                                 if p.get("parked") else "") + "</td>")
+        + f"<td class='num'>{p['verifying']}</td><td class='num'>{p['failed']}</td></tr>"
         for p in per_profile)
 
-    return (f'<div class="grid">{"".join(tiles)}</div>' + warn
+    return (f'<div class="grid">{"".join(tiles)}</div>' + split + warn
             + '<h3>Every post, in the order it is due</h3>'
             + f'<div class="scroll"><table>{head}{body}</table></div>'
             + '<h3>By profile</h3>'
