@@ -294,6 +294,14 @@ MAX_BLANK_READS = 5
 # go can land on a stale Play Store home before the wizard draws, and because
 # a phone that will not open it at all is not going to on the fifth try.
 MAX_ADD_ACCOUNT_STARTS = 2
+
+# How long to let Google sit on a password it is checking. The same shape as the
+# code screen's wait, because the failure they guard against is the same:
+# retyping into a form that is already submitted, which spends the repeat guard
+# without ever giving the check time to land. Eight, because on 2026-08-18 the
+# form was still spinning 47 seconds after `NEXT`.
+MAX_PASSWORD_WAITS = 8
+PASSWORD_WAIT_SECONDS = 10
 BLANK_READ_WAIT_SECONDS = 6
 
 _SKIP = ("Skip", "SKIP", "Not now", "NOT NOW", "Never", "NEVER")
@@ -441,6 +449,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     services_taps = 0
     blank_reads = 0
     add_account_starts = 0
+    password_waits = 0
 
     for step in range(MAX_STEPS):
         text = driver.read_screen() or ""
@@ -473,6 +482,30 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
         hints = driver.input_hints() if hasattr(driver, "input_hints") else ()
         screen = classify_google_screen(text, hints)
         log("info", "step %d: %s", step + 1, screen)
+
+        # Before the repeat guard, and for the same reason as `loading`: a
+        # password that is still being checked is not a screen that failed to
+        # advance. `Blank caio 2` spent its whole budget here on 2026-08-18 --
+        # the password was in the field and Google was drawing its own spinner
+        # over the form, and every pass typed it again.
+        if screen == SCREEN_PASSWORD and password_submits:
+            values = driver.input_values() if hasattr(driver, "input_values") else []
+            if password in values:
+                password_waits += 1
+                if password_waits <= MAX_PASSWORD_WAITS:
+                    log("info", "the password is still in the field; giving "
+                                "Google a moment (%d/%d)",
+                        password_waits, MAX_PASSWORD_WAITS)
+                    sleep(PASSWORD_WAIT_SECONDS)
+                    continue
+                # Long enough that it was not accepted: let the handler below
+                # type it again.
+                log("info", "the password has sat unanswered; typing it again")
+                password_waits = 0
+            else:
+                # Google cleared the field, so it is asking again rather than
+                # still thinking.
+                password_waits = 0
 
         # Before the repeat guard, and for the same reason as `loading`: a code
         # that is still being checked is not a screen that failed to advance.

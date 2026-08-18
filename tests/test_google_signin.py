@@ -457,3 +457,119 @@ def test_the_wanted_mailbox_already_being_on_the_phone_is_not_an_add():
 
     assert verdict == g.RESULT_ALREADY
     assert not [c for c in adb.commands if "ADD_ACCOUNT_SETTINGS" in c]
+
+
+# The password form as `Blank caio 2` dumped it on 2026-08-18, one pass after
+# `NEXT` was tapped: the password still in the field, and Google's own spinner
+# drawn over the form. Google was checking; the form had not failed.
+PASSWORD_CHECKING = ("welcome loading indeterminate, loading welcome "
+                     "cicireynaamelia@gmail.com akunbaru123@ show password "
+                     "show password forgot password? next")
+
+
+def test_a_password_being_checked_is_waited_out_rather_than_retyped(monkeypatch):
+    """The run spent its whole repeat budget retyping a password that was
+    already submitted, and reported `stuck` 356s in with the sign-in fine. The
+    code screen has had this wait since 2026-08-17; the password form needs the
+    same one -- so a form that settles must be reached *without* a second
+    typing."""
+    monkeypatch.setattr(g.totp, "fresh_code", lambda secret: ("123456", 30))
+
+    class SettlingDriver(_StubDriver):
+        """Spins over the password form three times, then moves on."""
+
+        def __init__(self):
+            super().__init__(PASSWORD_CHECKING)
+            self.fills, self.reads = 0, 0
+
+        def read_screen(self):
+            self.reads += 1
+            return PASSWORD_CHECKING if self.reads <= 4 else TWO_FA_BOTH
+
+        def input_hints(self):
+            return (["enter your password"] if self.reads <= 4
+                    else ["enter code totppin"])
+
+        def input_values(self):
+            return ["akunbaru123@"] if self.fills else []
+
+        def fill(self, hints, value, what, **kw):
+            if "code" in hints or "totppin" in hints:
+                return True
+            self.fills += 1
+            return True
+
+        def dismiss_keyboard(self):
+            pass
+
+    driver, adb = SettlingDriver(), _StubAdb()
+    slept = []
+
+    g.sign_in(driver, adb, "host:1", "cicireynaamelia@gmail.com",
+              "akunbaru123@", "SECRET", sleep=slept.append)
+
+    assert driver.fills == 1, (
+        f"typed the password {driver.fills} times; a form Google is still "
+        f"checking has to be waited out, not filled again")
+    assert g.PASSWORD_WAIT_SECONDS in slept, "never actually waited"
+    assert sum(slept) < 15 * 60, "a wait must not outlive the phone"
+
+
+def test_a_password_that_never_answers_still_gives_up():
+    """The wait is a budget, not a hang: a form that spins forever has to end
+    the run rather than sit on the phone until it dies."""
+    class StuckDriver(_StubDriver):
+        def __init__(self):
+            super().__init__(PASSWORD_CHECKING)
+            self.fills = 0
+
+        def input_hints(self):
+            return ["enter your password"]
+
+        def input_values(self):
+            return ["akunbaru123@"] if self.fills else []
+
+        def fill(self, hints, value, what, **kw):
+            self.fills += 1
+            return True
+
+        def dismiss_keyboard(self):
+            pass
+
+    driver, adb = StuckDriver(), _StubAdb()
+    slept = []
+
+    verdict = g.sign_in(driver, adb, "host:1", "a@gmail.com", "akunbaru123@",
+                        "SECRET", sleep=slept.append)
+
+    assert verdict == g.RESULT_STUCK
+    assert sum(slept) < 15 * 60, "spent longer than the phone lives"
+
+
+def test_a_cleared_password_field_is_retyped_rather_than_waited_on():
+    """Google clearing the field is it asking again, not still thinking -- and
+    waiting through that would spend the phone's life on a form that wants
+    input."""
+    class ClearingDriver(_StubDriver):
+        def __init__(self):
+            super().__init__(PASSWORD_CHECKING)
+            self.fills = 0
+
+        def input_hints(self):
+            return ["enter your password"]
+
+        def input_values(self):
+            return []          # never holds what we typed
+
+        def fill(self, hints, value, what, **kw):
+            self.fills += 1
+            return True
+
+        def dismiss_keyboard(self):
+            pass
+
+    driver, adb = ClearingDriver(), _StubAdb()
+    g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "SECRET",
+              sleep=lambda _s: None)
+
+    assert driver.fills > 1, "a field Google emptied has to be filled again"
