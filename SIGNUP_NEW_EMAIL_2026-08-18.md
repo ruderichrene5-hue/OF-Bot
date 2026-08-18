@@ -97,14 +97,36 @@ that account is signed in again — and whatever removed it can do so again.
 
 Instagram survived it. So did the installs.
 
-## 5. Launching this phone is the least reliable part of the day
+## 5. The fleet stopped launching phones at 16:57, and it is not this phone
 
-Five launches, three different outcomes: 90s, 134s, 204s to a usable ADB, one
-`not-ready` after 10 readiness attempts, and one that needed 11. MultiLogin
-answers `mobile profile ... started` and its own API then says `profile is not
-running; ADB toggle skipped`. This is the `Caio-tests` intermittency already on
-record — retry in rounds, do not read it as a fault — but it means **a plan that
-needs two consecutive launches should budget a third**.
+Three runs in a row ended `not-ready`, which looks exactly like the
+`Caio-tests` intermittency already on record. It is not. **The production
+posting loop is failing the same way at the same time**, on entirely different
+profiles:
+
+    loop_posting.log   'code': 42002, 'msg': 'profile is not running; ADB toggle skipped'
+
+- The `42002` run in `loop_posting.log` **starts at 16:38:39** and is still going.
+- **219** hits there, **3766** in `loop_recheck.log`, across **16** distinct
+  profiles.
+- Profiles were still coming up until **16:57**, and needing 5–8 readiness
+  attempts to do it: `Profile 624356719803236700 is ready after ADB enable
+  attempt 8`.
+- After 16:57, nothing. Every launch since — mine and the fleet's — has been
+  refused.
+
+So the launch ladder was degrading for twenty minutes before it stopped
+altogether, and MultiLogin reports it the confusing way round: the launcher says
+`mobile profile ... started` while its own API says the profile is not running.
+
+**Check the posting loop before blaming a phone.** Three launches were spent
+here learning that the phone was never the problem, and the earlier runs' own
+numbers say the same thing in hindsight: 90s, 134s, 204s to a usable ADB, each
+worse than the last.
+
+For the timings in §1 this matters only as a warning: **a plan that needs two
+consecutive launches should budget a third**, and when none of them work, look
+outside the phone.
 
 ## 6. What to do next
 
