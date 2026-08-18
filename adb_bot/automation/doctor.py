@@ -227,21 +227,33 @@ def check_airtable(token: str, base_id: str) -> CheckResult:
     from adb_bot.clients.airtable import AirtableClient
 
     client = AirtableClient(token, base_id, at.TABLE_PROFILES)
-    required = [at.TABLE_ACCOUNTS, at.TABLE_PROFILES, at.TABLE_RUN_LOG,
+    # Accounts is deliberately not required: it was removed from the production
+    # base on 2026-08-18 and posting is profile-driven, so its absence is a
+    # schema fact rather than a fault. See `AirtableClient.list_accounts`.
+    required = [at.TABLE_PROFILES, at.TABLE_RUN_LOG,
                 at.TABLE_POSTING_QUEUE, at.TABLE_SPOOF_VARIANTS, at.TABLE_BAN_HISTORY]
     missing = []
     for table in required:
         try:
             client._list_table(table, page_size=1, max_records=1)
         except Exception as exc:
-            text = str(exc)
-            if "401" in text or "403" in text:
-                return CheckResult("Airtable", FAIL, f"auth rejected ({text[:60]})",
-                                   "Check the PAT and that it has access to this base.")
-            missing.append(table)
+            missing.append((table, str(exc)))
+
+    # A 403 on one table used to return "auth rejected" immediately, and that is
+    # what hid the deleted Accounts table for seven hours: Airtable answers an
+    # unknown table name with 403, so a schema change wore the label of a
+    # credentials problem and the real cause was never in the message. Only call
+    # it auth when *every* table fails, which is what a dead token actually
+    # looks like; a subset failing names the tables instead.
+    if missing and len(missing) == len(required):
+        text = missing[0][1]
+        return CheckResult("Airtable", FAIL, f"auth rejected ({text[:60]})",
+                           "Check the PAT and that it has access to this base.")
     if missing:
-        return CheckResult("Airtable", FAIL, f"base {base_id}: missing/unreadable tables: {', '.join(missing)}",
-                           "Check AIRTABLE_BASE_ID and the PAT's table scopes.")
+        names = ", ".join(f"{t} ({e[:40]})" for t, e in missing)
+        return CheckResult("Airtable", FAIL, f"base {base_id}: missing/unreadable tables: {names}",
+                           "The token reaches the base, so check the table was not "
+                           "renamed or deleted before suspecting the PAT's scopes.")
     return CheckResult("Airtable", PASS, f"base {base_id}, {len(required)} tables readable")
 
 
