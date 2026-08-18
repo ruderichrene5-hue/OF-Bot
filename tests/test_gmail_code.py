@@ -523,3 +523,66 @@ def test_an_empty_primary_tab_reads_as_empty():
     so a synced-but-empty inbox was indistinguishable from a dead one."""
     assert gmail_code.looks_empty("Nothing in Primary") is True
     assert gmail_code.looks_empty("You've finished!") is True
+
+
+# `dumpsys content`, one row per sync authority: authority, syncable, enabled.
+# Read off `Blank caio 2` on 2026-08-18, when Gmail sync had never once run.
+SYNC_OFF_DUMP = ("gmail-ls    -1    false    Total  0  0  0  0  0  0  0  0  0  0s\n"
+                 "calendar     1    true     Total  3  0  0  0  0  0  0  0  0  0s\n")
+SYNC_ON_DUMP = ("gmail-ls     1    true     Total  6  0  0  0  0  0  0  0  0  0s\n")
+
+
+class _SyncAdb(FakeAdb):
+    """A phone whose Gmail sync flips on once the switch has been tapped."""
+
+    def __init__(self, flips=True):
+        super().__init__()
+        self.flips = flips
+        self.switched = False
+
+    def run_command(self, command):
+        if "dumpsys content" in command:
+            self.commands.append(command)
+            return SYNC_ON_DUMP if (self.flips and self.switched) else SYNC_OFF_DUMP
+        if "PublicPreferenceActivity" in command:
+            self.switched = True
+        return super().run_command(command)
+
+
+def test_a_new_mailbox_has_its_sync_switched_on_rather_than_refused():
+    """Every account added to a phone arrives with mail sync off, so refusing
+    the mailbox there means a *new* email can never be used inside the one
+    launch a phone lives for -- which is what limited this to one account per
+    phone."""
+    box, adb = _mailbox(["settings", "data usage", "sync gmail"],
+                        adb=_SyncAdb())
+
+    assert box.sync_enabled() is False
+    assert box.enable_sync() is True
+    starts = [c for c in adb.commands if "PublicPreferenceActivity" in c]
+    assert starts, "never opened Gmail's settings"
+
+
+def test_the_sync_switch_is_reached_through_gmails_exported_activity():
+    """`Gmail2PreferenceActivity` is not exported and `am start` throws on it."""
+    assert "PublicPreferenceActivity" in gmail_code.GMAIL_SETTINGS_ACTIVITY
+
+
+def test_the_switch_is_believed_only_when_the_sync_manager_agrees():
+    """A checkbox that did not take looks identical to one that did, and the
+    cost of believing the screen is a 210-second poll of a dead mailbox."""
+    box, _ = _mailbox(["settings", "data usage", "sync gmail"],
+                      adb=_SyncAdb(flips=False))
+
+    assert box.enable_sync() is False
+
+
+def test_a_failed_switch_still_leaves_gmail_in_front():
+    """The rest of the run reads the screen next, and a phone left in Android's
+    settings reports an unknown screen and ends a run that was fine."""
+    adb = _SyncAdb(flips=False)
+    box, _ = _mailbox([""], adb=adb)          # no rows to tap at all
+
+    box.enable_sync()
+
+    assert adb.backs >= 1, "never backed out of settings"

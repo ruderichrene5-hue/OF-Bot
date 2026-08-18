@@ -234,6 +234,13 @@ _SYNC_BANNER_LABELS = ("Account sync is off. Turn it on in Account settings.",
                        "Account sync is off", "Turn it on", "TURN ON")
 _SYNC_SWITCH_LABELS = ("Sync Gmail", "Sync mail", "Sync")
 
+# Gmail's settings, reached without its banner. `Gmail2PreferenceActivity` is
+# not exported (`am start` throws), so this is the way in. Confirmed on
+# `Blank caio 2`, 2026-08-18.
+GMAIL_SETTINGS_ACTIVITY = (
+    f"{GMAIL_PACKAGE}/com.android.mail.ui.settings.PublicPreferenceActivity")
+_DATA_USAGE_LABELS = ("Data usage", "DATA USAGE")
+
 # Two goes at turning sync on. If the switch cannot be found twice, the run is
 # better off saying so than tapping around Android's settings.
 MAX_SYNC_ATTEMPTS = 2
@@ -494,6 +501,51 @@ class PhoneMailbox:
             self.open_gmail()
         return turned
 
+    def enable_sync(self) -> bool | None:
+        """Turn `Sync Gmail` on from Gmail's settings, and say whether it took.
+
+        Every account added to a phone arrives with mail sync **off**, so this
+        is the state a run with a *new* mailbox always starts in -- and refusing
+        the mailbox there means no new email can ever be used inside one launch.
+
+        Not the banner path `_turn_sync_on` takes: that banner is offered once
+        and is gone by the time anything else on the screen has been tapped.
+        This walks Gmail's own settings instead -- the account, then Data usage,
+        then the switch -- and then asks the sync manager rather than believing
+        the screen, because a checkbox that did not take looks identical to one
+        that did.
+
+        Returns what `sync_enabled` returns afterwards: True, False, or None for
+        "could not tell".
+        """
+        if self.driver is None:
+            return self.sync_enabled()
+        self._log("info", "turning Gmail's sync on for %s", self.address)
+        self._start(GMAIL_SETTINGS_ACTIVITY)
+        time.sleep(6)
+        # The address, then Data usage, then the switch. Each tap redraws, and
+        # the settings list is scrollable, so every one gets a fresh read --
+        # tapping stale bounds here lands on a neighbouring row.
+        for labels in ((self.address,), _DATA_USAGE_LABELS,
+                       _SYNC_SWITCH_LABELS):
+            self.driver.read_screen()
+            if not self.driver.tap_label(labels):
+                self._log("warning", "no %s row in Gmail's settings",
+                          labels[0])
+                break
+            time.sleep(4)
+        # Back to Gmail whatever happened, so a failure leaves the phone where
+        # the rest of the run expects it rather than deep in settings.
+        for _ in range(3):
+            self.adb_client.shell_back(self.target)
+            time.sleep(2)
+        if not self.in_front():
+            self.open_gmail()
+        enabled = self.sync_enabled()
+        self._log("info", "Gmail sync for %s is now %s", self.address,
+                  {True: "on", False: "still off"}.get(enabled, "unreadable"))
+        return enabled
+
     def notification_code(self) -> str:
         """Instagram's code from the notification shade, or ""."""
         return code_from_notifications(
@@ -530,11 +582,16 @@ class PhoneMailbox:
         # fault and is not. Turning the switch on made six Instagram codes
         # appear at once, the oldest six days old.
         if self.sync_enabled() is False:
-            raise MailboxNotReady(
-                f"Gmail sync is off for {self.address} (dumpsys content: "
-                f"{GMAIL_SYNC_AUTHORITY} enabled=false), so no mail can reach "
-                f"this phone -- Gmail > Settings > {self.address} > Data usage "
-                f"> 'Sync Gmail'")
+            # Not fatal on its own: this is the state *every* freshly added
+            # account is in, so refusing here would mean a new mailbox could
+            # never be used inside the one launch a phone lives for.
+            if self.enable_sync() is False:
+                raise MailboxNotReady(
+                    f"Gmail sync is off for {self.address} (dumpsys content: "
+                    f"{GMAIL_SYNC_AUTHORITY} enabled=false) and the switch "
+                    f"would not go on, so no mail can reach this phone -- "
+                    f"Gmail > Settings > {self.address} > Data usage > "
+                    f"'Sync Gmail'")
 
         # Gmail not coming to the front is no longer fatal: the notification
         # shade carries the same code and needs nothing in front at all. Four
