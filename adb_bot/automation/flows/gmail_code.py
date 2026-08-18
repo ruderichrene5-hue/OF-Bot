@@ -74,7 +74,17 @@ _EMPTY_MARKERS = (
     "nothing in your inbox",
     "no mail here",
     "you're all caught up",
+    # What a synced-but-empty Primary tab actually says on these phones, seen
+    # on `Blank caio 2` 2026-08-18. Its absence here is why an inbox that was
+    # never syncing could not be told from one with no mail in it yet.
+    "nothing in primary",
+    "you've finished!",
 )
+
+# The authority Gmail syncs a Google account's mail under. `dumpsys content`
+# prints one row per authority as `name  syncable  enabled  ...`, and that row
+# is the only honest answer to "will mail arrive on this phone?".
+GMAIL_SYNC_AUTHORITY = "gmail-ls"
 
 
 class MailboxNotReady(Exception):
@@ -118,6 +128,31 @@ def code_from_notifications(dump: str | None) -> str:
             if match:
                 return match.group(1)
     return ""
+
+
+def sync_enabled_in_dump(dump: str | None) -> bool | None:
+    """Whether `gmail-ls` is enabled, from a `dumpsys content` dump.
+
+    True/False when the authority row is present, None when it is not -- and
+    None must never be read as False, because "I could not tell" and "sync is
+    off" call for different actions.
+
+    The row looks like this, columns being authority, syncable, enabled::
+
+        gmail-ls    -1    false   Total  0  0  0 ...
+
+    `syncable=-1` means Android has not yet decided, which is the state a
+    freshly signed-in account sits in; it says nothing about whether mail will
+    arrive, so only the `enabled` column is read here.
+    """
+    if not dump:
+        return None
+    for line in dump.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[0] == GMAIL_SYNC_AUTHORITY:
+            if fields[2] in ("true", "false"):
+                return fields[2] == "true"
+    return None
 
 
 def sync_is_off(text: str | None) -> bool:
@@ -464,6 +499,16 @@ class PhoneMailbox:
         return code_from_notifications(
             self._shell("dumpsys notification --noredact"))
 
+    def sync_enabled(self) -> bool | None:
+        """Whether Gmail will actually fetch mail here. None = could not tell.
+
+        Asked of the sync manager rather than of Gmail's screen, because the
+        screen only offers its "account sync is off" banner once: dismiss it --
+        or dismiss the welcome tip stacked on top of it -- and an inbox that
+        can never fill looks exactly like one that simply has no mail yet.
+        """
+        return sync_enabled_in_dump(self._shell("dumpsys content"))
+
     def wait_for_code(self, timeout: int = 180, poll_seconds: int = 15) -> str:
         """The code, or "" if none arrived inside `timeout`.
 
@@ -477,6 +522,19 @@ class PhoneMailbox:
             raise MailboxNotReady(
                 f"Gmail is not installed on this phone, so {self.address} "
                 f"cannot be read here")
+
+        # Asked once, before any waiting. On 2026-08-18 `Blank caio 2` sat here
+        # for its whole 210-second budget against `gmail-ls enabled=false`: no
+        # mail could arrive, the shade stayed empty, the inbox stayed empty,
+        # and the run reported "no code arrived" -- which reads as Instagram's
+        # fault and is not. Turning the switch on made six Instagram codes
+        # appear at once, the oldest six days old.
+        if self.sync_enabled() is False:
+            raise MailboxNotReady(
+                f"Gmail sync is off for {self.address} (dumpsys content: "
+                f"{GMAIL_SYNC_AUTHORITY} enabled=false), so no mail can reach "
+                f"this phone -- Gmail > Settings > {self.address} > Data usage "
+                f"> 'Sync Gmail'")
 
         # Gmail not coming to the front is no longer fatal: the notification
         # shade carries the same code and needs nothing in front at all. Four
@@ -527,6 +585,29 @@ class PhoneMailbox:
                     self.adb_client.shell_back(self.target)
                     time.sleep(4)
                     continue
+
+                # Sync before the tour, because they arrive on the same screen
+                # and the tour's button takes the banner with it. On 2026-08-18
+                # `Blank caio 2` rendered "account sync is off" and "welcome to
+                # your new inbox" together; the tour branch won, tapped `OK`,
+                # and the banner never came back. `sync_is_off` was then false
+                # for every later pass, the "Signed in as ..." header satisfied
+                # the ownership check, and the run polled an inbox that could
+                # never fill for its whole 210-second budget before reporting
+                # `mailbox`. The tour is cosmetic and its buttons keep working
+                # a pass later; the switch is the one thing on that screen the
+                # rest of the run depends on.
+                if sync_is_off(text):
+                    if syncs < MAX_SYNC_ATTEMPTS and self._turn_sync_on():
+                        syncs += 1
+                        self._log("info", "turned Gmail's sync on (%d/%d)",
+                                  syncs, MAX_SYNC_ATTEMPTS)
+                        time.sleep(poll_seconds)
+                        continue
+                    raise MailboxNotReady(
+                        f"{self.address} is on the phone but Gmail is not "
+                        f"syncing it -- account settings, Data usage, "
+                        f"'Sync Gmail'")
 
                 # A freshly installed Gmail opens on its own welcome tour, not
                 # on an inbox. Click through it before judging whose mail this

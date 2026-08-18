@@ -7,6 +7,7 @@ Instagram code of its own from 5 August, so "the inbox that happens to be open"
 is not the inbox we mean.
 """
 
+import pytest
 from adb_bot.automation.flows import gmail_code
 
 INBOX = (
@@ -456,3 +457,69 @@ def test_no_mail_inside_the_window_returns_empty(monkeypatch):
              "no new mail here")
     box, _ = _mailbox([quiet, quiet, quiet, quiet, quiet, quiet])
     assert box.wait_for_code(timeout=1, poll_seconds=0) == ""
+
+
+# The real `dumpsys content` rows off `Blank caio 2`, 2026-08-18. Columns are
+# authority, syncable, enabled -- and `syncable=-1` is the state a freshly
+# signed-in account sits in, which is why only `enabled` may be read.
+SYNC_DUMP_OFF = (
+    "com.google.android.gms.reminders         -1        false    Total  0    0\n"
+    "com.google.android.location.reporting    1         true     Total  0    0\n"
+    "gmail-ls                                 -1        false    Total  0    0\n"
+    "subscribedfeeds                          -1        true     Total  0    0\n")
+SYNC_DUMP_ON = SYNC_DUMP_OFF.replace(
+    "gmail-ls                                 -1        false",
+    "gmail-ls                                 -1        true ")
+
+
+def test_the_sync_authority_row_is_read_off_a_real_dump():
+    assert gmail_code.sync_enabled_in_dump(SYNC_DUMP_OFF) is False
+    assert gmail_code.sync_enabled_in_dump(SYNC_DUMP_ON) is True
+
+
+def test_a_missing_authority_is_not_the_same_as_sync_being_off():
+    """None and False call for different actions: one is "I could not tell",
+    the other is "no mail can arrive". Collapsing them would abandon runs on
+    phones that were fine."""
+    assert gmail_code.sync_enabled_in_dump("nothing about gmail here") is None
+    assert gmail_code.sync_enabled_in_dump("") is None
+    assert gmail_code.sync_enabled_in_dump(None) is None
+
+
+class SyncAdb(FakeAdb):
+    def __init__(self, dump, **kw):
+        super().__init__(**kw)
+        self.dump = dump
+
+    def run_command(self, command):
+        if "dumpsys content" in command:
+            self.commands.append(command)
+            return self.dump
+        return super().run_command(command)
+
+
+def test_a_mailbox_that_cannot_sync_is_refused_before_any_waiting(monkeypatch):
+    """`Blank caio 2` spent its whole 210-second budget on 2026-08-18 polling an
+    inbox that could never fill, then reported "no code arrived" -- which reads
+    as Instagram's fault. The sync manager knew all along."""
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    box, _ = _mailbox([INSTAGRAM_CODE_SCREEN] * 20,
+                      adb=SyncAdb(SYNC_DUMP_OFF))
+    with pytest.raises(gmail_code.MailboxNotReady) as caught:
+        box.wait_for_code(timeout=180, poll_seconds=0)
+    assert "Sync Gmail" in str(caught.value)
+
+
+def test_a_syncing_mailbox_is_not_refused(monkeypatch):
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    good = ("signed in as mia berg mia.berg1999@gmail.com primary "
+            "418902 is your instagram code")
+    box, _ = _mailbox([good], adb=SyncAdb(SYNC_DUMP_ON))
+    assert box.wait_for_code(timeout=30, poll_seconds=0) == "418902"
+
+
+def test_an_empty_primary_tab_reads_as_empty():
+    """Gmail says "Nothing in Primary", not any of the phrases the flow knew,
+    so a synced-but-empty inbox was indistinguishable from a dead one."""
+    assert gmail_code.looks_empty("Nothing in Primary") is True
+    assert gmail_code.looks_empty("You've finished!") is True

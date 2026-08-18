@@ -731,3 +731,22 @@ def test_a_feed_reached_after_real_work_is_still_a_creation():
     result = signup.run_signup(driver, FakeRouter([FakeLease()]), _identity(),
                                sleep=lambda _s: None)
     assert result.status == signup.RESULT_CREATED
+
+
+# What Instagram put in front of `@ida.sommer43` seconds after the `I agree`
+# tap, 2026-08-18. The account existed: Instagram names it.
+CHECKPOINT = ("menu confirm you're human to use your account, ida.sommer43 "
+              "confirm you're human to use your account, ida.sommer43 "
+              "continue continue")
+
+
+def test_the_human_checkpoint_is_named_rather_than_unknown():
+    assert signup.classify_signup_screen(CHECKPOINT) == signup.SCREEN_CHECKPOINT
+
+
+def test_the_checkpoint_does_not_swallow_the_screens_it_shares_words_with():
+    """It contains "account" and "continue", which several real screens do."""
+    assert signup.classify_signup_screen(
+        "join instagram get started") == signup.SCREEN_ENTRY
+    assert signup.classify_signup_screen(
+        "create a password continue") != signup.SCREEN_CHECKPOINT

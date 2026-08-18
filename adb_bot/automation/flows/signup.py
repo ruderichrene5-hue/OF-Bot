@@ -59,7 +59,19 @@ SCREEN_LAUNCHER = "launcher"            # the phone's home screen -- start the a
 SCREEN_LOADING = "loading"              # mid-render -- wait, do not act
 SCREEN_DONE = "done"                    # a working account
 SCREEN_BANNED = "banned"                # created and immediately disabled
+SCREEN_CHECKPOINT = "checkpoint"        # created, then held for verification
 SCREEN_UNKNOWN = "unknown"              # stop -- never act on this
+
+# "Confirm you're human to use your account, <username>" -- what Instagram put
+# in front of `@ida.sommer43` seconds after the `I agree` tap on 2026-08-18.
+# The account exists at this point: Instagram names it, which it cannot do
+# before creating it. Reported as `unknown_screen` this reads like a failure
+# and the credentials look worthless, when in fact the only work left is the
+# verification flow this repo already has.
+_CHECKPOINT_MARKERS = (
+    "confirm you're human to use your account",
+    "confirm you are human to use your account",
+)
 
 _ENTRY_MARKERS = (
     "join instagram",
@@ -196,6 +208,9 @@ _ACCOUNT_EXISTS_MARKERS = (
 # flow can have, because it stops the run believing it won.
 
 _ORDERED_MARKERS = (
+    # First: the checkpoint names the account, so it must not be read as any of
+    # the screens whose words it happens to share ("account", "continue").
+    (SCREEN_CHECKPOINT, _CHECKPOINT_MARKERS),
     # Before anything else: a screen that says the account is gone is not a
     # step in the chain.
     (SCREEN_SAVE_PASSWORD, _SAVE_PASSWORD_MARKERS),
@@ -373,6 +388,12 @@ class Identity:
 
 
 RESULT_CREATED = "created"
+# Created, then held behind "confirm you're human" before it could be used. The
+# account and its credentials are real; what is left is verification, not
+# signup. Kept separate from `created` so nothing downstream treats it as a
+# phone ready to post, and separate from the failures so nobody throws the
+# credentials away.
+RESULT_CREATED_UNVERIFIED = "created_unverified"
 RESULT_UNKNOWN_SCREEN = "unknown_screen"
 RESULT_NO_NUMBER = "no_number"
 RESULT_BANNED = "banned"
@@ -603,6 +624,25 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 log("info", "the account exists: @%s", identity.username)
                 release(False)
                 return SignupResult(status=RESULT_CREATED, username=identity.username,
+                                    steps=steps, numbers_used=numbers_used,
+                                    phone_number="")
+
+            if screen == SCREEN_CHECKPOINT:
+                # Guarded exactly like SCREEN_DONE: on a phone this run has not
+                # typed into, a checkpoint belongs to whatever account was
+                # already there, and claiming it as ours would write
+                # credentials for an account nobody made.
+                if not progressed:
+                    return finish(
+                        RESULT_OCCUPIED,
+                        "a checkpoint for an account already on this phone -- "
+                        "nothing was created, and nothing on it was touched")
+                log("info", "the account exists but is held for verification: "
+                            "@%s", identity.username)
+                release(False)
+                return SignupResult(status=RESULT_CREATED_UNVERIFIED,
+                                    username=identity.username,
+                                    detail=(text or "")[:200],
                                     steps=steps, numbers_used=numbers_used,
                                     phone_number="")
 
