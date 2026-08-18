@@ -367,3 +367,93 @@ def test_the_home_screen_is_named_so_the_app_can_be_started_again():
 
 def test_the_home_screen_is_not_mistaken_for_the_play_store_being_signed_out():
     assert g.classify_google_screen(LAUNCHER) != g.SCREEN_PLAY_SIGNIN
+
+
+# Read off `Blank caio 2` on 2026-08-18, for `hasan428483@gmail.com` -- an
+# unused pool mailbox Google challenged straight after the address, before it
+# had asked for a password at all.
+ROBOT_CHECK = (
+    "verify that it’s you to help keep your account safe, google wants to "
+    "make sure that it’s really you trying to sign in verify that it’s "
+    "you to help keep your account safe, google wants to make sure that it’s "
+    "really you trying to sign in hasan428483@gmail.com confirm that you're not "
+    "a robot try another way")
+
+
+def test_a_robot_check_is_named_rather_than_left_unknown():
+    """It reported `unknown_screen`, which reads as "the flow got confused" and
+    invites a retry -- and a retry costs a launch and lands here again. The
+    mailbox is the thing that has to change, so the screen has to say so."""
+    assert g.classify_google_screen(ROBOT_CHECK) == g.SCREEN_ROBOT_CHECK
+
+
+def test_a_robot_check_is_not_mistaken_for_a_wrong_password():
+    """Google has not asked for a password yet, so blaming the credentials
+    would send the next run at a mailbox whose password is fine."""
+    assert g.classify_google_screen(ROBOT_CHECK) != g.SCREEN_WRONG_PASSWORD
+
+
+def test_a_robot_check_stops_the_run_with_its_own_verdict():
+    driver, adb = _StubDriver(ROBOT_CHECK), _StubAdb()
+
+    verdict = g.sign_in(driver, adb, "host:1", "hasan428483@gmail.com", "pw",
+                        "SECRET", sleep=lambda _s: None)
+
+    assert verdict == g.RESULT_ROBOT_CHECK
+    assert not driver.taps, "there is nothing on a captcha worth tapping"
+
+
+# The Play Store home -- the screen a phone that already carries a Google
+# account opens on. Assembled from the module's own markers rather than read off
+# a phone, so it proves the branch, not the wording.
+PLAY_HOME = ("google play games apps movies books search for apps & games "
+             "top charts for you")
+
+
+def test_a_second_mailbox_goes_on_through_androids_own_add_account_wizard():
+    """The Play Store's `Sign in` button only exists while the phone carries no
+    Google account, so a phone that already has one opens on its home screen
+    and there is nothing to press. That read as `stuck`, which made "this phone
+    is spent" look like a fleet fault rather than one missing intent."""
+    class Adb(_StubAdb):
+        def run_command(self, command):
+            self.commands.append(command)
+            if "dumpsys account" in command:
+                return ("Accounts: 1\n"
+                        "  Account {name=someone.else@gmail.com, "
+                        "type=com.google}\n")
+            return ""
+
+    driver, adb = _StubDriver(PLAY_HOME), Adb()
+
+    verdict = g.sign_in(driver, adb, "host:1", "wanted@gmail.com", "pw",
+                        "SECRET", sleep=lambda _s: None)
+
+    adds = [c for c in adb.commands if "ADD_ACCOUNT_SETTINGS" in c]
+    assert adds, "never opened the wizard, so the second mailbox cannot go on"
+    assert all("account_types com.google" in c for c in adds), \
+        "without the type pinned the wizard stops on a picker"
+    # The stub shows the same home screen forever, so it must still give up.
+    assert verdict == g.RESULT_STUCK
+    assert len(adds) == g.MAX_ADD_ACCOUNT_STARTS, \
+        "an unbounded retry would spend the phone's whole life on it"
+
+
+def test_the_wanted_mailbox_already_being_on_the_phone_is_not_an_add():
+    """`already_signed_in` is the cheap path -- roughly nine minutes of cold
+    sign-in saved -- and it must not be spent re-adding what is there."""
+    class Adb(_StubAdb):
+        def run_command(self, command):
+            self.commands.append(command)
+            if "dumpsys account" in command:
+                return ("Accounts: 1\n"
+                        "  Account {name=wanted@gmail.com, type=com.google}\n")
+            return ""
+
+    driver, adb = _StubDriver(PLAY_HOME), Adb()
+
+    verdict = g.sign_in(driver, adb, "host:1", "wanted@gmail.com", "pw",
+                        "SECRET", sleep=lambda _s: None)
+
+    assert verdict == g.RESULT_ALREADY
+    assert not [c for c in adb.commands if "ADD_ACCOUNT_SETTINGS" in c]
