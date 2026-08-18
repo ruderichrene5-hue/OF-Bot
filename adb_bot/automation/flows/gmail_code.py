@@ -529,7 +529,7 @@ class PhoneMailbox:
         for labels in ((self.address,), _DATA_USAGE_LABELS,
                        _SYNC_SWITCH_LABELS):
             self.driver.read_screen()
-            if not self.driver.tap_label(labels):
+            if not self._tap_row(labels):
                 self._log("warning", "no %s row in Gmail's settings",
                           labels[0])
                 break
@@ -545,6 +545,25 @@ class PhoneMailbox:
         self._log("info", "Gmail sync for %s is now %s", self.address,
                   {True: "on", False: "still off"}.get(enabled, "unreadable"))
         return enabled
+
+    def _tap_row(self, labels) -> bool:
+        """Tap a settings row, strictly first and then by its own bounds.
+
+        Gmail's settings list marks nothing in it clickable -- on 2026-08-18 the
+        account row for `cicireynaamelia@gmail.com` was on screen, in the dump,
+        and unreachable, so the sync switch behind it could not be turned on and
+        a run that had already reached Instagram's code screen was thrown away.
+        The strict tap is still tried first: it is the one that cannot land on
+        the wrong control.
+        """
+        if self.driver.tap_label(labels):
+            return True
+        try:
+            return bool(self.driver.tap_label(labels, require_clickable=False))
+        except TypeError:
+            # A driver that does not know the argument. Not worth failing over:
+            # the strict attempt above is the one that usually works.
+            return False
 
     def notification_code(self) -> str:
         """Instagram's code from the notification shade, or ""."""

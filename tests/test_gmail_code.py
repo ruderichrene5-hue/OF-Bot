@@ -586,3 +586,60 @@ def test_a_failed_switch_still_leaves_gmail_in_front():
     box.enable_sync()
 
     assert adb.backs >= 1, "never backed out of settings"
+
+
+# Gmail's settings root, as `Blank caio 2` dumped it on 2026-08-18: the account
+# row is on screen and in the dump, and the only clickable things on the whole
+# page are the toolbar's.
+GMAIL_SETTINGS = ("general settings cicireynaamelia@gmail.com add account "
+                  "navigate up settings more options")
+
+
+class _StrictDriver(FakeDriver):
+    """Taps only what the screen marks clickable -- as the real driver does."""
+
+    def __init__(self, screens, clickable=("Navigate up", "More options")):
+        super().__init__(screens)
+        self.clickable = set(clickable)
+        self.loose_taps = []
+
+    def tap_label(self, labels, require_clickable=True):
+        if any(str(l) in self.clickable for l in labels):
+            self.taps.append(labels)
+            return True
+        if not require_clickable:
+            self.loose_taps.append(labels)
+            return True
+        return False
+
+
+def test_an_account_row_nothing_marks_clickable_is_still_tapped():
+    """Gmail marks nothing in its settings list clickable, so the strict rule
+    cannot reach the account and the sync switch behind it stays off -- which
+    threw away a run that had already reached Instagram's code screen."""
+    box, _ = _mailbox([GMAIL_SETTINGS], adb=_SyncAdb())
+    box.driver = _StrictDriver([GMAIL_SETTINGS])
+
+    assert box._tap_row(("cicireynaamelia@gmail.com",)) is True
+    assert box.driver.loose_taps, "never fell back to the row's own bounds"
+
+
+def test_the_strict_tap_is_tried_first():
+    """It is the one that cannot land on the wrong control."""
+    box, _ = _mailbox([GMAIL_SETTINGS], adb=_SyncAdb())
+    box.driver = _StrictDriver([GMAIL_SETTINGS])
+
+    assert box._tap_row(("Navigate up",)) is True
+    assert box.driver.taps and not box.driver.loose_taps
+
+
+def test_a_driver_without_the_argument_does_not_break_the_run():
+    """`PhoneMailbox` is handed whichever driver the caller built."""
+    class OldDriver(FakeDriver):
+        def tap_label(self, labels):
+            return False
+
+    box, _ = _mailbox([GMAIL_SETTINGS], adb=_SyncAdb())
+    box.driver = OldDriver([GMAIL_SETTINGS])
+
+    assert box._tap_row(("cicireynaamelia@gmail.com",)) is False
