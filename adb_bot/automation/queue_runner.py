@@ -561,22 +561,36 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
 
     gap = timedelta(minutes=max(0, int(anytime_gap_minutes or 0)))
 
-    def day_plan(target, count: int) -> list:
-        """Where `count` more of today's clips go for one target.
+    def day_plan(target, count: int) -> tuple:
+        """(moments, reason) for `count` more of today's clips for one target.
 
         Everything ready goes out today, so this is a fan-out across what is
         left of the posting window rather than a single "post it now". Rows this
         target already has scheduled push the start later, so a second run adds
         to the end of its day instead of landing on top of it.
+
+        When there is no room, `reason` says which of the two reasons it is.
+        They look identical from the moments alone and mean opposite things: the
+        clock being past 23:00 is the whole fleet stopping for the night, a
+        target booked to the end of the window is one busy phone in the middle
+        of a working afternoon.
         """
         window_start, window_end = window_bounds(local_now)
-        first = max(local_now.replace(second=0, microsecond=0), window_start)
+        now_local = local_now.replace(second=0, microsecond=0)
+        first = max(now_local, window_start)
         last = last_scheduled.get(target.key)
         if last is not None:
             after_last = last.astimezone(tz) + timedelta(minutes=1)
             if after_last > first:
                 first = after_last
-        return spread_across(count, first, window_end, gap)
+        if first > window_end:
+            if now_local > window_end:
+                return [], ("today's posting window has closed "
+                            f"({POSTING_WINDOW_END.strftime('%H:%M')}) -- these go out "
+                            "when it opens again")
+            return [], ("its day is already booked to the end of the window "
+                        f"({window_end.strftime('%H:%M')}) -- these go out tomorrow")
+        return spread_across(count, first, window_end, gap), None
 
     def add_rows(target, moments, pool) -> None:
         for moment in moments:
@@ -606,11 +620,9 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
             # Every free clip, today: one row each, spread across what is left of
             # the posting window. The first lands now (or at 09:00 if the day has
             # not opened yet), so "whenever there is a video" still holds.
-            moments = day_plan(target, len(pool))
-            if not moments:
-                report.skipped.append((target.name, "no fixed post times; today's posting window is "
-                                                    f"over ({POSTING_WINDOW_END.strftime('%H:%M')}) "
-                                                    "-- these go out when it opens again"))
+            moments, no_room = day_plan(target, len(pool))
+            if no_room:
+                report.skipped.append((target.name, f"no fixed post times; {no_room}"))
                 continue
             add_rows(target, moments, pool)
             continue
@@ -645,7 +657,12 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
             upcoming = len(upcoming_slots(now, schedule.times if schedule is not None else slot_times, tz))
             surplus = len(pool) - upcoming
             if surplus > 0:
-                add_rows(target, day_plan(target, surplus), pool)
+                moments, no_room = day_plan(target, surplus)
+                if no_room:
+                    report.skipped.append(
+                        (target.name, f"{surplus} clip(s) beyond its picked times, but {no_room}"))
+                else:
+                    add_rows(target, moments, pool)
 
     if schedules is not None:
         # Every distinct time that came round today across the models' own grids.

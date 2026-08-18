@@ -541,7 +541,21 @@ class ModelPostTimesTest(TestCase):
             [_variant("v1", account_id="acc1")],
             [], now=_now(23), tz=BERLIN, schedules={"nikki": queue_runner.ModelSchedule()})
         self.assertEqual(report.planned, [])
-        self.assertIn("posting window is over", dict(report.skipped)["nikki_1"])
+        self.assertIn("posting window has closed", dict(report.skipped)["nikki_1"])
+
+    def test_a_target_booked_to_the_end_says_so_not_that_the_window_shut(self):
+        """Seen live 2026-08-18 at 17:15 Berlin: a phone whose day was already
+        filled to 22:45 was reported as "today's posting window is over", which
+        reads as the whole fleet having stopped for the night. One busy phone in
+        the middle of the afternoon and a closed window look identical from the
+        planner's output and mean opposite things."""
+        rows = [_queue_row("pq1", at.POST_STATUS_PENDING, "2026-08-03T20:45:00+00:00",
+                           variant_id="v0", account_id="acc1", name="nikki_1 / 22:45",
+                           created_time="2026-08-03T11:00:00.000Z")]
+        report = self._plan_nikki(queue_runner.ModelSchedule(), queue_rows=rows)
+        reason = dict(report.skipped)["nikki_1"]
+        self.assertIn("already booked to the end of the window", reason)
+        self.assertNotIn("window has closed", reason)
 
     def test_the_first_row_of_the_morning_waits_for_the_window_to_open(self):
         report = plan_slot_rows(
