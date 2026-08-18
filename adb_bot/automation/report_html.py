@@ -1439,10 +1439,12 @@ def _retired_note(retired) -> str:
     shown = ", ".join(_e(name) for name in names[:12])
     rest = f" and {len(names) - 12} more" if len(names) > 12 else ""
     return (f'<p class="sub"><span class="pill">{len(names)} retired</span> '
-            f'not counted anywhere on this page: their MultiLogin profile no longer '
-            f'exists, so nothing can launch for them. Parked in Airtable with '
+            f'left off the lists above: their MultiLogin profile no longer exists, so '
+            f'nothing can launch for them. Parked in Airtable with '
             f'<span class="mono">Issue Reason = Profile Deleted From MLX</span>; the row '
-            f'is kept because retiring a phone for good is a client decision. '
+            f'is kept because retiring a phone for good is a client decision. The queue '
+            f'rows they left behind are still counted under Posts and Schedules, where '
+            f'they read as held — cancelling those is a separate job. '
             f'{shown}{rest}.</p>')
 
 
