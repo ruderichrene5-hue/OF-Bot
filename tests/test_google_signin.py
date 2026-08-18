@@ -573,3 +573,46 @@ def test_a_cleared_password_field_is_retyped_rather_than_waited_on():
               sleep=lambda _s: None)
 
     assert driver.fills > 1, "a field Google emptied has to be filled again"
+
+
+def test_an_unnamed_last_screen_asks_the_phone_before_calling_it_a_failure():
+    """`Blank caio 2` ended a 750-second sign-in on Google's own confirmation --
+    "signed in as cicireynaamelia@gmail.com" -- and reported `unknown_screen`,
+    which spent a launch and read as the mailbox being unusable. The screen at
+    the end of this chain is the one part we cannot enumerate, so `dumpsys` has
+    the last word."""
+    class Adb(_StubAdb):
+        """Empty at the start of the run -- the account lands during it."""
+
+        def __init__(self):
+            super().__init__()
+            self.account_reads = 0
+
+        def run_command(self, command):
+            self.commands.append(command)
+            if "dumpsys account" in command:
+                self.account_reads += 1
+                if self.account_reads == 1:
+                    return "Accounts: 0\n"
+                return ("Accounts: 1\n"
+                        "  Account {name=cicireynaamelia@gmail.com, "
+                        "type=com.google}\n")
+            return ""
+
+    driver, adb = _StubDriver("signed in as cicireynaamelia@gmail.com"), Adb()
+
+    verdict = g.sign_in(driver, adb, "host:1", "cicireynaamelia@gmail.com",
+                        "pw", "SECRET", sleep=lambda _s: None)
+
+    assert verdict == g.RESULT_SIGNED_IN
+
+
+def test_an_unnamed_screen_with_no_account_on_the_phone_is_still_a_failure():
+    """The check has to be the phone's answer, not a shortcut that turns every
+    screen nobody has named into a success."""
+    driver, adb = _StubDriver("a screen nobody here has ever seen"), _StubAdb()
+
+    verdict = g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "SECRET",
+                        sleep=lambda _s: None)
+
+    assert verdict == g.RESULT_UNKNOWN_SCREEN

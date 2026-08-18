@@ -636,6 +636,18 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             return RESULT_ROBOT_CHECK
 
         if screen == SCREEN_UNKNOWN:
+            # Ask the phone before calling this a failure. `Blank caio 2` ended
+            # a 750-second sign-in on "signed in as cicireynaamelia@gmail.com"
+            # (2026-08-18) -- Google's own confirmation, reported as
+            # `unknown_screen`, which spent a launch and read as the mailbox
+            # being unusable. The screen at the end of this chain is the one
+            # part of it we cannot enumerate; `dumpsys` is the same honest
+            # answer relied on everywhere else here.
+            names = accounts_on_device(adb_client, target)
+            if any(address.lower() == name.lower() for name in names):
+                log("info", "%s is on the phone, whatever this screen is: %s",
+                    address, (text or "")[:120])
+                return RESULT_SIGNED_IN
             log("warning", "unnamed screen: %s", (text or "")[:300])
             return RESULT_UNKNOWN_SCREEN
 
