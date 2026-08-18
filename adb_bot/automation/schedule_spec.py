@@ -37,7 +37,8 @@ PLANNED_LOOPS = ("queue", "retry")
 # was actually for.
 RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery",
                      "warmup", "warmup-state", "mlx-sync", "cleanup", "digest",
-                     "doctor", "reap-phones", "second-accounts", "verification")
+                     "doctor", "reap-phones", "second-accounts", "verification",
+                     "mlx-minutes")
 
 # Loops the CLI can run that are deliberately NOT scheduled: arming them has to
 # be a separate, deliberate act by a person, not a side effect of running the
@@ -161,6 +162,12 @@ RECOMMENDED_INTERVALS = {
     # either -- a worked profile has a six-hour cool-off, so the population of
     # things this loop *can* do is refilled by flags arriving, not by ticks.
     "verification": 30,
+    # Four hours. The balance moves at roughly 2,000 minutes a day across the
+    # fleet, so nothing is learned by asking more often -- and the alert
+    # de-duplicates itself anyway, so a tighter beat would only cost log noise.
+    # It is also what catches a fleet that has stopped launching, which is the
+    # more urgent of its two alerts; 2026-08-18 went unnoticed for three hours.
+    "mlx-minutes": 240,
 }
 
 # Historical name -- the UI, both backends and install_units.sh read this.
@@ -202,6 +209,7 @@ DESCRIPTIONS = {
     "reap-phones": "ADB bot orphan-phone reaper (closes abandoned phones)",
     "second-accounts": "ADB bot two-account watch (both accounts of a phone posting?)",
     "verification": "ADB bot verification loop (flagged profiles -> challenge answered)",
+    "mlx-minutes": "ADB bot MultiLogin minute check (warns before the fleet stops)",
 }
 
 # The same loops in words, for a person rather than a unit file. DESCRIPTIONS
@@ -267,6 +275,15 @@ WHAT_IT_DOES = {
     "reap-phones": "Closes phones no loop owns any more. Nothing else does — the "
                    "run that would have closed them died — and a leaked phone holds "
                    "a MultiLogin session open on a real account for hours.",
+    "mlx-minutes": "Counts the MultiLogin phone-minutes the fleet has spent this "
+                   "billing period, out of its own launcher log, because there is "
+                   "no API that reports the balance. Warns on Telegram when what "
+                   "is left falls below the threshold, and separately when two "
+                   "consecutive posting runs attempted launches and none "
+                   "succeeded \u2014 which is what an empty balance looks like "
+                   "from the inside, and what nothing noticed for three hours on "
+                   "2026-08-18. Reads logs only; it launches nothing and spends "
+                   "nothing.",
     "verification": "Answers Instagram's verification challenge on the phones flagged "
                     "for it: launches each one, reads the screen, and where the ask "
                     "is an SMS code or an image captcha, rents a number or buys a "

@@ -3693,9 +3693,22 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
     attempts = sum(r.attempts for r in runs)
     mlx_500 = sum(r.mlx_500 for r in runs)
 
+    # MultiLogin bills mobile profiles by the minute and exposes no balance
+    # anywhere -- see `mlx_minutes`. Counting what was spent is the only way the
+    # page can show how close the fleet is to the cliff it fell off on
+    # 2026-08-18, when the minutes ran out and every launch failed for hours.
+    try:
+        from adb_bot.automation import mlx_minutes
+        minutes = mlx_minutes.collect(now=now)
+    except Exception:
+        # A missing or unreadable MLX log dir must cost the page one panel, not
+        # the whole render.
+        minutes = None
+
     data = {
         "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
         "day": day,
+        "minutes": minutes,
         "now": running_now(),
         # Local half only: which profiles are live, which loop has each and
         # when its phone came up. The reel each posting profile is sending is

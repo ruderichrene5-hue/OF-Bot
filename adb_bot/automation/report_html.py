@@ -438,6 +438,60 @@ def _section_spoof(spoof: dict) -> str:
     return body
 
 
+def _section_minutes(minutes) -> str:
+    """MultiLogin phone-minutes: what the period has spent, and what is left.
+
+    Counted from MultiLogin's own launcher log because there is no API for the
+    balance (`mlx_minutes`). Shown even with no allowance configured -- the
+    consumption is the useful half, and a fleet that does not know its burn rate
+    is the one that gets surprised by it.
+    """
+    if minutes is None:
+        # Deliberately not `_hint`: that "?" belongs to the loop table, and a
+        # panel that borrowed it would put one on a page that has no loops.
+        return ('<p class="dim">MultiLogin\u2019s launcher logs could not be '
+                'read, so minute usage is unknown.</p>')
+    used = f"{minutes.period_minutes:,.0f}"
+    tiles = [_tile("used this period", used,
+                   f"since {minutes.period_start}"),
+             _tile("sessions", f"{minutes.period_sessions:,}",
+                   "phone launches billed"),
+             _tile("today", f"{minutes.today_minutes:,.0f}", "minutes")]
+    if minutes.allowance:
+        tone = "bad" if minutes.low else ""
+        tiles.insert(0, _tile("minutes left", f"{minutes.remaining:,.0f}",
+                              f"of {minutes.allowance:,} "
+                              f"({minutes.used_pct:.0f}% used)", tone))
+    else:
+        tiles.append(_tile("allowance", "not set",
+                           "set MLX_MINUTES_ALLOWANCE for a balance"))
+    out = ['<div class="tiles">' + "".join(tiles) + "</div>"]
+
+    recent = list(minutes.by_day)[-7:]
+    if recent:
+        peak = max(d.minutes for d in recent) or 1.0
+        rows = []
+        for day in reversed(recent):
+            # A bar rather than a number alone: the thing worth seeing is that
+            # some days cost three times others, which a column of figures hides.
+            width = max(1, round(100 * day.minutes / peak))
+            rows.append(
+                f"<tr><td>{_e(day.day)}</td>"
+                f"<td class=\"num\">{day.sessions:,}</td>"
+                f"<td class=\"num\">{day.minutes:,.0f}</td>"
+                f"<td><div style=\"background:#4b6bfb;height:.6rem;"
+                f"width:{width}%;border-radius:3px\"></div></td></tr>")
+        out.append(
+            "<table><thead><tr><th>day</th><th class=\"num\">sessions</th>"
+            "<th class=\"num\">minutes</th><th>&nbsp;</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>")
+    if minutes.unclosed:
+        out.append(f'<p class="dim">{minutes.unclosed} session(s) this period '
+                   f'were never closed in the log and are not counted, so the '
+                   f'real usage is a little higher.</p>')
+    return "\n".join(out)
+
+
 def _section_phones(phones) -> str:
     if not phones:
         return '<p class="empty">No phones are open right now.</p>'
@@ -2487,6 +2541,9 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
 
       <h2>Top CPU use</h2>
       {_section_cpu_processes(data.get('cpu_processes') or [], data.get('server') or {})}
+
+      <h2>MultiLogin minutes</h2>
+      {_section_minutes(data.get('minutes'))}
 
       <h2>Spoofing</h2>
       {_section_spoof(data.get('spoof') or {})}
