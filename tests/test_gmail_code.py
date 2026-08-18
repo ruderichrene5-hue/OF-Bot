@@ -523,3 +523,212 @@ def test_an_empty_primary_tab_reads_as_empty():
     so a synced-but-empty inbox was indistinguishable from a dead one."""
     assert gmail_code.looks_empty("Nothing in Primary") is True
     assert gmail_code.looks_empty("You've finished!") is True
+
+
+# `dumpsys content`, one row per sync authority: authority, syncable, enabled.
+# Read off `Blank caio 2` on 2026-08-18, when Gmail sync had never once run.
+SYNC_OFF_DUMP = ("gmail-ls    -1    false    Total  0  0  0  0  0  0  0  0  0  0s\n"
+                 "calendar     1    true     Total  3  0  0  0  0  0  0  0  0  0s\n")
+SYNC_ON_DUMP = ("gmail-ls     1    true     Total  6  0  0  0  0  0  0  0  0  0s\n")
+
+
+class _SyncAdb(FakeAdb):
+    """A phone whose Gmail sync flips on once the switch has been tapped."""
+
+    def __init__(self, flips=True):
+        super().__init__()
+        self.flips = flips
+        self.switched = False
+
+    def run_command(self, command):
+        if "dumpsys content" in command:
+            self.commands.append(command)
+            return SYNC_ON_DUMP if (self.flips and self.switched) else SYNC_OFF_DUMP
+        if "PublicPreferenceActivity" in command:
+            self.switched = True
+        return super().run_command(command)
+
+
+def test_a_new_mailbox_has_its_sync_switched_on_rather_than_refused():
+    """Every account added to a phone arrives with mail sync off, so refusing
+    the mailbox there means a *new* email can never be used inside the one
+    launch a phone lives for -- which is what limited this to one account per
+    phone."""
+    box, adb = _mailbox(["settings", "data usage", "sync gmail"],
+                        adb=_SyncAdb())
+
+    assert box.sync_enabled() is False
+    assert box.enable_sync() is True
+    starts = [c for c in adb.commands if "PublicPreferenceActivity" in c]
+    assert starts, "never opened Gmail's settings"
+
+
+def test_the_sync_switch_is_reached_through_gmails_exported_activity():
+    """`Gmail2PreferenceActivity` is not exported and `am start` throws on it."""
+    assert "PublicPreferenceActivity" in gmail_code.GMAIL_SETTINGS_ACTIVITY
+
+
+def test_the_switch_is_believed_only_when_the_sync_manager_agrees():
+    """A checkbox that did not take looks identical to one that did, and the
+    cost of believing the screen is a 210-second poll of a dead mailbox."""
+    box, _ = _mailbox(["settings", "data usage", "sync gmail"],
+                      adb=_SyncAdb(flips=False))
+
+    assert box.enable_sync() is False
+
+
+def test_a_failed_switch_still_leaves_gmail_in_front():
+    """The rest of the run reads the screen next, and a phone left in Android's
+    settings reports an unknown screen and ends a run that was fine."""
+    adb = _SyncAdb(flips=False)
+    box, _ = _mailbox([""], adb=adb)          # no rows to tap at all
+
+    box.enable_sync()
+
+    assert adb.backs >= 1, "never backed out of settings"
+
+
+# Gmail's settings root, as `Blank caio 2` dumped it on 2026-08-18: the account
+# row is on screen and in the dump, and the only clickable things on the whole
+# page are the toolbar's.
+GMAIL_SETTINGS = ("general settings cicireynaamelia@gmail.com add account "
+                  "navigate up settings more options")
+
+
+class _StrictDriver(FakeDriver):
+    """Taps only what the screen marks clickable -- as the real driver does."""
+
+    def __init__(self, screens, clickable=("Navigate up", "More options")):
+        super().__init__(screens)
+        self.clickable = set(clickable)
+        self.loose_taps = []
+
+    def tap_label(self, labels, require_clickable=True):
+        if any(str(l) in self.clickable for l in labels):
+            self.taps.append(labels)
+            return True
+        if not require_clickable:
+            self.loose_taps.append(labels)
+            return True
+        return False
+
+
+def test_an_account_row_nothing_marks_clickable_is_still_tapped():
+    """Gmail marks nothing in its settings list clickable, so the strict rule
+    cannot reach the account and the sync switch behind it stays off -- which
+    threw away a run that had already reached Instagram's code screen."""
+    box, _ = _mailbox([GMAIL_SETTINGS], adb=_SyncAdb())
+    box.driver = _StrictDriver([GMAIL_SETTINGS])
+
+    assert box._tap_row(("cicireynaamelia@gmail.com",)) is True
+    assert box.driver.loose_taps, "never fell back to the row's own bounds"
+
+
+def test_the_strict_tap_is_tried_first():
+    """It is the one that cannot land on the wrong control."""
+    box, _ = _mailbox([GMAIL_SETTINGS], adb=_SyncAdb())
+    box.driver = _StrictDriver([GMAIL_SETTINGS])
+
+    assert box._tap_row(("Navigate up",)) is True
+    assert box.driver.taps and not box.driver.loose_taps
+
+
+def test_a_driver_without_the_argument_does_not_break_the_run():
+    """`PhoneMailbox` is handed whichever driver the caller built."""
+    class OldDriver(FakeDriver):
+        def tap_label(self, labels):
+            return False
+
+    box, _ = _mailbox([GMAIL_SETTINGS], adb=_SyncAdb())
+    box.driver = OldDriver([GMAIL_SETTINGS])
+
+    assert box._tap_row(("cicireynaamelia@gmail.com",)) is False
+
+
+# Gmail's account settings page as `Blank caio 2` dumped it: it opens on inbox
+# and notification options, and `Data usage` is below the fold.
+ACCOUNT_PAGE_TOP = ("account manage your google account inbox inbox type "
+                    "default inbox inbox categories primary, promotions, "
+                    "social, updates notifications notifications all inbox "
+                    "notifications notify once manage labels")
+ACCOUNT_PAGE_LOWER = "data usage sync gmail days of mail to sync download attachments"
+
+
+class _ScrollingDriver(FakeDriver):
+    """A settings page whose lower half only appears after a swipe."""
+
+    def __init__(self, wanted):
+        super().__init__([])
+        self.wanted = wanted
+        self.scrolled = False
+        self.taps = []
+
+    def read_screen(self):
+        return ACCOUNT_PAGE_LOWER if self.scrolled else ACCOUNT_PAGE_TOP
+
+    def tap_label(self, labels, require_clickable=True):
+        if self.scrolled and any(str(l) == self.wanted for l in labels):
+            self.taps.append(labels)
+            return True
+        return False
+
+
+def test_a_settings_row_below_the_fold_is_scrolled_to():
+    """Looking only at the first screenful found the address and then declared
+    `Data usage` missing -- which reads as "Gmail has no such setting" when it
+    is simply further down, and it cost a run that had reached the code screen."""
+    class Adb(_SyncAdb):
+        def __init__(self, driver):
+            super().__init__()
+            self.driver = driver
+
+        def shell_swipe(self, target, x1, y1, x2, y2, duration_ms=300):
+            self.driver.scrolled = True
+            return ""
+
+    driver = _ScrollingDriver("Data usage")
+    adb = Adb(driver)
+    box = gmail_code.PhoneMailbox("host:1", adb, "a@gmail.com", driver=driver)
+
+    assert box._find_and_tap(("Data usage",)) is True
+    assert driver.scrolled, "never scrolled"
+
+
+def test_the_scrolling_is_bounded():
+    """A page that never shows the row is not the page we think it is, and an
+    unbounded search would spend the phone's whole life swiping."""
+    class Adb(_SyncAdb):
+        def __init__(self):
+            super().__init__()
+            self.swipes = 0
+
+        def shell_swipe(self, target, x1, y1, x2, y2, duration_ms=300):
+            self.swipes += 1
+            return ""
+
+    driver = _ScrollingDriver("never-present")
+    adb = Adb()
+    box = gmail_code.PhoneMailbox("host:1", adb, "a@gmail.com", driver=driver)
+
+    assert box._find_and_tap(("Data usage",)) is False
+    assert adb.swipes == gmail_code.MAX_SETTINGS_SCROLLS
+
+
+def test_a_row_already_on_screen_is_not_scrolled_past():
+    """Scrolling first would push a visible row off the top."""
+    class Adb(_SyncAdb):
+        def __init__(self):
+            super().__init__()
+            self.swipes = 0
+
+        def shell_swipe(self, target, x1, y1, x2, y2, duration_ms=300):
+            self.swipes += 1
+            return ""
+
+    driver = _ScrollingDriver("Data usage")
+    driver.scrolled = True                    # already showing the lower half
+    adb = Adb()
+    box = gmail_code.PhoneMailbox("host:1", adb, "a@gmail.com", driver=driver)
+
+    assert box._find_and_tap(("Data usage",)) is True
+    assert adb.swipes == 0

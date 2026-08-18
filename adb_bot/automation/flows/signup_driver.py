@@ -50,12 +50,23 @@ class AdbSignupDriver(AdbChallengeDriver):
                 return None
         return None
 
-    def tap_label(self, labels) -> bool:
+    def tap_label(self, labels, require_clickable: bool = True) -> bool:
         """Tap the node whose text or description EQUALS one of `labels`.
 
         Exact matching is the safety property -- it is what stops "Not now"
         matching "now" -- and the ancestor walk is what makes it work at all on
         the screens whose labels sit on non-clickable children.
+
+        `require_clickable=False` also taps a node with **no** clickable
+        ancestor at all, at its own bounds. Gmail's settings list is the case
+        that needs it: the account row renders its address on a plain view and
+        the only clickable things on the whole screen are `Navigate up` and
+        `More options`, so the row is untappable by the strict rule and the
+        account's settings cannot be reached. Android still delivers a tap at
+        those coordinates to whatever handles it. Off by default, because
+        tapping something the screen never said was interactive is a guess, and
+        everywhere else in this chain the strict rule is what keeps a stray tap
+        from landing on the wrong control.
         """
         if self._root is None:
             self.read_screen()
@@ -73,7 +84,9 @@ class AdbSignupDriver(AdbChallengeDriver):
                     continue
                 target = self._clickable_ancestor(node, root)
                 if target is None:
-                    continue
+                    if require_clickable:
+                        continue
+                    target = node
                 center = self._center(target.attrib)
                 if center is None:
                     continue

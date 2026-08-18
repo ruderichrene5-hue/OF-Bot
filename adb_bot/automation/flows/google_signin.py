@@ -66,6 +66,7 @@ SCREEN_SAVE_PASSWORD = "save_password"
 SCREEN_PLAY_HOME = "play_home"            # signed in -- done
 SCREEN_LAUNCHER = "launcher"              # the phone's home screen
 SCREEN_WRONG_PASSWORD = "wrong_password"
+SCREEN_ROBOT_CHECK = "google_robot_check"    # a captcha; needs a person
 SCREEN_SERVER_ERROR = "google_server_error"  # transient; retryable
 SCREEN_RETRY = "try_again"                   # Google's own retry page
 SCREEN_SERVICES = "google_services"          # backup/location consents
@@ -129,6 +130,18 @@ _PLAY_HOME_MARKERS = ("search apps & games", "search for apps & games",
 _WRONG_PASSWORD_MARKERS = ("wrong password", "couldn't sign you in",
                            "try again or click forgot password")
 
+# Google challenging the *address*, before it has asked for a password at all.
+# Read off `Blank caio 2` on 2026-08-18 for `hasan428483@gmail.com`, an unused
+# pool mailbox: "verify that it's you ... confirm that you're not a robot".
+# There is no automating past this -- it is a captcha -- so it must be told
+# apart from an unnamed screen, which reads as "the flow got confused" and
+# invites a retry that will land here again.
+_ROBOT_CHECK_MARKERS = (
+    "not a robot",
+    "confirm you're not a robot",
+    "confirm that you're not a robot",
+)
+
 # Google could not be reached at all. Seen on `Blank caio 1`, 2026-08-17,
 # straight after `checking info…`: a bare page carrying **no buttons** -- not
 # even "Try again" -- so there is nothing to tap and the only way out is to
@@ -160,6 +173,7 @@ _RETRY_MARKERS = (
 # named more precisely is named first.
 _ORDERED = (
     (SCREEN_WRONG_PASSWORD, _WRONG_PASSWORD_MARKERS),
+    (SCREEN_ROBOT_CHECK, _ROBOT_CHECK_MARKERS),
     (SCREEN_SERVER_ERROR, _SERVER_ERROR_MARKERS),
     (SCREEN_RETRY, _RETRY_MARKERS),
     (SCREEN_SAVE_PASSWORD, _SAVE_PASSWORD_MARKERS),
@@ -236,6 +250,7 @@ RESULT_WRONG_PASSWORD = "wrong_password"
 RESULT_STUCK = "stuck"
 RESULT_UNKNOWN_SCREEN = "unknown_screen"
 RESULT_GOOGLE_UNREACHABLE = "google_unreachable"
+RESULT_ROBOT_CHECK = "google_robot_check"
 
 MAX_STEPS = 40
 MAX_REPEATS = 4
@@ -274,6 +289,19 @@ MAX_SERVICES_TAPS = 8
 # while a screen is mid-transition -- but not forever, since a phone that has
 # stopped answering will never answer.
 MAX_BLANK_READS = 5
+
+# How many times to open Android's add-account wizard. Two, because the first
+# go can land on a stale Play Store home before the wizard draws, and because
+# a phone that will not open it at all is not going to on the fifth try.
+MAX_ADD_ACCOUNT_STARTS = 2
+
+# How long to let Google sit on a password it is checking. The same shape as the
+# code screen's wait, because the failure they guard against is the same:
+# retyping into a form that is already submitted, which spends the repeat guard
+# without ever giving the check time to land. Eight, because on 2026-08-18 the
+# form was still spinning 47 seconds after `NEXT`.
+MAX_PASSWORD_WAITS = 8
+PASSWORD_WAIT_SECONDS = 10
 BLANK_READ_WAIT_SECONDS = 6
 
 _SKIP = ("Skip", "SKIP", "Not now", "NOT NOW", "Never", "NEVER")
@@ -316,6 +344,36 @@ def _start_play_store(adb_client, target: str, logger=None) -> bool:
     arrived = PLAY_PACKAGE in focus
     if logger is not None:
         logger.info("google_signin: Play Store %s (focus %s)",
+                    "is in front" if arrived else "did NOT come up",
+                    focus.strip()[:120] or "<none>")
+    return arrived
+
+
+def _start_add_account(adb_client, target: str, logger=None) -> bool:
+    """Open Google's own "add an account" wizard, and say whether it arrived.
+
+    The Play Store's `Sign in` button only exists while the phone has no Google
+    account at all. Once one is on there the store opens on its home screen,
+    and the second mailbox has to be added through Android's account settings
+    instead -- `ADD_ACCOUNT_SETTINGS` with `account_types` pinned to Google, so
+    the picker is skipped and the wizard opens straight on the email form.
+
+    This is deliberately not Gmail's own `Add an email address`, which fails at
+    the Terms step on these phones every time (SIGNUP_RUN_2026-08-13).
+    """
+    adb_client.run_command(
+        f"adb -s {target} shell am start -a "
+        f"android.settings.ADD_ACCOUNT_SETTINGS "
+        f"--esa account_types com.google")
+    time.sleep(8)
+    focus = adb_client.run_command(
+        f"adb -s {target} shell dumpsys window | grep mCurrentFocus") or ""
+    # Whichever wrapper Android puts in front, the wizard itself is GMS.
+    arrived = ("com.google.android.gms" in focus
+               or "AddAccountSettings" in focus
+               or "accounts" in focus.lower())
+    if logger is not None:
+        logger.info("google_signin: add-account wizard %s (focus %s)",
                     "is in front" if arrived else "did NOT come up",
                     focus.strip()[:120] or "<none>")
     return arrived
@@ -390,6 +448,8 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     retry_pages = 0
     services_taps = 0
     blank_reads = 0
+    add_account_starts = 0
+    password_waits = 0
 
     for step in range(MAX_STEPS):
         text = driver.read_screen() or ""
@@ -422,6 +482,30 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
         hints = driver.input_hints() if hasattr(driver, "input_hints") else ()
         screen = classify_google_screen(text, hints)
         log("info", "step %d: %s", step + 1, screen)
+
+        # Before the repeat guard, and for the same reason as `loading`: a
+        # password that is still being checked is not a screen that failed to
+        # advance. `Blank caio 2` spent its whole budget here on 2026-08-18 --
+        # the password was in the field and Google was drawing its own spinner
+        # over the form, and every pass typed it again.
+        if screen == SCREEN_PASSWORD and password_submits:
+            values = driver.input_values() if hasattr(driver, "input_values") else []
+            if password in values:
+                password_waits += 1
+                if password_waits <= MAX_PASSWORD_WAITS:
+                    log("info", "the password is still in the field; giving "
+                                "Google a moment (%d/%d)",
+                        password_waits, MAX_PASSWORD_WAITS)
+                    sleep(PASSWORD_WAIT_SECONDS)
+                    continue
+                # Long enough that it was not accepted: let the handler below
+                # type it again.
+                log("info", "the password has sat unanswered; typing it again")
+                password_waits = 0
+            else:
+                # Google cleared the field, so it is asking again rather than
+                # still thinking.
+                password_waits = 0
 
         # Before the repeat guard, and for the same reason as `loading`: a code
         # that is still being checked is not a screen that failed to advance.
@@ -469,6 +553,21 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             if any(address.lower() == name.lower() for name in names):
                 log("info", "%s is on the phone", address)
                 return RESULT_SIGNED_IN
+            if names and add_account_starts < MAX_ADD_ACCOUNT_STARTS:
+                # A phone that already carries somebody else's mailbox opens
+                # the store on its home screen, so there is no `Sign in` to
+                # press. This is the *only* reason a second account cannot be
+                # added the same way as the first, and it read as `stuck`.
+                add_account_starts += 1
+                log("info", "the store is signed in as %s; opening Android's "
+                            "add-account wizard for %s (%d/%d)",
+                    names, address, add_account_starts,
+                    MAX_ADD_ACCOUNT_STARTS)
+                _start_add_account(adb_client, target, logger=logger)
+                # The wizard re-enters on the email form, which the repeat
+                # guard would otherwise count against the screen we came from.
+                last, repeats = None, 0
+                continue
             log("warning", "Play Store looks signed in but dumpsys says %s",
                 names or "nothing")
             return RESULT_STUCK
@@ -528,7 +627,27 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
         if screen == SCREEN_WRONG_PASSWORD:
             return RESULT_WRONG_PASSWORD
 
+        if screen == SCREEN_ROBOT_CHECK:
+            # A captcha on the address itself. Retrying costs a launch and
+            # lands here again; the mailbox is the thing that has to change.
+            log("warning", "Google put a robot check on %s -- that mailbox "
+                           "cannot be signed in from here; use another",
+                address)
+            return RESULT_ROBOT_CHECK
+
         if screen == SCREEN_UNKNOWN:
+            # Ask the phone before calling this a failure. `Blank caio 2` ended
+            # a 750-second sign-in on "signed in as cicireynaamelia@gmail.com"
+            # (2026-08-18) -- Google's own confirmation, reported as
+            # `unknown_screen`, which spent a launch and read as the mailbox
+            # being unusable. The screen at the end of this chain is the one
+            # part of it we cannot enumerate; `dumpsys` is the same honest
+            # answer relied on everywhere else here.
+            names = accounts_on_device(adb_client, target)
+            if any(address.lower() == name.lower() for name in names):
+                log("info", "%s is on the phone, whatever this screen is: %s",
+                    address, (text or "")[:120])
+                return RESULT_SIGNED_IN
             log("warning", "unnamed screen: %s", (text or "")[:300])
             return RESULT_UNKNOWN_SCREEN
 

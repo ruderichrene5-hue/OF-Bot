@@ -38,7 +38,7 @@ from adb_bot.core.logger import get_logger
 
 LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery", "warmup",
          "warmup-state", "issue-tags", "mlx-sync", "cleanup", "second-accounts",
-         "digest", "verification")
+         "digest", "verification", "mlx-minutes")
 # `doctor` isn't a loop -- it's the preflight check, runnable the same way.
 # `report` renders the operational page; like `doctor` it is a command rather
 # than a loop, and unlike `doctor` it is not in the recommended set, so it never
@@ -886,6 +886,19 @@ def _run_reap_phones(args, logger) -> int:
     return 0
 
 
+def _run_mlx_minutes(args, logger) -> int:
+    """Warn before the minutes run out, and if nothing is launching.
+
+    Both alerts exist because 2026-08-18 had no warning of either: the balance
+    emptied at 16:59 and the fleet spent three hours failing every launch while
+    every layer reported it as somebody else's server fault.
+    """
+    from adb_bot.automation import mlx_minutes
+    result = mlx_minutes.run_check(logger=logger)
+    logger.info("mlx-minutes: %s", result)
+    return 0
+
+
 _DISPATCH = {
     "posting": _run_posting,
     "recheck": _run_recheck,
@@ -904,6 +917,7 @@ _DISPATCH = {
     "second-accounts": _run_second_accounts,
     "report": _run_report,
     "reap-phones": _run_reap_phones,
+    "mlx-minutes": _run_mlx_minutes,
 }
 
 

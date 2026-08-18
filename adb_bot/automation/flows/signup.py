@@ -50,6 +50,7 @@ SCREEN_TERMS = "terms"                  # "Agree to Instagram's terms" -- create
 SCREEN_PERMISSIONS = "permissions"      # "Allow Instagram to access your device?"
 SCREEN_PHOTO_PROMPT = "photo_prompt"    # "Add a profile photo"
 SCREEN_FOLLOW = "follow"                # "Follow 5 or more people"
+SCREEN_COOKIES = "cookies"              # Meta's cookie consent, after the account exists
 SCREEN_ADD_EMAIL = "add_email"          # post-creation "Add an email address"
 SCREEN_ADD_PHONE = "add_phone"          # post-creation "Add a mobile number"
 SCREEN_PERMISSION_DIALOG = "permission_dialog"   # Android's own allow/deny
@@ -154,6 +155,16 @@ _FOLLOW_MARKERS = (
     "following isn't required",
 )
 
+# Meta's cookie consent, which arrives *after* the account has been created --
+# it greets the new username by name. Read off `Blank caio 2` on 2026-08-18,
+# where it was the last screen of a successful signup and, being unnamed, turned
+# `@alina.sommer74` into an `unknown_screen` failure.
+_COOKIES_MARKERS = (
+    "allow the use of cookies",
+    "we use cookies",
+    "allow all cookies",
+)
+
 _ADD_EMAIL_MARKERS = (
     "add an email address",
     "enter the email where you can be contacted",
@@ -230,6 +241,7 @@ _ORDERED_MARKERS = (
     (SCREEN_EMAIL, _EMAIL_MARKERS),
     (SCREEN_PHONE, _PHONE_MARKERS),
     (SCREEN_PERMISSIONS, _PERMISSIONS_MARKERS),
+    (SCREEN_COOKIES, _COOKIES_MARKERS),
     (SCREEN_PHOTO_PROMPT, _PHOTO_PROMPT_MARKERS),
     (SCREEN_FOLLOW, _FOLLOW_MARKERS),
     (SCREEN_INTERSTITIAL, _INTERSTITIAL_MARKERS),
@@ -850,6 +862,18 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 # leads to Android's dialogs above (where the answer is no).
                 if not driver.tap_label(_SKIP_LABELS):
                     driver.tap_label(_SUBMIT_LABELS)
+                sleep(5)
+
+            elif screen == SCREEN_COOKIES:
+                # Answered rather than skipped: there is no "not now" on it, and
+                # it stands between a created account and the app. `Allow all
+                # cookies` is the ordinary choice and the one that clears in a
+                # single tap; declining is accepted too, and is the fallback
+                # only because a screen that will not answer is worse than
+                # either answer.
+                if not driver.tap_label(("Allow all cookies", "ALLOW ALL COOKIES",
+                                         "Allow", "Decline optional cookies")):
+                    log("warning", "nothing to answer on the cookie screen")
                 sleep(5)
 
             elif screen in (SCREEN_PHOTO_PROMPT, SCREEN_FOLLOW,

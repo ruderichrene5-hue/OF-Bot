@@ -750,3 +750,30 @@ def test_the_checkpoint_does_not_swallow_the_screens_it_shares_words_with():
         "join instagram get started") == signup.SCREEN_ENTRY
     assert signup.classify_signup_screen(
         "create a password continue") != signup.SCREEN_CHECKPOINT
+
+
+# Meta's cookie consent, read off `Blank caio 2` on 2026-08-18. It arrives
+# *after* the account is created -- it greets the new username by name -- and
+# being unnamed it turned a finished signup into an `unknown_screen` failure.
+COOKIES = ("more allow the use of cookies by instagram? allow the use of "
+           "cookies by instagram? alina.sommer74, at meta, we use cookies and "
+           "similar technologies decline optional cookies allow all cookies")
+
+
+def test_the_cookie_consent_is_named_rather_than_unknown():
+    """`@alina.sommer74` was created and reported as a failure on this screen,
+    which also meant the verification step never ran on a real account."""
+    assert signup.classify_signup_screen(COOKIES) == signup.SCREEN_COOKIES
+
+
+def test_the_cookie_screen_is_not_read_as_the_terms():
+    """Both are consent pages, and the terms handler's tap is what creates the
+    account -- tapping it again here would be answering the wrong question."""
+    assert signup.classify_signup_screen(COOKIES) != signup.SCREEN_TERMS
+
+
+def test_the_screens_around_it_still_classify_as_themselves():
+    assert signup.classify_signup_screen(
+        "follow 5 or more people following isn't required") == signup.SCREEN_FOLLOW
+    assert signup.classify_signup_screen(
+        "add a profile photo") == signup.SCREEN_PHOTO_PROMPT
