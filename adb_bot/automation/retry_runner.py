@@ -30,6 +30,7 @@ from pathlib import Path
 
 from adb_bot.clients import airtable as at
 from adb_bot.automation import post_ledger
+from adb_bot.automation.recheck_runner import disprove_from_later_share
 
 # How many attempts a row gets before it stops being retried automatically.
 # The posting runner bumps Retry Count on each failed attempt, so this counts
@@ -59,6 +60,19 @@ OUTCOME_NEEDS_HUMAN = "needs_human"  # banned / verification: retrying is harmfu
 OUTCOME_EXHAUSTED = "exhausted"      # out of retries; a person should look
 OUTCOME_UNRESOLVED = "unresolved"    # can't identify the clip or the account
 OUTCOME_BLOCKED = "blocked"          # the ledger says this clip may be live
+
+# How long a blocked row is given to acquire the evidence that would settle it
+# before its clip is written off. Matches the deferred recheck's own write-off
+# window, because it is the same question being given up on.
+#
+# The evidence a blocked row needs is the *next* share on the same account --
+# and for a profile whose every row is blocked, that share can never happen.
+# Emely 4, 5, 7 and 12 were each sitting on one Failed row apiece, holding the
+# only Ready variant their profile had, with nothing Pending behind it: no
+# further post could ever be made, so no later count could ever be read, so the
+# row could never be settled and the profile could never post again. Waiting
+# longer does not break that circle; releasing the clip does.
+WRITE_OFF_SECONDS = 24 * 3600
 
 
 def retry_delay_seconds(retry_count: int,
@@ -265,8 +279,13 @@ def retry_failed_posts(airtable, ledger=None, logger=None, now=time.time,
             getattr(logger, level, logger.info)(message, *args)
 
     store = ledger or post_ledger.PostLedger()
+    # Read once, not per row: the counter evidence below compares a blocked
+    # row's share against every other share on the same account, and the ledger
+    # is a file on disk.
+    all_shares = list(store.load().values())
     tally = {"considered": 0, "requeued": 0, "needs_human": 0, "exhausted": 0,
-             "unresolved": 0, "blocked": 0, "errors": 0}
+             "unresolved": 0, "blocked": 0, "unblocked": 0,
+             "written_off": 0, "closed_as_posted": 0, "errors": 0}
 
     try:
         rows = airtable.list_failed_posts()
@@ -302,6 +321,84 @@ def retry_failed_posts(airtable, ledger=None, logger=None, now=time.time,
 
         outcome, detail = decide_retry(fields, profile_id, media_hash, record,
                                        max_retries=max_retries)
+
+        # A blocked row is not necessarily a stuck one. `blocked` means the
+        # ledger still calls this clip `shared`: Share was tapped and nobody
+        # ever proved the outcome. The deferred recheck is what normally
+        # settles that, but it only ever looks at rows Airtable has in
+        # `Verifying` -- so a run that died *after* Share left the row `Failed`
+        # and put it somewhere nothing would ever read it again. The ledger
+        # kept blocking, this pass kept refusing, the row kept holding its
+        # Ready variant, and the queue kept reporting the profile as having
+        # nothing to post. That is the `No Recent Success` deadlock: on
+        # 2026-08-19, 119 unresolved shares across 49 profiles, and profiles
+        # refused here 720 times each without one of them ever being asked the
+        # one question that could free it.
+        #
+        # The proof is usually already on disk and needs no phone: every share
+        # records the post count read moments before Share, so the next share
+        # on the same account is a second reading of the same counter. If it
+        # is unchanged, nothing landed in between and the clip is safe to send
+        # again.
+        #
+        # No device is launched and nothing new is spent. When the evidence
+        # does not reach, `disprove_from_later_share` returns None and the row
+        # stays blocked exactly as before.
+        if outcome == OUTCOME_BLOCKED and profile_id and media_hash and record is not None:
+            settled = disprove_from_later_share(record, all_shares)
+            if settled is not None:
+                _, why = settled
+                log("info", "Unblocking %s: %s", name, why)
+                if not dry_run:
+                    store.resolve(profile_id, media_hash,
+                                  post_ledger.STATUS_DISPROVED, why)
+                outcome, detail = OUTCOME_RETRY, f"disproved with no device -- {why}"
+                tally["unblocked"] += 1
+            elif record.status == post_ledger.STATUS_CONFIRMED:
+                # The ledger already proved this one landed; the row just never
+                # heard. Marking it Failed would be false, and it matters beyond
+                # tidiness: `stale_profiles` flags a profile on its count of
+                # *confirmed* posts in Airtable, so a post that went out and was
+                # recorded only on disk still reads as "No Recent Success" and
+                # parks the profile. Close the row honestly instead.
+                log("info", "Closing %s as posted: the ledger confirmed this clip "
+                            "on %s and the row never heard", name, profile_id)
+                if not dry_run:
+                    airtable.mark_post_result(queue_id, at.POST_STATUS_POSTED,
+                                              at.ISSUE_NONE)
+                    variant_id = _first_link(fields, at.F_PQ_SPOOF_VARIANT)
+                    if variant_id:
+                        airtable.mark_variant_used(variant_id)
+                outcome = OUTCOME_BLOCKED
+                tally["closed_as_posted"] += 1
+            elif (now() - (record.shared_at or 0.0)) > WRITE_OFF_SECONDS:
+                # No evidence has arrived in a day and none can now: this row is
+                # holding the profile's only Ready variant, and a variant only
+                # becomes `Used` on a *successful* post, so a Failed row holds
+                # its clip for ever. `queue_runner` then reports the profile as
+                # having Ready content it may not touch and queues nothing, and
+                # the pipeline keeps spoofing clips nobody can post.
+                #
+                # Burning the clip is the one move that frees the profile
+                # without re-sending anything. The reel may well be live -- that
+                # is exactly why it is marked `Used` rather than retried -- but
+                # the *next* one no longer has to wait behind it.
+                #
+                # The deferred recheck already writes rows off after ~26h and
+                # leaves the variant linked, which is why `Viktoria 10` was
+                # abandoned on 2026-08-18 and still had not posted a day later.
+                variant_id = _first_link(fields, at.F_PQ_SPOOF_VARIANT)
+                log("warning",
+                    "Writing off %s: %s -- unproven for %.1fh and no later post can "
+                    "settle it; burning the clip so the profile can post again",
+                    name, detail, (now() - (record.shared_at or 0.0)) / 3600.0)
+                if not dry_run:
+                    airtable.mark_post_result(queue_id, at.POST_STATUS_FAILED,
+                                              at.ISSUE_OTHER)
+                    if variant_id:
+                        airtable.mark_variant_used(variant_id)
+                outcome = OUTCOME_BLOCKED
+                tally["written_off"] += 1
 
         if outcome != OUTCOME_RETRY:
             if outcome == OUTCOME_NOT_FAILED:

@@ -93,6 +93,96 @@ def _handle_key(value) -> str:
     return str(value or "").strip().lstrip("@").lower()
 
 
+def _same_account_test(entry, shares):
+    """A predicate matching shares taken on the *same account* as `entry`, or
+    None when this evidence cannot be used on this phone at all.
+
+    Two accounts on one phone have unrelated counters, so a reading only means
+    anything next to another reading of the same counter. There are two cases:
+
+    * `entry` carries a handle -- the row was account-driven. Match on profile
+      *and* handle, which is what tells the phone's two accounts apart.
+    * `entry` carries no handle. **That is the single-account case, not a
+      missing field**: the posting flow only sets `target_handle` when it has
+      to switch accounts first ("no handle means a single-account phone, and
+      this does nothing at all", `instagram_reel`). On such a phone the profile
+      *is* the account and the profile id alone is a sound key.
+
+    Refusing the second case is how this evidence came to be dead for most of
+    the fleet: posting is profile-driven now, so almost every record has an
+    empty handle, and the one check that can settle a share with no device
+    returned None before it read anything. 119 shares sat unresolved on
+    2026-08-19, holding their variants and starving 23 profiles.
+
+    The safety condition for the second case is that the phone really does hold
+    one account. A handle appearing on *any* share for this profile means it
+    holds two, whatever the MLX tags say -- the tags are known to be incomplete
+    (8 carry it; roughly twenty phones hold two accounts), so the ledger's own
+    evidence decides rather than the label.
+    """
+    entry_handle = _handle_key(entry.target_handle)
+    if entry_handle:
+        return lambda share: (str(share.profile_id) == str(entry.profile_id)
+                              and _handle_key(share.target_handle) == entry_handle)
+
+    for share in shares:
+        if (str(share.profile_id) == str(entry.profile_id)
+                and _handle_key(share.target_handle)):
+            return None        # two accounts here; the counter is ambiguous
+    return lambda share: str(share.profile_id) == str(entry.profile_id)
+
+
+def disprove_from_later_share(entry, shares) -> tuple | None:
+    """Prove a parked post did NOT land, using the next post's opening count.
+
+    The mirror of `confirm_from_later_share`, and the half that was missing.
+    Confirming a share stops it being re-sent, which the ledger already did by
+    blocking; **disproving is what lets the clip go out again**, and without it
+    a share that was tapped and never proved holds its variant for good. The
+    retry pass then refuses the row for ever, the queue reports the profile's
+    only Ready variant as held, and the profile stops posting -- which is what
+    `No Recent Success` has mostly been.
+
+    Deliberately narrower than the confirming direction:
+
+    * **Flat only.** The next reading must equal this one. A *decrease* proves
+      nothing -- a deleted post, or a counter read off the wrong screen -- and
+      `77 -> 1` is a misread, not a disappearance.
+    * **Exactly one share in the window**, this one. With two shares and a flat
+      counter neither landed, but saying so needs both rows, and this rules on
+      one; the extra caution costs a cycle and avoids reasoning about a set.
+
+    Returns (OUTCOME_FAILED, detail) or None. None is the safe answer: the
+    caller goes on blocking the clip exactly as it does today.
+    """
+    if entry.baseline_count < 0 or not entry.baseline_exact:
+        return None
+    same_account = _same_account_test(entry, shares)
+    if same_account is None:
+        return None
+
+    later = [s for s in shares
+             if same_account(s) and (s.shared_at or 0.0) > (entry.shared_at or 0.0)
+             and s.baseline_count >= 0 and s.baseline_exact]
+    if not later:
+        return None
+
+    nxt = min(later, key=lambda s: s.shared_at or 0.0)
+    if nxt.baseline_count != entry.baseline_count:
+        return None
+
+    between = [s for s in shares
+               if same_account(s)
+               and (entry.shared_at or 0.0) <= (s.shared_at or 0.0) < (nxt.shared_at or 0.0)]
+    if len(between) != 1:
+        return None
+
+    who = f"@{_handle_key(entry.target_handle)}" if entry.target_handle else "this phone"
+    return (OUTCOME_FAILED,
+            f"the next post on {who} opened at {nxt.baseline_count}, the same count "
+            f"this one read before sharing -- nothing landed in between, so this reel did not")
+
+
 def confirm_from_later_share(entry, shares) -> tuple | None:
     """Prove a parked post landed using the *next* post's opening count.
 
@@ -120,13 +210,12 @@ def confirm_from_later_share(entry, shares) -> tuple | None:
     * The rise must cover every share recorded in the window. Two shares and a
       +1 means one of them landed and this does not say which.
     """
-    handle = _handle_key(entry.target_handle)
-    if not handle or entry.baseline_count < 0 or not entry.baseline_exact:
+    if entry.baseline_count < 0 or not entry.baseline_exact:
         return None
-
-    def same_account(share) -> bool:
-        return (str(share.profile_id) == str(entry.profile_id)
-                and _handle_key(share.target_handle) == handle)
+    same_account = _same_account_test(entry, shares)
+    if same_account is None:
+        return None
+    handle = _handle_key(entry.target_handle) or str(entry.profile_id)
 
     later = [s for s in shares
              if same_account(s) and (s.shared_at or 0.0) > (entry.shared_at or 0.0)
@@ -148,8 +237,9 @@ def confirm_from_later_share(entry, shares) -> tuple | None:
     if risen < len(between):
         return None
 
+    who = f"@{_handle_key(entry.target_handle)}" if entry.target_handle else "this phone"
     return (OUTCOME_POSTED,
-            f"the next post on @{handle} opened at {nxt.baseline_count}, up from "
+            f"the next post on {who} opened at {nxt.baseline_count}, up from "
             f"{entry.baseline_count} before this one -- the counter moved, so this reel landed")
 
 
