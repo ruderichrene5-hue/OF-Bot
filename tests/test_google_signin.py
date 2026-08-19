@@ -616,3 +616,115 @@ def test_an_unnamed_screen_with_no_account_on_the_phone_is_still_a_failure():
                         sleep=lambda _s: None)
 
     assert verdict == g.RESULT_UNKNOWN_SCREEN
+
+
+# --- adaptive waiting -------------------------------------------------------
+
+class _Clock:
+    """A clock that only moves when something sleeps on it."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class _Screens:
+    """Hands back a scripted sequence of screen reads, then repeats the last."""
+
+    def __init__(self, *screens):
+        self.screens = list(screens)
+        self.reads = 0
+
+    def read_screen(self):
+        self.reads += 1
+        i = min(self.reads - 1, len(self.screens) - 1)
+        return self.screens[i]
+
+
+def test_a_screen_that_moves_ends_the_wait_early():
+    """The whole point: a form that settles in one look no longer costs ten
+    seconds, and this chain has about a dozen such waits."""
+    clock = _Clock()
+    driver = _Screens(EMAIL, PASSWORD_CHECKING)
+
+    out = g.settle(driver, EMAIL, 10, sleep=clock.sleep, clock=clock)
+
+    assert out == PASSWORD_CHECKING
+    assert clock.now < 10, "waited the full budget on a screen that had moved"
+
+
+def test_a_screen_that_does_not_move_is_waited_out_in_full():
+    """Early exit only on change, so the caller's repeat guard counts exactly
+    what it counted before -- a stuck run must not look different."""
+    clock = _Clock()
+    driver = _Screens(EMAIL)
+
+    out = g.settle(driver, EMAIL, 10, sleep=clock.sleep, clock=clock)
+
+    assert out == EMAIL
+    assert clock.now >= 10
+
+
+def test_a_half_drawn_screen_does_not_end_the_wait():
+    """Google's forms redraw in stages and a tap into one mid-draw lands on
+    nothing or on the wrong control -- the fixed sleeps existed for this."""
+    clock = _Clock()
+    driver = _Screens("skip next", "skip next", PASSWORD_CHECKING)
+
+    out = g.settle(driver, EMAIL, 10, sleep=clock.sleep, clock=clock)
+
+    assert g.classify_google_screen("skip next") == g.SCREEN_LOADING
+    assert out == PASSWORD_CHECKING, "settled on the spinner instead of the form"
+
+
+def test_a_failed_dump_never_ends_the_wait():
+    """An empty read is a dump that failed, not a screen that changed."""
+    clock = _Clock()
+    driver = _Screens("", "", "")
+
+    out = g.settle(driver, EMAIL, 10, sleep=clock.sleep, clock=clock)
+
+    assert out == EMAIL
+    assert clock.now >= 10
+
+
+def test_whitespace_and_case_are_not_a_change():
+    """The same screen dumps with different spacing depending on how far a
+    layout has settled; treating that as movement would defeat the guard."""
+    clock = _Clock()
+    driver = _Screens(EMAIL.upper().replace(" ", "  "))
+
+    out = g.settle(driver, EMAIL, 6, sleep=clock.sleep, clock=clock)
+
+    assert clock.now >= 6
+
+
+def test_the_wait_is_bounded_even_when_the_clock_never_moves():
+    """The tests inject a sleep that does not sleep. Without the look bound
+    this spins on the driver for a wall-clock second."""
+    driver = _Screens(EMAIL)
+
+    g.settle(driver, EMAIL, 10, sleep=lambda _s: None, clock=lambda: 0.0)
+
+    assert driver.reads <= int(10 / g.POLL_SECONDS) + 1
+
+
+def test_a_driver_that_raises_hands_back_what_it_had():
+    class Broken:
+        def read_screen(self):
+            raise RuntimeError("adb died")
+
+    assert g.settle(Broken(), EMAIL, 6, sleep=lambda _s: None,
+                    clock=lambda: 0.0) == EMAIL
+
+
+def test_a_zero_budget_does_not_look_at_all():
+    driver = _Screens(EMAIL)
+
+    assert g.settle(driver, EMAIL, 0) == EMAIL
+    assert driver.reads == 0
