@@ -4820,10 +4820,50 @@ class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):
             width, height = (1080, 2340)
         _emit(logger, "info", "u2: screen size for %s is %sx%s", target, width, height)
 
+        def _find_profile_tab():
+            """The bottom-nav Profile tab, by whichever handle answers.
+
+            The content-desc alone is not enough. On 2026-08-19 the picture flow
+            found nothing here, blind-tapped three guessed positions and never
+            reached the profile -- while the bio flow, a minute earlier on the
+            same phone, had matched the very same tab and read
+            `id=com.instagram.android:id/profile_tab` off it. The resource id is
+            the more stable of the two and costs one more selector.
+            """
+            for selector in (dict(descriptionStartsWith="Profile"),
+                             dict(resourceId=f"{self.IG_PACKAGE}:id/profile_tab")):
+                candidate = d(**selector)
+                if candidate.exists:
+                    return candidate, selector
+            return None, None
+
         tapped_profile = False
-        profile_tab = d(descriptionStartsWith="Profile")
-        if profile_tab.exists:
-            _emit(logger, "info", "u2: Profile tab candidate -> %s", _u2_describe(profile_tab))
+        profile_tab, matched_by = _find_profile_tab()
+
+        # No bottom nav at all usually means Instagram is still on a sub-screen
+        # -- Edit profile, settings, a picker -- because `am start` resumes the
+        # task where it was left rather than going Home. That is exactly how the
+        # picture flow failed when it ran straight after the bio flow. Backing
+        # out is cheap and puts the nav back; guessing coordinates does not.
+        if profile_tab is None:
+            for attempt in range(1, 4):
+                _emit(logger, "info", "u2: no bottom nav on screen; backing out of "
+                                      "whatever is open (%d/3)", attempt)
+                try:
+                    d.press("back")
+                except Exception as exc:                      # noqa: BLE001
+                    _emit(logger, "warning", "u2: back press failed: %s", exc)
+                    break
+                time.sleep(2)
+                profile_tab, matched_by = _find_profile_tab()
+                if profile_tab is not None:
+                    _emit(logger, "info", "u2: bottom nav is back after %d back "
+                                          "press(es)", attempt)
+                    break
+
+        if profile_tab is not None:
+            _emit(logger, "info", "u2: Profile tab candidate (via %s) -> %s",
+                  matched_by, _u2_describe(profile_tab))
             try:
                 bounds = profile_tab.info.get("bounds", {})
                 if bounds.get("top", 0) > height * 0.80:
@@ -4835,7 +4875,7 @@ class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):
             except Exception as exc:
                 _emit(logger, "warning", "u2: could not read Profile tab bounds: %s", exc)
         else:
-            _emit(logger, "info", "u2: no 'Profile' content-desc on screen; using position fallback")
+            _emit(logger, "info", "u2: no Profile tab by any selector; using position fallback")
 
         if not tapped_profile:
             for fx, fy in ((0.90, 0.95), (0.90, 0.93), (0.93, 0.95)):
@@ -5136,10 +5176,92 @@ class InstagramUpdateProfilePictureU2Flow(InstagramUpdateBioU2Flow):
                 break
             time.sleep(1)
 
+        # Tapping Done is not evidence. On 2026-08-19 this returned success on
+        # `@alina.sommer74` while the avatar was still the default silhouette --
+        # the gallery tile had never actually been selected, and a screenshot of
+        # the profile was the only thing that showed it. Instagram itself gives
+        # the answer: while no picture is set it keeps offering "Add profile
+        # picture" on the profile's own "Complete your profile" card.
+        applied = self._profile_picture_applied_u2(d, target, emit, logger=logger)
+        if applied is False:
+            emit("warning", "Instagram still offers 'Add profile picture' for %s, "
+                            "so the picture did not apply", target)
+            return {"profile_id": profile.id, "target": target, "aborted": False,
+                    "success": False}
+        if applied is None:
+            emit("info", "Could not tell whether the picture applied for %s; "
+                         "reporting what was done, not what was proved", target)
+
         emit("info", "Instagram update profile picture flow completed for %s", target)
         return {"profile_id": profile.id, "target": target, "aborted": False, "success": True}
 
+    def _profile_picture_applied_u2(self, d, target, emit, logger=None):
+        """True / False / None -- whether a profile picture is now set.
+
+        None is deliberate and is not False: a screen we could not read is not
+        the same as a picture we know is missing, and treating it as failure
+        would throw away runs that worked.
+        """
+        try:
+            for _ in range(3):
+                if d(textContains="Add profile picture").exists:
+                    return False
+                if d(textMatches="(?i)change profile photo").exists:
+                    # The Edit-profile wording once a picture exists.
+                    return True
+                time.sleep(2)
+        except Exception as exc:                              # noqa: BLE001
+            _emit(logger, "warning", "u2: could not check the profile picture: %s", exc)
+            return None
+        return None
+
     # -- uiautomator2 helpers -------------------------------------------------
+
+    # Android's own ids, read off the dialog on `Blank caio 2` (2026-08-19):
+    #   permission_allow_all_button / permission_allow_selected_button
+    #   permission_deny_button
+    # "Allow all" rather than limited access: the picture was pushed to
+    # /sdcard/Download, and limited access opens a second picker that would have
+    # to be driven as well.
+    # How long to give the dialog to draw after the library is chosen.
+    PHOTO_PERMISSION_WAIT_SECONDS = 12
+
+    PHOTO_PERMISSION_SELECTORS = (
+        {"resourceIdMatches": ".*permission_allow_all_button"},
+        {"textMatches": "(?i)^allow all$"},
+        {"textMatches": "(?i)^allow$"},
+        {"textMatches": "(?i)^while using the app$"},
+    )
+
+    def _grant_photo_permission_u2(self, d, target, logger=None) -> bool:
+        """Answer the photos-and-videos permission dialog if it is up.
+
+        Matched exactly so "allow" can never select "Don't allow" -- the same
+        rule `interruptions._GRANT_BUTTON_LABELS` follows, kept here because
+        this runs inside the u2 driver rather than the dump-based one.
+        """
+        # The dialog is drawn a beat after "Choose from library" is tapped, so
+        # one look is not enough -- the first version of this checked
+        # immediately, found nothing, and the gallery then timed out behind a
+        # sheet that was there all along.
+        deadline = time.monotonic() + self.PHOTO_PERMISSION_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            for selector in self.PHOTO_PERMISSION_SELECTORS:
+                try:
+                    button = d(**selector)
+                    if not button.exists:
+                        continue
+                    _emit(logger, "info", "u2: photo permission dialog is up; "
+                                          "granting via %s for %s", selector, target)
+                    button.click()
+                    time.sleep(3)
+                    return True
+                except Exception as exc:                      # noqa: BLE001
+                    _emit(logger, "warning", "u2: could not answer the photo "
+                                             "permission dialog: %s", exc)
+                    return False
+            time.sleep(1.5)
+        return False
 
     def _open_edit_picture_u2(self, d, target, emit, logger=None) -> bool:
         # Tap the blue "Edit picture or avatar" link on the Edit profile screen.
@@ -5174,6 +5296,13 @@ class InstagramUpdateProfilePictureU2Flow(InstagramUpdateBioU2Flow):
             logger=logger,
             purpose="profile-photo source option (optional)",
         )
+
+        # Android's photo-permission dialog sits *over* the gallery the first
+        # time a fresh account opens the picker. Unanswered, the flow tapped a
+        # guessed "most recent photo" position that was really this sheet,
+        # tapped a guessed "Done", and reported success while the avatar stayed
+        # the default silhouette (`@alina.sommer74`, 2026-08-19).
+        self._grant_photo_permission_u2(d, target, logger=logger)
 
         # Confirm the gallery/photo picker is open.
         ready = self._first_present(
