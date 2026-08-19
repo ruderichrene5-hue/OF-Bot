@@ -3332,6 +3332,30 @@ class InstagramStoryUploadFlow:
         return False
 
     def _select_story_media(self, target: str, adb_client, logger=None, prefer_reel_text: bool = False) -> bool:
+        # Android's photo permission is asked the first time an account opens
+        # the picker, and the dialog is drawn *over* the gallery. Every phone in
+        # the fleet granted it long ago, so this never showed up here -- but a
+        # freshly created account has not, and the signup pipeline now makes
+        # those. Unanswered it does not look like a permission problem: the
+        # gallery simply "is not found" and the run taps whatever the fallback
+        # coordinates happen to hit. That is exactly how the profile-picture
+        # flow silently set nothing on `@alina.sommer74` (2026-08-19).
+        #
+        # `handle_blocking_prompts` already matches this dialog
+        # ("allow instagram to access" / "access photos" / "photos and videos")
+        # and prefers "allow all", matched exactly so it can never press
+        # "Don't allow".
+        try:
+            from adb_bot.automation.flows import interruptions
+            if interruptions.handle_blocking_prompts(target, adb_client,
+                                                     logger=logger, flow=self):
+                _emit(logger, "info", "Cleared a blocking prompt before the "
+                                      "media picker for %s", target)
+                time.sleep(2)
+        except Exception as exc:                              # noqa: BLE001
+            _emit(logger, "warning", "Could not clear blocking prompts before "
+                                     "the media picker for %s: %s", target, exc)
+
         if prefer_reel_text:
             reel_option = _adb_find_instagram_reel_option_center(target, logger=logger)
             if reel_option is not None:

@@ -619,6 +619,46 @@ class InstagramReelUploadU2Flow:
     """
 
     name = "instagram_reel_upload_u2"
+
+    # Android's own ids, read off the dialog on `Blank caio 2` (2026-08-19).
+    # "Allow all" rather than limited access: the clip is pushed to the device
+    # and limited access opens a second picker that would have to be driven too.
+    PHOTO_PERMISSION_WAIT_SECONDS = 12
+    PHOTO_PERMISSION_SELECTORS = (
+        {"resourceIdMatches": ".*permission_allow_all_button"},
+        {"textMatches": "(?i)^allow all$"},
+        {"textMatches": "(?i)^allow$"},
+        {"textMatches": "(?i)^while using the app$"},
+    )
+
+    def _grant_photo_permission_u2(self, d, target, logger=None) -> bool:
+        """Answer the photos-and-videos permission dialog if it is up.
+
+        Matched exactly, never as a substring: "allow" must not be able to
+        select "Don't allow". Polled rather than checked once, because the
+        dialog is drawn a beat after the composer opens -- a single immediate
+        look finds nothing and the gallery then times out behind a sheet that
+        was there all along.
+        """
+        deadline = time.monotonic() + self.PHOTO_PERMISSION_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            for selector in self.PHOTO_PERMISSION_SELECTORS:
+                try:
+                    button = d(**selector)
+                    if not button.exists:
+                        continue
+                    _emit(logger, "info", "u2: photo permission dialog is up; "
+                                          "granting via %s for %s", selector, target)
+                    button.click()
+                    time.sleep(3)
+                    return True
+                except Exception as exc:                      # noqa: BLE001
+                    _emit(logger, "warning", "u2: could not answer the photo "
+                                             "permission dialog for %s: %s",
+                          target, exc)
+                    return False
+            time.sleep(1.5)
+        return False
     IG_PACKAGE = "com.instagram.android"
     SELECTOR_WAIT_SECONDS = 15.0
 
@@ -1397,6 +1437,16 @@ class InstagramReelUploadU2Flow:
                 d.click(0.08, 0.08)
             except Exception as exc:
                 _emit(logger, "warning", "u2: fallback Create tap failed for %s: %s", target, exc)
+
+        # Android asks for photo access the first time an account opens the
+        # picker, and the dialog is drawn *over* the gallery. Every phone in the
+        # fleet granted it long ago, so this never showed up here -- but a
+        # freshly created account has not, and the signup pipeline now makes
+        # those. Unanswered it does not look like a permission problem at all:
+        # the gallery simply never appears and the run blames the composer. It
+        # is what silently set no profile picture on `@alina.sommer74`
+        # (2026-08-19).
+        self._grant_photo_permission_u2(d, target, logger=logger)
 
         # The composer usually opens straight into the gallery; only wait for it
         # if it isn't up yet.
