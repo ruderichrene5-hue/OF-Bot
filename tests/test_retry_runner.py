@@ -8,6 +8,7 @@ same principle from a different angle -- unknown is never a yes.
 """
 
 import tempfile
+from adb_bot.automation.flows.reel_verify import Count
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import MagicMock
@@ -493,3 +494,83 @@ class FlagIsIdempotentTest(TestCase):
         self.client.flag_profile_for_human("recP", at.PROFILE_ISSUE_BANNED, "Jasmin 9")
         self.assertIs(self.patch_calls[0][at.F_PROF_NEEDS_HUMAN], True)
         self.assertEqual(self.patch_calls[0][at.F_PROF_ISSUE_REASON], at.PROFILE_ISSUE_BANNED)
+
+
+class BlockedRowIsSettledOrReleasedTest(TestCase):
+    """What happens to a row the ledger blocks -- the `No Recent Success` cause.
+
+    `blocked` means Share was tapped and nobody ever proved the outcome. The
+    deferred recheck settles that, but only for rows Airtable holds in
+    `Verifying`; a run that died after Share leaves the row `Failed`, where
+    nothing reads it again. It then holds its Ready variant for ever, because a
+    variant is only consumed by a *successful* post -- so `queue_runner` reports
+    the profile's content as held and queues nothing else, and the profile stops
+    posting. 23 profiles were refused here on 2026-08-19, one of them 720 times.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.ledger = PostLedger(root / "ledger.jsonl")
+        self.clip = root / "v1.mp4"
+        self.clip.write_bytes(b"reel bytes")
+        self.airtable = MagicMock()
+        self.airtable.list_failed_posts.return_value = [failed_row()]
+        self.airtable.accounts_by_id.return_value = {
+            "recAcc1": {at.F_ACC_NAME: "nikki_1", at.F_ACC_PROFILE: ["recProf1"]}}
+        self.airtable.profile_launch_map.return_value = {
+            "recProf1": {"launch_id": PROFILE_ID, "name": "Nikki 1"}}
+        self.airtable.variants_by_id.return_value = {
+            "recVar1": {"file_path": str(self.clip), "status": "Ready"}}
+        self.airtable.requeue_post.return_value = True
+
+    def _share(self, baseline, at_time):
+        return self.ledger.record_share(
+            PROFILE_ID, self.clip, queue_id="recQ1",
+            baseline_count=Count(baseline, True), target_handle="")
+
+    def _run(self, now, dry_run=False):
+        return retry_runner.retry_failed_posts(
+            self.airtable, ledger=self.ledger, now=lambda: now, dry_run=dry_run)
+
+    def test_a_flat_later_count_unblocks_the_row_with_no_device(self):
+        self._share(2, NOW)
+        # A later share on the same phone opening at the same count: nothing
+        # landed in between, so this clip is safe to send again.
+        other = Path(self.tmp.name) / "v2.mp4"
+        other.write_bytes(b"another reel")
+        self.ledger.record_share(PROFILE_ID, other, queue_id="recQ2",
+                                 baseline_count=Count(2, True), target_handle="")
+        tally = self._run(NOW + 60)
+        self.assertEqual(tally["unblocked"], 1)
+        self.assertEqual(tally["requeued"], 1)
+        record = self.ledger.lookup(
+            PROFILE_ID, post_ledger.media_fingerprint(self.clip))
+        self.assertEqual(record.status, STATUS_DISPROVED)
+
+    def test_a_fresh_blocked_row_is_left_alone(self):
+        """Today's share has no later reading yet and is not written off."""
+        record = self._share(2, NOW)
+        tally = self._run(record.shared_at + 60)
+        self.assertEqual(tally["blocked"], 1)
+        self.assertEqual(tally["written_off"], 0)
+        self.airtable.mark_variant_used.assert_not_called()
+
+    def test_a_day_old_blocked_row_releases_its_clip(self):
+        """The circle that starved Emely 4: the evidence needs a later post,
+        and the row holding the only variant is what stops one happening."""
+        record = self._share(2, NOW)
+        tally = self._run(record.shared_at + retry_runner.WRITE_OFF_SECONDS + 60)
+        self.assertEqual(tally["written_off"], 1)
+        self.airtable.mark_variant_used.assert_called_once_with("recVar1")
+        # Written off, never re-sent: the reel may be live and must not go twice.
+        self.airtable.requeue_post.assert_not_called()
+
+    def test_a_dry_run_writes_nothing_off(self):
+        record = self._share(2, NOW)
+        tally = self._run(record.shared_at + retry_runner.WRITE_OFF_SECONDS + 60,
+                          dry_run=True)
+        self.assertEqual(tally["written_off"], 1)
+        self.airtable.mark_variant_used.assert_not_called()
+        self.airtable.mark_post_result.assert_not_called()

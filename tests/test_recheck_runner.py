@@ -521,10 +521,20 @@ class ConfirmFromLaterShareTest(TestCase):
         shares = [first, Share(8000.0, 107, profile_id="p2")]
         self.assertIsNone(recheck_runner.confirm_from_later_share(first, shares))
 
-    def test_a_share_with_no_handle_is_never_confirmed(self):
-        """On a two-account phone an unlabelled count could be either account."""
+    def test_an_unlabelled_count_on_a_two_account_phone_is_still_refused(self):
+        """The property the old "no handle is never evidence" rule protected.
+
+        An unlabelled count on a phone that holds two accounts could be either
+        of them. What has changed is how that phone is recognised: not "this
+        record has no handle" -- which is the *single*-account case and is how
+        almost every profile-driven row is written -- but "some share on this
+        profile does have one", which is the ledger saying there are two
+        accounts here regardless of what the MLX tags claim.
+        """
         first = Share(1000.0, 106, handle="")
-        shares = [first, Share(8000.0, 107, handle="")]
+        shares = [first,
+                  Share(4000.0, 12, handle="helenaiscutee"),
+                  Share(8000.0, 107, handle="")]
         self.assertIsNone(recheck_runner.confirm_from_later_share(first, shares))
 
     def test_a_rise_too_small_to_cover_every_share_confirms_nothing(self):
@@ -662,3 +672,102 @@ class AccountAbsentStopsTheRetryTest(TestCase):
         self.assertEqual(verdict.produced, 1)
         self.assertEqual(verdict.due, 1)
         self.assertFalse(verdict.stalled)
+
+
+class SingleAccountCounterEvidenceTest(TestCase):
+    """The counter evidence on a phone that holds one account.
+
+    Posting is profile-driven, and the posting flow only sets `target_handle`
+    when it has to switch accounts first -- so on a single-account phone the
+    handle is empty by design. The old guard read that empty handle as "cannot
+    tell the accounts apart" and returned None before looking at anything,
+    which disabled the evidence for most of the fleet. Numbers are Emely 4's,
+    whose ledger read 2 either side of a share that never landed.
+    """
+
+    def test_a_missing_handle_no_longer_refuses_the_evidence(self):
+        first = Share(1000.0, 5, handle="", profile_id="emely4")
+        shares = [first, Share(8000.0, 6, handle="", profile_id="emely4")]
+        outcome, detail = recheck_runner.confirm_from_later_share(first, shares)
+        self.assertEqual(outcome, OUTCOME_POSTED)
+        self.assertIn("this phone", detail)
+
+    def test_a_handle_on_any_share_means_two_accounts_and_refuses(self):
+        """The MLX tags miss most two-account phones, so the ledger decides.
+
+        `625727267523461165` carries clips for both `Nikki 1` and
+        `kikittie22`; its two counters are unrelated and neither reading says
+        anything about the other.
+        """
+        first = Share(1000.0, 77, handle="", profile_id="two")
+        shares = [first,
+                  Share(4000.0, 3, handle="kikittie22", profile_id="two"),
+                  Share(8000.0, 78, handle="", profile_id="two")]
+        self.assertIsNone(recheck_runner.confirm_from_later_share(first, shares))
+        self.assertIsNone(recheck_runner.disprove_from_later_share(first, shares))
+
+    def test_another_profiles_shares_are_not_this_phones_counter(self):
+        first = Share(1000.0, 2, handle="", profile_id="emely4")
+        shares = [first, Share(8000.0, 40, handle="", profile_id="emely5")]
+        self.assertIsNone(recheck_runner.confirm_from_later_share(first, shares))
+
+
+class DisproveFromLaterShareTest(TestCase):
+    """Proving a share did NOT land -- the half that frees the clip.
+
+    Confirming only stops a re-send, which the ledger already did by blocking.
+    Disproving is what lets the row be retried, and without it a tapped-but-
+    unproven share holds its variant for good.
+    """
+
+    def test_a_flat_count_disproves_the_share(self):
+        first = Share(1000.0, 2, handle="", profile_id="emely4")
+        shares = [first, Share(8000.0, 2, handle="", profile_id="emely4")]
+        outcome, detail = recheck_runner.disprove_from_later_share(first, shares)
+        self.assertEqual(outcome, OUTCOME_FAILED)
+        self.assertIn("did not", detail)
+
+    def test_a_rise_is_not_a_disproof(self):
+        first = Share(1000.0, 2, handle="", profile_id="emely4")
+        shares = [first, Share(8000.0, 3, handle="", profile_id="emely4")]
+        self.assertIsNone(recheck_runner.disprove_from_later_share(first, shares))
+
+    def test_a_decrease_proves_nothing_either_way(self):
+        """`77 -> 1` is a misread of the screen, not a vanished post."""
+        first = Share(1000.0, 77, handle="", profile_id="jil6")
+        shares = [first, Share(8000.0, 1, handle="", profile_id="jil6")]
+        self.assertIsNone(recheck_runner.disprove_from_later_share(first, shares))
+
+    def test_two_shares_at_the_same_instant_are_left_alone(self):
+        """Neither landed, but ruling on one row must not reason about a set.
+
+        `nxt` is the earliest share after this one, so the only way two shares
+        share a window is a tie on the timestamp -- two clips sent to one
+        account in the same moment, which the counter cannot separate.
+        """
+        first = Share(1000.0, 2, handle="", profile_id="emely4")
+        shares = [first,
+                  Share(1000.0, 2, handle="", profile_id="emely4"),
+                  Share(8000.0, 2, handle="", profile_id="emely4")]
+        self.assertIsNone(recheck_runner.disprove_from_later_share(first, shares))
+
+    def test_a_later_flat_reading_disproves_each_of_a_run_of_shares(self):
+        """Three flat readings in a row: each pair proves its own share dead.
+
+        This is the Nikki 28 shape -- post count 2 across every attempt.
+        """
+        a = Share(1000.0, 2, handle="", profile_id="nikki28")
+        b = Share(4000.0, 2, handle="", profile_id="nikki28")
+        shares = [a, b, Share(8000.0, 2, handle="", profile_id="nikki28")]
+        for share in (a, b):
+            outcome, _ = recheck_runner.disprove_from_later_share(share, shares)
+            self.assertEqual(outcome, OUTCOME_FAILED)
+
+    def test_the_most_recent_share_has_nothing_to_compare_against(self):
+        last = Share(9000.0, 2, handle="", profile_id="emely4")
+        self.assertIsNone(recheck_runner.disprove_from_later_share(last, [last]))
+
+    def test_an_inexact_baseline_is_never_evidence(self):
+        first = Share(1000.0, 2, handle="", profile_id="emely4", exact=False)
+        shares = [first, Share(8000.0, 2, handle="", profile_id="emely4")]
+        self.assertIsNone(recheck_runner.disprove_from_later_share(first, shares))
