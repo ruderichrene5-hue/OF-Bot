@@ -399,6 +399,77 @@ def _press_enter(adb_client, target: str) -> None:
     adb_client.run_command(f"adb -s {target} shell input keyevent 66")
 
 
+# How long to leave between looks while waiting for a screen to move. A
+# `uiautomator` dump costs about 2-3 seconds on these phones (measured on
+# `Blank caio 2`, 2026-08-18), so the real cadence is ~4s and there is nothing
+# to gain from a smaller number -- the dump, not the pause, is the floor.
+POLL_SECONDS = 1.5
+
+
+def _differs(a: str, b: str) -> bool:
+    """Whether two screen reads are meaningfully different.
+
+    Whitespace and case are noise: the same screen dumps with different spacing
+    depending on how far a layout has settled.
+    """
+    return " ".join((a or "").split()).lower() != " ".join((b or "").split()).lower()
+
+
+def settle(driver, previous: str, seconds: float, sleep=time.sleep,
+           clock=time.monotonic) -> str:
+    """Wait for the screen to move on from `previous`, up to `seconds`.
+
+    Replaces a blind `sleep(seconds)` after an action. The ceiling is unchanged
+    -- what changes is that a screen which settles in three seconds no longer
+    costs ten, and this chain has about a dozen such waits in it.
+
+    **It only returns early on an actual change.** A screen that has not moved
+    is waited out in full, so the caller's repeat guard counts exactly what it
+    counted before: this makes a working run faster without making a stuck one
+    look different.
+
+    Two things never end the wait: an empty read, which is a dump that failed
+    rather than a screen that changed; and a change into a spinner, because
+    Google's forms redraw in stages and acting on a half-drawn one lands a tap
+    on nothing or on the wrong control -- which is what the fixed sleeps were
+    there to prevent.
+
+    Bounded twice on purpose. The clock is the real limit in production; the
+    look count is what keeps the tests -- which inject a sleep that does not
+    sleep -- from spinning on the driver for a wall-clock second.
+
+    Returns the last text actually read, so the caller can use it instead of
+    paying for another dump.
+    """
+    if seconds <= 0:
+        return previous
+    deadline = clock() + seconds
+    # One more look than the budget divides into, so the clock is what
+    # actually limits a production wait and this count only ever catches
+    # the tests, whose injected sleep does not move a real clock.
+    looks = max(2, int(seconds / POLL_SECONDS) + 1)
+    last = None
+    for _ in range(looks):
+        if clock() >= deadline:
+            break
+        sleep(POLL_SECONDS)
+        try:
+            current = driver.read_screen() or ""
+        except Exception:                                     # noqa: BLE001
+            # The driver's own problem, not a screen state. Hand back what we
+            # have and let the loop's normal handling see it.
+            return last if last is not None else previous
+        if not current.strip():
+            continue
+        last = current
+        if not _differs(current, previous):
+            continue
+        if classify_google_screen(current) == SCREEN_LOADING:
+            continue
+        return current
+    return last if last is not None else previous
+
+
 def accounts_on_device(adb_client, target: str) -> list[str]:
     """Every Google account already on the phone.
 
@@ -411,7 +482,8 @@ def accounts_on_device(adb_client, target: str) -> list[str]:
 
 
 def sign_in(driver, adb_client, target: str, address: str, password: str,
-            totp_secret: str, logger=None, sleep=time.sleep) -> str:
+            totp_secret: str, logger=None, sleep=time.sleep,
+            clock=time.monotonic) -> str:
     """Sign `address` into the phone through the Play Store.
 
     Returns one of the `RESULT_*` constants. Never force-stops anything: this
@@ -451,8 +523,15 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     add_account_starts = 0
     password_waits = 0
 
+    # What the last adaptive wait already read. Using it saves one dump per
+    # step -- 2-3 seconds each, about twenty times a run.
+    pending: str | None = None
+
     for step in range(MAX_STEPS):
-        text = driver.read_screen() or ""
+        if pending is not None:
+            text, pending = pending, None
+        else:
+            text = driver.read_screen() or ""
 
         # An empty read is a dump that failed, not a screen that is unknown.
         # `Blank caio 3` ended a run on one within two steps of starting
@@ -532,7 +611,8 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             if loading_waits > MAX_LOADING_WAITS:
                 log("warning", "still loading after %d waits", loading_waits)
                 return RESULT_STUCK
-            sleep(LOADING_WAIT_SECONDS)
+            pending = settle(driver, text, LOADING_WAIT_SECONDS,
+                             sleep=sleep, clock=clock)
             continue
         loading_waits = 0
 
@@ -659,7 +739,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             # A lookup by phone number. These phones cannot receive SMS.
             if not driver.tap_label(_SKIP):
                 driver.tap_label(_NEXT)
-            sleep(6)
+            pending = settle(driver, text, 6, sleep=sleep, clock=clock)
 
         elif screen == SCREEN_EASE_FAILED:
             # Its own escape hatch, and the only thing on the screen worth
@@ -699,7 +779,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
                 log("info", "tapping NEXT did not move the email screen; "
                             "submitting with the keyboard's own action")
                 _press_enter(adb_client, target)
-            sleep(9)
+            pending = settle(driver, text, 9, sleep=sleep, clock=clock)
 
         elif screen == SCREEN_PASSWORD:
             # Same reasoning as the email screen, including the fallback.
@@ -712,7 +792,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
                 driver.tap_label(_NEXT)
             else:
                 _press_enter(adb_client, target)
-            sleep(10)
+            pending = settle(driver, text, 10, sleep=sleep, clock=clock)
 
         elif screen == SCREEN_2FA_CHOOSER:
             # The exact-label tap does not advance -- the clickable node is the
@@ -726,7 +806,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
                     "Try another way")):
                 log("warning", "no authenticator row on the 2FA chooser")
                 return RESULT_STUCK
-            sleep(6)
+            pending = settle(driver, text, 6, sleep=sleep, clock=clock)
 
         elif screen == SCREEN_TOTP:
             # Generated and typed inside one window, from this process.
@@ -750,7 +830,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
                             "submitting with the keyboard's own action")
                 _press_enter(adb_client, target)
             submitted_code = code
-            sleep(10)
+            pending = settle(driver, text, 10, sleep=sleep, clock=clock)
 
         elif screen == SCREEN_SERVICES:
             # `Accept` first: on the last page both buttons may be present, and
@@ -768,17 +848,17 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             # Scrolling the same page is progress, not a screen that failed to
             # advance, so this is bounded by its own counter instead.
             last, repeats = None, 0
-            sleep(8)
+            pending = settle(driver, text, 8, sleep=sleep, clock=clock)
 
         elif screen == SCREEN_TERMS:
             driver.tap_label(("I agree", "I AGREE", "Accept", "ACCEPT"))
-            sleep(10)
+            pending = settle(driver, text, 10, sleep=sleep, clock=clock)
 
         elif screen == SCREEN_SAVE_PASSWORD:
             # "NOT NOW" the first time, "NEVER" after -- both are in `_SKIP`.
             if not driver.tap_label(_SKIP):
                 driver.dismiss_keyboard()
-            sleep(4)
+            pending = settle(driver, text, 4, sleep=sleep, clock=clock)
 
         sleep(2)
 
