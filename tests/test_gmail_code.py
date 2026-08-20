@@ -171,6 +171,45 @@ def test_numbers_elsewhere_in_the_dump_are_not_the_code():
     assert gmail_code.code_from_notifications(no_instagram) == ""
 
 
+# Shape taken from a real `dumpsys notification --noredact` on a fleet twin,
+# 2026-08-20 -- the dump that made a run type "100215" into Instagram.
+REAL_SHAPED_DUMP = """\
+    NotificationRecord(0x0f37dce4: pkg=com.instagram.android user=UserHandle{0} id=64278 tag=newstab|33128646897_ig_ufac_enrollment_push
+            when=1787263000000/1787263000000
+                android.title=String (Verify your account to keep using it)
+                android.text=String (We need more information about 123456)
+    NotificationRecord(0x0594425f: pkg=com.zixun.cmp user=UserHandle{0} id=100215 tag=null importance=4 key=0|com.zixun.cmp|100215|null|10059: instagram
+            when=1787263100000/1787263100000
+                android.title=String (Cloud phone service)
+    NotificationRecord(0x0ec27bd6: pkg=com.google.android.gm user=UserHandle{0} id=456 tag=null
+            when=1787263200000/1787263200000
+                android.title=String (111111 is your Instagram code)
+    NotificationRecord(0x0ec27bd7: pkg=com.google.android.gm user=UserHandle{0} id=457 tag=null
+            when=1787263900000/1787263900000
+                android.title=String (999888 is your Instagram code)
+"""
+
+
+def test_another_apps_notification_id_is_not_a_code():
+    """The bug this guards: the scan was line-at-a-time over the whole dump,
+    so `pkg=com.zixun.cmp ... id=100215` on a line that also happened to carry
+    the word "instagram" was returned as a security code and typed in."""
+    assert gmail_code.code_from_notifications(REAL_SHAPED_DUMP) != "100215"
+
+
+def test_instagrams_own_pushes_are_not_a_code():
+    """Instagram posts its own notifications, full of numbers and certain to
+    mention its own name. Only Gmail's records carry a code."""
+    assert gmail_code.code_from_notifications(REAL_SHAPED_DUMP) != "123456"
+
+
+def test_the_newest_code_wins():
+    """Codes pile up in one thread and only the last is live. An older one is
+    already spent: typing it drops the login back to the password screen,
+    which reads as a wrong password and is not."""
+    assert gmail_code.code_from_notifications(REAL_SHAPED_DUMP) == "999888"
+
+
 def test_an_empty_notification_dump_yields_nothing():
     assert gmail_code.code_from_notifications("") == ""
     assert gmail_code.code_from_notifications(None) == ""
