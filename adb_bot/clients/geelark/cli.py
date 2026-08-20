@@ -126,18 +126,78 @@ def cmd_tags(args) -> int:
 
 
 def cmd_proxies(args) -> int:
+    from adb_bot.clients.geelark.ip_rotation import ProxyRotator
+
     transport = _transport()
-    clusters = GeelarkProxyClient(transport).endpoint_clusters()
+    client = GeelarkProxyClient(transport)
+    clusters = client.endpoint_clusters()
+
+    exit_ips: dict[int, str | None] = {}
+    if args.check_ips:
+        print("checking real exit IPs through each proxy (Geelark never "
+              "reports these)...\n")
+        exit_ips = ProxyRotator(client.list_proxies()).exit_ips()
+
     for endpoint, members in sorted(clusters.items()):
-        print(f"  {endpoint:<28} {len(members)} record(s)")
+        port = int(endpoint.rsplit(":", 1)[1])
+        suffix = ""
+        if args.check_ips:
+            suffix = f"  exit={exit_ips.get(port) or 'unreachable'}"
+        print(f"  {endpoint:<28} {len(members)} record(s){suffix}")
+
     gateways = {endpoint.split(":")[0] for endpoint in clusters}
     print(f"\n{sum(len(v) for v in clusters.values())} proxy record(s) across "
           f"{len(clusters)} endpoint(s) on {len(gateways)} gateway host(s).")
-    print("The gateway host is not the exit IP: separate ports on one host "
-          "commonly leave from different addresses. Geelark's API never reports "
-          "the exit address, so check it through the proxy itself, e.g.\n"
-          "  curl --socks5-hostname USER:PASS@HOST:PORT https://api.ipify.org")
+
+    if args.check_ips:
+        live = [ip for ip in exit_ips.values() if ip]
+        print(f"{len(set(live))} distinct exit IP(s) across {len(live)} "
+              f"reachable endpoint(s).")
+        phones = len(GeelarkPhoneClient(transport).list_phones())
+        if live:
+            print(f"At {phones} phone(s) today that is "
+                  f"{phones / len(set(live)):.1f} phone(s) per exit IP.")
+    else:
+        print("The gateway host is not the exit IP -- pass --check-ips to read "
+              "the real ones through each proxy.")
     return 0
+
+
+def cmd_rotate(args) -> int:
+    from adb_bot.clients.geelark.ip_rotation import (
+        ProxyRotationError,
+        ProxyRotator,
+    )
+
+    transport = _transport()
+    rotator = ProxyRotator(GeelarkProxyClient(transport).list_proxies())
+
+    if not rotator.reboot_config:
+        print("No rotation URLs configured. Set GEELARK_PROXY_REBOOT_URLS to a "
+              "JSON object keyed by SOCKS5 port, e.g.\n"
+              '  {"54015": "https://<vendor rotate url>"}')
+        return 2
+
+    if not args.apply:
+        print(f"DRY RUN: would rotate the exit IP of port {args.port}. "
+              f"Re-run with --apply.")
+        print(f"  current exit IP: {rotator.exit_ip(args.port) or 'unreachable'}")
+        return 0
+
+    try:
+        result = rotator.rotate_and_verify(args.port)
+    except ProxyRotationError as error:
+        print(f"{error}")
+        return 1
+
+    print(f"  before : {result['before']}")
+    print(f"  after  : {result['after']}")
+    print(f"  changed: {result['changed']} (after {result['seconds']}s)")
+    if not result["changed"]:
+        print("The vendor accepted the call but the address did not move. A "
+              "mobile proxy can hand back the address it just released; treat "
+              "an unchanged IP as a real outcome, not a failure to retry blindly.")
+    return 0 if result["changed"] else 1
 
 
 def cmd_apps(args) -> int:
@@ -381,7 +441,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("phones", help="list the account's cloud phones").set_defaults(func=cmd_phones)
     subparsers.add_parser("tags", help="list tags and groups").set_defaults(func=cmd_tags)
-    subparsers.add_parser("proxies", help="list proxies by exit IP").set_defaults(func=cmd_proxies)
+
+    proxies = subparsers.add_parser("proxies", help="list proxies and their exit IPs")
+    proxies.add_argument("--check-ips", action="store_true",
+                         help="make a request through each proxy to read its "
+                              "real exit IP (Geelark never reports it)")
+    proxies.set_defaults(func=cmd_proxies)
+
+    rotate = subparsers.add_parser(
+        "rotate", help="force a new exit IP on one proxy (vendor-side)")
+    rotate.add_argument("port", type=int, help="the proxy's SOCKS5 port")
+    rotate.add_argument("--apply", action="store_true")
+    rotate.set_defaults(func=cmd_rotate)
 
     apps = subparsers.add_parser("apps", help="apps installable on one phone")
     apps.add_argument("phone")
