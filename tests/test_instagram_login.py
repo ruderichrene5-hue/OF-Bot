@@ -94,6 +94,15 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(login.classify_login_screen(text),
                          login.SCREEN_NO_SUCH_HANDLE)
 
+    def test_the_hard_no_such_account_wording_too(self):
+        """Observed: Instagram has two wordings for a missing handle and only
+        one offers a near match. Both mean the stored handle is wrong."""
+        text = ("can't find account | we can't find an account with catcutie02. "
+                "try another mobile number or email, or if you don't have an "
+                "account, you can sign up. | try again | sign up")
+        self.assertEqual(login.classify_login_screen(text),
+                         login.SCREEN_NO_SUCH_HANDLE)
+
     def test_a_blank_read_is_unknown_not_a_screen(self):
         """An empty dump is a dump that failed, not a screen that is wrong."""
         self.assertEqual(login.classify_login_screen(""), login.SCREEN_UNKNOWN)

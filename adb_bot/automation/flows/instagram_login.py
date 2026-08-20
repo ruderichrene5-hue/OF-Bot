@@ -156,9 +156,19 @@ _GONE_MARKERS = (
 # The flow deliberately does NOT tap Continue. Accepting Instagram's guess would
 # log a phone into a DIFFERENT account from the one recorded against it, and
 # nothing downstream would ever notice. Report it and let a person decide.
+# Instagram has TWO wordings for a handle that does not exist, and only one of
+# them offers a near match:
+#   soft: "is this your account? we couldn't find an account that matches what
+#          you entered, but found one that closely matches. babybri73"
+#   hard: "can't find account -- we can't find an account with catcutie02. try
+#          another mobile number or email, or if you don't have an account, you
+#          can sign up."
+# Both mean the stored handle is wrong. Neither is ever accepted automatically.
 _NO_SUCH_HANDLE_MARKERS = (
     "find an account that matches what you entered",
     "is this your account?",
+    "can't find an account with",
+    "can't find account",
 )
 
 _SUSPENDED_MARKERS = (           # anticipated
