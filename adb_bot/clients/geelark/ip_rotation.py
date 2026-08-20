@@ -2,9 +2,41 @@
 
 Geelark itself has **no rotate-now endpoint**. What it has is a `refreshUrl`
 field you can attach to a phone at creation time; the rotation is performed by
-the *proxy vendor*, not by Geelark. On this account the vendor is proxy-seller
-and each of the four endpoints has its own reboot URL carrying a private token,
-so rotating is a plain GET to that URL.
+the *proxy vendor*, not by Geelark. So rotation is a plain GET to a vendor URL,
+made from here -- Geelark is not needed for it at all.
+
+**The link format matters, and the one we were given is not it.** For
+proxy-seller's Mobile CRM the documented shape puts the token in the **path**,
+on the mobile host::
+
+    https://mobile.proxy-seller.com/c/modem/status/<token>   # read-only
+    https://mobile.proxy-seller.com/c/modem/ip/<token>       # change IP
+    https://mobile.proxy-seller.com/c/modem/reboot/<token>   # reboot modem
+
+Measured 2026-08-20, and worth keeping because the failure modes are easy to
+misread:
+
+* The URLs we were handed -- ``proxy-seller.com/api/proxy/reboot?token=...``,
+  token as a *query parameter* on the *retail* host -- answer **HTTP 400** for a
+  real token, a garbage token and no token alike, while an unknown path on the
+  same host answers 401. The 400 is HAProxy's built-in parse-layer page, emitted
+  before routing, so the request never reaches any token check. A 400 there says
+  nothing about whether a token is valid.
+* The documented path form answers **HTTP 200** with a plain-text body. Our four
+  tokens each return ``ERROR_MODEM_NOT_FOUND`` -- exactly what an invented token
+  returns -- so they are not Mobile CRM modem tokens.
+
+`probe_link` exists for precisely this: given a candidate URL, say whether it is
+a live link for a real modem *before* anything depends on it.
+
+The API alternative, once an account has a Mobile CRM key (header is
+``Authorization: <key>`` with **no** ``Bearer`` prefix)::
+
+    PATCH /api/v1/modems/{id}/change-ip
+    PATCH /api/v1/modems/{id}/reboot
+    POST  /api/v1/modems/{id}/rotation?rotation=5   # minutes; a standing timer
+
+That last one may remove the need for on-demand rotation entirely.
 
 Two things make this worth a module rather than a curl:
 
@@ -161,6 +193,38 @@ class ProxyRotator:
         addresses are entirely different.
         """
         return {port: self.exit_ip(port) for port in sorted(self.proxies_by_port)}
+
+    @staticmethod
+    def probe_link(url: str, timeout: int = 25) -> dict:
+        """Is this rotation URL live, and does it name a real modem?
+
+        Answers before anything depends on it, because both failure modes here
+        look like success to a careless caller:
+
+        * an HTTP **400** on proxy-seller's retail host is HAProxy's parse-layer
+          page, returned before any token is examined -- it does not mean the
+          token is bad, it means the URL shape is wrong;
+        * a **200** whose *body* reads ``ERROR_MODEM_NOT_FOUND`` is a perfectly
+          healthy endpoint telling you the token names nothing. A caller that
+          only checks the status code would call that working.
+        """
+        try:
+            response = requests.get(url, timeout=timeout)
+        except Exception as error:
+            return {"ok": False, "status": None, "detail": str(error)}
+
+        body = (response.text or "").strip()
+        looks_like_error = body.upper().startswith("ERROR")
+        return {
+            "ok": response.status_code == 200 and not looks_like_error,
+            "status": response.status_code,
+            "detail": body[:200] or "(empty body)",
+        }
+
+    def probe_all(self) -> dict[int, dict]:
+        """Probe every configured rotation URL."""
+        return {port: self.probe_link(entry["reboot"])
+                for port, entry in sorted(self.reboot_config.items())}
 
     def rotate(self, port: int) -> bool:
         """Fire the vendor's reboot URL. Says nothing about whether the IP moved."""

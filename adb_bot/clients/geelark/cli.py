@@ -181,8 +181,19 @@ def cmd_rotate(args) -> int:
     if not rotator.reboot_config:
         print("No rotation URLs configured. Set GEELARK_PROXY_REBOOT_URLS to a "
               "JSON object keyed by SOCKS5 port, e.g.\n"
-              '  {"54015": "https://<vendor rotate url>"}')
+              '  {"54015": "https://mobile.proxy-seller.com/c/modem/ip/<token>"}')
         return 2
+
+    if args.probe:
+        print("checking whether each rotation URL is live and names a modem\n")
+        for port, result in rotator.probe_all().items():
+            state = "OK" if result["ok"] else "UNUSABLE"
+            print(f"  {port}  {state:<9} HTTP {result['status']}  {result['detail']}")
+        print("\nA 400 here is HAProxy rejecting the URL shape before any token "
+              "is read -- it does not mean the token is wrong.\n"
+              "A 200 whose body says ERROR_MODEM_NOT_FOUND means the endpoint is "
+              "fine and the token names nothing.")
+        return 0
 
     if not args.apply:
         print(f"DRY RUN: would rotate the exit IP of port {args.port}. "
@@ -456,7 +467,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     rotate = subparsers.add_parser(
         "rotate", help="force a new exit IP on one proxy (vendor-side)")
-    rotate.add_argument("port", type=int, help="the proxy's SOCKS5 port")
+    rotate.add_argument("port", type=int, nargs="?", default=0,
+                        help="the proxy's SOCKS5 port")
+    rotate.add_argument("--probe", action="store_true",
+                        help="check whether the configured rotation URLs are "
+                             "live and name a real modem, changing nothing")
     rotate.add_argument("--apply", action="store_true")
     rotate.set_defaults(func=cmd_rotate)
 
