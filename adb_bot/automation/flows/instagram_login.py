@@ -27,6 +27,16 @@ assumes login lands on the feed will read a normal security check as a failure.
 Reaching the code screen is therefore its own result (`RESULT_EMAIL_CODE`),
 handed back for the caller's mailbox to answer rather than treated as an error.
 
+**The mailbox that answers the code is, at present, unreachable.** `log_in` will
+take a `mailbox` and answer the code with it, and that path works -- but ten of
+the pool's mailboxes were driven through Google's own sign-in on 2026-08-20 and
+**none opened**: five wrong password, three stuck, one Google captcha, one phone
+that never booted. IMAP is dead for them as well. So in practice this flow stops
+at `RESULT_EMAIL_CODE`, and an account with perfect credentials still cannot be
+finished. That is a credentials problem to fix elsewhere, not something this
+module can route around -- do not read the volume of `email_code_required`
+results as a fault in the login.
+
 Markers below marked "observed" were read off a real run on 2026-08-20. The rest
 are anticipated and have **not** been seen; treat them as unproven until a run
 records them.
