@@ -119,6 +119,22 @@ def get_saved_2captcha_key() -> str:
     return _get_saved_or_env("twocaptcha_api_key", "TWOCAPTCHA_API_KEY")
 
 
+# --- Geelark (adb_bot/clients/geelark) ---------------------------------------
+# Geelark is a second cloud-phone host, evaluated alongside MultiLogin rather
+# than replacing it. Unlike every other integration here it *signs* requests, so
+# it needs two values rather than one token, and both must be present before any
+# call can be made. With neither set the Geelark clients refuse to call and the
+# dashboard tab reports that it is not configured -- nothing else changes.
+def get_saved_geelark_app_id() -> str:
+    """Geelark app id -- the public half of the signing credential."""
+    return _get_saved_or_env("geelark_app_id", "GEELARK_APP_ID")
+
+
+def get_saved_geelark_api_key() -> str:
+    """Geelark API key -- the secret half, hashed into every request's `sign`."""
+    return _get_saved_or_env("geelark_api_key", "GEELARK_API_KEY")
+
+
 # There is deliberately NO default base id.
 #
 # Until 2026-08-10 this fell back to the test base `appNAm6iTuzmOn4ib`. The bot
