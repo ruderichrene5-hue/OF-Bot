@@ -254,6 +254,82 @@ class ParseProfilesTest(unittest.TestCase):
         self.assertEqual(GeelarkApiClient.parse_profiles({"items": [{"ip": "x"}]}), [])
 
 
+class ProxyExitIpTest(unittest.TestCase):
+    """Geelark *does* report the exit IP -- just not on the proxy record.
+
+    `/proxy/list` carries only the gateway host, which is identical across all
+    four endpoints on this account while the exit addresses are four different
+    Vodafone Germany IPs. Reading the gateway as the identity said "one IP"
+    about four, which understates IP diversity -- the wrong direction for a
+    fleet whose clustering is already a known risk. `/proxy/check` answers with
+    the real `outboundIP`.
+    """
+
+    def _client(self, responses):
+        from adb_bot.clients.geelark.proxies import GeelarkProxyClient
+
+        calls = []
+
+        class FakeTransport(GeelarkTransport):
+            def __init__(self):
+                super().__init__(app_id="a", api_key="k")
+
+            def post(self, path, payload=None):
+                calls.append(path)
+                return responses[path]
+
+            def paged(self, path, page_size=100, extra=None):
+                calls.append(path)
+                return responses[path]
+
+        return GeelarkProxyClient(FakeTransport()), calls
+
+    def test_the_exit_ip_comes_from_the_check_not_the_record(self):
+        client, calls = self._client({
+            "/proxy/list": [{"id": "1", "server": "162.55.84.35", "port": 54015,
+                             "username": "u", "password": "p", "scheme": "socks5"}],
+            "/proxy/check": {"detectStatus": True, "outboundIP": "94.219.47.10",
+                             "countryName": "Germany", "city": "Möhnesee",
+                             "isp": "VF-Network"},
+        })
+        result = client.exit_ips()
+        self.assertEqual(result[54015]["ip"], "94.219.47.10")
+        self.assertEqual(result[54015]["isp"], "VF-Network")
+        self.assertIn("/proxy/check", calls)
+
+    def test_gateway_clustering_is_not_exit_ip_clustering(self):
+        """Four ports on one host must not read as one address."""
+        client, _calls = self._client({
+            "/proxy/list": [
+                {"id": "1", "server": "162.55.84.35", "port": 54015},
+                {"id": "2", "server": "162.55.84.35", "port": 54018},
+            ],
+        })
+        clusters = client.endpoint_clusters()
+        self.assertEqual(len(clusters), 2, "ports collapsed into one endpoint")
+
+    def test_a_dead_proxy_does_not_kill_the_sweep(self):
+        """One unreachable endpoint must not hide the others."""
+        from adb_bot.clients.geelark.proxies import GeelarkProxyClient
+
+        class Boom(GeelarkTransport):
+            def __init__(self):
+                super().__init__(app_id="a", api_key="k")
+
+            def paged(self, path, page_size=100, extra=None):
+                return [{"id": "1", "server": "h", "port": 1},
+                        {"id": "2", "server": "h", "port": 2}]
+
+            def post(self, path, payload=None):
+                if payload.get("port") == 1:
+                    raise GeelarkError("/proxy/check", 45002, "unavailable")
+                return {"detectStatus": True, "outboundIP": "1.2.3.4"}
+
+        result = GeelarkProxyClient(Boom()).exit_ips()
+        self.assertFalse(result[1]["ok"])
+        self.assertEqual(result[2]["ip"], "1.2.3.4")
+
+
 class PhoneClientTest(unittest.TestCase):
     def test_status_zero_is_running_not_stopped(self):
         """The enum reads backwards, and it was got wrong first time.

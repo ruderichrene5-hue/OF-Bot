@@ -3782,8 +3782,9 @@ def geelark_status() -> dict:
         ]
         out["counts"]["proxies"] = sum(p["profiles"] for p in out["proxies"])
         # Gateway hosts, deliberately NOT exit IPs -- separate ports on one host
-        # commonly egress from different addresses, and Geelark never reports
-        # the exit address at all. Counting hosts as IPs said "one" about four.
+        # commonly egress from different addresses. The real exit address comes
+        # from Geelark's proxy check, not the proxy record; counting gateway
+        # hosts as IPs said "one" about four.
         out["counts"]["gateways"] = len({
             endpoint.split(":")[0] for endpoint in clusters
         })

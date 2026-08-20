@@ -1630,8 +1630,8 @@ def _section_geelark(geelark: dict) -> str:
                        f'{counts.get("gateways", 0)} gateway host(s).{shared_note} '
                        f'The gateway host is <em>not</em> the exit IP — separate '
                        f'ports on one host commonly leave from different '
-                       f'addresses, and Geelark never reports the exit address, '
-                       f'so it has to be checked through the proxy itself.</p>'
+                       f'addresses. Geelark reports the real one through its proxy '
+                       f'check, not on the proxy record.</p>'
                        f'<div class="scroll"><table>'
                        f'<tr><th>Endpoint</th><th class="num">Profiles</th></tr>'
                        f'{proxy_rows}</table></div>')
