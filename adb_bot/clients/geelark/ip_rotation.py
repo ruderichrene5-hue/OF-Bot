@@ -13,18 +13,29 @@ on the mobile host::
     https://mobile.proxy-seller.com/c/modem/ip/<token>       # change IP
     https://mobile.proxy-seller.com/c/modem/reboot/<token>   # reboot modem
 
-Measured 2026-08-20, and worth keeping because the failure modes are easy to
-misread:
+Measured 2026-08-20. The important finding is that **the links we were given are
+probably correct and the vendor's own edge is broken**, which is the opposite of
+what the first round of testing suggested:
 
-* The URLs we were handed -- ``proxy-seller.com/api/proxy/reboot?token=...``,
-  token as a *query parameter* on the *retail* host -- answer **HTTP 400** for a
-  real token, a garbage token and no token alike, while an unknown path on the
-  same host answers 401. The 400 is HAProxy's built-in parse-layer page, emitted
-  before routing, so the request never reaches any token check. A 400 there says
-  nothing about whether a token is valid.
-* The documented path form answers **HTTP 200** with a plain-text body. Our four
-  tokens each return ``ERROR_MODEM_NOT_FOUND`` -- exactly what an invented token
-  returns -- so they are not Mobile CRM modem tokens.
+* ``proxy-seller.com/api/proxy/reboot?token=...`` answers **HTTP 400** for every
+  request shape tried -- GET/POST/HEAD, HTTP/1.0/1.1/2, with a real token, a
+  garbage token, or no token -- while ``/api/proxy/list`` on the same host
+  answers a normal **401**.
+* The 400 is **HAProxy's built-in page, and the response carries no ``SRVID``
+  cookie**, while the 401 does. ``SRVID`` is HAProxy's backend-affinity cookie,
+  so its absence means the reboot request **never reached a backend at all** --
+  it is rejected at the proxy layer, before routing.
+* It is a **prefix** match, not a route: ``/api/proxy/rebootx`` also 400s, while
+  ``/api/proxy/xreboot``, ``/api/proxy/restart`` and ``/api/reboot/anything``
+  all return the normal 401. Something in front of their application is
+  configured for ``/api/proxy/reboot*`` specifically, and whatever it points at
+  does not answer.
+
+**So the token cannot be judged from here.** Nothing we send reaches the code
+that would validate it. (The tokens are separately known not to be *Mobile CRM*
+tokens -- the path form ``mobile.proxy-seller.com/c/modem/status/<token>``
+returns ``ERROR_MODEM_NOT_FOUND`` for all four -- but that is a different
+product, and says nothing about their validity for this retail endpoint.)
 
 `probe_link` exists for precisely this: given a candidate URL, say whether it is
 a live link for a real modem *before* anything depends on it.
