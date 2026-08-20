@@ -36,11 +36,15 @@ _MAILBOX_CLAUSE = re.compile(r"\s*\|\s*MAILBOX:[^|]*")
 #   accepted = Instagram took the handle and password. It may still want a
 #   security code -- that is the account being unrecognised on a new device,
 #   not the credentials being wrong.
+# The bool is "is this account CONNECTED" -- signed in and usable -- not "could
+# it be". Only reaching the feed counts. A security code means the credentials
+# are good and the account is still logged out, which is a different fact and
+# lives in the remark rather than the tag.
 OUTCOMES = {
     "logged_in": ("OK-on-feed", True),
-    "email_code_required": ("OK-needs-email-code", True),
-    "sms_code_required": ("OK-needs-sms-code", True),
-    "two_factor_required": ("OK-needs-2fa", True),
+    "email_code_required": ("OK-needs-email-code", False),
+    "sms_code_required": ("OK-needs-sms-code", False),
+    "two_factor_required": ("OK-needs-2fa", False),
     "wrong_password": ("WRONG-PASSWORD", False),
     "account_no_longer_exists": ("ACCOUNT-GONE", False),
     "handle_not_found": ("HANDLE-NOT-FOUND", False),
@@ -85,6 +89,7 @@ class GeelarkOutcomeWriter:
         self._connected_tag_id: str | None = None
 
     def connected_tag_id(self) -> str | None:
+        """The tag for accounts that are actually signed in and usable."""
         if self._connected_tag_id is None:
             self._connected_tag_id = self.tags.ensure_tag(CONNECTED_TAG, "green")
         return self._connected_tag_id

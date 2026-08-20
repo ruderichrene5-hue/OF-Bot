@@ -42,12 +42,16 @@ class RemarkTest(unittest.TestCase):
     def test_a_phone_with_no_remark_still_gets_one(self):
         self.assertEqual(remark_with_outcome("", "logged_in"), "LOGIN:OK-on-feed")
 
-    def test_a_needed_code_counts_as_credentials_accepted(self):
-        """A security code means the device is unrecognised, not that the
-        password is wrong -- so it is a working account, and must be told apart
-        from a genuinely bad one."""
-        self.assertTrue(describe("email_code_required")[1])
+    def test_only_a_finished_login_counts_as_connected(self):
+        """The tag means the account IS signed in and usable, not that its
+        credentials would work. An account sitting on a security code is
+        logged OUT -- tagging it says the migration is further along than it
+        is, which is exactly the wrong direction for this page to be wrong in.
+        """
         self.assertTrue(describe("logged_in")[1])
+        self.assertFalse(describe("email_code_required")[1])
+        self.assertFalse(describe("sms_code_required")[1])
+        self.assertFalse(describe("two_factor_required")[1])
         self.assertFalse(describe("wrong_password")[1])
         self.assertFalse(describe("account_no_longer_exists")[1])
         self.assertFalse(describe("stuck")[1])
@@ -101,9 +105,16 @@ class FakeTransport(GeelarkTransport):
 class WriterTest(unittest.TestCase):
     def test_a_connected_phone_is_tagged(self):
         transport = FakeTransport()
-        GeelarkOutcomeWriter(transport).record("p1", REMARK, "email_code_required")
+        GeelarkOutcomeWriter(transport).record("p1", REMARK, "logged_in")
         _path, payload = transport.calls[-1]
         self.assertIn("tag1", payload["tagIDs"])
+
+    def test_an_account_waiting_on_a_code_is_NOT_tagged(self):
+        transport = FakeTransport()
+        GeelarkOutcomeWriter(transport).record("p1", REMARK,
+                                               "email_code_required")
+        _path, payload = transport.calls[-1]
+        self.assertNotIn("tagIDs", payload)
 
     def test_a_failed_phone_is_not_tagged(self):
         transport = FakeTransport()
