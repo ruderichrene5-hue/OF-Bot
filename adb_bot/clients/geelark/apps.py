@@ -14,7 +14,7 @@ to a usable state entirely through the API.
 
 from __future__ import annotations
 
-from .transport import GeelarkTransport
+from .transport import GeelarkError, GeelarkTransport
 
 INSTALLED_PATH = "/app/list"
 INSTALLABLE_PATH = "/app/installable/list"
@@ -24,6 +24,10 @@ START_PATH = "/app/start"
 STOP_PATH = "/app/stop"
 
 INSTAGRAM_PACKAGE = "com.instagram.android"
+
+# "app installing" -- returned when an install is already under way on
+# this phone, which a freshly created phone does by itself.
+CODE_APP_INSTALLING = 42003
 
 # `installStatus` on an installed/installable row.
 INSTALL_STATUS = {
@@ -104,6 +108,26 @@ class GeelarkAppClient:
             "envId": profile_id,
             "appVersionId": app_version_id,
         })
+
+    def request_install(self, profile_id: str, app_version_id: str) -> str:
+        """Ask for an install, tolerating one that is already under way.
+
+        Returns "requested" or "already-installing".
+
+        A newly created phone starts installing the team's apps by itself, so
+        asking for Instagram on a fresh phone frequently answers
+        ``42003 app installing``. That is not a failure -- it is the thing you
+        wanted, already happening -- but it arrives as an error and reads like
+        one. Treating it as fatal aborts a migration run on phones that were
+        about to be perfectly fine.
+        """
+        try:
+            self.install_app(profile_id, app_version_id)
+        except GeelarkError as error:
+            if error.code != CODE_APP_INSTALLING:
+                raise
+            return "already-installing"
+        return "requested"
 
     def uninstall_app(self, profile_id: str, package_name: str) -> dict:
         """Uninstall by **package name** -- this endpoint does not take a
