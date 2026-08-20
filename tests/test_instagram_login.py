@@ -130,12 +130,32 @@ class LogInTest(unittest.TestCase):
                          login.RESULT_WRONG_PASSWORD)
 
     def test_it_does_not_retype_credentials_after_submitting(self):
-        """Landing back on the form means the submit missed. Typing everything
-        again blindly is how a flow burns its whole step budget."""
-        driver = FakeDriver([FORM, FORM])
+        """The fields still hold what was typed; typing again would append."""
+        driver = FakeDriver([FORM] * 12)
+        login.log_in(driver, "a", "b", sleep=lambda *_: None)
+        self.assertEqual(len(driver.filled), 2)   # one username + one password
+
+    def test_the_form_staying_up_briefly_is_not_a_failure(self):
+        """Instagram leaves the form on screen while it works -- measured still
+        showing six seconds after Log in, with the answer arriving about twenty
+        seconds in. Giving up on the first re-appearance abandoned four good
+        accounts in a row.
+        """
+        driver = FakeDriver([FORM, FORM, FORM, FEED])
+        result = login.log_in(driver, "a", "b", sleep=lambda *_: None)
+        self.assertEqual(result, login.RESULT_LOGGED_IN)
+
+    def test_a_form_that_never_goes_away_is_eventually_stuck(self):
+        """The wait is bounded -- a submit that truly missed must still end."""
+        driver = FakeDriver([FORM] * 30)
         result = login.log_in(driver, "a", "b", sleep=lambda *_: None)
         self.assertEqual(result, login.RESULT_STUCK)
-        self.assertEqual(len(driver.filled), 2)   # one username + one password
+
+    def test_a_challenge_after_the_wait_is_still_recognised(self):
+        """The answer usually arrives a few reads in, not on the first."""
+        driver = FakeDriver([FORM, FORM, FORM, FORM, EMAIL])
+        result = login.log_in(driver, "a", "b", sleep=lambda *_: None)
+        self.assertEqual(result, login.RESULT_EMAIL_CODE)
 
     def test_an_unnamed_screen_ends_the_run(self):
         driver = FakeDriver([FORM, "some screen nobody has named yet at all"])

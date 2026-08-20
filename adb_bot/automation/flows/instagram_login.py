@@ -65,6 +65,15 @@ MAX_STEPS = 25
 MAX_REPEATS = 4
 SETTLE_SECONDS = 6
 
+# Instagram leaves the login form on screen while it works. Measured on a real
+# login: the form was still showing six seconds after Log in was tapped, and the
+# answer arrived about twenty seconds in. Treating the first re-appearance of
+# the form as "the submit did not take" gave up on four perfectly good accounts
+# in a row, so the form is now allowed to persist for a while before that
+# conclusion is drawn.
+MAX_FORM_WAITS = 6
+FORM_WAIT_SECONDS = 6
+
 # Observed 2026-08-20. Instagram shows one of two entry screens; this is the one
 # that needs a tap to reach the form.
 _JOIN_MARKERS = (
@@ -190,17 +199,23 @@ def log_in(driver, username: str, password: str, logger=None,
 
     last, repeats = None, 0
     submitted = False
+    form_waits = 0
 
     for step in range(MAX_STEPS):
         text = driver.read_screen() or ""
         screen = classify_login_screen(text)
 
-        if screen == last:
+        # Waiting out the login form after submitting is deliberate, and is
+        # bounded by its own counter below -- the generic repeat guard must not
+        # cut that short, or the flow gives up while Instagram is still working.
+        waiting_on_submit = submitted and screen == SCREEN_FORM
+
+        if screen == last and not waiting_on_submit:
             repeats += 1
             if repeats >= MAX_REPEATS:
                 log("warning", "stuck on %s after %s reads", screen, repeats)
                 return RESULT_STUCK
-        else:
+        elif screen != last:
             last, repeats = screen, 0
 
         log("info", "step %s: %s", step, screen)
@@ -242,9 +257,18 @@ def log_in(driver, username: str, password: str, logger=None,
 
         if screen == SCREEN_FORM:
             if submitted:
-                # Back on the form after submitting means the submit did not
-                # take, not that we should type it all again blindly.
-                log("warning", "back on the login form after submitting")
+                # The form stays up while Instagram works, so its presence is
+                # not evidence the submit missed -- only its *persistence* is.
+                # Never retype the credentials: the fields still hold them, and
+                # typing again would append to what is there.
+                form_waits += 1
+                if form_waits <= MAX_FORM_WAITS:
+                    log("info", "still on the login form (%s/%s); waiting",
+                        form_waits, MAX_FORM_WAITS)
+                    sleep(FORM_WAIT_SECONDS)
+                    continue
+                log("warning", "login form still up after %ss; the submit did "
+                               "not take", MAX_FORM_WAITS * FORM_WAIT_SECONDS)
                 return RESULT_STUCK
             driver.fill(("username, email or mobile number", "username"),
                         username, "instagram username")
