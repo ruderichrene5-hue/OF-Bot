@@ -53,13 +53,26 @@ class ProfileRow:
     handle: str = ""
     email: str = ""
     password: str = ""
+    # Only needed when the phone is not named after its MultiLogin profile --
+    # the unassigned ones are named by Instagram handle, because eight of them
+    # share a MultiLogin name and the handle is the only thing that separates
+    # them.
+    mlx_name: str = ""
 
     @property
     def has_credentials(self) -> bool:
         return bool(self.password)
 
     def remark(self) -> str:
-        """What a person should see when they open this phone in Geelark."""
+        """What a person should see when they open this phone in Geelark.
+
+        `mlx_name` defaults to the phone's own name, which is right for the
+        model phones because both sides are named the same. It is set
+        explicitly for the unassigned ones, where the phone is named after its
+        Instagram handle and the MultiLogin name is the only way back.
+        """
+        origin = self.mlx_name or self.name
+
         if self.has_credentials:
             parts = []
             if self.handle:
@@ -67,11 +80,16 @@ class ProfileRow:
             if self.email:
                 parts.append(f"MAIL:{self.email}")
             parts.append(f"PW:{self.password}")
+            # Only worth saying when the phone is not already named after it --
+            # on a model phone the name *is* the MultiLogin name, and repeating
+            # it is noise.
+            if self.mlx_name and self.mlx_name != self.name:
+                parts.append(f"MLX:{self.mlx_name}")
             return " | ".join(parts)
 
         parts = ["NOCREDS"]
-        if self.name:
-            parts.append(f"MLX:{self.name}")
+        if origin:
+            parts.append(f"MLX:{origin}")
         if self.mlx_id:
             parts.append(f"ID:{self.mlx_id}")
         if self.handle:

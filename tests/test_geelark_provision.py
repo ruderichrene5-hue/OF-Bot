@@ -32,6 +32,22 @@ class RemarkTest(unittest.TestCase):
             row.remark(),
             "NOCREDS | MLX:Nikki 12 | ID:628660154778255398 | IG:@nikki_lat")
 
+    def test_a_phone_named_after_something_else_still_points_home(self):
+        """The unassigned phones are named by Instagram handle, because eight
+        of them share a MultiLogin name. The remark is then the only way back
+        to the profile they came from.
+        """
+        row = ProfileRow(name="llavennie", model="Unassigned",
+                         mlx_id="632162578940297286", handle="llavennie",
+                         email="a@b.com", password="pw", mlx_name="Blank (9)")
+        self.assertIn("MLX:Blank (9)", row.remark())
+
+    def test_a_model_phone_does_not_repeat_its_own_name(self):
+        """On a model phone the name already *is* the MultiLogin name."""
+        row = ProfileRow(name="Nikki 3", model="Nikki", handle="h",
+                         email="a@b", password="p", mlx_name="Nikki 3")
+        self.assertNotIn("MLX:", row.remark())
+
     def test_a_missing_handle_does_not_leave_a_dangling_separator(self):
         row = ProfileRow(name="Jil 5", model="Jil", mlx_id="123456789012")
         self.assertEqual(row.remark(), "NOCREDS | MLX:Jil 5 | ID:123456789012")
