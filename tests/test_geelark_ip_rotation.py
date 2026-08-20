@@ -62,23 +62,32 @@ class ConfigTest(unittest.TestCase):
 
 
 class ProbeTest(unittest.TestCase):
-    def _rotator(self):
-        return ProxyRotator(PROXIES, reboot_config={
-            54015: {"reboot": "https://example/rotate", "http_port": 44015}})
+    """Classifying what a rotation URL answered.
 
-    def test_a_four_hundred_is_unusable(self):
-        """The retail host's HAProxy page. Not a verdict on the token."""
+    400 means two opposite things on this vendor, which is the whole reason
+    this classification exists rather than a bare status-code check.
+    """
+
+    def test_the_wrong_url_is_unusable(self):
+        """HTML body, no SRVID: the load balancer rejected it before any
+        backend. The URL is wrong; it says nothing about the token."""
         with patch("adb_bot.clients.geelark.ip_rotation.requests.get",
                    return_value=FakeResponse("<h1>400 Bad request</h1>", 400)):
             result = ProxyRotator.probe_link("https://example/rotate")
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], 400)
 
-    def test_a_two_hundred_saying_ERROR_is_still_unusable(self):
-        """The regression that matters: status 200, body ERROR_MODEM_NOT_FOUND.
+    def test_a_cooldown_is_reported_as_refused(self):
+        """400 with body ERROR on the *working* endpoint means "called again
+        too soon". The link is fine; retrying instantly is not."""
+        with patch("adb_bot.clients.geelark.ip_rotation.requests.get",
+                   return_value=FakeResponse("ERROR", 400)):
+            result = ProxyRotator.probe_link("https://example/rotate")
+        self.assertFalse(result["ok"])
 
-        Checking only the status code would call this a working link.
-        """
+    def test_a_two_hundred_saying_ERROR_is_still_unusable(self):
+        """Status 200 with an ERROR body would pass a status-code-only check
+        and rotate nothing, silently, for ever."""
         with patch("adb_bot.clients.geelark.ip_rotation.requests.get",
                    return_value=FakeResponse("ERROR_MODEM_NOT_FOUND", 200)):
             result = ProxyRotator.probe_link("https://example/rotate")
@@ -87,6 +96,7 @@ class ProbeTest(unittest.TestCase):
         self.assertIn("ERROR_MODEM_NOT_FOUND", result["detail"])
 
     def test_a_genuine_success_is_usable(self):
+        """What the working link actually returns: 200, body OK."""
         with patch("adb_bot.clients.geelark.ip_rotation.requests.get",
                    return_value=FakeResponse("OK", 200)):
             self.assertTrue(ProxyRotator.probe_link("https://example/rotate")["ok"])
@@ -119,7 +129,32 @@ class RotateTest(unittest.TestCase):
                    lambda *_: None):
             result = rotator.rotate_and_verify(54015, timeout_seconds=0)
         self.assertFalse(result["changed"])
+        self.assertTrue(result["accepted"])
         self.assertEqual(result["before"], result["after"])
+
+    def test_a_cooldown_returns_immediately_without_polling(self):
+        """A refused call must not then sit and poll for a change that cannot
+        come -- and must be distinguishable from "fired but the IP stayed"."""
+        rotator = self._rotator()
+        with patch.object(ProxyRotator, "exit_ip", return_value="1.1.1.1"), \
+             patch("adb_bot.clients.geelark.ip_rotation.requests.get",
+                   return_value=FakeResponse("ERROR", 400)), \
+             patch("adb_bot.clients.geelark.ip_rotation.time.sleep",
+                   lambda *_: None):
+            result = rotator.rotate_and_verify(54015)
+        self.assertFalse(result["accepted"])
+        self.assertFalse(result["changed"])
+        self.assertIn("ERROR", result["detail"])
+
+    def test_rotate_reports_acceptance_rather_than_raising(self):
+        """The vendor's refusal is an answer, not an exception; raising would
+        make callers retry into the cooldown they just hit."""
+        rotator = self._rotator()
+        with patch("adb_bot.clients.geelark.ip_rotation.requests.get",
+                   return_value=FakeResponse("ERROR", 400)):
+            fired = rotator.rotate(54015)
+        self.assertFalse(fired["accepted"])
+        self.assertEqual(fired["status"], 400)
 
     def test_a_changed_ip_is_reported_with_both_addresses(self):
         rotator = self._rotator()

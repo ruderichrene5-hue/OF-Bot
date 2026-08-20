@@ -184,16 +184,29 @@ def cmd_rotate(args) -> int:
               '  {"54015": "https://mobile.proxy-seller.com/c/modem/ip/<token>"}')
         return 2
 
-    if args.probe:
-        print("checking whether each rotation URL is live and names a modem\n")
+    if args.check_all:
+        # NOT a dry run. There is no read-only status endpoint on this vendor,
+        # so the only way to test a link is to use it -- this rotates every
+        # configured proxy. An earlier version of this claimed otherwise and
+        # rotated all four at once by surprise.
+        if not args.apply:
+            print("DRY RUN: --check-all ROTATES every configured proxy "
+                  f"({', '.join(str(p) for p in rotator.rotatable_ports())}) -- "
+                  "this vendor has no read-only status URL, so testing a link "
+                  "means using it. Re-run with --apply.")
+            return 0
+        print("rotating every configured proxy to test its link\n")
         for port, result in rotator.probe_all().items():
-            state = "OK" if result["ok"] else "UNUSABLE"
-            print(f"  {port}  {state:<9} HTTP {result['status']}  {result['detail']}")
-        print("\nA 400 here is HAProxy rejecting the URL shape before any token "
-              "is read -- it does not mean the token is wrong.\n"
-              "A 200 whose body says ERROR_MODEM_NOT_FOUND means the endpoint is "
-              "fine and the token names nothing.")
+            state = "OK" if result["ok"] else "REFUSED"
+            print(f"  {port}  {state:<8} HTTP {result['status']}  {result['detail']}")
+        print("\n200/OK means the link fired. 400 with body ERROR is a cooldown "
+              "on a working link.\n400 with an HTML body is the wrong URL "
+              "entirely.")
         return 0
+
+    if not args.port:
+        print("Give a port to rotate, or --check-all to exercise every link.")
+        return 2
 
     if not args.apply:
         print(f"DRY RUN: would rotate the exit IP of port {args.port}. "
@@ -205,6 +218,13 @@ def cmd_rotate(args) -> int:
         result = rotator.rotate_and_verify(args.port)
     except ProxyRotationError as error:
         print(f"{error}")
+        return 1
+
+    if not result.get("accepted", True):
+        print(f"  the vendor REFUSED the call: {result.get('detail')}")
+        print("  body 'ERROR' on this endpoint is a cooldown -- the link works, "
+              "it was called again too soon. Wait and retry rather than "
+              "treating the link as broken.")
         return 1
 
     print(f"  before : {result['before']}")
@@ -469,9 +489,10 @@ def build_parser() -> argparse.ArgumentParser:
         "rotate", help="force a new exit IP on one proxy (vendor-side)")
     rotate.add_argument("port", type=int, nargs="?", default=0,
                         help="the proxy's SOCKS5 port")
-    rotate.add_argument("--probe", action="store_true",
-                        help="check whether the configured rotation URLs are "
-                             "live and name a real modem, changing nothing")
+    rotate.add_argument("--check-all", action="store_true",
+                        help="exercise every configured rotation link. NOT a "
+                             "dry run -- this vendor has no read-only status "
+                             "URL, so it really does rotate every proxy")
     rotate.add_argument("--apply", action="store_true")
     rotate.set_defaults(func=cmd_rotate)
 

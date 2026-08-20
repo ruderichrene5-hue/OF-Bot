@@ -5,37 +5,33 @@ field you can attach to a phone at creation time; the rotation is performed by
 the *proxy vendor*, not by Geelark. So rotation is a plain GET to a vendor URL,
 made from here -- Geelark is not needed for it at all.
 
-**The link format matters, and the one we were given is not it.** For
-proxy-seller's Mobile CRM the documented shape puts the token in the **path**,
-on the mobile host::
+**The working format puts the token in the path, and needs the trailing
+slash**::
 
-    https://mobile.proxy-seller.com/c/modem/status/<token>   # read-only
-    https://mobile.proxy-seller.com/c/modem/ip/<token>       # change IP
-    https://mobile.proxy-seller.com/c/modem/reboot/<token>   # reboot modem
+    https://proxy-seller.com/modem/reboot/<token>/
 
-Measured 2026-08-20. The important finding is that **the links we were given are
-probably correct and the vendor's own edge is broken**, which is the opposite of
-what the first round of testing suggested:
+Confirmed end to end on 2026-08-20: port 54015 had been sitting on
+``94.219.47.10`` for 49 minutes across 33 consecutive samples; the call was made
+at 16:46:58 and the address was ``109.41.112.239`` by 16:47:23 -- **about 25
+seconds**. Without the trailing slash the URL 301s, so follow redirects or send
+it with the slash.
 
-* ``proxy-seller.com/api/proxy/reboot?token=...`` answers **HTTP 400** for every
-  request shape tried -- GET/POST/HEAD, HTTP/1.0/1.1/2, with a real token, a
-  garbage token, or no token -- while ``/api/proxy/list`` on the same host
-  answers a normal **401**.
-* The 400 is **HAProxy's built-in page, and the response carries no ``SRVID``
-  cookie**, while the 401 does. ``SRVID`` is HAProxy's backend-affinity cookie,
-  so its absence means the reboot request **never reached a backend at all** --
-  it is rejected at the proxy layer, before routing.
-* It is a **prefix** match, not a route: ``/api/proxy/rebootx`` also 400s, while
-  ``/api/proxy/xreboot``, ``/api/proxy/restart`` and ``/api/reboot/anything``
-  all return the normal 401. Something in front of their application is
-  configured for ``/api/proxy/reboot*`` specifically, and whatever it points at
-  does not answer.
+**The earlier `/api/proxy/reboot?token=...` links were simply the wrong URL**,
+and diagnosing them wasted a day, so the tell is written down: that path
+answered **HTTP 400 for every request shape** -- any method, any HTTP version,
+real token, garbage token or none -- and the response carried **no ``SRVID``
+cookie**, while ``/api/proxy/list`` on the same host returned a normal 401
+*with* ``SRVID``. ``SRVID`` is the load balancer's backend-affinity cookie, so
+its absence proves the request never reached a backend at all. **A 400 with no
+SRVID means the URL is wrong; it says nothing about the token**, because nothing
+ever reached the code that validates tokens.
 
-**So the token cannot be judged from here.** Nothing we send reaches the code
-that would validate it. (The tokens are separately known not to be *Mobile CRM*
-tokens -- the path form ``mobile.proxy-seller.com/c/modem/status/<token>``
-returns ``ERROR_MODEM_NOT_FOUND`` for all four -- but that is a different
-product, and says nothing about their validity for this retail endpoint.)
+**Two different 400s, and only one of them is fatal.** The working endpoint also
+answers 400 -- but with ``Content-Type: text/plain`` and the body ``ERROR`` --
+when called again too soon. That is a **cooldown**, not a broken URL: a second
+rotation about a minute after the first was refused this way. So judge these
+responses by body and content type, never by status code alone, which is exactly
+what `probe_link` does.
 
 `probe_link` exists for precisely this: given a candidate URL, say whether it is
 a live link for a real modem *before* anything depends on it.
@@ -207,17 +203,26 @@ class ProxyRotator:
 
     @staticmethod
     def probe_link(url: str, timeout: int = 25) -> dict:
-        """Is this rotation URL live, and does it name a real modem?
+        """Classify what a rotation URL answered.
 
-        Answers before anything depends on it, because both failure modes here
-        look like success to a careless caller:
+        .. warning::
+           **This is not a dry run.** This vendor exposes no read-only status
+           endpoint, so the only way to learn whether a link works is to *use*
+           it -- fetching a rotation URL rotates the IP. An earlier version of
+           the CLI advertised this as "changes nothing" and rotated all four
+           production proxies in one go.
 
-        * an HTTP **400** on proxy-seller's retail host is HAProxy's parse-layer
-          page, returned before any token is examined -- it does not mean the
-          token is bad, it means the URL shape is wrong;
-        * a **200** whose *body* reads ``ERROR_MODEM_NOT_FOUND`` is a perfectly
-          healthy endpoint telling you the token names nothing. A caller that
-          only checks the status code would call that working.
+        Classifying by status code alone is not enough, because 400 means two
+        opposite things here:
+
+        * **400 with an HTML body and no ``SRVID`` cookie** -- the load balancer
+          rejected the URL before reaching a backend. The URL is wrong, and this
+          says nothing about the token.
+        * **400 with ``Content-Type: text/plain`` and the body ``ERROR``** -- the
+          real endpoint refusing because it was called again too soon. A
+          cooldown, i.e. "not yet", on a URL that works perfectly well.
+
+        A success is **200** with body ``OK``.
         """
         try:
             response = requests.get(url, timeout=timeout)
@@ -237,15 +242,32 @@ class ProxyRotator:
         return {port: self.probe_link(entry["reboot"])
                 for port, entry in sorted(self.reboot_config.items())}
 
-    def rotate(self, port: int) -> bool:
-        """Fire the vendor's reboot URL. Says nothing about whether the IP moved."""
+    def rotate(self, port: int) -> dict:
+        """Fire the vendor's rotation URL.
+
+        Returns `{"accepted", "status", "detail"}`. Says nothing about whether
+        the address actually moved -- `rotate_and_verify` is what checks that.
+
+        Deliberately does not raise on a refusal, because the common one is a
+        **cooldown**: called again too soon, the vendor answers HTTP 400 with the
+        plain-text body ``ERROR``. That is "not yet", not "broken", and a caller
+        that treats it as an exception will retry itself into a loop.
+        """
         entry = self.reboot_config.get(port)
         if not entry:
             raise ProxyRotationError(
                 f"no reboot URL configured for port {port}; set {REBOOT_ENV}")
-        response = requests.get(entry["reboot"], timeout=self.timeout)
-        response.raise_for_status()
-        return True
+
+        # allow_redirects: the URL 301s to a trailing-slash form.
+        response = requests.get(entry["reboot"], timeout=self.timeout,
+                                allow_redirects=True)
+        body = (response.text or "").strip()
+        accepted = response.status_code == 200 and not body.upper().startswith("ERROR")
+        return {
+            "accepted": accepted,
+            "status": response.status_code,
+            "detail": body[:200] or "(empty body)",
+        }
 
     def rotate_and_verify(self, port: int,
                           timeout_seconds: int = ROTATE_TIMEOUT_SECONDS) -> dict:
@@ -258,7 +280,13 @@ class ProxyRotator:
         """
         before = self.exit_ip(port)
         started = time.time()
-        self.rotate(port)
+        fired = self.rotate(port)
+        if not fired["accepted"]:
+            return {
+                "port": port, "before": before, "after": before,
+                "changed": False, "seconds": round(time.time() - started, 1),
+                "accepted": False, "detail": fired["detail"],
+            }
         time.sleep(ROTATE_SETTLE_SECONDS)
 
         deadline = started + timeout_seconds
@@ -278,4 +306,6 @@ class ProxyRotator:
             "after": after,
             "changed": bool(after and after != before),
             "seconds": round(time.time() - started, 1),
+            "accepted": True,
+            "detail": fired["detail"],
         }
