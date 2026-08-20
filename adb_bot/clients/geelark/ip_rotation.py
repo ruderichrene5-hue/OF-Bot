@@ -22,6 +22,28 @@ SOCKS5 one, because `requests` speaks HTTP proxies out of the box and SOCKS
 needs PySocks, which this venv does not have. On this vendor both ports are the
 same tunnel: 44015 and 54015 were observed leaving from the same address.
 
+**The exit IP cannot be changed from the phone.** This was tested rather than
+assumed, because "just toggle airplane mode over ADB" is the obvious idea and it
+does not work here:
+
+* The phone carries **no device-level proxy** -- ``settings get global
+  http_proxy`` is null. Geelark applies the proxy *outside* the Android
+  container, so the phone cannot see it, let alone rotate it.
+* The phone's default route is the container's own ``wlan0`` (a 10.x address).
+  Its radios are virtual; cycling them cycles the container's interfaces, not
+  the proxy's upstream mobile modem.
+* Measured: with the phone egressing as ``94.219.47.10``, ``svc data
+  disable/enable`` and a full airplane-mode off/on cycle both left the exit IP
+  **unchanged**. ADB survived both.
+* Calling the vendor's rotation URL *from the phone* -- so the request leaves
+  through the proxy's own address, in case the vendor whitelists it -- returned
+  the same HTTP 400 as calling it from the server.
+
+Rotation is therefore a vendor-side operation reachable only over the vendor's
+own API, from anywhere. What the phone is good for is *verifying* the result:
+``adb shell curl -s https://api.ipify.org`` is the ground truth for what
+Instagram actually sees, and it matched the proxy's exit exactly.
+
 `GEELARK_PROXY_REBOOT_URLS` is a JSON object keyed by the SOCKS5 port::
 
     {"54015": "https://proxy-seller.com/api/proxy/reboot?token=...",
