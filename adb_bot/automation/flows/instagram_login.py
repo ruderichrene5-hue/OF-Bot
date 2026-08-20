@@ -302,6 +302,18 @@ def log_in(driver, username: str, password: str, logger=None,
                     code_attempts - 1)
                 return RESULT_EMAIL_CODE
 
+            # Ask for a FRESH code before reading. A mailbox that has been
+            # asked before holds several Instagram codes, only the newest is
+            # valid, and `find_code` takes the first one it meets in a
+            # flattened dump -- its own comment admits the newest is not
+            # reliably first. Requesting a new one invalidates the rest, so
+            # whatever is newest is also the only one that works. Measured: a
+            # run read 875047 out of a four-message thread and Instagram
+            # bounced straight back to the login form.
+            if driver.tap_label(("Get a new code",), require_clickable=False):
+                log("info", "asked Instagram for a fresh code")
+                sleep(SETTLE_SECONDS)
+
             log("info", "fetching the confirmation code from %s",
                 getattr(mailbox, "address", "the mailbox"))
             code = ""
