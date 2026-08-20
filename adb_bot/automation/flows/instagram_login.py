@@ -62,6 +62,7 @@ RESULT_WRONG_PASSWORD = "wrong_password"
 RESULT_SUSPENDED = "suspended"
 RESULT_ACCOUNT_GONE = "account_no_longer_exists"
 RESULT_HANDLE_NOT_FOUND = "handle_not_found"
+RESULT_NO_CODE = "code_never_arrived"
 RESULT_UNKNOWN_SCREEN = "unknown_screen"
 RESULT_STUCK = "stuck"
 
@@ -78,6 +79,11 @@ SETTLE_SECONDS = 6
 # The Log in button moves ~230px when the keyboard closes; give the layout
 # time to settle before reading its position.
 KEYBOARD_SETTLE_SECONDS = 3
+
+# How many times to fetch a confirmation code before giving up. More than
+# one because Instagram will re-ask if the first is stale or mistyped, but
+# bounded because each attempt costs a mailbox round trip.
+MAX_CODE_ATTEMPTS = 2
 
 MAX_FORM_WAITS = 6
 FORM_WAIT_SECONDS = 6
@@ -219,7 +225,7 @@ def classify_login_screen(text: str | None) -> str:
 
 
 def log_in(driver, username: str, password: str, logger=None,
-           sleep=time.sleep) -> str:
+           sleep=time.sleep, mailbox=None) -> str:
     """Sign `username` in on the phone `driver` is attached to.
 
     Returns a `RESULT_*` constant. Reaching a code screen is a *result*, not a
@@ -233,6 +239,7 @@ def log_in(driver, username: str, password: str, logger=None,
     last, repeats = None, 0
     submitted = False
     form_waits = 0
+    code_attempts = 0
 
     for step in range(MAX_STEPS):
         text = driver.read_screen() or ""
@@ -241,7 +248,8 @@ def log_in(driver, username: str, password: str, logger=None,
         # Waiting out the login form after submitting is deliberate, and is
         # bounded by its own counter below -- the generic repeat guard must not
         # cut that short, or the flow gives up while Instagram is still working.
-        waiting_on_submit = submitted and screen == SCREEN_FORM
+        waiting_on_submit = (submitted and screen == SCREEN_FORM) or (
+            mailbox is not None and screen == SCREEN_EMAIL_CODE)
 
         if screen == last and not waiting_on_submit:
             repeats += 1
@@ -263,7 +271,46 @@ def log_in(driver, username: str, password: str, logger=None,
         if screen == SCREEN_SUSPENDED:
             return RESULT_SUSPENDED
         if screen == SCREEN_EMAIL_CODE:
-            return RESULT_EMAIL_CODE
+            # Without a mailbox this is the end of the line: the account is
+            # fine and something else has to answer the code.
+            if mailbox is None:
+                return RESULT_EMAIL_CODE
+
+            code_attempts += 1
+            if code_attempts > MAX_CODE_ATTEMPTS:
+                log("warning", "asked for a code %s times; giving up",
+                    code_attempts - 1)
+                return RESULT_EMAIL_CODE
+
+            log("info", "fetching the confirmation code from %s",
+                getattr(mailbox, "address", "the mailbox"))
+            code = ""
+            try:
+                code = mailbox.wait_for_code() or ""
+            except Exception as exc:  # a mailbox that misbehaves is not fatal
+                log("warning", "could not read the code: %s", exc)
+            finally:
+                # Always come back, even if the read failed -- leaving the phone
+                # sitting in Gmail strands the login half-done.
+                try:
+                    mailbox.back_to_instagram()
+                except Exception:
+                    pass
+
+            if not code:
+                log("warning", "no confirmation code arrived")
+                return RESULT_NO_CODE
+
+            sleep(SETTLE_SECONDS)
+            driver.fill(("code", "enter code", "confirmation code"), code,
+                        "instagram email code")
+            driver.dismiss_keyboard()
+            sleep(KEYBOARD_SETTLE_SECONDS)
+            # Same cached-dump trap as the Log in button: re-read before tapping.
+            driver.read_screen()
+            driver.tap_label(("Continue", "Next", "Confirm"))
+            sleep(SETTLE_SECONDS)
+            continue
         if screen == SCREEN_SMS_CODE:
             return RESULT_SMS_CODE
         if screen == SCREEN_TWO_FACTOR:

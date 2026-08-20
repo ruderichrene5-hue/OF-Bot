@@ -59,6 +59,32 @@ class RemarkTest(unittest.TestCase):
         self.assertFalse(accepted)
 
 
+class MailboxClauseTest(unittest.TestCase):
+    """The mailbox result must not overwrite the Instagram one.
+
+    Instagram accepting an account and its mailbox being reachable are separate
+    facts. Writing the mailbox result into LOGIN: erased the knowledge that two
+    accounts' Instagram credentials were good, and they had to be restored by
+    hand.
+    """
+
+    def test_a_mailbox_result_leaves_the_login_result_alone(self):
+        after_login = remark_with_outcome(REMARK, "email_code_required")
+        both = remark_with_outcome(after_login, "mailbox_wrong_password",
+                                   field="MAILBOX")
+        self.assertIn("LOGIN:OK-needs-email-code", both)
+        self.assertIn("MAILBOX:WRONG-PASSWORD", both)
+
+    def test_each_clause_replaces_only_itself(self):
+        s = remark_with_outcome(REMARK, "email_code_required")
+        s = remark_with_outcome(s, "mailbox_wrong_password", field="MAILBOX")
+        s = remark_with_outcome(s, "logged_in")
+        self.assertEqual(s.count("LOGIN:"), 1)
+        self.assertEqual(s.count("MAILBOX:"), 1)
+        self.assertIn("LOGIN:OK-on-feed", s)
+        self.assertIn("MAILBOX:WRONG-PASSWORD", s)
+
+
 class FakeTransport(GeelarkTransport):
     def __init__(self):
         super().__init__(app_id="a", api_key="k")
@@ -94,6 +120,14 @@ class WriterTest(unittest.TestCase):
         _path, payload = transport.calls[-1]
         self.assertIn("keepme", payload["tagIDs"])
         self.assertIn("tag1", payload["tagIDs"])
+
+    def test_a_mailbox_result_never_earns_the_connected_tag(self):
+        """The tag means Instagram took the account, not that Gmail did."""
+        transport = FakeTransport()
+        GeelarkOutcomeWriter(transport).record(
+            "p1", REMARK, "logged_in", field="MAILBOX")
+        _path, payload = transport.calls[-1]
+        self.assertNotIn("tagIDs", payload)
 
     def test_the_tag_is_not_added_twice(self):
         transport = FakeTransport()

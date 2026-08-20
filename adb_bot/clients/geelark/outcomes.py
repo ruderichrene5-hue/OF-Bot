@@ -25,6 +25,11 @@ CONNECTED_TAG = "IG connected"
 
 # Any earlier LOGIN: clause, so a re-run replaces rather than stacks.
 _LOGIN_CLAUSE = re.compile(r"\s*\|\s*LOGIN:[^|]*")
+# The mailbox result is a SEPARATE clause. Writing it into LOGIN: overwrote the
+# fact that an account's Instagram credentials were good -- two phones lost that
+# and had to have it restored by hand. The two facts are independent: Instagram
+# can accept the password while the mailbox that holds its code does not.
+_MAILBOX_CLAUSE = re.compile(r"\s*\|\s*MAILBOX:[^|]*")
 
 # What each flow result should say on the phone, and whether the account's
 # credentials were accepted by Instagram.
@@ -43,6 +48,9 @@ OUTCOMES = {
     "app_never_opened": ("INSTAGRAM-DID-NOT-OPEN", False),
     "adb_unreachable": ("ADB-UNREACHABLE", False),
     "phone_not_ready": ("PHONE-NOT-READY", False),
+    "mailbox_wrong_password": ("WRONG-PASSWORD", False),
+    "mailbox_google_robot_check": ("CAPTCHA", False),
+    "code_never_arrived": ("NO-CODE-ARRIVED", False),
     "suspended": ("SUSPENDED", False),
     "unknown_screen": ("UNKNOWN-SCREEN", False),
     "stuck": ("STUCK", False),
@@ -54,11 +62,19 @@ def describe(result: str) -> tuple[str, bool]:
     return OUTCOMES.get(result, (result.upper().replace("_", "-"), False))
 
 
-def remark_with_outcome(remark: str, result: str, day: str = "") -> str:
-    """The phone's remark with its LOGIN: clause set to this result."""
+def remark_with_outcome(remark: str, result: str, day: str = "",
+                        field: str = "LOGIN") -> str:
+    """The phone's remark with one clause set to this result.
+
+    `field` is "LOGIN" for the Instagram result and "MAILBOX" for the Gmail
+    one. They are kept apart on purpose: Instagram accepting an account and its
+    mailbox being reachable are different facts, and collapsing them loses the
+    good half.
+    """
     label, _accepted = describe(result)
-    base = _LOGIN_CLAUSE.sub("", remark or "").rstrip(" |")
-    clause = f"LOGIN:{label}" + (f" {day}" if day else "")
+    pattern = _MAILBOX_CLAUSE if field == "MAILBOX" else _LOGIN_CLAUSE
+    base = pattern.sub("", remark or "").rstrip(" |")
+    clause = f"{field}:{label}" + (f" {day}" if day else "")
     return f"{base} | {clause}" if base else clause
 
 
@@ -75,7 +91,7 @@ class GeelarkOutcomeWriter:
 
     def record(self, phone_id: str, remark: str, result: str,
                existing_tag_ids: list[str] | None = None,
-               day: str = "") -> dict:
+               day: str = "", field: str = "LOGIN") -> dict:
         """Write the outcome onto the phone, tagging it if it connected.
 
         `existing_tag_ids` matters: `tagIDs` **replaces** a phone's tags rather
@@ -83,9 +99,11 @@ class GeelarkOutcomeWriter:
         back in or it is silently dropped.
         """
         _label, accepted = describe(result)
+        # Only an Instagram result earns the connected tag.
+        accepted = accepted and field == "LOGIN"
         payload: dict[str, object] = {
             "id": phone_id,
-            "remark": remark_with_outcome(remark, result, day),
+            "remark": remark_with_outcome(remark, result, day, field),
         }
 
         tag_ids = list(existing_tag_ids or [])

@@ -194,6 +194,61 @@ class LogInTest(unittest.TestCase):
         self.assertEqual(result, login.RESULT_HANDLE_NOT_FOUND)
         self.assertNotIn(("Continue",), driver.tapped)
 
+    def test_a_mailbox_answers_the_code_and_the_login_completes(self):
+        class Mailbox:
+            address = "a@b.com"
+            def __init__(self):
+                self.back = False
+            def wait_for_code(self):
+                return "123456"
+            def back_to_instagram(self):
+                self.back = True
+
+        box = Mailbox()
+        # EMAIL is followed by two FEEDs: the flow re-reads the screen
+        # before tapping Continue, same cached-dump guard as Log in.
+        driver = FakeDriver([FORM, FORM, EMAIL, FEED, FEED])
+        result = login.log_in(driver, "a", "b", sleep=lambda *_: None,
+                              mailbox=box)
+        self.assertEqual(result, login.RESULT_LOGGED_IN)
+        self.assertIn(("instagram email code", "123456"), driver.filled)
+        self.assertTrue(box.back, "must return to Instagram after reading")
+
+    def test_a_code_that_never_arrives_is_its_own_result(self):
+        class Empty:
+            address = "a@b.com"
+            def wait_for_code(self):
+                return ""
+            def back_to_instagram(self):
+                pass
+
+        driver = FakeDriver([FORM, FORM, EMAIL])
+        self.assertEqual(
+            login.log_in(driver, "a", "b", sleep=lambda *_: None,
+                         mailbox=Empty()),
+            login.RESULT_NO_CODE)
+
+    def test_a_mailbox_that_throws_still_returns_to_instagram(self):
+        """Leaving the phone sitting in Gmail strands the login half-done."""
+        class Angry:
+            address = "a@b.com"
+            def __init__(self):
+                self.back = False
+            def wait_for_code(self):
+                raise RuntimeError("gmail exploded")
+            def back_to_instagram(self):
+                self.back = True
+
+        box = Angry()
+        driver = FakeDriver([FORM, FORM, EMAIL])
+        login.log_in(driver, "a", "b", sleep=lambda *_: None, mailbox=box)
+        self.assertTrue(box.back)
+
+    def test_without_a_mailbox_the_code_screen_is_still_the_end(self):
+        driver = FakeDriver([FORM, FORM, EMAIL])
+        self.assertEqual(login.log_in(driver, "a", "b", sleep=lambda *_: None),
+                         login.RESULT_EMAIL_CODE)
+
     def test_a_wrong_password_stops_immediately(self):
         driver = FakeDriver([FORM, FORM, "the password you entered is incorrect"])
         self.assertEqual(login.log_in(driver, "a", "b", sleep=lambda *_: None),
