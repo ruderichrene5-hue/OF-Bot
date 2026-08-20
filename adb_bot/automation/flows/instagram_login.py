@@ -47,6 +47,7 @@ SCREEN_TWO_FACTOR = "two_factor"      # anticipated
 SCREEN_SAVE_LOGIN = "save_login"      # anticipated
 SCREEN_NOTIFICATIONS = "notifications"     # anticipated
 SCREEN_SUSPENDED = "suspended"        # anticipated
+SCREEN_GONE = "account_gone"          # observed
 SCREEN_FEED = "feed"                  # anticipated
 SCREEN_LOADING = "loading"
 SCREEN_UNKNOWN = "unknown"
@@ -58,6 +59,7 @@ RESULT_SMS_CODE = "sms_code_required"
 RESULT_TWO_FACTOR = "two_factor_required"
 RESULT_WRONG_PASSWORD = "wrong_password"
 RESULT_SUSPENDED = "suspended"
+RESULT_ACCOUNT_GONE = "account_no_longer_exists"
 RESULT_UNKNOWN_SCREEN = "unknown_screen"
 RESULT_STUCK = "stuck"
 
@@ -71,6 +73,10 @@ SETTLE_SECONDS = 6
 # the form as "the submit did not take" gave up on four perfectly good accounts
 # in a row, so the form is now allowed to persist for a while before that
 # conclusion is drawn.
+# The Log in button moves ~230px when the keyboard closes; give the layout
+# time to settle before reading its position.
+KEYBOARD_SETTLE_SECONDS = 3
+
 MAX_FORM_WAITS = 6
 FORM_WAIT_SECONDS = 6
 
@@ -114,6 +120,16 @@ _TWO_FACTOR_MARKERS = (          # anticipated
     "enter the code from your authentication app",
 )
 
+# Observed verbatim on a real login: "recover your account -- it looks like that
+# login info is no longer connected to an account. we'll use a secure process to
+# help you get back in." The credentials are fine as *data*; the account behind
+# them is gone. That is a migration finding, not a login failure, and conflating
+# the two would have somebody re-testing a dead account for ever.
+_GONE_MARKERS = (
+    "no longer connected to an account",
+    "recover your account",
+)
+
 _SUSPENDED_MARKERS = (           # anticipated
     "we suspended your account",
     "your account has been disabled",
@@ -143,6 +159,7 @@ _FEED_MARKERS = (
 _LOADING_MARKERS = ("loading", "please wait", "just a moment")
 
 _ORDERED = (
+    (SCREEN_GONE, _GONE_MARKERS),
     (SCREEN_SUSPENDED, _SUSPENDED_MARKERS),
     (SCREEN_WRONG_PASSWORD, _WRONG_PASSWORD_MARKERS),
     (SCREEN_TWO_FACTOR, _TWO_FACTOR_MARKERS),
@@ -255,6 +272,11 @@ def log_in(driver, username: str, password: str, logger=None,
             sleep(SETTLE_SECONDS)
             continue
 
+        if screen == SCREEN_GONE:
+            log("warning", "Instagram says this login is not connected to an "
+                           "account any more")
+            return RESULT_ACCOUNT_GONE
+
         if screen == SCREEN_FORM:
             if submitted:
                 # The form stays up while Instagram works, so its presence is
@@ -274,6 +296,17 @@ def log_in(driver, username: str, password: str, logger=None,
                         username, "instagram username")
             driver.fill(("password",), password, "instagram password")
             driver.dismiss_keyboard()
+            sleep(KEYBOARD_SETTLE_SECONDS)
+            # Re-read the screen before tapping, and do NOT remove this.
+            # `tap_label` taps using the driver's *cached* dump and only
+            # re-reads when it has none -- so without this it taps a position
+            # captured while the keyboard was still open. The Log in button
+            # moves ~230px when the keyboard closes (measured: y=542 up,
+            # y=775 down on a 1440-tall screen), so the tap lands on nothing,
+            # and the form then sits there fully filled while the flow waits
+            # for an answer that was never asked for. Four accounts in a row
+            # were reported "stuck" by exactly this.
+            driver.read_screen()
             driver.tap_label(("Log in", "Log In"))
             submitted = True
             sleep(SETTLE_SECONDS)

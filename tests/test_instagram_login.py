@@ -65,6 +65,22 @@ class ClassifyTest(unittest.TestCase):
         self.assertNotEqual(screen, login.SCREEN_FEED)
         self.assertEqual(screen, login.SCREEN_EMAIL_CODE)
 
+    def test_a_dead_account_is_told_apart_from_a_failed_login(self):
+        """Observed verbatim. The credentials are fine as data; the account
+        behind them is gone. Filing that as a login failure would have somebody
+        re-testing a dead account for ever.
+        """
+        text = ("recover your account | it looks like that login info is no "
+                "longer connected to an account. we'll use a secure process to "
+                "help you get back in.")
+        self.assertEqual(login.classify_login_screen(text), login.SCREEN_GONE)
+
+    def test_a_dead_account_outranks_the_login_form(self):
+        """The recovery screen still carries form-ish words; order decides."""
+        text = ("recover your account no longer connected to an account "
+                "username, email or mobile number forgot password?")
+        self.assertEqual(login.classify_login_screen(text), login.SCREEN_GONE)
+
     def test_a_blank_read_is_unknown_not_a_screen(self):
         """An empty dump is a dump that failed, not a screen that is wrong."""
         self.assertEqual(login.classify_login_screen(""), login.SCREEN_UNKNOWN)
@@ -77,12 +93,24 @@ class ClassifyTest(unittest.TestCase):
 
 
 class FakeDriver:
+    """Screens are consumed one per read_screen().
+
+    Note the fixtures include an extra copy of the form: the flow re-reads the
+    screen after dismissing the keyboard, because `tap_label` taps a cached
+    dump and would otherwise use a position from before the keyboard closed.
+    """
+
     def __init__(self, screens):
         self.screens = list(screens)
         self.filled = []
         self.tapped = []
+        self.dismissed = False
+        self.reads_before_tap = None
+
+    reads = 0
 
     def read_screen(self):
+        self.reads += 1
         return self.screens.pop(0) if self.screens else ""
 
     def fill(self, hints, value, what, submits_itself=False):
@@ -90,10 +118,13 @@ class FakeDriver:
         return True
 
     def tap_label(self, labels, require_clickable=True):
+        if self.reads_before_tap is None:
+            self.reads_before_tap = self.reads
         self.tapped.append(tuple(labels))
         return True
 
     def dismiss_keyboard(self):
+        self.dismissed = True
         return True
 
 
@@ -102,17 +133,18 @@ FORM = ("instagram from meta | username, email or mobile number | password | "
 JOIN = "join instagram | get started | i already have a profile"
 EMAIL = "check your email | enter the code we sent to a@b.com | enter code"
 FEED = "your story | what's on your mind | suggested for you"
+GONE = "recover your account | no longer connected to an account"
 
 
 class LogInTest(unittest.TestCase):
     def test_the_join_screen_is_stepped_through_to_the_form(self):
-        driver = FakeDriver([JOIN, FORM, FEED])
+        driver = FakeDriver([JOIN, FORM, FORM, FEED])
         result = login.log_in(driver, "someone", "pw", sleep=lambda *_: None)
         self.assertEqual(result, login.RESULT_LOGGED_IN)
         self.assertIn(("I already have a profile",), driver.tapped)
 
     def test_credentials_are_typed_then_submitted(self):
-        driver = FakeDriver([FORM, FEED])
+        driver = FakeDriver([FORM, FORM, FEED])
         login.log_in(driver, "alina", "secret", sleep=lambda *_: None)
         self.assertEqual([v for _w, v in driver.filled], ["alina", "secret"])
         self.assertIn(("Log in", "Log In"), driver.tapped)
@@ -120,12 +152,29 @@ class LogInTest(unittest.TestCase):
     def test_an_email_challenge_is_a_result_not_a_failure(self):
         """The account is fine; something else answers the code. Treating this
         as an error would write off a perfectly good account."""
-        driver = FakeDriver([FORM, EMAIL])
+        driver = FakeDriver([FORM, FORM, EMAIL])
         self.assertEqual(login.log_in(driver, "a", "b", sleep=lambda *_: None),
                          login.RESULT_EMAIL_CODE)
 
+    def test_a_dead_account_ends_the_run_with_its_own_result(self):
+        driver = FakeDriver([FORM, FORM, GONE])
+        self.assertEqual(login.log_in(driver, "a", "b", sleep=lambda *_: None),
+                         login.RESULT_ACCOUNT_GONE)
+
+    def test_the_screen_is_re_read_before_tapping_log_in(self):
+        """tap_label taps the driver's CACHED dump. Without a fresh read the
+        tap uses a position captured while the keyboard was still open, and the
+        Log in button has moved ~230px by then -- so the tap lands on nothing
+        and four accounts in a row get reported "stuck".
+        """
+        driver = FakeDriver([FORM, FORM, FEED])
+        login.log_in(driver, "a", "b", sleep=lambda *_: None)
+        self.assertTrue(driver.dismissed)
+        # One read to see the form, then another after dismissing, before tap.
+        self.assertGreaterEqual(driver.reads_before_tap, 2)
+
     def test_a_wrong_password_stops_immediately(self):
-        driver = FakeDriver([FORM, "the password you entered is incorrect"])
+        driver = FakeDriver([FORM, FORM, "the password you entered is incorrect"])
         self.assertEqual(login.log_in(driver, "a", "b", sleep=lambda *_: None),
                          login.RESULT_WRONG_PASSWORD)
 
@@ -141,7 +190,7 @@ class LogInTest(unittest.TestCase):
         seconds in. Giving up on the first re-appearance abandoned four good
         accounts in a row.
         """
-        driver = FakeDriver([FORM, FORM, FORM, FEED])
+        driver = FakeDriver([FORM, FORM, FORM, FORM, FEED])
         result = login.log_in(driver, "a", "b", sleep=lambda *_: None)
         self.assertEqual(result, login.RESULT_LOGGED_IN)
 
@@ -153,7 +202,7 @@ class LogInTest(unittest.TestCase):
 
     def test_a_challenge_after_the_wait_is_still_recognised(self):
         """The answer usually arrives a few reads in, not on the first."""
-        driver = FakeDriver([FORM, FORM, FORM, FORM, EMAIL])
+        driver = FakeDriver([FORM, FORM, FORM, FORM, FORM, EMAIL])
         result = login.log_in(driver, "a", "b", sleep=lambda *_: None)
         self.assertEqual(result, login.RESULT_EMAIL_CODE)
 
