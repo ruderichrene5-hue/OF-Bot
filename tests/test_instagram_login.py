@@ -81,6 +81,19 @@ class ClassifyTest(unittest.TestCase):
                 "username, email or mobile number forgot password?")
         self.assertEqual(login.classify_login_screen(text), login.SCREEN_GONE)
 
+    def test_a_near_miss_handle_is_its_own_outcome(self):
+        """Observed: stored handle `babybri732`, real account `babybri73`.
+
+        Instagram offers to log into the near match. Accepting that would put
+        the phone on a DIFFERENT account from the one recorded against it, and
+        nothing downstream would notice -- so this is reported, never taken.
+        """
+        text = ("is this your account? | we couldn\u2019t find an account that "
+                "matches what you entered, but found one that closely matches. "
+                "| babybri73 | continue | log into another account")
+        self.assertEqual(login.classify_login_screen(text),
+                         login.SCREEN_NO_SUCH_HANDLE)
+
     def test_a_blank_read_is_unknown_not_a_screen(self):
         """An empty dump is a dump that failed, not a screen that is wrong."""
         self.assertEqual(login.classify_login_screen(""), login.SCREEN_UNKNOWN)
@@ -172,6 +185,14 @@ class LogInTest(unittest.TestCase):
         self.assertTrue(driver.dismissed)
         # One read to see the form, then another after dismissing, before tap.
         self.assertGreaterEqual(driver.reads_before_tap, 2)
+
+    def test_a_near_miss_never_taps_continue(self):
+        near = ("is this your account? we couldn\u2019t find an account that "
+                "matches what you entered | continue | log into another account")
+        driver = FakeDriver([FORM, FORM, near])
+        result = login.log_in(driver, "a", "b", sleep=lambda *_: None)
+        self.assertEqual(result, login.RESULT_HANDLE_NOT_FOUND)
+        self.assertNotIn(("Continue",), driver.tapped)
 
     def test_a_wrong_password_stops_immediately(self):
         driver = FakeDriver([FORM, FORM, "the password you entered is incorrect"])

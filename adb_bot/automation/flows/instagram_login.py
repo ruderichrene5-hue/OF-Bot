@@ -48,6 +48,7 @@ SCREEN_SAVE_LOGIN = "save_login"      # anticipated
 SCREEN_NOTIFICATIONS = "notifications"     # anticipated
 SCREEN_SUSPENDED = "suspended"        # anticipated
 SCREEN_GONE = "account_gone"          # observed
+SCREEN_NO_SUCH_HANDLE = "no_such_handle"   # observed
 SCREEN_FEED = "feed"                  # anticipated
 SCREEN_LOADING = "loading"
 SCREEN_UNKNOWN = "unknown"
@@ -60,6 +61,7 @@ RESULT_TWO_FACTOR = "two_factor_required"
 RESULT_WRONG_PASSWORD = "wrong_password"
 RESULT_SUSPENDED = "suspended"
 RESULT_ACCOUNT_GONE = "account_no_longer_exists"
+RESULT_HANDLE_NOT_FOUND = "handle_not_found"
 RESULT_UNKNOWN_SCREEN = "unknown_screen"
 RESULT_STUCK = "stuck"
 
@@ -130,6 +132,19 @@ _GONE_MARKERS = (
     "recover your account",
 )
 
+# Observed verbatim: "is this your account? we couldn't find an account that
+# matches what you entered, but found one that closely matches. babybri73 |
+# continue | log into another account". The stored handle was `babybri732` and
+# the real account is `babybri73` -- one character out.
+#
+# The flow deliberately does NOT tap Continue. Accepting Instagram's guess would
+# log a phone into a DIFFERENT account from the one recorded against it, and
+# nothing downstream would ever notice. Report it and let a person decide.
+_NO_SUCH_HANDLE_MARKERS = (
+    "find an account that matches what you entered",
+    "is this your account?",
+)
+
 _SUSPENDED_MARKERS = (           # anticipated
     "we suspended your account",
     "your account has been disabled",
@@ -159,6 +174,7 @@ _FEED_MARKERS = (
 _LOADING_MARKERS = ("loading", "please wait", "just a moment")
 
 _ORDERED = (
+    (SCREEN_NO_SUCH_HANDLE, _NO_SUCH_HANDLE_MARKERS),
     (SCREEN_GONE, _GONE_MARKERS),
     (SCREEN_SUSPENDED, _SUSPENDED_MARKERS),
     (SCREEN_WRONG_PASSWORD, _WRONG_PASSWORD_MARKERS),
@@ -271,6 +287,12 @@ def log_in(driver, username: str, password: str, logger=None,
             driver.tap_label(("Not now", "Not Now", "Don't allow", "Skip"))
             sleep(SETTLE_SECONDS)
             continue
+
+        if screen == SCREEN_NO_SUCH_HANDLE:
+            log("warning", "no account matches %s; Instagram offered a near "
+                           "match, which is NOT accepted automatically",
+                username)
+            return RESULT_HANDLE_NOT_FOUND
 
         if screen == SCREEN_GONE:
             log("warning", "Instagram says this login is not connected to an "
