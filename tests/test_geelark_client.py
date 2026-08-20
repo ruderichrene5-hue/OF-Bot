@@ -214,6 +214,26 @@ class ParseProfilesTest(unittest.TestCase):
         self.assertEqual(profile.target, "1.2.3.4:20899")
         self.assertTrue(profile.is_ready)
 
+    def test_a_stopped_phone_reads_as_off_not_as_an_error(self):
+        """`42002` on a stopped phone is the expected answer, not a fault.
+
+        Rendering it as "error-42002" made an idle account look broken, which
+        is the opposite of what the tab is for.
+        """
+        profiles = GeelarkApiClient.parse_profiles({
+            "items": [{"id": "633", "code": 42002, "msg": "phone is not running"}]
+        })
+        self.assertEqual(profiles[0].status, "phone-not-running")
+        self.assertFalse(profiles[0].is_ready)
+
+    def test_a_genuinely_unknown_code_still_surfaces(self):
+        """Only the two expected reasons are softened; anything else must stay
+        visible as an error rather than being quietly normalised."""
+        profiles = GeelarkApiClient.parse_profiles({
+            "items": [{"id": "633", "code": 43029, "msg": "under maintenance"}]
+        })
+        self.assertEqual(profiles[0].status, "error-43029")
+
     def test_a_half_filled_row_is_not_ready(self):
         """Mid-enable, Geelark can answer with no port yet. That is not a
         failure and not a usable phone either."""

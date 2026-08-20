@@ -1574,6 +1574,10 @@ def _section_geelark(geelark: dict) -> str:
             return '<span class="pill ok">reachable</span>'
         if state == "adb-not-enabled":
             return '<span class="pill warn">ADB off</span>'
+        # A stopped phone cannot answer ADB, which is expected rather than a
+        # fault -- showing it as an error made an idle account look broken.
+        if state == "phone-not-running":
+            return '<span class="empty">phone off</span>'
         if state == "unknown":
             return '<span class="empty">—</span>'
         return f'<span class="pill bad">{_e(state)}</span>'

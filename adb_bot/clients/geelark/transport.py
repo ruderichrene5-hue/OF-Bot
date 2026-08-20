@@ -32,6 +32,7 @@ GEELARK_API_URL = "https://openapi.geelark.com/open/v1"
 CODE_OK = 0
 CODE_BAD_ARGUMENT = 40004
 CODE_ENV_NOT_FOUND = 42001
+CODE_PHONE_NOT_RUNNING = 42002
 CODE_ADB_NOT_OPEN = 49001
 
 # A `pageSize` above this silently returns `data: null` instead of an error.

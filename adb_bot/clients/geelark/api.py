@@ -15,9 +15,18 @@ from __future__ import annotations
 
 from adb_bot.core.models import Profile
 
-from .transport import CODE_ADB_NOT_OPEN, GeelarkTransport
+from .transport import CODE_ADB_NOT_OPEN, CODE_PHONE_NOT_RUNNING, GeelarkTransport
 
 ADB_GET_DATA_PATH = "/adb/getData"
+
+# Per-item reasons, mapped to statuses a reader can act on. These two are the
+# normal answers, not faults: a stopped phone and a phone whose ADB has simply
+# never been switched on. Reporting them as "error-42002" makes an idle account
+# look broken.
+ADB_ITEM_STATUS = {
+    CODE_ADB_NOT_OPEN: "adb-not-enabled",
+    CODE_PHONE_NOT_RUNNING: "phone-not-running",
+}
 
 
 class GeelarkApiClient:
@@ -61,8 +70,7 @@ class GeelarkApiClient:
             pwd = item.get("pwd")
 
             if code not in (None, 0):
-                status = ("adb-not-enabled" if code == CODE_ADB_NOT_OPEN
-                          else f"error-{code}")
+                status = ADB_ITEM_STATUS.get(code, f"error-{code}")
             elif ip and port and pwd:
                 status = "active"
             else:
