@@ -40,15 +40,26 @@ wrong product:
 an *estimate*: phone-minutes burned since the last top-up times a rate. The
 rate calibrates itself -- every time the gateway goes 402 the cycle that just
 ended is measured, and `allowance / minutes_burned` becomes the new rate. Until
-`MLX_PROXY_GB_ALLOWANCE` is set there is no number to subtract from and the
-warning stays silent, exactly as `mlx_minutes` treats an unset minute
-allowance: an unknown balance is not a low one.
+`MLX_PROXY_GB_ALLOWANCE` is set there is no number to subtract from and the GB
+figure stays silent, exactly as `mlx_minutes` treats an unset minute allowance:
+an unknown balance is not a low one.
+
+That would leave a fresh install with no early warning at all, so there is a
+fallback that needs no configuration: the length of the *previous* cycle is
+measured every time the gateway goes 402, and being 85% of the way through what
+the last top-up bought is worth saying out loud. Coarser than gigabytes -- a
+quiet cycle and a busy one buy the same minutes but spend different traffic --
+so the GB figure wins whenever it exists, and the message names its basis.
 
 Config (normally `/etc/adbbot/env`):
 
-    MLX_PROXY_GB_ALLOWANCE    GB in the current top-up. Unset -> no GB warning.
+    MLX_PROXY_GB_ALLOWANCE    GB in the current top-up. Unset -> fall back to
+                              comparing against the last cycle's length.
     MLX_PROXY_GB_WARN_BELOW   warn at or below this many GB left. Default 2.
     MLX_PROXY_GB_PER_MINUTE   override the self-calibrated burn rate.
+    MLX_PROXY_CYCLE_WARN_FRACTION
+                              fallback threshold, as a fraction of the last
+                              cycle's phone-minutes. Default 0.85.
     ADBBOT_GUARD_TIMERS       units to stop. Default posting, recheck, warmup.
     ADBBOT_GUARD_AUTORESUME   "1" to re-enable them when the gateway recovers.
                               Off by default: resuming spends money and posts
@@ -103,6 +114,20 @@ MINUTES_501_THRESHOLD = 25
 
 DEFAULT_GB_WARN_BELOW = 2.0
 
+# Fallback early warning for when nobody has typed a GB figure in.
+#
+# The GB estimate needs `MLX_PROXY_GB_ALLOWANCE`, which only exists on the
+# MultiLogin dashboard -- so on a fresh install the low-traffic warning is
+# silent and the first thing anyone hears is the fleet stopping. But the
+# previous cycle's length *is* measured, every time the gateway goes 402, and
+# "you are 85% of the way through what the last top-up bought" is a real
+# warning that needs no numbers from anyone.
+#
+# It is coarser than the GB figure -- a quiet cycle and a busy one buy the same
+# minutes but spend different traffic -- so the GB estimate wins whenever it is
+# available, and the message says which basis it used.
+DEFAULT_CYCLE_WARN_FRACTION = 0.85
+
 STATE_FILE = Path.home() / ".adb_bot" / "mlx_guard.json"
 
 
@@ -133,6 +158,9 @@ class GuardReport:
     gb_low: bool = False
     burn_rate: float | None = None
     minutes_this_cycle: float = 0.0
+    last_cycle_minutes: float | None = None
+    cycle_fraction: float | None = None     # how far through the last cycle
+    low_basis: str = ""                     # "gb" | "cycle" -- what warned
     stopped: list = field(default_factory=list)
     resumed: list = field(default_factory=list)
     sent: list = field(default_factory=list)
@@ -426,19 +454,42 @@ def proxy_out_message(report: GuardReport) -> str:
 
 
 def proxy_low_message(report: GuardReport) -> str:
-    rate = f"~{report.burn_rate * 1024:.0f} MB/minute" if report.burn_rate else "an unknown rate"
-    return "\n".join([
-        "⚠️ <b>MultiLogin proxy traffic is nearly gone</b>",
-        f"About <b>{report.gb_left:.1f} GB</b> left of "
-        f"{report.gb_allowance:,.0f} GB.",
-        f"Burned {report.minutes_this_cycle:,.0f} phone-minutes this top-up "
-        f"at {rate}.",
-        "",
-        "This is an <b>estimate</b> -- MultiLogin exposes no traffic API, so it "
-        "is phone-minutes times a rate calibrated on the last outage. Check the "
-        "dashboard before topping up.",
-        "When it hits zero the fleet stops itself and you get a second message.",
-    ])
+    """Telegram HTML for the running-low warning.
+
+    Two shapes, because the warning has two possible bases and saying which one
+    it used is the difference between a number somebody can act on and a number
+    they have to come and ask about.
+    """
+    lines = ["⚠️ <b>MultiLogin proxy traffic is running low</b>"]
+    if report.low_basis == "gb":
+        rate = (f"~{report.burn_rate * 1024:.0f} MB/minute" if report.burn_rate
+                else "an unknown rate")
+        lines += [
+            f"About <b>{report.gb_left:.1f} GB</b> left of "
+            f"{report.gb_allowance:,.0f} GB.",
+            f"Burned {report.minutes_this_cycle:,.0f} phone-minutes this top-up "
+            f"at {rate}.",
+            "",
+            "This is an <b>estimate</b> -- MultiLogin exposes no traffic API, "
+            "so it is phone-minutes times a rate calibrated on the last outage.",
+        ]
+    else:
+        lines += [
+            f"This top-up has burned <b>{report.minutes_this_cycle:,.0f}</b> "
+            f"phone-minutes -- <b>{report.cycle_fraction * 100:.0f}%</b> of the "
+            f"{report.last_cycle_minutes:,.0f} the last one lasted before it "
+            f"ran dry.",
+            "",
+            "No GB figure is configured, so this compares against the previous "
+            "cycle rather than the allowance. It is coarser -- a quiet cycle "
+            "and a busy one buy the same minutes but spend different traffic. "
+            "Set <code>MLX_PROXY_GB_ALLOWANCE</code> in "
+            "<code>/etc/adbbot/env</code> for the real number.",
+        ]
+    lines += ["Check the dashboard before topping up.",
+              "When it runs out the fleet stops itself and you get a second "
+              "message."]
+    return "\n".join(lines)
 
 
 def proxy_back_message(report: GuardReport) -> str:
@@ -541,9 +592,21 @@ def run_check(logger=None, notifier=None, now=None, state_path=None,
                 state["topped_up_at"] = now.isoformat()
             state["gateway"] = "ok"
 
-    report.gb_low = (report.gb_left is not None
-                     and report.gb_left <= (_env_float("MLX_PROXY_GB_WARN_BELOW")
-                                            or DEFAULT_GB_WARN_BELOW))
+    report.last_cycle_minutes = state.get("last_cycle_minutes")
+    if report.last_cycle_minutes:
+        report.cycle_fraction = (report.minutes_this_cycle
+                                 / report.last_cycle_minutes)
+    if report.gb_left is not None:
+        # A real GB figure beats the proxy for one every time.
+        report.gb_low = report.gb_left <= (_env_float("MLX_PROXY_GB_WARN_BELOW")
+                                           or DEFAULT_GB_WARN_BELOW)
+        report.low_basis = "gb"
+    elif report.cycle_fraction is not None:
+        report.gb_low = report.cycle_fraction >= (
+            _env_float("MLX_PROXY_CYCLE_WARN_FRACTION")
+            or DEFAULT_CYCLE_WARN_FRACTION)
+        report.low_basis = "cycle"
+
     if mlx_minutes.should_alert("proxy_low",
                                 report.gb_low and not report.probe.exhausted,
                                 now=now, state=alerts_state):

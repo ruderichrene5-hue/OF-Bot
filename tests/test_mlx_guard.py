@@ -249,6 +249,76 @@ def test_autoresume_is_off_unless_asked_for(monkeypatch, tmp_path):
     assert "proxy_back" in report.sent
 
 
+def test_without_a_gb_figure_it_warns_off_the_last_cycles_length(monkeypatch,
+                                                                 tmp_path):
+    """The GB number only exists on the MultiLogin dashboard, so a fresh install
+    would otherwise have no early warning at all and hear nothing until the
+    fleet stopped. The previous cycle's length is measured, and needs nobody."""
+    monkeypatch.delenv("MLX_PROXY_GB_ALLOWANCE", raising=False)
+    monkeypatch.setenv("MLX_LOG_DIR", str(tmp_path))
+    (tmp_path / "launcher_20260820.log").write_text(SESSIONS)   # 30 minutes
+    _patch_get(monkeypatch, [FakeResponse(200, {"city": "Mannheim",
+                                                "query": "1.2.3.4"})] * 4)
+    monkeypatch.setattr(g, "refusals_501", lambda **kw: 0)
+    state_path = tmp_path / "s.json"
+    # The last top-up bought 32 minutes; 30 of them are already gone.
+    state_path.write_text('{"gateway": "ok", '
+                          '"topped_up_at": "2026-08-20T15:00:00", '
+                          '"last_cycle_minutes": 32}')
+
+    report = g.run_check(profiles=_profiles(4), state_path=state_path,
+                         now=datetime(2026, 8, 20, 16, 0), dry_run=True)
+
+    assert report.low_basis == "cycle"
+    assert report.gb_low is True
+    assert "proxy_low" in report.sent
+    assert "94%" in g.proxy_low_message(report)
+
+
+def test_the_fallback_stays_quiet_early_in_a_cycle(monkeypatch, tmp_path):
+    monkeypatch.delenv("MLX_PROXY_GB_ALLOWANCE", raising=False)
+    monkeypatch.setenv("MLX_LOG_DIR", str(tmp_path))
+    (tmp_path / "launcher_20260820.log").write_text(SESSIONS)   # 30 minutes
+    _patch_get(monkeypatch, [FakeResponse(200, {"city": "Mannheim",
+                                                "query": "1.2.3.4"})] * 4)
+    monkeypatch.setattr(g, "refusals_501", lambda **kw: 0)
+    state_path = tmp_path / "s.json"
+    # 30 minutes into a cycle the last one ran 3,000 -- nowhere near.
+    state_path.write_text('{"gateway": "ok", '
+                          '"topped_up_at": "2026-08-20T15:00:00", '
+                          '"last_cycle_minutes": 3000}')
+
+    report = g.run_check(profiles=_profiles(4), state_path=state_path,
+                         now=datetime(2026, 8, 20, 16, 0), dry_run=True)
+
+    assert report.gb_low is False
+    assert report.sent == []
+
+
+def test_a_real_gb_figure_beats_the_cycle_proxy(monkeypatch, tmp_path):
+    """The fallback is the coarser instrument; it must not override a number
+    somebody actually configured."""
+    monkeypatch.setenv("MLX_PROXY_GB_ALLOWANCE", "10")
+    monkeypatch.setenv("MLX_LOG_DIR", str(tmp_path))
+    (tmp_path / "launcher_20260820.log").write_text(SESSIONS)
+    _patch_get(monkeypatch, [FakeResponse(200, {"city": "Mannheim",
+                                                "query": "1.2.3.4"})] * 4)
+    monkeypatch.setattr(g, "refusals_501", lambda **kw: 0)
+    state_path = tmp_path / "s.json"
+    # Deep into the last cycle's length, but 7 GB still left by the real figure.
+    state_path.write_text('{"gateway": "ok", '
+                          '"topped_up_at": "2026-08-20T15:00:00", '
+                          '"last_cycle_minutes": 32, "gb_per_minute": 0.1}')
+
+    report = g.run_check(profiles=_profiles(4), state_path=state_path,
+                         now=datetime(2026, 8, 20, 16, 0), dry_run=True)
+
+    assert report.low_basis == "gb"
+    assert report.gb_left == 7.0
+    assert report.gb_low is False
+    assert report.sent == []
+
+
 def test_recovery_does_not_also_warn_that_traffic_is_nearly_gone(monkeypatch,
                                                                  tmp_path):
     """The estimate is measured from the top-up that just ran dry, so on the
