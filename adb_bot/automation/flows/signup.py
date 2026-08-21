@@ -278,6 +278,13 @@ _COOKIES_MARKERS = (
     "allow the use of cookies",
     "we use cookies",
     "allow all cookies",
+    # Meta's ads-consent screen, which is a separate gate from the cookie one
+    # and carries only `Get started`. Seen on an MLX twin on 2026-08-21, where
+    # it stopped a login cold: the screen IS Instagram, so `open_instagram`
+    # read "not in front" and gave up after five relaunches against an app
+    # that was already there.
+    "choose if we process your data for ads",
+    "whether you consent to us processing your personal data",
 )
 
 _ADD_EMAIL_MARKERS = (
@@ -1323,7 +1330,10 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 # only because a screen that will not answer is worse than
                 # either answer.
                 if not driver.tap_label(("Allow all cookies", "ALLOW ALL COOKIES",
-                                         "Allow", "Decline optional cookies")):
+                                         "Allow", "Decline optional cookies",
+                                         # Meta's ads-consent gate carries only
+                                         # this, and leads on to the choices.
+                                         "Get started", "GET STARTED")):
                     log("warning", "nothing to answer on the cookie screen")
                 sleep(5)
 
