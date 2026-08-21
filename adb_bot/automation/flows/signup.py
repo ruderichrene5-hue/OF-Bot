@@ -41,6 +41,7 @@ SCREEN_ENTRY = "entry"                  # "Join Instagram" -- the start
 SCREEN_PHONE = "phone"                  # "What's your mobile number?"
 SCREEN_EMAIL = "email"                  # "What's your email address?" (we avoid it)
 SCREEN_CODE = "code"                    # "Enter the confirmation code"
+SCREEN_CALL_CONFIRM = "call_confirm"    # "Confirm ... automatically with a phone call"
 SCREEN_PASSWORD = "password"            # "Create a password"
 SCREEN_BIRTHDAY = "birthday"            # "What's your date of birth?"
 SCREEN_DATE_PICKER = "date_picker"      # the Android spinner dialog
@@ -93,6 +94,20 @@ _PHONE_MARKERS = (
     # Instagram now words it "where you can be contacted" here too, which used
     # to belong to the post-creation prompt alone. See `_ADD_PHONE_MARKERS`.
     "enter the mobile number where you can be contacted",
+)
+
+# Instagram's offer to verify by ringing the number instead of texting it.
+# Seen first on 2026-08-21, on the first UK number ever used here -- twenty-four
+# German numbers never produced it, so it appears to follow the country.
+#
+# It has to be answered, not skipped: it wants the `manage phone calls`
+# permission so it can ring the handset and hang up automatically, and a rented
+# SMS number cannot take a call. The screen offers `Confirm with a code`, which
+# is the SMS route we already know how to drive, so that is the button -- NOT
+# `Next`, which is the one that asks for the permission.
+_CALL_CONFIRM_MARKERS = (
+    "confirm your account automatically with a phone call",
+    "we'll call your mobile number and end the call automatically",
 )
 
 _EMAIL_MARKERS = (
@@ -251,6 +266,10 @@ _ORDERED_MARKERS = (
     (SCREEN_PERMISSION_DIALOG, _PERMISSION_DIALOG_MARKERS),
     (SCREEN_ADD_EMAIL, _ADD_EMAIL_MARKERS),
     (SCREEN_ADD_PHONE, _ADD_PHONE_MARKERS),
+    # Before SCREEN_PHONE: this screen repeats the number and can carry the
+    # same wording, and mistaking it for the number form retypes a number
+    # Instagram has already accepted.
+    (SCREEN_CALL_CONFIRM, _CALL_CONFIRM_MARKERS),
     (SCREEN_EMAIL, _EMAIL_MARKERS),
     (SCREEN_PHONE, _PHONE_MARKERS),
     (SCREEN_PERMISSIONS, _PERMISSIONS_MARKERS),
@@ -514,6 +533,14 @@ _SKIP_LABELS = ("Skip", "SKIP", "Not now", "NOT NOW", "Got it", "GOT IT",
 
 _SUBMIT_LABELS = ("Next", "NEXT", "Continue", "Done")
 
+# The way off the phone-call offer and back onto SMS. Several spellings,
+# because this screen has only been seen once and Instagram varies its wording
+# between builds and locales.
+_CONFIRM_WITH_CODE_LABELS = (
+    "Confirm with a code", "CONFIRM WITH A CODE", "Confirm with code",
+    "Send a code", "Use a code", "Confirm another way",
+)
+
 
 def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                sleep=None, mailbox=None, country: str | None = None) -> SignupResult:
@@ -767,6 +794,21 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 progressed = True
                 driver.dismiss_keyboard()
                 driver.tap_label(_SUBMIT_LABELS)
+                sleep(6)
+
+            elif screen == SCREEN_CALL_CONFIRM:
+                # Take the code, not the call. `Next` here grants Instagram the
+                # `manage phone calls` permission so it can ring the handset --
+                # which a rented SMS number can never answer, and which would
+                # spend the number for nothing.
+                if not driver.tap_label(_CONFIRM_WITH_CODE_LABELS):
+                    return finish(RESULT_STUCK,
+                                  "no way from the phone-call offer back to a "
+                                  "code: " + ", ".join(
+                                      str(x) for x in
+                                      (driver.clickable_labels() or ())[:8]))
+                log("info", "declined the phone call; asking for a code")
+                progressed = True
                 sleep(6)
 
             elif screen == SCREEN_CODE:
