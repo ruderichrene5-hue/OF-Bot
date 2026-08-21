@@ -7,10 +7,55 @@ device because a Gmail row was bad. The first Geelark batch got both wrong in
 the same run.
 """
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
+from adb_bot.automation import signup_geelark
 from adb_bot.automation.flows import signup
-from adb_bot.automation.signup_geelark import reached_instagram
+from adb_bot.automation.signup_geelark import failed_mailboxes, reached_instagram
+
+
+class FailedMailboxesTest(unittest.TestCase):
+    """Which addresses are never offered again.
+
+    Only Google's verdicts on the address itself. A run that ended because the
+    phone would not produce a UI dump has learned nothing about the mailbox --
+    and mailboxes are the scarce thing here, so retiring one on that evidence
+    is the expensive direction to be wrong in.
+    """
+
+    def _ledger(self, rows):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+        handle.close()
+        return Path(handle.name)
+
+    def test_googles_own_verdicts_retire_an_address(self):
+        path = self._ledger([
+            {"email": "a@gmail.com", "status": "mailbox-wrong_password"},
+            {"email": "b@gmail.com", "status": "mailbox-google_robot_check"},
+        ])
+        with mock.patch.object(signup_geelark, "LEDGER", path):
+            self.assertEqual(failed_mailboxes(),
+                             {"a@gmail.com", "b@gmail.com"})
+
+    def test_a_phone_that_would_not_dump_does_not(self):
+        path = self._ledger([
+            {"email": "c@gmail.com", "status": "mailbox-no_ui_dump"},
+            {"email": "d@gmail.com", "status": "mailbox-stuck"},
+        ])
+        with mock.patch.object(signup_geelark, "LEDGER", path):
+            self.assertEqual(failed_mailboxes(), set())
+
+    def test_a_finished_signup_does_not_retire_its_address_here(self):
+        """That is the claim's job, not the blocklist's."""
+        path = self._ledger([{"email": "e@gmail.com", "status": "created"}])
+        with mock.patch.object(signup_geelark, "LEDGER", path):
+            self.assertEqual(failed_mailboxes(), set())
 
 
 class ReachedInstagramTest(unittest.TestCase):

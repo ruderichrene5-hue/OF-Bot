@@ -251,6 +251,14 @@ RESULT_STUCK = "stuck"
 RESULT_UNKNOWN_SCREEN = "unknown_screen"
 RESULT_GOOGLE_UNREACHABLE = "google_unreachable"
 RESULT_ROBOT_CHECK = "google_robot_check"
+# The phone never rendered a readable hierarchy. Deliberately not `stuck`: this
+# says nothing about the address, so the mailbox stays in the pool and the run
+# is worth repeating, which is the opposite of what `stuck` should trigger.
+RESULT_NO_DUMP = "no_ui_dump"
+
+# How many dumpless reads to sit through before calling it the phone. Each
+# costs about six seconds, against a phone that lives roughly fifteen minutes.
+MAX_DUMPLESS_READS = 5
 
 MAX_STEPS = 40
 MAX_REPEATS = 4
@@ -512,6 +520,10 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     MAX_LOOKUP_FAILURES = 2
     email_submits = 0
     password_submits = 0
+    # Reads that produced no hierarchy at all. Counted across the whole run,
+    # not per screen: a phone that cannot be dumped is not going to start on
+    # the next screen either.
+    dumpless = 0
     totp_submits = 0
     submitted_code, code_waits = None, 0
     restarts = 0
@@ -763,6 +775,27 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             # four times and call itself stuck (2026-08-16, `Blank caio 1`).
             # `fill` clears, types and reads back, so doing it again is safe.
             if not driver.fill(("email", "phone"), address, "google email"):
+                # A screen read by OCR has no input fields *by construction* --
+                # OCR returns text, not a hierarchy -- so `fill` cannot
+                # possibly succeed on one, and reporting that as "the address
+                # would not stay in the field" blames the mailbox for a failed
+                # `uiautomator dump`. Five Geelark phones were written off that
+                # way on 2026-08-21 with the email box plainly visible in the
+                # OCR text. Give the dump another go instead: it is a transient
+                # on a phone still settling, not a verdict on anything.
+                if getattr(driver, "_source", "") != "ui-dump":
+                    dumpless += 1
+                    if dumpless > MAX_DUMPLESS_READS:
+                        log("warning", "the screen would not produce a UI dump "
+                                       "after %d tries; this is the phone, not "
+                                       "the mailbox", dumpless)
+                        return RESULT_NO_DUMP
+                    log("info", "no UI dump on the email screen (%d/%d) -- "
+                                "waiting and reading again",
+                        dumpless, MAX_DUMPLESS_READS)
+                    sleep(6)
+                    pending = None
+                    continue
                 log("warning", "the address would not stay in the field")
                 return RESULT_STUCK
             email_submits += 1

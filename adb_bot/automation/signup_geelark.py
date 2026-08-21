@@ -160,13 +160,17 @@ def already_attempted() -> set[str]:
     return seen
 
 
-def failed_mailboxes() -> set[str]:
-    """Addresses that could not be signed into a phone.
+# Google verdicts that are about the *address* and will not change on another
+# phone. Everything else that ends a sign-in -- a phone that would not dump, a
+# screen nobody has named, a device that died -- is about the run, and the
+# address goes back in the pool. Getting this list wrong in the generous
+# direction retires good mailboxes we cannot replace: `stuck` was on it for one
+# batch and cost five addresses from the only untested batch we had.
+SETTLED_MAILBOX_VERDICTS = ("wrong_password", "google_robot_check")
 
-    Google's verdict on one of these does not change between phones -- a wrong
-    password is wrong everywhere -- so offering the address again would spend
-    another launch to be told the same thing.
-    """
+
+def failed_mailboxes() -> set[str]:
+    """Addresses Google itself has ruled out, so they are not offered again."""
     bad: set[str] = set()
     if not LEDGER.exists():
         return bad
@@ -175,7 +179,10 @@ def failed_mailboxes() -> set[str]:
             row = json.loads(line)
         except ValueError:
             continue
-        if str(row.get("status") or "").startswith("mailbox-"):
+        status = str(row.get("status") or "")
+        if not status.startswith("mailbox-"):
+            continue
+        if status[len("mailbox-"):] in SETTLED_MAILBOX_VERDICTS:
             bad.add(str(row.get("email") or "").lower())
     return bad
 
