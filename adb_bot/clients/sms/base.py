@@ -34,6 +34,7 @@ SERVICE_INSTAGRAM = "instagram"
 COUNTRY_US = "US"
 COUNTRY_DE = "DE"
 COUNTRY_GB = "GB"
+COUNTRY_CA = "CA"
 
 # International dialling code per canonical country. Used to split an
 # international number into the part Instagram's form actually wants: its phone
@@ -43,6 +44,10 @@ DIALLING_CODES = {
     COUNTRY_US: "1",
     COUNTRY_DE: "49",
     COUNTRY_GB: "44",
+    # Canada shares +1 with the US. That is the point of having it: Instagram
+    # demonstrably texts +1 numbers, and SMSPool sells Canadian ones at $0.05
+    # against $0.42 for American.
+    COUNTRY_CA: "1",
 }
 
 # Where numbers are rented from unless a caller says otherwise.
