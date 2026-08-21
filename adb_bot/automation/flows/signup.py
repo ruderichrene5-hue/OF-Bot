@@ -623,7 +623,22 @@ MAX_REPEATS = 4
 #
 # Raise it again only against new evidence of a slow delivery, not on the
 # general feeling that longer is safer: longer is only safer if something
-# actually arrives late, and so far nothing has.
+# actually arrives late, and across 40 numbers that waited the full 150s, not
+# one ever did.
+#
+# **Delivery here is bimodal, and that shapes how this can bite.** The two slow
+# codes -- 68s and 77s, on different phones in different runs -- arrived within
+# one second of each other. They were not drifting; the provider was holding a
+# backlog and flushed it at 16:12:24, while every other code that day came in
+# 0s or 3s. So a number is either answered at once or stuck behind a stall that
+# clears for everyone together.
+#
+# The failure that implies is not gradual. A stall lasting a little longer than
+# that one costs not one number but every number waiting in the window, across
+# every phone running -- so it will present as a fleet-wide SMS outage rather
+# than as variance. Several runs reporting `no_number` in the same minute is
+# that signature, and it means "the provider stalled", not "the pool is
+# burned".
 CODE_WAIT_SECONDS = 90
 
 # How long to wait for the mail. Longer than the SMS budget because nothing is
