@@ -587,6 +587,41 @@ _CONFIRM_WITH_CODE_LABELS = (
     "Send a code", "Use a code", "Confirm another way",
 )
 
+# Instagram saying the handle is spoken for. Both wordings appear together on
+# the same screen: a human sentence and an accessibility label.
+_USERNAME_TAKEN_MARKERS = (
+    "is not available",
+    "input username is invalid",
+    "username isn't available",
+    "that username is taken",
+)
+
+# How many rejected handles to work through before giving up. Each costs about
+# 28 seconds of a phone that lives roughly fifteen minutes.
+MAX_USERNAME_REJECTIONS = 4
+
+
+def next_username(rejected: str, attempt: int) -> str:
+    """A different handle after Instagram refuses one.
+
+    Deliberately not Instagram's own suggestion, which sits in the field's hint
+    and is tempting to reuse: those are minted from the real name and collide
+    with the pattern every other account here already uses. A short numeric
+    tail keeps the handle recognisably ours and is what the identity generator
+    would have produced anyway.
+
+    Bounded to Instagram's 30-character limit by trimming the stem, never the
+    tail -- a truncated tail is how two accounts end up asking for the same
+    handle again.
+    """
+    import random as _random
+
+    tail = str(_random.randint(10, 9999))
+    stem = "".join(ch for ch in rejected if ch.isalnum() or ch in "._")
+    stem = stem.rstrip("0123456789") or "user"
+    return (stem[:30 - len(tail)] + tail)
+
+
 # The way off any verification method this fleet cannot perform.
 _ANOTHER_WAY_LABELS = (
     "Try another way", "TRY ANOTHER WAY", "Try Another Way",
@@ -624,6 +659,9 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
     repeats = 0
     loading_waits = 0
     app_restarts = 0
+    # Handles Instagram has refused. Counted so a run cannot spend its whole
+    # phone cycling through names.
+    rejections = 0
     empty_reads = 0
     code_submitted = False
     done_flags = set()
@@ -994,6 +1032,21 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 # Arrives holding Instagram's own suggestion, which is why this
                 # is a fill and not a "tap Next".
                 progressed = True
+                if any(marker in text for marker in _USERNAME_TAKEN_MARKERS):
+                    # Instagram has rejected this handle, and it will reject it
+                    # every time: retyping the same one is what the repeat
+                    # guard sees, so the run died "username did not advance in
+                    # 4 tries" on a screen that was telling us plainly what was
+                    # wrong. Change the handle instead.
+                    rejected = identity.username
+                    identity.username = next_username(rejected, rejections)
+                    rejections += 1
+                    log("info", "username %s is taken; trying %s",
+                        rejected, identity.username)
+                    if rejections > MAX_USERNAME_REJECTIONS:
+                        return finish(RESULT_STUCK,
+                                      f"{rejections} usernames rejected in a "
+                                      f"row, last {rejected}")
                 driver.fill(("username",), identity.username, "username")
                 driver.dismiss_keyboard()
                 driver.tap_label(_SUBMIT_LABELS)
