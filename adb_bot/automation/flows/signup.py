@@ -710,6 +710,17 @@ _USERNAME_VALID_MARKERS = (
     "username is available",
 )
 
+# Instagram refusing a number as malformed, before it ever tries to text it.
+# This is about the number, not the format we typed it in: `+12274442163` was
+# rejected this way while `+19382778361` went through in exactly the same
+# shape minutes earlier. Retrying the same number cannot help -- the flow has
+# to swap it, which is what it already does when no code arrives.
+_PHONE_INVALID_MARKERS = (
+    "mobile number is invalid",
+    "your mobile number may be incorrect",
+    "phone number is invalid",
+)
+
 # How many rejected handles to work through before giving up. Each costs about
 # 28 seconds of a phone that lives roughly fifteen minutes.
 MAX_USERNAME_REJECTIONS = 4
@@ -781,6 +792,11 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
     # that without typing first would take a handle minted from the real name,
     # which is the pattern every other account here already uses.
     username_filled = False
+    # How many times an accepted username has been submitted. The second
+    # submit takes a different route rather than repeating one that did not
+    # work -- repeating an identical action is what the repeat guard exists to
+    # catch, and it caught this.
+    username_submits = 0
     empty_reads = 0
     code_submitted = False
     done_flags = set()
@@ -1001,6 +1017,17 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     sleep(6)
                     continue
 
+                if lease is not None and any(marker in text
+                                             for marker in
+                                             _PHONE_INVALID_MARKERS):
+                    # Instagram will not even try this number. Retyping it just
+                    # earns the same rejection -- four times, then a spent
+                    # phone. Swap it, and do not count it against the provider:
+                    # the number was delivered to us fine, Instagram declined
+                    # to use it.
+                    log("info", "instagram calls %s invalid; swapping it",
+                        lease.e164)
+                    release(False)
                 if lease is None:
                     if numbers_used >= MAX_NUMBER_ATTEMPTS:
                         return finish(RESULT_NO_NUMBER,
@@ -1183,10 +1210,27 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     # there is nothing left to type -- only a button to press.
                     # Retyping here is the loop that spent a run's whole
                     # budget while the screen said the handle was valid.
-                    log("info", "instagram accepts %s; submitting",
-                        identity.username)
-                    driver.dismiss_keyboard()
-                    driver.tap_label(_SUBMIT_LABELS)
+                    username_submits += 1
+                    if username_submits == 1:
+                        log("info", "instagram accepts %s; submitting",
+                            identity.username)
+                        driver.dismiss_keyboard()
+                        driver.tap_label(_SUBMIT_LABELS)
+                    else:
+                        # The tap landed and the screen did not move: five
+                        # identical reads, `Next` enabled, `input username is
+                        # valid` on screen. Same shape as Google's email form,
+                        # and the same answer -- submit the field with the
+                        # IME's own action, which is the one thing a tap on the
+                        # button cannot do.
+                        log("info", "tapping Next did not move the username "
+                                    "screen; submitting with the keyboard")
+                        submitter = getattr(driver, "submit_with_keyboard",
+                                            None)
+                        if callable(submitter):
+                            submitter()
+                        else:
+                            driver.tap_label(_SUBMIT_LABELS)
                     sleep(8)
                     continue
                 if any(marker in text for marker in _USERNAME_TAKEN_MARKERS):

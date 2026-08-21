@@ -197,6 +197,25 @@ class AdbSignupDriver(AdbChallengeDriver):
         self.adb_client.run_command(f"adb -s {self.target} shell input keyevent 4")
         time.sleep(KEYBOARD_SETTLE)
 
+    def submit_with_keyboard(self) -> None:
+        """Submit the focused field using the IME's own action key.
+
+        The thing a tap on the button cannot do. Google's email screen needed
+        this when tapping NEXT left the form redrawing itself, and Instagram's
+        username screen does the same: it reports `input username is valid`,
+        keeps `Next` enabled, and does not move when it is tapped.
+
+        Deliberately without dismissing the keyboard first -- the IME action
+        only exists while the keyboard is up, which is exactly why this reaches
+        a case tapping cannot.
+        """
+        if not self.act:
+            self._refuse("submit with the keyboard")
+            return
+        self.adb_client.run_command(
+            f"adb -s {self.target} shell input keyevent 66")
+        time.sleep(KEYBOARD_SETTLE)
+
     # --- the date picker ------------------------------------------------------
     def _picker_inputs(self, root):
         out = []
