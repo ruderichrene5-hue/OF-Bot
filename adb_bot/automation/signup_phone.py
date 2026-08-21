@@ -64,6 +64,66 @@ MIN_VERIFY_SECONDS = 150
 ASSIGNMENTS = Path.home() / ".adb_bot" / "mailboxes.json"
 
 
+class MlxHost:
+    """Launch and stop one MultiLogin phone.
+
+    The three steps between -- sign the mailbox in, install the apps, create the
+    account -- are the same wherever the phone is hosted, and were written
+    against MultiLogin only because that is where the fleet lived. Keeping the
+    host behind this seam is what lets the identical, hard-won chain run on
+    Geelark without a second copy of it drifting out of step.
+    """
+
+    def __init__(self, clients, args) -> None:
+        self.clients = clients
+        self.args = args
+
+    def launch(self, profile_id: str, logger):
+        self.clients.launcher.start_profiles([profile_id])
+        return prepare_profile_for_adb(
+            profile_id, self.clients.api, self.clients.adb_enable, logger,
+            max_attempts=self.args.readiness_attempts,
+            wait_seconds=self.args.readiness_wait,
+            launcher_client=self.clients.launcher)
+
+    def shutdown(self, profile_id: str, logger) -> None:
+        try:
+            self.clients.shutdown.shutdown_profiles([profile_id])
+        except Exception as exc:
+            logger.warning("signup_phone: shutdown failed for %s (%s)",
+                           profile_id, exc)
+
+
+class GeelarkHost:
+    """Launch and stop one Geelark cloud phone.
+
+    Stopping matters more here than on MultiLogin: a Geelark phone left running
+    bills by the minute *and* holds one of only four parallel slots, so a
+    forgotten phone stalls the next run as well as costing money.
+    """
+
+    def __init__(self, transport=None, args=None) -> None:
+        from adb_bot.clients.geelark import GeelarkTransport
+
+        self.transport = transport or GeelarkTransport()
+        self.args = args
+
+    def launch(self, profile_id: str, logger):
+        from adb_bot.clients.geelark import prepare_geelark_profile_for_adb
+
+        return prepare_geelark_profile_for_adb(
+            profile_id, self.transport, logger=logger)
+
+    def shutdown(self, profile_id: str, logger) -> None:
+        from adb_bot.clients.geelark import release_geelark_phone
+
+        try:
+            release_geelark_phone(profile_id, self.transport, logger=logger)
+        except Exception as exc:
+            logger.warning("signup_phone: shutdown failed for %s (%s)",
+                           profile_id, exc)
+
+
 def load_assignment(profile_name: str, path: Path | None = None) -> dict:
     path = path or ASSIGNMENTS
     if not path.exists():
@@ -78,7 +138,7 @@ def load_assignment(profile_name: str, path: Path | None = None) -> dict:
     return data[profile_name]
 
 
-def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
+def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
     profile_id = str(profile_item.get("id"))
     name = str(profile_item.get("serial_name") or profile_id)
     identity = make_identity()
@@ -86,7 +146,12 @@ def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
     identity.email_password = box.get("password", "")
 
     out = {"profile": name, "id": profile_id, "email": box["address"],
-           "username": identity.username, "steps": {}}
+           "username": identity.username, "steps": {},
+           # The object itself, not just its handle: a caller that has to write
+           # the account somewhere else afterwards -- the Geelark remark, the
+           # mailbox claim -- needs the password and full name too, and
+           # rebuilding an identity from its username would invent a new one.
+           "identity": identity}
 
     print(f"\n{'=' * 68}\n{name} ({profile_id})")
     print(f"  mailbox  {box['address']}")
@@ -106,12 +171,7 @@ def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
 
     started = time.monotonic()
     try:
-        clients.launcher.start_profiles([profile_id])
-        profile = prepare_profile_for_adb(
-            profile_id, clients.api, clients.adb_enable, logger,
-            max_attempts=args.readiness_attempts,
-            wait_seconds=args.readiness_wait,
-            launcher_client=clients.launcher)
+        profile = host.launch(profile_id, logger)
         if not profile:
             out["status"] = "not-ready"
             return out
@@ -207,11 +267,7 @@ def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
         return out
     finally:
         out["elapsed"] = int(time.monotonic() - started)
-        try:
-            clients.shutdown.shutdown_profiles([profile_id])
-        except Exception as exc:
-            logger.warning("signup_phone: shutdown failed for %s (%s)",
-                           profile_id, exc)
+        host.shutdown(profile_id, logger)
         locks.release(profile_id)
 
 
@@ -308,7 +364,8 @@ def main(argv=None) -> int:
             print(f"[skip] no MLX profile named {wanted!r}", file=sys.stderr)
             continue
         box = load_assignment(str(item.get("serial_name")), args.assignments)
-        results.append(run_phone(item, box, clients, adb_client, args, logger))
+        results.append(run_phone(item, box, MlxHost(clients, args), adb_client,
+                                 args, logger))
 
     print(f"\n{'=' * 68}")
     for r in results:
