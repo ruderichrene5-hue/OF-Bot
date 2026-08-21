@@ -104,7 +104,7 @@ def spent_locally() -> set[str]:
 
 def mailbox_queue(token: str | None = None) -> list[dict]:
     """Free mailboxes, best batch first, minus any already spent here."""
-    used = spent_locally()
+    used = spent_locally() | failed_mailboxes()
     free = [r for r in signup_mailboxes.free_mailboxes(token=token)
             if str((r.get("fields") or {}).get("Gmail Account") or "").lower()
             not in used]
@@ -123,21 +123,61 @@ def new_phones(transport=None) -> list[dict]:
         str(p.get("serialName") or "")))
 
 
-def already_attempted() -> set[str]:
-    """Phone ids this pipeline has already spent a launch on.
+def reached_instagram(status: str) -> bool:
+    """Did this run get far enough for Instagram to have seen the address?
 
-    A phone whose signup failed still had a mailbox claimed against it, so
-    retrying it silently would burn a second address for the same phone.
+    The dividing line for both of the decisions below. `run_phone` prefixes its
+    early exits -- `mailbox-...`, `install-...` -- and returns a bare signup
+    result once the account chain itself starts. Only in that second case has
+    anything irreversible happened.
+    """
+    status = str(status or "")
+    if not status:
+        return False
+    early = ("mailbox-", "install-")
+    return not (status.startswith(early)
+                or status in ("dry-run", "busy", "not-ready", "unreachable"))
+
+
+def already_attempted() -> set[str]:
+    """Phone ids that have really been spent.
+
+    A phone whose *mailbox* failed is untouched -- Instagram never opened on
+    it -- so it belongs back in the queue with a different address. Retiring it
+    would have thrown away a good phone for a bad Gmail row, and there are far
+    more phones than working mailboxes to waste.
     """
     seen: set[str] = set()
     if not LEDGER.exists():
         return seen
     for line in LEDGER.read_text().splitlines():
         try:
-            seen.add(str(json.loads(line).get("phone_id")))
+            row = json.loads(line)
         except ValueError:
             continue
+        if reached_instagram(row.get("status")):
+            seen.add(str(row.get("phone_id")))
     return seen
+
+
+def failed_mailboxes() -> set[str]:
+    """Addresses that could not be signed into a phone.
+
+    Google's verdict on one of these does not change between phones -- a wrong
+    password is wrong everywhere -- so offering the address again would spend
+    another launch to be told the same thing.
+    """
+    bad: set[str] = set()
+    if not LEDGER.exists():
+        return bad
+    for line in LEDGER.read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if str(row.get("status") or "").startswith("mailbox-"):
+            bad.add(str(row.get("email") or "").lower())
+    return bad
 
 
 def record_outcome(row: dict) -> None:
@@ -157,8 +197,16 @@ def write_back(phone: dict, identity, address: str, status: str,
     account sitting behind "confirm you're human" is real but cannot post, and
     tagging it would say the migration is further along than it is.
     """
-    remark = (f"IG:@{identity.username} | PW:{identity.password} | "
-              f"MAIL:{address} | SIGNUP:{status}")
+    # Two different facts, kept in two different clauses. A run that died at
+    # the Google sign-in has an Instagram handle in memory and no account
+    # anywhere, and writing `IG:@someone` for it would invent one -- the same
+    # conflation that once erased the knowledge that two accounts' Instagram
+    # credentials were good.
+    if reached_instagram(status):
+        remark = (f"IG:@{identity.username} | PW:{identity.password} | "
+                  f"MAIL:{address} | SIGNUP:{status}")
+    else:
+        remark = f"MAIL:{address} | SIGNUP-BLOCKED:{status} | no account made"
     tag_ids = [t.get("id") for t in (phone.get("tags") or []) if t.get("id")]
     try:
         if status == signup.RESULT_CREATED:
@@ -206,12 +254,18 @@ def run_one(phone: dict, record: dict, args, logger, transport) -> dict:
     if args.apply:
         identity = out.get("identity")
         if identity is not None:
-            write_back(phone, identity, box["address"],
-                       str(out.get("status")), transport, logger)
-            # Claimed whatever the outcome: the address has been typed into
-            # Google and, on anything past the mailbox step, into Instagram
-            # too. Leaving it "free" would hand it to the next phone.
-            claim_mailbox(record, identity, phone, apply=True, logger=logger)
+            status = str(out.get("status"))
+            write_back(phone, identity, box["address"], status, transport,
+                       logger)
+            # Claimed only once Instagram has actually seen the address.
+            # Claiming on a failed Google sign-in costs a pool row and writes a
+            # `Profile Creation` entry for somebody who does not exist -- which
+            # is exactly what the first batch did, twice, before this check.
+            if reached_instagram(status):
+                claim_mailbox(record, identity, phone, apply=True,
+                              logger=logger)
+            else:
+                print(f"  mailbox left free: {box['address']} ({status})")
         record_outcome({k: v for k, v in out.items() if k != "identity"})
     return out
 
