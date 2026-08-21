@@ -45,6 +45,51 @@ class UsernameTakenTest(unittest.TestCase):
                                  signup.SCREEN_USERNAME)
 
 
+# Verbatim from `Jasmin new 4`. The handle was typed as `emma8613` and the
+# field renders it as `emma8_613` -- so a fill that insists on an exact echo
+# can never succeed, however many times it tries.
+VALID_SCREEN = (
+    "create a username create a username add a username or use our "
+    "suggestion. you can change this at any time. username username "
+    "emma8_613 username,emma620477 input username is valid. next next next "
+    "back"
+)
+
+
+class UsernameAcceptedTest(unittest.TestCase):
+    """A handle Instagram calls valid needs a button press, not more typing.
+
+    The flow retyped `emma8613` until its four-try budget ran out while the
+    screen said `input username is valid` and `Next` sat there enabled. Two
+    identical steps, byte for byte, and a run lost several screens past a
+    delivered SMS code.
+    """
+
+    def test_the_acceptance_is_visible_on_the_screen(self):
+        self.assertTrue(any(marker in VALID_SCREEN
+                            for marker in signup._USERNAME_VALID_MARKERS))
+
+    def test_a_rejection_is_never_read_as_an_acceptance(self):
+        """"invalid" contains "valid"; the markers must not collide."""
+        self.assertFalse(any(marker in TAKEN_SCREEN
+                             for marker in signup._USERNAME_VALID_MARKERS))
+
+    def test_an_acceptance_is_never_read_as_a_rejection(self):
+        self.assertFalse(any(marker in VALID_SCREEN
+                             for marker in signup._USERNAME_TAKEN_MARKERS))
+
+    def test_a_fresh_screen_is_neither(self):
+        """Nothing has been typed yet, so there is nothing to accept."""
+        self.assertFalse(any(marker in FRESH_SCREEN
+                             for marker in signup._USERNAME_VALID_MARKERS))
+        self.assertFalse(any(marker in FRESH_SCREEN
+                             for marker in signup._USERNAME_TAKEN_MARKERS))
+
+    def test_it_is_still_the_username_screen(self):
+        self.assertEqual(signup.classify_signup_screen(VALID_SCREEN),
+                         signup.SCREEN_USERNAME)
+
+
 class NextUsernameTest(unittest.TestCase):
 
     def test_the_new_handle_differs_from_the_rejected_one(self):

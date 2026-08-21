@@ -627,6 +627,21 @@ _USERNAME_TAKEN_MARKERS = (
     "that username is taken",
 )
 
+# Instagram saying the box is fine as it stands. Checked only after the
+# rejection markers, which must win: "input username is invalid" is not
+# matched by "input username is valid", but the reverse order would still be
+# asking for trouble the day Instagram rewords one of them.
+#
+# This is what breaks the retype loop. Instagram decorates the value it renders
+# -- a handle typed as `emma8613` came back as `emma8_613` -- so a fill that
+# insists the field echo back exactly what was typed can never succeed, and the
+# flow retyped a username Instagram had already accepted until its budget ran
+# out, with `Next` sitting there enabled the whole time.
+_USERNAME_VALID_MARKERS = (
+    "input username is valid",
+    "username is available",
+)
+
 # How many rejected handles to work through before giving up. Each costs about
 # 28 seconds of a phone that lives roughly fifteen minutes.
 MAX_USERNAME_REJECTIONS = 4
@@ -693,6 +708,11 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
     # Handles Instagram has refused. Counted so a run cannot spend its whole
     # phone cycling through names.
     rejections = 0
+    # Whether our handle has been put in the box at all. The screen arrives
+    # holding Instagram's own suggestion, which is also "valid" -- accepting
+    # that without typing first would take a handle minted from the real name,
+    # which is the pattern every other account here already uses.
+    username_filled = False
     empty_reads = 0
     code_submitted = False
     done_flags = set()
@@ -1065,6 +1085,21 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 # Arrives holding Instagram's own suggestion, which is why this
                 # is a fill and not a "tap Next".
                 progressed = True
+                if (username_filled
+                        and not any(marker in text
+                                    for marker in _USERNAME_TAKEN_MARKERS)
+                        and any(marker in text
+                                for marker in _USERNAME_VALID_MARKERS)):
+                    # Instagram has already accepted what is in the box, so
+                    # there is nothing left to type -- only a button to press.
+                    # Retyping here is the loop that spent a run's whole
+                    # budget while the screen said the handle was valid.
+                    log("info", "instagram accepts %s; submitting",
+                        identity.username)
+                    driver.dismiss_keyboard()
+                    driver.tap_label(_SUBMIT_LABELS)
+                    sleep(8)
+                    continue
                 if any(marker in text for marker in _USERNAME_TAKEN_MARKERS):
                     # Instagram has rejected this handle, and it will reject it
                     # every time: retyping the same one is what the repeat
@@ -1081,6 +1116,7 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                                       f"{rejections} usernames rejected in a "
                                       f"row, last {rejected}")
                 driver.fill(("username",), identity.username, "username")
+                username_filled = True
                 driver.dismiss_keyboard()
                 driver.tap_label(_SUBMIT_LABELS)
                 sleep(8)
