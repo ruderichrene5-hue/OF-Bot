@@ -387,6 +387,20 @@ def verify_account(profile_id: str, name: str, identity, target: str,
     country = getattr(args, "country", None) or DEFAULT_COUNTRY
     print(f"  verification: starting, {int(seconds)}s of phone left "
           f"(numbers cost money)")
+
+    # Android's own dialogs sit on top of whatever Instagram is showing, and
+    # the verification loop has no idea what they are: on 2026-08-21 an account
+    # behind "confirm you're human" was read as `needs_human` because
+    # "allow instagram to send you notifications?" was in front of it. The
+    # challenge was never seen, and the report blamed the account.
+    from adb_bot.automation.flows import interruptions
+
+    try:
+        interruptions.handle_permission_prompts(target, adb_client,
+                                                logger=logger, flow="signup")
+    except Exception as exc:
+        logger.warning("signup_phone: could not clear permission prompts (%s)",
+                       exc)
     challenge_driver = AdbChallengeDriver(target, adb_client, logger=logger,
                                           act=True,
                                           screenshots=args.screenshots)

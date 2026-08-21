@@ -832,6 +832,13 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 # not in front. Starting it again is nearly free.
                 starter = getattr(driver, "restart_app", None)
                 if app_restarts < MAX_APP_RESTARTS and callable(starter) and starter():
+                    # Give the number back first. A restart puts Instagram at
+                    # "Join Instagram" and the flow walks from the top, leasing
+                    # a fresh number -- so any number already rented is now
+                    # unreachable, and holding it means paying for one nobody
+                    # will ever type. Not counted as a failure: the number was
+                    # fine, the app went away.
+                    release(False)
                     app_restarts += 1
                     log("info", "%s; starting Instagram again (%d/%d)",
                         "on the home screen" if screen == SCREEN_LAUNCHER
