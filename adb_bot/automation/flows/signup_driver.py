@@ -197,6 +197,39 @@ class AdbSignupDriver(AdbChallengeDriver):
         self.adb_client.run_command(f"adb -s {self.target} shell input keyevent 4")
         time.sleep(KEYBOARD_SETTLE)
 
+    def field_holds(self, hints, value: str) -> bool:
+        """Does an input field currently hold exactly `value`?
+
+        Equality against the field, not a search of the screen text. The
+        difference is not academic: Instagram mutates a submitted handle by
+        appending digits, so `sara65` becomes `sara652203` -- and a substring
+        test against the whole screen says our handle is present when the box
+        holds something else entirely. That misfire submitted Instagram's
+        value while logging ours, seven times round a name/username loop,
+        until the run gave up after thirty screens.
+
+        Returns False when the screen cannot be read: "I cannot see it" must
+        not be reported as "it is there".
+        """
+        root = self._root
+        if root is None:
+            root, _xml = self._dump()
+            if root is None:
+                return False
+            self._root = root
+        wanted = str(value).strip().lower()
+        if not wanted:
+            return False
+        hints = tuple(str(h).lower() for h in (hints or ()))
+        for candidate in self._edit_fields(root):
+            if hints:
+                hint = str(candidate.get("hint", "") or "").lower()
+                if not any(h in hint for h in hints):
+                    continue
+            if str(candidate.get("value", "") or "").strip().lower() == wanted:
+                return True
+        return False
+
     def submit_with_keyboard(self) -> None:
         """Submit the focused field using the IME's own action key.
 

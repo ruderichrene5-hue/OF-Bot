@@ -1215,7 +1215,19 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 # `input username is valid` is true, just not about us. Without
                 # this check the flow submits a field it never retyped, four
                 # times, and calls itself stuck; three phones went that way.
-                ours_on_screen = identity.username.lower() in text
+                # Equality against the field, never a search of the screen
+                # text. Instagram mutates a submitted handle by appending
+                # digits -- `sara65` comes back as `sara652203` -- so a
+                # substring test reports our handle present while the box holds
+                # something else, and the accept path then submits Instagram's
+                # value while logging ours. One run went seven times round a
+                # name/username loop that way before giving up at thirty
+                # screens. Short handles make it near-certain.
+                holds = getattr(driver, "field_holds", None)
+                if callable(holds):
+                    ours_on_screen = holds(("username",), identity.username)
+                else:
+                    ours_on_screen = identity.username.lower() in text
                 if (username_filled and ours_on_screen
                         and not any(marker in text
                                     for marker in _USERNAME_TAKEN_MARKERS)
