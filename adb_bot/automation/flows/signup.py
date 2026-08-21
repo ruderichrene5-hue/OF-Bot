@@ -43,6 +43,7 @@ SCREEN_EMAIL = "email"                  # "What's your email address?" (we avoid
 SCREEN_CODE = "code"                    # "Enter the confirmation code"
 SCREEN_CALL_CONFIRM = "call_confirm"    # "Confirm ... automatically with a phone call"
 SCREEN_SEND_SMS = "send_sms"            # "Send SMS to confirm your account" (outbound!)
+SCREEN_METHOD_CHOOSER = "method_chooser"  # "Change mobile number / Confirm by email"
 SCREEN_PASSWORD = "password"            # "Create a password"
 SCREEN_BIRTHDAY = "birthday"            # "What's your date of birth?"
 SCREEN_DATE_PICKER = "date_picker"      # the Android spinner dialog
@@ -125,6 +126,20 @@ _SEND_SMS_MARKERS = (
     "tap to open your default sms app",
 )
 
+# What `Try another way` actually leads to, seen 2026-08-21 on a UK number:
+# `Dismiss / Change mobile number / Confirm by email / Close`.
+#
+# Read that list carefully, because it is the whole finding. There is **no
+# option to receive an SMS code**. Instagram offered this number a phone call,
+# an outbound SMS, a different number, or email -- and never once offered to
+# text it. German numbers were offered the code route and simply never
+# received; British ones are refused it outright. Both are the same wall from
+# opposite sides: a rented virtual number cannot finish this signup.
+_METHOD_CHOOSER_MARKERS = (
+    "change mobile number",
+    "confirm by email",
+)
+
 _EMAIL_MARKERS = (
     "what's your email address",
     "whats your email address",
@@ -151,6 +166,14 @@ _BIRTHDAY_MARKERS = (
     "whats your date of birth",
     "use your own date of birth",
     "why do i need to provide my date of birth",
+    # The US build says "birthday" where the German one says "date of birth".
+    # Same screen, same field, different noun -- and on 2026-08-21 it stopped
+    # the first run ever to get a code delivered, one screen past the wall
+    # everything else had been stuck behind.
+    "what's your birthday",
+    "whats your birthday",
+    "use your own birthday",
+    "why do i need to provide my birthday",
 )
 
 # The Android date-picker dialog. It has no Instagram wording at all -- just the
@@ -286,6 +309,7 @@ _ORDERED_MARKERS = (
     # Instagram has already accepted.
     (SCREEN_CALL_CONFIRM, _CALL_CONFIRM_MARKERS),
     (SCREEN_SEND_SMS, _SEND_SMS_MARKERS),
+    (SCREEN_METHOD_CHOOSER, _METHOD_CHOOSER_MARKERS),
     (SCREEN_EMAIL, _EMAIL_MARKERS),
     (SCREEN_PHONE, _PHONE_MARKERS),
     (SCREEN_PERMISSIONS, _PERMISSIONS_MARKERS),
@@ -456,6 +480,12 @@ RESULT_CREATED = "created"
 RESULT_CREATED_UNVERIFIED = "created_unverified"
 RESULT_UNKNOWN_SCREEN = "unknown_screen"
 RESULT_NO_NUMBER = "no_number"
+# Instagram would not text this number at all -- it offered a call, an outbound
+# SMS, a different number or email, and never the code route. Deliberately not
+# `no_number`, which means the opposite: Instagram *did* send a code and the
+# number never received it. One says the pool is burned, the other says the
+# number type is refused, and they need different answers.
+RESULT_NUMBER_REFUSED = "number_refused"
 RESULT_BANNED = "banned"
 RESULT_STUCK = "stuck"
 RESULT_PHONE_LOST = "phone_lost"
@@ -847,6 +877,24 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 log("info", "declined sending an SMS; asking for another way")
                 progressed = True
                 sleep(6)
+
+            elif screen == SCREEN_METHOD_CHOOSER:
+                labels = [str(x) for x in (driver.clickable_labels() or ())]
+                if mailbox is not None and driver.tap_label(
+                        ("Confirm by email", "CONFIRM BY EMAIL")):
+                    log("info", "no SMS option offered; confirming by email")
+                    progressed = True
+                    sleep(6)
+                    continue
+                # Nothing here can be done with a rented number. Another
+                # number from the same pool would be refused the same way, so
+                # spending two more to be told twice more is waste: stop and
+                # say which methods were actually offered.
+                release(False)
+                return finish(
+                    RESULT_NUMBER_REFUSED,
+                    "Instagram offered no SMS-code option for this number; "
+                    "it offered: " + ", ".join(labels[:8]))
 
             elif screen == SCREEN_CODE:
                 if code_submitted:
