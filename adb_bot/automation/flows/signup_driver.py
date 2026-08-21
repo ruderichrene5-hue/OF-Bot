@@ -33,6 +33,35 @@ MAX_CLEAR = 60
 # real button rather than on a keyboard that is still animating away.
 KEYBOARD_SETTLE = 1.0
 
+# Characters Android and Instagram render as punctuation but which are not the
+# ASCII ones anybody types into a label list. Android's own permission dialog
+# spells its button `DON’T ALLOW` with U+2019, so a list containing "DON'T
+# ALLOW" matched nothing and the run sat on the dialog until its repeat guard
+# gave up -- one screen after the tap that creates the account.
+#
+# Normalising both sides is the fix rather than adding a second spelling of
+# every label: the same character turns up in "I didn’t get the code" and
+# anywhere else Instagram writes an apostrophe, and each of those would
+# otherwise be its own silent miss.
+_PUNCTUATION = {
+    "’": "'",      # right single quotation mark
+    "‘": "'",      # left single quotation mark
+    "ʼ": "'",      # modifier letter apostrophe
+    "“": '"',
+    "”": '"',
+    "–": "-",      # en dash
+    "—": "-",      # em dash
+    " ": " ",      # non-breaking space
+}
+
+
+def normalise_label(value) -> str:
+    """A label reduced to what two spellings of it have in common."""
+    text = str(value or "")
+    for fancy, plain in _PUNCTUATION.items():
+        text = text.replace(fancy, plain)
+    return " ".join(text.split()).strip().lower()
+
 
 class AdbSignupDriver(AdbChallengeDriver):
     """The signup flow's device seam."""
@@ -75,11 +104,11 @@ class AdbSignupDriver(AdbChallengeDriver):
             self._log("warning", "no screen to tap %s on", list(labels))
             return False
 
-        wanted = [str(label).strip().lower() for label in labels]
+        wanted = [normalise_label(label) for label in labels]
         for node in root.iter():
             attrs = node.attrib
             for key in ("text", "content-desc"):
-                value = str(attrs.get(key, "") or "").strip().lower()
+                value = normalise_label(attrs.get(key, ""))
                 if not value or value not in wanted:
                     continue
                 target = self._clickable_ancestor(node, root)
