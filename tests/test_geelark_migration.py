@@ -132,6 +132,50 @@ class Classify(unittest.TestCase):
                     self._state(remark=f"IG:@x | PW:p | LOGIN:{label} 2026-08-20"),
                     "retry")
 
+    def test_twin_and_approval_failures_are_untested(self):
+        """Reading the code off the account's old MultiLogin phone is the other
+        route to a security code. A twin that cannot answer leaves the account
+        untested, exactly like a phone that would not boot."""
+        for label in ("TWIN-NOT-READY", "APPROVAL-DID-NOT-LAND",
+                      "INSTAGRAM-NEVER-OPENED"):
+            with self.subTest(label=label):
+                self.assertEqual(
+                    self._state(remark=f"IG:@x | PW:p | LOGIN:{label} 2026-08-21"),
+                    "retry")
+
+    def test_a_phone_fault_on_the_mailbox_clause_is_not_a_mailbox_problem(self):
+        """`MAILBOX-PHONE-NOT-READY` is a cloud phone that would not come up
+        during the mailbox step. Filing it under "mailbox problem" blames
+        Google for a phone failing to boot, and hides it from the untested
+        count where it belongs."""
+        self.assertEqual(
+            self._state(remark="IG:@x | PW:p | MAILBOX:MAILBOX-PHONE-NOT-READY"),
+            "retry")
+
+    def test_mailbox_stuck_is_a_mailbox_problem(self):
+        self.assertEqual(
+            self._state(remark="IG:@x | PW:p | MAILBOX:MAILBOX-STUCK"),
+            "mailbox")
+
+    def test_a_reachable_mailbox_does_not_override_the_login_result(self):
+        """`MAILBOX:OK-on-feed` is good news and must not pull a phone out of
+        `needs_code` into a problem bucket."""
+        self.assertEqual(
+            self._state(remark="IG:@x | PW:p | LOGIN:OK-needs-email-code "
+                               "| MAILBOX:OK-on-feed"),
+            "needs_code")
+
+    def test_a_reachable_mailbox_alone_leaves_the_phone_ready(self):
+        self.assertEqual(
+            self._state(remark="IG:@x | PW:p | MAILBOX:OK-on-feed"), "ready")
+
+    def test_unknown_mailbox_label_stays_a_mailbox_problem(self):
+        """Conservative in the other direction from LOGIN: the clause is
+        written by the mailbox half, so it lands where somebody reads it."""
+        self.assertEqual(
+            self._state(remark="IG:@x | PW:p | MAILBOX:SOMETHING-ELSE"),
+            "mailbox")
+
     def test_unknown_label_falls_through_to_untested(self):
         """The vocabulary lives in the Geelark client and will grow. An
         unrecognised result must never be silently counted as good."""

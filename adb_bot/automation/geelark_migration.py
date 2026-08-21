@@ -98,17 +98,38 @@ LOGIN_MEANING: dict[str, tuple[str, str]] = {
     # failed is the address that holds its code.
     "NO-CODE-ARRIVED": ("mailbox", "The code never arrived in the mailbox."),
     "CAPTCHA": ("mailbox", "Google put a robot check on the mailbox."),
+
+    # Reading the code off the account's OLD MultiLogin phone -- its "twin" --
+    # is the other route to a security code. When the twin is unusable the
+    # account was never tested, exactly like a phone that would not boot.
+    "TWIN-NOT-READY": ("retry", "The account's MultiLogin twin was not usable."),
+    "APPROVAL-DID-NOT-LAND": ("retry", "No approval or code arrived from the twin."),
+
+    # A second wording for the same fault, written by a different code path.
+    # Kept as its own key rather than normalised, because guessing that two
+    # labels mean one thing is how a real distinction gets erased by mistake.
+    "INSTAGRAM-NEVER-OPENED": ("retry", "Instagram never opened on the phone."),
 }
 
 # The `MAILBOX:` clause is scored on its own, because Instagram accepting a
 # password and that account's mailbox being reachable are independent facts --
 # writing one over the other cost two phones their known-good credentials once
 # already.
-MAILBOX_MEANING: dict[str, str] = {
-    "OK-on-feed": "Mailbox reachable.",
-    "WRONG-PASSWORD": "Google rejected the mailbox password.",
-    "CAPTCHA": "Google put a robot check on the mailbox.",
-    "NO-CODE-ARRIVED": "No code arrived at the mailbox.",
+#
+# Carries a bucket as well as a sentence, for the same reason `LOGIN_MEANING`
+# does: not everything that arrives on this clause is a mailbox fault.
+# `MAILBOX-PHONE-NOT-READY` is a *phone* that would not come up during the
+# mailbox step -- filing it under "mailbox problem" would blame Google for a
+# cloud phone failing to boot, and would hide it from the untested count where
+# it belongs.
+MAILBOX_MEANING: dict[str, tuple[str, str]] = {
+    "OK-on-feed": ("ok", "Mailbox reachable."),
+    "WRONG-PASSWORD": ("mailbox", "Google rejected the mailbox password."),
+    "CAPTCHA": ("mailbox", "Google put a robot check on the mailbox."),
+    "NO-CODE-ARRIVED": ("mailbox", "No code arrived at the mailbox."),
+    "MAILBOX-STUCK": ("mailbox", "The mailbox sign-in stopped making progress."),
+    "MAILBOX-PHONE-NOT-READY": ("retry",
+                                "The phone was not ready during the mailbox step."),
 }
 
 # Order the buckets are reported in: the ones a person can act on first, and
@@ -238,6 +259,17 @@ def classify(phone: dict) -> dict:
     }
 
 
+def _mailbox_meaning(label: str) -> tuple[str, str]:
+    """One `MAILBOX:` label as (bucket, sentence).
+
+    An unrecognised label falls through to `mailbox` rather than to `retry`,
+    which is the conservative choice *here*: the clause is written by the
+    mailbox half of the flow, so a mailbox problem is the better guess, and it
+    lands the phone in a bucket somebody reads rather than one they discount.
+    """
+    return MAILBOX_MEANING.get(label, ("mailbox", f"Mailbox result “{label}”."))
+
+
 def _state_for(tags: set[str], parsed: dict) -> tuple[str, str]:
     """The bucket and the sentence, kept apart from `classify`'s bookkeeping."""
     # An account this fleet *created* rather than recovered. Checked FIRST,
@@ -272,15 +304,17 @@ def _state_for(tags: set[str], parsed: dict) -> tuple[str, str]:
         # two: "wants an emailed code" and "the mailbox is captchaed" together
         # mean the account is fine and unreachable, which is a different errand
         # from a bad password.
-        if group == "needs_code" and parsed["mailbox"] in MAILBOX_MEANING:
-            if parsed["mailbox"] != "OK-on-feed":
-                return "mailbox", (f"{why} {MAILBOX_MEANING[parsed['mailbox']]}")
+        if group == "needs_code" and parsed["mailbox"]:
+            mail_group, mail_why = _mailbox_meaning(parsed["mailbox"])
+            if mail_group != "ok":
+                return mail_group, f"{why} {mail_why}"
         return group, why
 
     # Tried the mailbox but never got as far as a login result.
-    if parsed["mailbox"] and parsed["mailbox"] != "OK-on-feed":
-        return "mailbox", MAILBOX_MEANING.get(
-            parsed["mailbox"], f"Mailbox result “{parsed['mailbox']}”.")
+    if parsed["mailbox"]:
+        mail_group, mail_why = _mailbox_meaning(parsed["mailbox"])
+        if mail_group != "ok":
+            return mail_group, mail_why
 
     if parsed["has_credentials"]:
         return "ready", STATE_BLURBS["ready"]
