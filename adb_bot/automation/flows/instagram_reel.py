@@ -865,7 +865,7 @@ class InstagramReelUploadU2Flow:
                 d, target, want_handle, emit, logger=log)
         posted_as = None
         if want_handle and not account_ok:
-            flagged = self._account_flag_result_u2(d, profile, target, emit, "switching accounts")
+            flagged = self._account_flag_result_u2(d, profile, target, emit, "switching accounts", logger=log)
             if flagged:
                 return flagged
             # The phone demonstrably does not have this account, and it will not
@@ -919,7 +919,7 @@ class InstagramReelUploadU2Flow:
         # --- Step 1: open the reel composer ----------------------------------
         emit("info", "Opening reel composer for %s", target)
         if not self._open_reel_composer_u2(d, target, emit, log):
-            flagged = self._account_flag_result_u2(d, profile, target, emit, "opening the composer")
+            flagged = self._account_flag_result_u2(d, profile, target, emit, "opening the composer", logger=log)
             if flagged:
                 return flagged
             emit("warning", "Unable to open the Instagram reel composer for %s (leaving Instagram open)", target)
@@ -931,7 +931,7 @@ class InstagramReelUploadU2Flow:
         # --- Step 2: select REEL mode + first media --------------------------
         emit("info", "Selecting reel media for %s", target)
         if not self._select_media_u2(d, target, emit, log):
-            flagged = self._account_flag_result_u2(d, profile, target, emit, "selecting media")
+            flagged = self._account_flag_result_u2(d, profile, target, emit, "selecting media", logger=log)
             if flagged:
                 return flagged
             emit("warning", "Unable to select reel media for %s", target)
@@ -1003,7 +1003,7 @@ class InstagramReelUploadU2Flow:
             # Share was never tapped, so nothing can have gone out. Safe to
             # retry -- unless what blocked Share was an account flag, which no
             # number of retries will clear.
-            flagged = self._account_flag_result_u2(d, profile, target, emit, "the Share step")
+            flagged = self._account_flag_result_u2(d, profile, target, emit, "the Share step", logger=log)
             if flagged:
                 return flagged
             emit("warning", "Instagram reel upload (u2) did not complete successfully for %s "
@@ -1343,7 +1343,7 @@ class InstagramReelUploadU2Flow:
                   target, best_score, rid, desc, cls, bounds, best)
         return best
 
-    def _account_flag_result_u2(self, d, profile, target, emit, what: str):
+    def _account_flag_result_u2(self, d, profile, target, emit, what: str, logger=None):
         """If an IG block screen is what stopped the flow, return the result dict
         that says so; None if the screen isn't one.
 
@@ -1356,9 +1356,16 @@ class InstagramReelUploadU2Flow:
         Only pre-Share paths use it. After Share the post may exist, and the
         uncertain/verify path owns that decision -- flagging the account there
         could discard a live post.
+
+        The one screen this does NOT report is Instagram's "Was this you?"
+        login notice: `account_flag_u2` answers that itself and returns no flag.
         """
-        flag = instagram_module.account_flag_u2(d)
+        flag = instagram_module.account_flag_u2(d, logger=logger, target=target)
         if not flag:
+            # Also the path a "Was this you?" notice takes: `account_flag_u2`
+            # taps it away and reports no flag, so the run ends as an ordinary
+            # retryable failure and the next attempt finds a clear screen --
+            # instead of the account being parked for a person over one button.
             return None
         emit("warning", "Instagram flagged %s during %s: %s -- not a retryable failure",
              target, what, flag)

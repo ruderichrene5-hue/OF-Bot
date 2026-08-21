@@ -68,6 +68,7 @@ CHALLENGE_PHOTO = "photo"                   # asks for a photo to prove a human
 CHALLENGE_IMAGE_CAPTCHA = "image_captcha"   # asks for letters/digits in an image
 CHALLENGE_CONSENT = "consent"               # Meta consent / onboarding gate
 CHALLENGE_VERIFY_INTRO = "verify_intro"     # "confirm you're human" -- press Continue
+CHALLENGE_LOGIN_CONFIRM = "login_confirm"   # "Was this you?" -- press "This Was Me"
 CHALLENGE_BANNED = "banned"                 # not a challenge; the account is gone
 CHALLENGE_SIGNED_OUT = "signed_out"         # not a challenge; nobody is logged in
 
@@ -379,6 +380,14 @@ def classify_challenge(text: str | None) -> str:
     if ban_detection.classify_block_text(haystack) == ban_detection.KIND_BANNED:
         return CHALLENGE_BANNED
 
+    # Second, and ahead of the ordered markers: the "Was this you?" login notice
+    # describes unusual activity in the same words the real checkpoints use, so
+    # anything below would claim it first. It is also the cheapest screen in the
+    # list -- one button, no code, no number, no captcha -- and every profile
+    # parked behind one was parked for nothing.
+    if ban_detection.looks_like_login_confirm(haystack):
+        return CHALLENGE_LOGIN_CONFIRM
+
     for kind, markers in _ORDERED_MARKERS:
         if not any(marker in haystack for marker in markers):
             continue
@@ -540,6 +549,10 @@ MAX_PHONE_REFUSALS = 2
 # unchanged" makes them go and find out.
 MAX_CONSENT_ROUNDS = 2
 
+# The login notice is one button, so two goes is already generous; a third would
+# only mean we are tapping something that is not the button we think it is.
+MAX_LOGIN_CONFIRM_ROUNDS = 2
+
 # How many times a run will start Instagram again when the phone is sitting on
 # the Android home screen. `Jil 6` (2026-08-13) spent a whole launch, a
 # concurrency slot and a hand-back on this: Instagram was simply not running,
@@ -684,6 +697,7 @@ class _Session:
         self._captcha_images = 0
         self._refusals = 0
         self._consent_rounds = 0
+        self._login_confirm_rounds = 0
         self._number_takeovers = 0   # see `_handle_code`
         self._captcha_blind_reads = 0  # see `_handle_image_captcha`
         self._app_restarts = 0       # see `looks_like_launcher`
@@ -920,6 +934,9 @@ class _Session:
         if challenge == CHALLENGE_VERIFY_INTRO:
             return self._handle_verify_intro()
 
+        if challenge == CHALLENGE_LOGIN_CONFIRM:
+            return self._handle_login_confirm()
+
         if challenge == CHALLENGE_CONSENT:
             return self._handle_consent()
 
@@ -941,6 +958,29 @@ class _Session:
             return self._result(
                 RESULT_NEEDS_HUMAN,
                 "could not get past the screen introducing the challenge")
+        return None
+
+    def _handle_login_confirm(self):
+        """Tap "This Was Me" on Instagram's new-login notice.
+
+        Free, like the consent gates, and bounded the same way: a notice still
+        on screen after being answered is not being answered, and looping on it
+        would burn the run's rounds on one button. Whatever is behind it comes
+        back round the loop and is classified on its own terms -- confirming a
+        login is sometimes only the first of two screens.
+        """
+        if self._login_confirm_rounds >= MAX_LOGIN_CONFIRM_ROUNDS:
+            return self._result(
+                RESULT_NEEDS_HUMAN,
+                f"the \"Was this you?\" notice was still there after "
+                f"{self._login_confirm_rounds} attempts to confirm it")
+        self._login_confirm_rounds += 1
+
+        confirm = getattr(self.driver, "confirm_login_was_me", None)
+        if not callable(confirm) or not confirm():
+            return self._result(
+                RESULT_NEEDS_HUMAN,
+                "could not confirm the login on the \"Was this you?\" notice")
         return None
 
     def _handle_consent(self):

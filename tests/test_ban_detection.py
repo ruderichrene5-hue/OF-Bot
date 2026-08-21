@@ -191,3 +191,87 @@ class InterruptionsOutcomeTest(TestCase):
         self.assertEqual(interruptions.account_flag_for(interruptions.OUTCOME_ACTION_BLOCK), KIND_ACTION_BLOCK)
         self.assertIsNone(interruptions.account_flag_for(interruptions.OUTCOME_HANDLED))
         self.assertIsNone(interruptions.account_flag_for(interruptions.OUTCOME_NONE))
+
+
+class LoginConfirmTest(TestCase):
+    """Instagram's "Was this you?" new-login notice.
+
+    It reads like a checkpoint and is not one: nothing has to be solved,
+    received or proved, so the bot answers it. Everything here is about the two
+    ways that can go wrong -- calling a real checkpoint self-clearable, and
+    calling ordinary text a login notice and flagging an account over it.
+    """
+
+    # Real wordings, over the button pair Instagram shows under them.
+    SCREENS = (
+        ("We Detected An Unusual Login. Someone logged into your account from a "
+         "device you don't usually use. Was this you? This Was Me  This Wasn't Me"),
+        ("Someone tried to log in to your account. Was this you? "
+         "Yes, It Was Me   No, It Wasn't Me"),
+        ("New login from Chrome on Windows. Berlin, Germany. "
+         "That Was Me   That Wasn't Me"),
+        ("Suspicious login attempt. We noticed a login from a device you don't "
+         "usually use. This Was Me   Secure Account"),
+    )
+
+    def test_login_notices_classify_as_login_confirm(self):
+        for text in self.SCREENS:
+            self.assertEqual(classify_block_text(text),
+                             ban_detection.KIND_LOGIN_CONFIRM, text)
+            self.assertTrue(ban_detection.looks_like_login_confirm(text), text)
+
+    def test_it_outranks_the_checkpoint_whose_words_it_borrows(self):
+        """"We detected" is a human-verification marker. It must not win here.
+
+        This is the whole point of the kind: before it existed, every one of
+        these screens was reported as "Human Verification Required" and the
+        profile stopped posting until a person tapped one button.
+        """
+        text = ("We detected unusual activity. Was this you? "
+                "This Was Me   This Wasn't Me")
+        self.assertEqual(classify_block_text(text), ban_detection.KIND_LOGIN_CONFIRM)
+
+    def test_a_banned_account_still_reads_as_banned(self):
+        """A dead account can be showing an old login notice; ban wins."""
+        text = ("Your account has been suspended. Was this you? "
+                "This Was Me   This Wasn't Me")
+        self.assertEqual(classify_block_text(text), KIND_BANNED)
+
+    def test_a_real_checkpoint_is_untouched(self):
+        """No affirmative button -> nothing changes for these screens."""
+        for text in (
+            "Confirm you're human to use your account. Takes about 30 seconds. Continue",
+            "We detected unusual activity. Help us confirm it's you.",
+            ("Enter confirmation code. Enter the 6-digit confirmation code we sent "
+             "via SMS to +31613813164. Request new code"),
+        ):
+            self.assertEqual(classify_block_text(text), KIND_HUMAN_VERIFICATION, text)
+
+    def test_a_button_without_the_context_is_not_the_screen(self):
+        """The AND-gate. A message bubble reading "it was me" must never flag
+        an account, which is what a button-only test would have done."""
+        for text in (
+            "it was me",
+            "haha it was me. Send message. Reply",
+            "This Was Me",
+        ):
+            self.assertIsNone(classify_block_text(text), text)
+            self.assertFalse(ban_detection.looks_like_login_confirm(text), text)
+
+    def test_it_is_not_an_incident(self):
+        """No Airtable mapping and not in ALL_KINDS -- `instagram.py` tests
+        membership of that tuple to decide whether to flag the account, so a
+        login notice appearing there would park the profile all over again."""
+        self.assertIsNone(mapping_for(ban_detection.KIND_LOGIN_CONFIRM))
+        self.assertNotIn(ban_detection.KIND_LOGIN_CONFIRM, ban_detection.ALL_KINDS)
+
+    def test_the_refusing_buttons_are_not_affirmative_labels(self):
+        """The one tap that must never happen. "This Wasn't Me" starts a
+        password reset and loses the account for good, so it must not appear in
+        the tap list -- as a whole label or as a substring of one."""
+        for refusal in ("this wasn't me", "this wasn’t me", "that wasn't me",
+                        "no, it wasn't me", "secure account", "it wasn't me"):
+            self.assertNotIn(refusal, ban_detection.LOGIN_CONFIRM_BUTTON_LABELS)
+            for label in ban_detection.LOGIN_CONFIRM_BUTTON_LABELS:
+                self.assertNotIn(label, refusal,
+                                 f"{label!r} matches the refusing button {refusal!r}")

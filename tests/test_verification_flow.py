@@ -166,6 +166,10 @@ class FakeDriver:
         self.actions.append(("photo", None))
         return self._advance() if self.can_upload else False
 
+    def confirm_login_was_me(self):
+        self.actions.append(("login_confirm", None))
+        return self._advance()
+
     def capture_captcha_image(self):
         return self.captcha_image
 
@@ -1466,3 +1470,55 @@ def test_a_driver_that_cannot_restart_still_hands_back_cleanly():
     driver = _RestartingDriver(restarts_needed=99, can_restart=False)
     result = _run(driver)
     assert result.status == verification.RESULT_NEEDS_HUMAN
+
+
+SCREEN_LOGIN_NOTICE = (
+    "we detected an unusual login. someone logged into your account from a "
+    "device you don't usually use. was this you? this was me this wasn't me"
+)
+
+
+class LoginConfirmTest(FlowTestCase):
+    """The "Was this you?" notice, from the verification runner's side.
+
+    Every profile parked behind one of these was parked for nothing: the screen
+    needs no code, no number and no captcha, only the affirmative button. It is
+    classified ahead of the checkpoints because it describes unusual activity in
+    the same words they do.
+    """
+
+    def test_it_is_named_rather_than_read_as_a_checkpoint(self):
+        self.assertEqual(classify_challenge(SCREEN_LOGIN_NOTICE),
+                         verification_module.CHALLENGE_LOGIN_CONFIRM)
+
+    def test_the_chain_solves_it_without_a_number_or_a_solve(self):
+        result, driver, provider = self.run_chain([SCREEN_LOGIN_NOTICE, SCREEN_FEED])
+
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertEqual(driver.actions, [("login_confirm", None)])
+        self.assertEqual(provider.purchases, 0, "no number may be rented for a button")
+
+    def test_a_checkpoint_behind_it_is_still_solved_normally(self):
+        """Confirming a login can be the first of two screens."""
+        result, driver, _provider = self.run_chain(
+            [SCREEN_LOGIN_NOTICE, SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED])
+
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertEqual([a[0] for a in driver.actions],
+                         ["login_confirm", "phone", "code"])
+
+    def test_a_notice_that_never_clears_goes_to_a_person(self):
+        """A screen still there after being answered is not being answered."""
+        result, driver, _provider = self.run_chain([SCREEN_LOGIN_NOTICE] * 8)
+
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+        self.assertLessEqual(len(driver.actions), 3,
+                             "must not spend the run's rounds on one button")
+
+    def test_the_review_calls_it_self_clearable_not_a_real_issue(self):
+        """`flag_review` reports what a flagged profile is actually stuck on.
+        Calling this one a "real issue" is how a profile waits on a person for
+        a button the posting loop would have pressed on its next run."""
+        from adb_bot.automation import flag_review
+        self.assertIn(verification_module.CHALLENGE_LOGIN_CONFIRM, flag_review.SELF_CLEARABLE)
+        self.assertNotIn(verification_module.CHALLENGE_LOGIN_CONFIRM, flag_review.REAL_ISSUES)

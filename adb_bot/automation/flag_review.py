@@ -66,6 +66,11 @@ REAL_ISSUES = (
     verification.CHALLENGE_SIGNED_OUT,
 )
 
+# Screens the bot answers by itself. Reported separately because calling one a
+# "real issue" is how a profile ends up waiting on a person for a button the
+# posting loop would have pressed on its next run.
+SELF_CLEARABLE = (verification.CHALLENGE_LOGIN_CONFIRM,)
+
 REVIEW_DIR = Path.home() / ".adb_bot" / "flag_review"
 
 
@@ -137,6 +142,8 @@ def _look(profile_item, clients, adb_client, args, logger) -> dict:
 
         if verification.looks_like_launcher(text):
             out["verdict"] = "instagram-not-in-front"
+        elif challenge in SELF_CLEARABLE:
+            out["verdict"] = "self-clearable"
         elif challenge in REAL_ISSUES:
             out["verdict"] = "real-issue"
         elif challenge in CLEARS_THE_FLAG and verification.screen_is_healthy(text):

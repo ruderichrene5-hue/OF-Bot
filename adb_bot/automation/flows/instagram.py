@@ -114,11 +114,53 @@ def _emit(logger, level, message, *args) -> None:
         print(message)
 
 
-def account_flag_u2(d) -> str | None:
+def _confirm_login_u2(d, logger=None, target=None) -> bool:
+    """Answer Instagram's "Was this you?" notice on the u2 side by tapping the
+    affirmative button. True only once the notice is actually gone.
+
+    The selectors are fully-anchored, case-insensitive regexes -- the u2
+    equivalent of the EXACT label rule the dump-based handler follows. A
+    substring match here would eventually hit *This Wasn't Me* / *Secure
+    Account*, which starts a password reset and loses the account for good, so
+    the anchoring is the safety property and not a detail.
+    """
+    selectors = []
+    for label in ban_detection.LOGIN_CONFIRM_BUTTON_LABELS:
+        pattern = r"(?i)^\s*" + re.escape(label) + r"\s*$"
+        selectors.append({"textMatches": pattern})
+        selectors.append({"descriptionMatches": pattern})
+
+    if not _u2_click(d, selectors, logger=logger, purpose='the "This Was Me" button'):
+        _emit(logger, "warning",
+              'u2: "Was this you?" notice on %s has no affirmative button we recognise; '
+              "leaving it for a person", target)
+        return False
+
+    time.sleep(3)
+    try:
+        xml = d.dump_hierarchy()
+    except Exception:
+        xml = ""
+    if ban_detection.looks_like_login_confirm(xml):
+        _emit(logger, "warning",
+              'u2: "Was this you?" notice on %s is still there after confirming it; '
+              "leaving it for a person", target)
+        return False
+    _emit(logger, "info", 'u2: confirmed the "Was this you?" login notice on %s', target)
+    return True
+
+
+def account_flag_u2(d, logger=None, target=None) -> str | None:
     """Classify an IG block screen from the u2 hierarchy: a ban_detection kind
     ("banned" / "human_verification" / "action_block"), or None if the screen
     isn't one. Reads the whole dumped hierarchy, so bans and action-blocks are
     caught too, not just the human-verification checkpoint.
+
+    The "Was this you?" login notice is *answered* here rather than returned:
+    it is not a flag, it is a button. It only becomes "human_verification" --
+    which is what it was reported as before -- when the button cannot be found
+    or pressing it does not clear the screen. So `login_confirm` never leaves
+    this function, and no caller has to learn a fourth kind.
 
     Module-level on purpose: the reel-upload flow is not part of the u2 bio
     flow's class tree, and a checkpoint stops a reel post exactly as dead as it
@@ -129,7 +171,12 @@ def account_flag_u2(d) -> str | None:
         xml = d.dump_hierarchy()
     except Exception:
         xml = ""
-    return ban_detection.classify_block_text(xml)
+    kind = ban_detection.classify_block_text(xml)
+    if kind == ban_detection.KIND_LOGIN_CONFIRM:
+        if _confirm_login_u2(d, logger=logger, target=target):
+            return None
+        return ban_detection.KIND_HUMAN_VERIFICATION
+    return kind
 
 
 def _u2_describe(sel) -> str:
@@ -4715,14 +4762,14 @@ class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):
 
         if check_abort():
             return {"profile_id": profile.id, "target": target, "aborted": True}
-        _flag = self._account_flag_u2(d)
+        _flag = self._account_flag_u2(d, logger=log, target=target)
         if _flag:
             emit("warning", "Instagram flagged %s (%s); closing the profile", profile.id, _flag)
             return {"profile_id": profile.id, "target": target, "aborted": False, "account_flag": _flag}
 
         # Step 1: profile tab -> Edit profile screen.
         if not self._open_edit_profile_u2(d, target, emit, log):
-            _flag = self._account_flag_u2(d)
+            _flag = self._account_flag_u2(d, logger=log, target=target)
             if _flag:
                 emit("warning", "Instagram flagged %s (%s); closing the profile", profile.id, _flag)
                 return {"profile_id": profile.id, "target": target, "aborted": False, "account_flag": _flag}
@@ -4800,12 +4847,15 @@ class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):
                 break
         return dismissed
 
-    def _account_flag_u2(self, d) -> str | None:
+    def _account_flag_u2(self, d, logger=None, target=None) -> str | None:
         """Classify an IG block screen from the u2 hierarchy: returns a
         ban_detection kind ("banned" / "human_verification" / "action_block") or
         None. Reads the whole dumped hierarchy so ban/suspend/action-block
-        screens are caught, not just the human-verification checkpoint."""
-        return account_flag_u2(d)
+        screens are caught, not just the human-verification checkpoint.
+
+        Pass `logger` -- a "Was this you?" notice is answered in here, and a tap
+        nobody can see in the run log is a tap nobody can check."""
+        return account_flag_u2(d, logger=logger, target=target)
 
     def _looks_like_human_verification_u2(self, d) -> bool:
         """Back-compat: True if any IG account-flag screen is showing."""
@@ -5100,14 +5150,14 @@ class InstagramUpdateProfilePictureU2Flow(InstagramUpdateBioU2Flow):
         _sleep_after_instagram_launch(target, logger=log, delay_seconds=10)
         self._dismiss_popups_u2(d, logger=log)
 
-        _flag = self._account_flag_u2(d)
+        _flag = self._account_flag_u2(d, logger=log, target=target)
         if _flag:
             emit("warning", "Instagram flagged %s (%s); closing the profile", profile.id, _flag)
             return {"profile_id": profile.id, "target": target, "aborted": False, "account_flag": _flag}
 
         # --- Reach Edit profile (reused from the bio flow) -------------------
         if not self._open_edit_profile_u2(d, target, emit, log):
-            _flag = self._account_flag_u2(d)
+            _flag = self._account_flag_u2(d, logger=log, target=target)
             if _flag:
                 emit("warning", "Instagram flagged %s (%s); closing the profile", profile.id, _flag)
                 return {"profile_id": profile.id, "target": target, "aborted": False, "account_flag": _flag}

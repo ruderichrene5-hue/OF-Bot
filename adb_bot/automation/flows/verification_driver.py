@@ -39,6 +39,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from adb_bot.automation import ban_detection
 from adb_bot.automation.flows import verification
 from adb_bot.automation.flows.interruptions import _dump_text
 from adb_bot.core.adb_commands import back, swipe, tap, write_text
@@ -952,6 +953,29 @@ class AdbChallengeDriver:
         if not self._tap(center, "the intro screen's continue button"):
             return False
         # The step behind it has to load before it can be read.
+        time.sleep(max(self.settle_seconds, 3.0))
+        return True
+
+    def confirm_login_was_me(self) -> bool:
+        """Tap the affirmative button on Instagram's "Was this you?" notice.
+
+        The refusing twin of this button ("This Wasn't Me" / "Secure Account")
+        starts a password reset and takes the account away from the bot
+        permanently, so this uses `_find_exact` and nothing else: a whole-label
+        match from the UI dump, never OCR, never a substring. `_tap` still
+        refuses in read-only mode, so a probe run reports the screen without
+        touching it.
+        """
+        center = self._find_exact(ban_detection.LOGIN_CONFIRM_BUTTON_LABELS)
+        if center is None:
+            self._log("info", 'no affirmative button on the "Was this you?" notice '
+                              "(clickable labels were %s)",
+                      self._clickable_labels(self._root)[:20])
+            return False
+        if not self._tap(center, 'the "This Was Me" button'):
+            return False
+        # Whatever Instagram puts up next -- the feed, or a second screen --
+        # has to load before the loop can read it.
         time.sleep(max(self.settle_seconds, 3.0))
         return True
 

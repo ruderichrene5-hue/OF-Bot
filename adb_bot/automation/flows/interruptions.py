@@ -20,7 +20,15 @@ Handled cases:
    Granting can bounce the app back to the main feed, so the caller is told to
    restart its navigation rather than assume it is still where it was.
 
-4. **New-device onboarding / Meta ads-consent chain** -- a fresh profile is
+4. **"Was this you?" login confirmation** -- Instagram's new-login notice
+   ("We detected an unusual login", "Someone tried to log in to your account")
+   over a *This Was Me* / *This Wasn't Me* pair. Nothing has to be solved, so
+   the bot taps the affirmative button itself and carries on. Before this, the
+   screen's own wording put it in the human-verification bucket and parked the
+   profile until a person tapped one button. If the button cannot be found the
+   old behaviour is exactly what happens, so this can only ever help.
+
+5. **New-device onboarding / Meta ads-consent chain** -- a fresh profile is
    walked through a series of full-screen blockers before it ever reaches the
    feed: "Choose if we process your data for ads" (*Get started*), the
    subscribe-vs-free-with-ads choice (select *Use free of charge with ads*,
@@ -51,6 +59,7 @@ INTERRUPTION_BANNED = "banned"
 INTERRUPTION_ACTION_BLOCK = "action_block"
 INTERRUPTION_PERMISSION = "permission"
 INTERRUPTION_ONBOARDING = "onboarding"
+INTERRUPTION_LOGIN_CONFIRM = "login_confirm"
 
 # --- What the caller should do next ------------------------------------------
 OUTCOME_NONE = "none"                                # nothing to handle
@@ -197,6 +206,12 @@ def detect_interruption(target, logger=None, flow=None, expect=None) -> tuple[st
     kind = ban_detection.classify_block_text(text)
     if kind is None and any(marker in text for marker in _HUMAN_VERIFICATION_MARKERS):
         kind = ban_detection.KIND_HUMAN_VERIFICATION
+    # Checked before the flag kinds below, and before the local marker fallback
+    # above can promote it: the login notice says "we detected unusual activity"
+    # in both lists' language, and it is the only one of them the bot can answer.
+    if kind == ban_detection.KIND_LOGIN_CONFIRM or ban_detection.looks_like_login_confirm(text):
+        ig._emit(logger, "info", "\"Was this you?\" login notice detected for %s; the bot can answer this one", target)
+        return INTERRUPTION_LOGIN_CONFIRM, root
     if kind == ban_detection.KIND_BANNED:
         ig._emit(logger, "warning", "Account appears banned/suspended for %s", target)
         return INTERRUPTION_BANNED, root
@@ -281,11 +296,93 @@ def _advance_onboarding_screen(target, adb_client, root, text, logger=None) -> b
     return False
 
 
+def _advance_login_confirm_screen(target, adb_client, root, logger=None) -> bool:
+    """Tap the affirmative button on the "Was this you?" notice via an EXACT
+    label match from the UI dump. Returns True if a button was tapped.
+
+    Callers must pass a non-None `root` -- this screen is never tapped from OCR.
+    The exact match is what keeps the tap off *This Wasn't Me* / *Secure
+    Account*, which would start a password reset and lock the bot out of the
+    account for good; it is the single most expensive wrong tap on the fleet.
+    """
+    ig = _ig()
+    center = ig._find_center_by_exact_label(root, ban_detection.LOGIN_CONFIRM_BUTTON_LABELS)
+    if center is None:
+        ig._emit(
+            logger, "warning",
+            "Fallback (login notice): recognised the screen for %s but no exact affirmative button "
+            "(looked for %s); leaving it for a person",
+            target, list(ban_detection.LOGIN_CONFIRM_BUTTON_LABELS),
+        )
+        return False
+    ig._emit(logger, "info", "Fallback (login notice): confirming the login for %s at %s", target, center)
+    ig._adb_tap(target, center[0], center[1], adb_client, logger=logger,
+                description="Confirming the login was ours")
+    return True
+
+
+def handle_login_confirm(target, adb_client, logger=None, flow=None, max_rounds: int = 3) -> bool:
+    """Answer Instagram's "Was this you?" notice by tapping the affirmative
+    button. Returns True only once the screen is actually gone.
+
+    The return value is deliberately evidence-based rather than "we tapped
+    something": a tap that does not clear the screen means we did not understand
+    it, and the caller must fall back to flagging the profile exactly as it did
+    before this function existed. Reporting a tap as a success would hand a
+    still-blocked phone back to the posting loop, which is the mistake the
+    verification runner already had to unlearn.
+    """
+    ig = _ig()
+    tapped = False
+
+    for round_index in range(1, max_rounds + 1):
+        text, root = _screen_text(target, logger=logger, flow=flow)
+
+        if not ban_detection.looks_like_login_confirm(text):
+            if tapped:
+                ig._emit(logger, "info", "Login notice cleared for %s after %s tap(s)", target, round_index - 1)
+            else:
+                ig._emit(logger, "info", "No login notice on screen for %s; nothing to confirm", target)
+            return tapped
+
+        if root is None:
+            ig._emit(
+                logger, "warning",
+                "Login notice for %s is only readable via OCR (no UI dump), so there is no safe button "
+                "to click; leaving it. OCR text=%r",
+                target, _snippet(text),
+            )
+            return False
+
+        ig._emit(logger, "info", "Login notice round %s for %s: text=%r", round_index, target, _snippet(text))
+        if not _advance_login_confirm_screen(target, adb_client, root, logger=logger):
+            return False
+        tapped = True
+        time.sleep(3.0)
+
+    # Out of rounds with the notice still up on the last look.
+    text, _root = _screen_text(target, logger=logger, flow=flow)
+    if not ban_detection.looks_like_login_confirm(text):
+        ig._emit(logger, "info", "Login notice cleared for %s after %s tap(s)", target, max_rounds)
+        return True
+    ig._emit(logger, "warning",
+             "Login notice for %s was still on screen after %s tap(s); leaving it for a person",
+             target, max_rounds)
+    return False
+
+
 def _matched_markers(text) -> frozenset:
     """The set of onboarding/permission markers present in `text`. Used to tell
     whether a tap actually moved us to a new screen (the marker set changes) or
     left us stuck on the same one (it doesn't)."""
-    return frozenset(m for m in (_ONBOARDING_MARKERS + _PERMISSION_MARKERS) if m in text)
+    markers = {m for m in (_ONBOARDING_MARKERS + _PERMISSION_MARKERS) if m in text}
+    # The login notice has no marker list of its own (it is an AND of a button
+    # and some context), so it contributes one sentinel. Without it a notice
+    # sitting on top of an onboarding screen would look like "no markers
+    # changed" and trip the stuck detector on the round that cleared it.
+    if ban_detection.looks_like_login_confirm(text):
+        markers.add("<login confirmation>")
+    return frozenset(markers)
 
 
 def handle_permission_prompts(target, adb_client, logger=None, flow=None, max_rounds: int = 6) -> bool:
@@ -340,7 +437,11 @@ def handle_blocking_prompts(target, adb_client, logger=None, flow=None, max_roun
 
         is_permission = any(marker in text for marker in _PERMISSION_MARKERS)
         is_onboarding = any(marker in text for marker in _ONBOARDING_MARKERS)
-        if not is_permission and not is_onboarding:
+        # The login notice turns up *inside* this chain on a fresh device -- it
+        # is one of the screens standing between a launch and the feed -- so it
+        # is cleared here rather than only from `check_and_handle`.
+        is_login_confirm = ban_detection.looks_like_login_confirm(text)
+        if not is_permission and not is_onboarding and not is_login_confirm:
             if round_index == 1:
                 ig._emit(logger, "info", "Fallback (blocking prompts): none on screen for %s; nothing to clear", target)
             else:
@@ -348,7 +449,10 @@ def handle_blocking_prompts(target, adb_client, logger=None, flow=None, max_roun
             break
 
         markers = sorted(_matched_markers(text))
-        kind = "permission+onboarding" if (is_permission and is_onboarding) else ("permission" if is_permission else "onboarding")
+        kinds = [name for name, flag in (("permission", is_permission),
+                                         ("onboarding", is_onboarding),
+                                         ("login-notice", is_login_confirm)) if flag]
+        kind = "+".join(kinds)
         ig._emit(
             logger, "info",
             "Fallback (blocking prompts) round %s for %s: SEES a %s screen via %s; markers=%s; text=%r",
@@ -377,7 +481,13 @@ def handle_blocking_prompts(target, adb_client, logger=None, flow=None, max_roun
         # buttons the onboarding list doesn't match, so onboarding-advance
         # returns False and permission-advance takes over.
         advanced = False
-        if is_onboarding:
+        # The login notice first: it is a full-screen blocker that can sit over
+        # an onboarding screen, and its own buttons match neither of the other
+        # lists, so a generic "Continue"/"OK" hunt would tap straight through it
+        # into whatever is behind.
+        if is_login_confirm:
+            advanced = _advance_login_confirm_screen(target, adb_client, root, logger=logger)
+        if not advanced and is_onboarding:
             advanced = _advance_onboarding_screen(target, adb_client, root, text, logger=logger)
         if not advanced and is_permission:
             advanced = _advance_permission_screen(target, adb_client, root, logger=logger)
@@ -421,12 +531,39 @@ def handle_stuck_edit_profile(target, adb_client, logger=None, flow=None) -> boo
 def check_and_handle(target, adb_client, logger=None, flow=None, expect=None) -> str:
     """Detect an interruption on the current screen and deal with it.
 
+    A "Was this you?" login notice is answered here rather than reported: the
+    bot taps the affirmative button and returns ``OUTCOME_RESTART``. Only if it
+    cannot find that button does the screen become ``OUTCOME_HUMAN_VERIFICATION``.
+
     Returns one of ``OUTCOME_NONE``, ``OUTCOME_HANDLED`` (retry your step),
     ``OUTCOME_RESTART`` (navigation may have reset -- start over from the feed),
     ``OUTCOME_HUMAN_VERIFICATION`` (stop and close the profile), or
     ``OUTCOME_UNRESOLVED``.
     """
     kind, _root = detect_interruption(target, logger=logger, flow=flow, expect=expect)
+
+    if kind == INTERRUPTION_LOGIN_CONFIRM:
+        if not handle_login_confirm(target, adb_client, logger=logger, flow=flow):
+            # Could not answer it. That is precisely what happened to every one
+            # of these screens before this branch existed, so the fallback is
+            # the old behaviour rather than a new failure mode.
+            ig = _ig()
+            ig._emit(logger, "warning",
+                     "Could not confirm the login notice for %s; reporting it as human verification", target)
+            return OUTCOME_HUMAN_VERIFICATION
+        # Confirming can reveal a real checkpoint that was queued behind it.
+        # Classify once more so the caller hears about it now, instead of
+        # re-navigating a flow that is going to hit the same wall.
+        after, _after_root = detect_interruption(target, logger=logger, flow=flow)
+        if after == INTERRUPTION_BANNED:
+            return OUTCOME_ACCOUNT_BANNED
+        if after == INTERRUPTION_HUMAN_VERIFICATION:
+            return OUTCOME_HUMAN_VERIFICATION
+        if after == INTERRUPTION_ACTION_BLOCK:
+            return OUTCOME_ACTION_BLOCK
+        # Confirming a login drops the app wherever Instagram feels like --
+        # usually the feed -- so the caller must re-navigate, not resume.
+        return OUTCOME_RESTART
 
     if kind == INTERRUPTION_BANNED:
         return OUTCOME_ACCOUNT_BANNED
