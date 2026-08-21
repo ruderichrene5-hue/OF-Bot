@@ -90,6 +90,9 @@ _PHONE_MARKERS = (
     "what's your mobile number",
     "whats your mobile number",
     "enter the mobile number on which you can be contacted",
+    # Instagram now words it "where you can be contacted" here too, which used
+    # to belong to the post-creation prompt alone. See `_ADD_PHONE_MARKERS`.
+    "enter the mobile number where you can be contacted",
 )
 
 _EMAIL_MARKERS = (
@@ -175,7 +178,17 @@ _ADD_EMAIL_MARKERS = (
 # answer: the account is already made.
 _ADD_PHONE_MARKERS = (
     "add a mobile number",
-    "enter the mobile number where you can be contacted",
+    # "enter the mobile number where you can be contacted" USED to be here and
+    # must not come back: Instagram now says exactly that on the *signup*
+    # mobile-number screen as well, and this screen is classified first -- so
+    # the marker turned every signup into a post-creation prompt the flow then
+    # tried to skip. There is no Skip on it, so two Geelark runs looped thirty
+    # screens and gave up with the account never started (2026-08-21).
+    #
+    # "add a mobile number" is the heading only the post-creation prompt has.
+    # If this ever needs a second marker, use something the signup screen
+    # cannot carry -- it still offers "Sign up with email" and "I already have
+    # an account", neither of which can appear once an account exists.
 )
 
 # Android's own runtime permission dialogs, raised by the screen below. Contacts
