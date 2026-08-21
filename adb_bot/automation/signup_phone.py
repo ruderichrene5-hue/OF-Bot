@@ -124,6 +124,51 @@ class GeelarkHost:
                            profile_id, exc)
 
 
+def open_instagram(driver, adb_client, target: str, logger=None,
+                   attempts: int = 5, wait_seconds: int = 8) -> bool:
+    """Bring Instagram to the front, and prove it got there.
+
+    Two things this replaces, both of which failed silently.
+
+    **The launcher intent was missing.** Every other Instagram launch in this
+    repo -- reels, stories, the posting flow -- fires
+    `monkey -c android.intent.category.LAUNCHER` *before* naming the activity.
+    Only the signup path named `.activity.MainTabActivity` directly, and a
+    freshly installed Instagram does not always expose it, so the start was a
+    no-op that returned nothing anyone looked at.
+
+    **The wait was a fixed twelve seconds.** Whatever was on screen when it
+    elapsed became the signup's first screen. On Geelark that was the Play
+    Store's signed-out page, which the flow could not name, so four phones were
+    written off for `unknown_screen` at step 1 with Instagram never opened and
+    no number ever rented.
+
+    So: launcher intent first, then the activity, then *look* -- and if
+    Instagram is not there yet, say so and try again.
+    """
+    def log(level, message, *args):
+        if logger is not None:
+            getattr(logger, level)("open_instagram: " + message, *args)
+
+    for attempt in range(1, attempts + 1):
+        adb_client.run_command(
+            f"adb -s {target} shell monkey -p {INSTAGRAM_PACKAGE} "
+            f"-c android.intent.category.LAUNCHER 1")
+        adb_client.run_command(
+            f"adb -s {target} shell am start -n "
+            f"{INSTAGRAM_PACKAGE}/.activity.MainTabActivity")
+        time.sleep(wait_seconds)
+        screen = driver.read_screen() or ""
+        if signup.classify_signup_screen(screen) != signup.SCREEN_UNKNOWN:
+            log("info", "instagram is in front after %d attempt(s)", attempt)
+            return True
+        log("info", "instagram is not in front yet (%d/%d); on screen: %r",
+            attempt, attempts, screen[:120])
+    log("warning", "instagram would not come to the front after %d attempts",
+        attempts)
+    return False
+
+
 def load_assignment(profile_name: str, path: Path | None = None) -> dict:
     path = path or ASSIGNMENTS
     if not path.exists():
@@ -238,10 +283,12 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
                 return out
 
         # --- 3. the account ---------------------------------------------------
-        adb_client.run_command(
-            f"adb -s {target} shell am start -n "
-            f"{INSTAGRAM_PACKAGE}/.activity.MainTabActivity")
-        time.sleep(12)
+        if not open_instagram(driver, adb_client, target, logger=logger):
+            # Deliberately its own status, and deliberately not one of the
+            # signup results: Instagram never opened, so nothing was typed
+            # anywhere and the phone is as unused as before the launch.
+            out["status"] = "app-instagram-would-not-open"
+            return out
 
         if box is not None:
             mailbox = PhoneMailbox(target, adb_client, box["address"],

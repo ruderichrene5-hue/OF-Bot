@@ -134,7 +134,7 @@ def reached_instagram(status: str) -> bool:
     status = str(status or "")
     if not status:
         return False
-    early = ("mailbox-", "install-")
+    early = ("mailbox-", "install-", "app-")
     return not (status.startswith(early)
                 or status in ("dry-run", "busy", "not-ready", "unreachable"))
 
