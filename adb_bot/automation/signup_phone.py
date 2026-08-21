@@ -160,7 +160,7 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
            "identity": identity}
 
     print(f"\n{'=' * 68}\n{name} ({profile_id})")
-    print(f"  mailbox  {box['address']}")
+    print(f"  mailbox  {box['address'] if box else '(none -- SMS)'}")
     print(f"  identity {identity.summary()}")
     if not args.apply:
         out["status"] = "dry-run"
@@ -264,7 +264,8 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
 
         record_account(profile_id, name, identity, status=result.status)
         if result.ok:
-            print(f"  CREATED @{identity.username} on {box['address']}")
+            where = box["address"] if box else "a rented number"
+            print(f"  CREATED @{identity.username} on {where}")
 
         # --- 4. the checkpoint ------------------------------------------------
         # Instagram holds a brand-new account behind "confirm you're human"

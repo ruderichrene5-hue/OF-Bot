@@ -58,6 +58,40 @@ class FailedMailboxesTest(unittest.TestCase):
             self.assertEqual(failed_mailboxes(), set())
 
 
+class NoMailboxTest(unittest.TestCase):
+    """`run_phone` has to survive having no mailbox at all.
+
+    The SMS fallback passes `box=None`, and every read of it has to be
+    guarded. One that was not -- a print of the address in the run header --
+    killed both phones of the first SMS batch before either launched.
+    """
+
+    def test_a_run_with_no_mailbox_does_not_blow_up(self):
+        from adb_bot.automation import signup_phone
+
+        args = mock.Mock(apply=False, screenshots=False, verify=False,
+                         country=None, readiness_attempts=1, readiness_wait=1)
+        out = signup_phone.run_phone(
+            {"id": "1", "serial_name": "Emely new 1"}, None,
+            host=mock.Mock(), adb_client=mock.Mock(), args=args,
+            logger=mock.Mock())
+        self.assertEqual(out["status"], "dry-run")
+        self.assertEqual(out["email"], "")
+
+    def test_a_run_with_a_mailbox_still_carries_its_address(self):
+        from adb_bot.automation import signup_phone
+
+        args = mock.Mock(apply=False, screenshots=False, verify=False,
+                         country=None, readiness_attempts=1, readiness_wait=1)
+        out = signup_phone.run_phone(
+            {"id": "1", "serial_name": "Emely new 1"},
+            {"address": "someone@gmail.com", "password": "x",
+             "totp_secret": ""},
+            host=mock.Mock(), adb_client=mock.Mock(), args=args,
+            logger=mock.Mock())
+        self.assertEqual(out["email"], "someone@gmail.com")
+
+
 class ReachedInstagramTest(unittest.TestCase):
 
     def test_a_failed_google_sign_in_has_touched_nothing(self):
