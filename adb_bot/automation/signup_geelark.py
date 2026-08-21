@@ -214,17 +214,30 @@ def write_back(phone: dict, identity, address: str, status: str,
                   f"MAIL:{address} | SIGNUP:{status}")
     else:
         remark = f"MAIL:{address} | SIGNUP-BLOCKED:{status} | no account made"
-    tag_ids = [t.get("id") for t in (phone.get("tags") or []) if t.get("id")]
     try:
-        if status == signup.RESULT_CREATED:
-            from adb_bot.clients.geelark.tags import GeelarkTagClient
+        from adb_bot.clients.geelark.tags import GeelarkTagClient
 
-            connected = GeelarkTagClient(transport).ensure_tag(
-                CONNECTED_TAG, "green")
-            if connected and connected not in tag_ids:
-                tag_ids.append(connected)
-        # `tagIDs` REPLACES a phone's tags rather than adding to them, so the
-        # surviving ones have to be sent back or `new profile` disappears.
+        tags = GeelarkTagClient(transport)
+        # Resolved from names through the tag list, NOT read off the phone:
+        # `/phone/list` returns each tag as a name with a **null id**, so
+        # collecting ids from there yields an empty list -- and since `tagIDs`
+        # REPLACES a phone's tags rather than adding to them, sending that
+        # empty list strips every tag. Ten phones silently lost `new profile`
+        # that way and dropped out of their own work queue.
+        by_name = tags.tag_ids_by_name()
+        wanted = [str(t.get("name")) for t in (phone.get("tags") or [])
+                  if t.get("name")]
+        if status == signup.RESULT_CREATED and CONNECTED_TAG not in wanted:
+            wanted.append(CONNECTED_TAG)
+            tags.ensure_tag(CONNECTED_TAG, "green")
+            by_name = tags.tag_ids_by_name(refresh=True)
+        tag_ids = [by_name[name] for name in wanted if name in by_name]
+        if wanted and not tag_ids:
+            # Better to leave the tags alone than to replace them with nothing.
+            logger.warning("signup_geelark: could not resolve tags %s for %s; "
+                           "leaving them as they are", wanted,
+                           phone.get("serialName"))
+            tag_ids = None
         GeelarkPhoneClient(transport).update_phone(
             str(phone["id"]), remark=remark, tag_ids=tag_ids)
     except Exception as exc:
