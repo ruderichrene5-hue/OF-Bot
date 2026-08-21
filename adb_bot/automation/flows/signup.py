@@ -863,6 +863,14 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     steps.pop()
                     sleep(6)
                     continue
+                # Released here, not left to `finish`, which counts every
+                # non-created outcome against the provider. The number was
+                # delivered to us perfectly well; Instagram died on the phone
+                # seventeen seconds later. Charging that to the provider walks
+                # a healthy one toward its breaker -- and we have already
+                # watched that breaker misfire, cooling every provider down and
+                # then renting anyway.
+                release(False)
                 return finish(RESULT_STUCK,
                               "Instagram is not running and would not start")
 
