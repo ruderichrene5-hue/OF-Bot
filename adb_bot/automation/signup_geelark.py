@@ -258,30 +258,36 @@ def claim_mailbox(record: dict, identity, phone: dict, apply: bool,
         return ""
 
 
-def run_one(phone: dict, record: dict, args, logger, transport) -> dict:
-    fields = record.get("fields") or {}
-    box = {"address": str(fields.get("Gmail Account") or ""),
-           "password": str(fields.get("Password") or ""),
-           "totp_secret": str(fields.get("2FA Secret Key") or "")}
+def run_one(phone: dict, record: dict | None, args, logger,
+            transport) -> dict:
+    if record is None:
+        box = None
+    else:
+        fields = record.get("fields") or {}
+        box = {"address": str(fields.get("Gmail Account") or ""),
+               "password": str(fields.get("Password") or ""),
+               "totp_secret": str(fields.get("2FA Secret Key") or "")}
     item = {"id": str(phone["id"]), "serial_name": phone.get("serialName")}
 
     out = run_phone(item, box, GeelarkHost(transport, args), ADBClient(),
                     args, logger)
     out["phone_id"] = str(phone["id"])
     out["folder"] = (phone.get("group") or {}).get("name")
-    out["mailbox_record"] = record["id"]
+    out["mailbox_record"] = record["id"] if record else ""
 
     if args.apply:
         identity = out.get("identity")
         if identity is not None:
             status = str(out.get("status"))
-            write_back(phone, identity, box["address"], status, transport,
-                       logger)
+            address = box["address"] if box else "(sms, no mailbox)"
+            write_back(phone, identity, address, status, transport, logger)
             # Claimed only once Instagram has actually seen the address.
             # Claiming on a failed Google sign-in costs a pool row and writes a
             # `Profile Creation` entry for somebody who does not exist -- which
             # is exactly what the first batch did, twice, before this check.
-            if reached_instagram(status):
+            if record is None:
+                pass
+            elif reached_instagram(status):
                 claim_mailbox(record, identity, phone, apply=True,
                               logger=logger)
             else:
@@ -301,6 +307,11 @@ def main(argv=None) -> int:
                         help="phones running at once (Geelark sells 4 slots)")
     parser.add_argument("--folder", action="append",
                         help="restrict to these model folders")
+    parser.add_argument("--sms", action="store_true",
+                        help="verify by rented SMS number instead of a "
+                             "mailbox. Costs money per number, and the "
+                             "account cannot be recovered afterwards -- use "
+                             "when the mailbox pool cannot deliver")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--screenshots", action="store_true")
     parser.add_argument("--no-verify", dest="verify", action="store_false",
@@ -323,14 +334,21 @@ def main(argv=None) -> int:
     spent = already_attempted()
     phones = [p for p in phones if str(p["id"]) not in spent]
 
-    mailboxes = mailbox_queue()
+    if args.sms:
+        mailboxes = [None] * len(phones)
+        print(f"phones tagged {NEW_TAG!r} and untried: {len(phones)}")
+        print("verifying by SMS -- no mailbox, and these accounts cannot be "
+              "recovered once their number is released")
+    else:
+        mailboxes = mailbox_queue()
+        print(f"phones tagged {NEW_TAG!r} and untried: {len(phones)}")
+        print(f"free mailboxes: {len(mailboxes)}")
     pairs = list(zip(phones, mailboxes))[:max(0, args.limit)]
 
-    print(f"phones tagged {NEW_TAG!r} and untried: {len(phones)}")
-    print(f"free mailboxes: {len(mailboxes)}")
     print(f"this batch: {len(pairs)}\n")
     for phone, record in pairs:
-        address = (record.get("fields") or {}).get("Gmail Account")
+        address = ((record.get("fields") or {}).get("Gmail Account")
+                   if record else "(sms)")
         print(f"  {str(phone.get('serialName')):18} "
               f"{str((phone.get('group') or {}).get('name')):12} {address}")
     if args.list or not pairs:

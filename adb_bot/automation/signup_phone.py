@@ -142,10 +142,16 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
     profile_id = str(profile_item.get("id"))
     name = str(profile_item.get("serial_name") or profile_id)
     identity = make_identity()
-    identity.email = box["address"]
-    identity.email_password = box.get("password", "")
+    if box is not None:
+        # `run_signup` picks its chain off `identity.email`: an address takes
+        # the "sign up with email" hatch, no address takes the mobile-number
+        # screen Instagram offers first. Leaving it unset is how the SMS
+        # fallback is selected.
+        identity.email = box["address"]
+        identity.email_password = box.get("password", "")
 
-    out = {"profile": name, "id": profile_id, "email": box["address"],
+    out = {"profile": name, "id": profile_id,
+           "email": box["address"] if box else "",
            "username": identity.username, "steps": {},
            # The object itself, not just its handle: a caller that has to write
            # the account somewhere else afterwards -- the Geelark remark, the
@@ -194,24 +200,33 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
                                  screenshots=args.screenshots)
 
         # --- 1. the mailbox ---------------------------------------------------
-        verdict = google_signin.sign_in(
-            driver, adb_client, target, box["address"], box["password"],
-            box["totp_secret"], logger=logger)
-        out["steps"]["google_signin"] = verdict
-        print(f"  google sign-in: {verdict} "
-              f"({int(time.monotonic() - started)}s)")
-        if verdict not in (google_signin.RESULT_SIGNED_IN,
-                           google_signin.RESULT_ALREADY):
-            out["status"] = f"mailbox-{verdict}"
-            return out
+        # Skipped entirely when there is no mailbox to sign in: the account
+        # then verifies by SMS instead. That is the worse account -- a rented
+        # number is released and nobody can ever recover it -- so it is a
+        # deliberate fallback for when the mailbox pool cannot deliver, never
+        # the default.
+        if box is not None:
+            verdict = google_signin.sign_in(
+                driver, adb_client, target, box["address"], box["password"],
+                box["totp_secret"], logger=logger)
+            out["steps"]["google_signin"] = verdict
+            print(f"  google sign-in: {verdict} "
+                  f"({int(time.monotonic() - started)}s)")
+            if verdict not in (google_signin.RESULT_SIGNED_IN,
+                               google_signin.RESULT_ALREADY):
+                out["status"] = f"mailbox-{verdict}"
+                return out
 
         # --- 2. Instagram, and Gmail to read its code out of -------------------
         # Gmail is *not* preinstalled on these phones -- `Blank caio 2` spent a
         # whole launch on 2026-08-17 waiting for a code from an app that was
         # not there. Instagram first: it is the one the run cannot proceed
-        # without, and the phone's life is finite.
-        for package, what in ((INSTAGRAM_PACKAGE, "instagram"),
-                              (GMAIL_PACKAGE, "gmail")):
+        # without, and the phone's life is finite. With no mailbox there is
+        # nothing to read a code out of, so Gmail is not worth the minutes.
+        wanted = [(INSTAGRAM_PACKAGE, "instagram")]
+        if box is not None:
+            wanted.append((GMAIL_PACKAGE, "gmail"))
+        for package, what in wanted:
             verdict = play_install.install(driver, adb_client, target,
                                            package, logger=logger)
             out["steps"][f"install-{what}"] = verdict
@@ -228,9 +243,19 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
             f"{INSTAGRAM_PACKAGE}/.activity.MainTabActivity")
         time.sleep(12)
 
-        mailbox = PhoneMailbox(target, adb_client, box["address"],
-                               logger=logger, driver=driver)
-        result = signup.run_signup(driver, None, identity, logger=logger,
+        if box is not None:
+            mailbox = PhoneMailbox(target, adb_client, box["address"],
+                                   logger=logger, driver=driver)
+            router = None
+        else:
+            # Built here, not earlier: a router that is never asked for a
+            # number costs nothing, but building one proves the keys are
+            # present before a phone has been launched on the assumption.
+            from adb_bot.clients.sms.router import build_router
+
+            mailbox = None
+            router = build_router(logger=logger)
+        result = signup.run_signup(driver, router, identity, logger=logger,
                                    mailbox=mailbox)
         out["steps"]["signup"] = result.status
         out["status"] = result.status
