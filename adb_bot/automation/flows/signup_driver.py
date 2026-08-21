@@ -197,6 +197,32 @@ class AdbSignupDriver(AdbChallengeDriver):
         self.adb_client.run_command(f"adb -s {self.target} shell input keyevent 4")
         time.sleep(KEYBOARD_SETTLE)
 
+    def showing_package(self, package: str) -> bool:
+        """Is `package` the one that drew the screen?
+
+        Asked of the UI dump itself, where every node carries the package that
+        owns it. That is authoritative, unlike "does the classifier recognise
+        this screen" -- which is what callers were using, and which answers no
+        for every screen nobody has named yet. Instagram's "set up on new
+        device" onboarding was in front, fully drawn, while a relaunch loop
+        declared five times that Instagram would not come to the front.
+
+        `dumpsys window` would also answer, and is what this deliberately
+        avoids: it times out under concurrency and returns empty, which reads
+        as "not in front" for a phone that is merely busy.
+        """
+        root = self._root
+        if root is None:
+            root, _xml = self._dump()
+            if root is None:
+                return False
+            self._root = root
+        wanted = str(package).strip().lower()
+        for node in root.iter():
+            if str(node.attrib.get("package", "") or "").lower() == wanted:
+                return True
+        return False
+
     def field_holds(self, hints, value: str) -> bool:
         """Does an input field currently hold exactly `value`?
 

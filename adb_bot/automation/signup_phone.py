@@ -159,7 +159,19 @@ def open_instagram(driver, adb_client, target: str, logger=None,
             f"{INSTAGRAM_PACKAGE}/.activity.MainTabActivity")
         time.sleep(wait_seconds)
         screen = driver.read_screen() or ""
-        if signup.classify_signup_screen(screen) != signup.SCREEN_UNKNOWN:
+        # Ask the dump who drew the screen, and only fall back to "does the
+        # classifier recognise it" when the driver cannot say. The classifier
+        # answers no for every screen nobody has named yet -- Instagram's
+        # "set up on new device" onboarding and Meta's ads consent among them --
+        # so judging by it relaunched Instagram five times over an app that was
+        # fully drawn and in front.
+        showing = getattr(driver, "showing_package", None)
+        if callable(showing):
+            if showing(INSTAGRAM_PACKAGE):
+                log("info", "instagram is in front after %d attempt(s)",
+                    attempt)
+                return True
+        elif signup.classify_signup_screen(screen) != signup.SCREEN_UNKNOWN:
             log("info", "instagram is in front after %d attempt(s)", attempt)
             return True
         log("info", "instagram is not in front yet (%d/%d); on screen: %r",
