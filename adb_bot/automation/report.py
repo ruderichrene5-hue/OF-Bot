@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from adb_bot.automation import schedule_spec, warmup_completion
+from adb_bot.automation import geelark_migration, schedule_spec, warmup_completion
 
 # How long a collected snapshot may be reused. Short enough that the page is
 # honest about "running now", long enough that holding the refresh key cannot
@@ -3665,6 +3665,189 @@ def warmup_status(airtable, now=None) -> dict:
     return out
 
 
+def geelark_status() -> dict:
+    """The Geelark account: phones, what is running, tags, proxies, ADB.
+
+    Deliberately separate from every MultiLogin reading on this page. Geelark is
+    a second cloud-phone host under evaluation, not a replacement, and merging
+    the two inventories would make both unreadable -- a phone that exists in
+    Geelark has no Airtable row, no model, and no posting history, so it must
+    not be counted beside MLX phones that do.
+
+    Never raises: an unconfigured or unreachable Geelark costs this tab and
+    nothing else. Anything that goes wrong is reported in `error`.
+
+    Unlike MultiLogin, Geelark *does* report money: `/pay/wallet` and
+    `/pay/plan/info` give the balance, the parallel-slot count and the profile
+    allowance. That matters because running out of MultiLogin minutes stops
+    every launch while every log blames the server -- here the runway is
+    readable before a run rather than diagnosed from failures afterwards. Both
+    endpoints are heavily rate limited (the plan one to a single call a minute),
+    which is why this whole function sits behind `_slow`.
+    """
+    out: dict = {
+        "configured": False,
+        "phones": [],
+        "tags": [],
+        "proxies": [],
+        "billing": {},
+        "counts": {"phones": 0, "running": 0, "stopped": 0,
+                   "adb_enabled": 0, "proxies": 0, "gateways": 0},
+        # Always present, so every early return below still hands the renderer
+        # the same shape and the tab degrades to empty sections rather than a
+        # KeyError on the one day Geelark is unreachable.
+        "migration": {},
+        "signup": {},
+        "error": "",
+    }
+
+    try:
+        from adb_bot.clients.geelark import (
+            GeelarkApiClient,
+            GeelarkBillingClient,
+            GeelarkPhoneClient,
+            GeelarkProxyClient,
+            GeelarkTagClient,
+            GeelarkTransport,
+            status_label,
+        )
+    except Exception as exc:  # pragma: no cover - import guard
+        out["error"] = f"Geelark client unavailable: {exc}"
+        return out
+
+    # Constructing the transport reads the credentials, which means it can fail
+    # on a host where the settings module does not know about Geelark at all.
+    # That has to be caught here: `_slow` requires its builder to report
+    # failures in its return value rather than raise, so an exception escaping
+    # this function does not cost the Geelark tab -- it costs the whole
+    # dashboard, every tab, for everybody.
+    try:
+        transport = GeelarkTransport()
+    except Exception as exc:
+        out["error"] = f"Geelark credentials could not be read: {exc}"
+        return out
+
+    if not transport.is_configured:
+        # Not an error: the credentials are simply not installed on this host.
+        out["error"] = ("Not configured -- set GEELARK_APP_ID and "
+                        "GEELARK_API_KEY in /etc/adbbot/env.")
+        # The signup ledger is a local file, so it is still readable and still
+        # worth showing -- the new-account pipeline's progress does not depend
+        # on being able to reach Geelark's API right now.
+        try:
+            out["signup"] = geelark_migration.signup_progress()
+        except Exception:
+            out["signup"] = {}
+        return out
+    out["configured"] = True
+
+    try:
+        rows = GeelarkPhoneClient(transport).list_phones()
+    except Exception as exc:
+        out["error"] = f"Could not read the Geelark phone list: {exc}"
+        return out
+
+    # One ADB read for the whole account, so the tab can say which phones are
+    # actually reachable rather than merely running. ADB is off per phone by
+    # default, and a phone with it off is invisible to the bot.
+    adb_by_id: dict[str, str] = {}
+    try:
+        api = GeelarkApiClient(transport)
+        raw = api.fetch_adb_credentials([str(row.get("id")) for row in rows])
+        for profile in GeelarkApiClient.parse_profiles(raw):
+            adb_by_id[profile.id] = profile.status
+    except Exception as exc:
+        out["error"] = f"Phones listed, but the ADB state could not be read: {exc}"
+
+    for row in rows:
+        equipment = row.get("equipmentInfo") or {}
+        proxy = row.get("proxy") or {}
+        phone_id = str(row.get("id"))
+        adb_state = adb_by_id.get(phone_id, "unknown")
+        out["phones"].append({
+            "id": phone_id,
+            "name": str(row.get("serialName") or ""),
+            "status": status_label(row.get("status")),
+            "adb": adb_state,
+            "country": str(equipment.get("countryName") or ""),
+            "os": str(equipment.get("osVersion") or ""),
+            "device": " ".join(part for part in (
+                str(equipment.get("deviceBrand") or ""),
+                str(equipment.get("deviceModel") or "")) if part),
+            "timezone": str(equipment.get("timeZone") or ""),
+            "proxy": (f"{proxy.get('server')}:{proxy.get('port')}"
+                      if proxy.get("server") else ""),
+            "tags": [str(tag.get("name") or "") for tag in row.get("tags") or []],
+            "group": str((row.get("group") or {}).get("name") or ""),
+            # The remark is where the whole migration state lives -- whose
+            # account this is, whether a password was ever recovered for it,
+            # and how the last login attempt ended. `geelark_migration` parses
+            # it; it is carried here raw so there is one read of the phone list
+            # rather than two. It holds passwords, so it is consumed into
+            # counts and never rendered.
+            "remark": str(row.get("remark") or ""),
+        })
+
+    out["phones"].sort(key=lambda p: p["name"].lower())
+    out["counts"]["phones"] = len(out["phones"])
+    out["counts"]["running"] = sum(1 for p in out["phones"] if p["status"] == "started")
+    out["counts"]["stopped"] = sum(1 for p in out["phones"] if p["status"] == "stopped")
+    out["counts"]["adb_enabled"] = sum(1 for p in out["phones"] if p["adb"] == "active")
+
+    try:
+        out["tags"] = [
+            {"name": str(tag.get("name") or ""), "id": str(tag.get("id") or "")}
+            for tag in GeelarkTagClient(transport).list_tags()
+        ]
+    except Exception:
+        # A tag read failing must not blank the phone table above it.
+        out["tags"] = []
+
+    try:
+        proxy_client = GeelarkProxyClient(transport)
+        clusters = proxy_client.endpoint_clusters()
+        out["proxies"] = [
+            {"endpoint": endpoint, "profiles": len(members)}
+            for endpoint, members in sorted(clusters.items())
+        ]
+        out["counts"]["proxies"] = sum(p["profiles"] for p in out["proxies"])
+        # Gateway hosts, deliberately NOT exit IPs -- separate ports on one host
+        # commonly egress from different addresses. The real exit address comes
+        # from Geelark's proxy check, not the proxy record; counting gateway
+        # hosts as IPs said "one" about four.
+        out["counts"]["gateways"] = len({
+            endpoint.split(":")[0] for endpoint in clusters
+        })
+    except Exception:
+        out["proxies"] = []
+
+    try:
+        out["billing"] = GeelarkBillingClient(transport).runway()
+    except Exception:
+        # Money is the one reading here that is rate limited hard enough to fail
+        # on its own; the inventory above is still worth showing without it.
+        out["billing"] = {}
+
+    # How far the migration is, read back out of the remarks the provisioner and
+    # the login flow wrote onto the phones. Pure parsing of what was already
+    # fetched above -- no extra API call, so it cannot fail on a rate limit and
+    # cannot cost money.
+    try:
+        out["migration"] = geelark_migration.summarise(out["phones"])
+    except Exception as exc:
+        out["migration"] = {}
+        out["error"] = out["error"] or f"Could not read the migration state: {exc}"
+
+    # The other half of the tab: phones set aside to create *new* accounts on,
+    # and what the signup runs have produced so far. Local file, no API.
+    try:
+        out["signup"] = geelark_migration.signup_progress()
+    except Exception:
+        out["signup"] = {}
+
+    return out
+
+
 def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
     """Everything the page shows. Cached for `CACHE_SECONDS`."""
     if use_cache and _cache["data"] is not None and (time.time() - _cache["at"]) < CACHE_SECONDS:
@@ -3780,8 +3963,22 @@ def collect(airtable=None, now=None, use_cache: bool = True) -> dict:
                             "account_driven": False, "error": "",
                             "counts": {"ok": 0, "failed": 0, "running": 0,
                                        "never": 0, "stalled": 0, "finished": 0}},
+        # Seeded with every key `geelark_status` can return, for the same reason
+        # as `warmup_progress` above: a key missing here is a KeyError on the
+        # whole page exactly when Geelark is unreachable.
+        "geelark": {"configured": False, "phones": [], "tags": [], "proxies": [],
+                    "billing": {},
+                    "counts": {"phones": 0, "running": 0, "stopped": 0,
+                               "adb_enabled": 0, "proxies": 0, "gateways": 0},
+                    "error": ""},
         "airtable_error": "",
     }
+
+    # Outside the Airtable block below on purpose, and behind `_slow`: Geelark is
+    # a third-party HTTP read that has nothing to do with Airtable, so neither an
+    # Airtable outage nor a Geelark one may blank the other. It reports its own
+    # failures, which is what `_slow` requires.
+    data["geelark"] = _slow("geelark", geelark_status)
 
     if airtable is not None:
         # Outside the block below on purpose: this one reports its own failures

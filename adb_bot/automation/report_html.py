@@ -16,6 +16,7 @@ import html
 from collections import Counter
 from datetime import datetime
 
+from adb_bot.automation import geelark_migration as _gm
 from adb_bot.automation import schedule_spec
 from adb_bot.automation.retry_runner import DEFAULT_MAX_RETRIES
 
@@ -128,17 +129,20 @@ footer { margin-top: 2.5rem; color: var(--muted); font-size: .78rem;
 #tab-schedules:checked ~ #panel-schedules,
 #tab-warmup:checked ~ #panel-warmup,
 #tab-profiles:checked ~ #panel-profiles,
+#tab-geelark:checked ~ #panel-geelark,
 #tab-technical:checked ~ #panel-technical { display: block; }
 #tab-server:checked ~ .tabs label[for="tab-server"],
 #tab-schedules:checked ~ .tabs label[for="tab-schedules"],
 #tab-warmup:checked ~ .tabs label[for="tab-warmup"],
 #tab-profiles:checked ~ .tabs label[for="tab-profiles"],
+#tab-geelark:checked ~ .tabs label[for="tab-geelark"],
 #tab-technical:checked ~ .tabs label[for="tab-technical"] {
   color: var(--fg); border-bottom-color: var(--accent); }
 #tab-server:focus-visible ~ .tabs label[for="tab-server"],
 #tab-schedules:focus-visible ~ .tabs label[for="tab-schedules"],
 #tab-warmup:focus-visible ~ .tabs label[for="tab-warmup"],
 #tab-profiles:focus-visible ~ .tabs label[for="tab-profiles"],
+#tab-geelark:focus-visible ~ .tabs label[for="tab-geelark"],
 #tab-technical:focus-visible ~ .tabs label[for="tab-technical"] {
   outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .tabs .count { display: inline-block; margin-left: .4rem; padding: .05rem .4rem;
@@ -1028,6 +1032,17 @@ DEFAULT_GUIDE = ("Flagged with no reason recorded. Almost always this is the "
                  "flagged this way turned out to have nothing wrong with them.")
 
 
+def _dash(value: str, empty: str = "—") -> str:
+    """An escaped value, or a muted placeholder when it is blank."""
+    text = _e(value or "")
+    return text if text else f'<span class="empty">{_e(empty)}</span>'
+
+
+def _handle_cell(handle: str) -> str:
+    """An Instagram handle with its @, or a dash. Never a bare @."""
+    return f'<span class="mono">@{_e(handle)}</span>' if handle else _dash("")
+
+
 def _pills(labels, tone: str) -> str:
     """A list of short labels as coloured pills, or a dash when it is empty."""
     if not labels:
@@ -1541,6 +1556,398 @@ def _section_folders(folders: dict, retired=()) -> str:
             f'somebody\'s job, not a healthy row.</p>'
             + f'<div class="scroll"><table>{head}{body}</table></div>'
             + _retired_note(retired))
+
+
+def _geelark_unconfigured(geelark: dict) -> str:
+    """The one line to add, rather than a bare “not configured”.
+
+    A dashboard section that only says something is missing wastes the reader's
+    trip. This says exactly what to do, because the fix is two lines in a file.
+    """
+    return (
+        '<p class="sub"><span class="pill warn">not configured</span> '
+        'This host has no Geelark API credentials, so nothing on this tab can '
+        'be read live. Add them to <span class="mono">/etc/adbbot/env</span> '
+        'and restart the site:</p>'
+        '<div class="scroll"><table><tr><td class="mono">'
+        'GEELARK_APP_ID=…<br>GEELARK_API_KEY=…<br><br>'
+        'systemctl restart adbbot-site'
+        '</td></tr></table></div>'
+        '<p class="sub">The credentials are read/write and are the only ones '
+        'Geelark issues — there is no separate session or bearer token. '
+        'Everything below stays blank until they are installed.</p>')
+
+
+def _geelark_state_pill(state: str, label: str) -> str:
+    """Colour a bucket by whether it is good news, work, or a dead end."""
+    if state == "connected":
+        return f'<span class="pill ok">{_e(label)}</span>'
+    if state in ("blocked", "no_credentials"):
+        return f'<span class="pill bad">{_e(label)}</span>'
+    if state in ("needs_code", "mailbox", "retry"):
+        return f'<span class="pill warn">{_e(label)}</span>'
+    return f'<span class="pill">{_e(label)}</span>'
+
+
+def _section_geelark_migration(geelark: dict) -> str:
+    """The headline answer: how much of the fleet can actually move.
+
+    This leads the tab because it is the only question the migration turns on.
+    Everything else here -- phones, proxies, money -- is the machinery; this is
+    the result.
+
+    The three numbers are drawn deliberately, and the third is the one that is
+    easy to get wrong. A phone whose *run* failed (never booted, ADB never
+    answered, Instagram never opened) is **untested**, not lost, and is kept out
+    of "cannot connect" on purpose. Folding it in would let one bad afternoon of
+    phone launches read as a verdict on the accounts -- the same mistake the
+    "Retries Exhausted" and "Human Verification Required" labels made on the
+    MultiLogin side, where a counter and a screen-check got reported as
+    diagnoses.
+    """
+    if not geelark.get("configured"):
+        return _geelark_unconfigured(geelark)
+
+    migration = geelark.get("migration") or {}
+    rows = migration.get("rows") or []
+    if not rows:
+        return ('<p class="empty">No phones to assess — either the account is '
+                'empty or the phone list could not be read.</p>')
+
+    total = migration.get("migration_total", 0)
+    can = migration.get("can_connect", 0)
+    cannot = migration.get("cannot_connect", 0)
+    untested = migration.get("untested", 0)
+    counts = migration.get("counts") or {}
+
+    def _pct(value: int) -> str:
+        return f"{(100.0 * value / total):.0f}%" if total else "—"
+
+    headline = (
+        f'<p class="sub">Of <strong>{total}</strong> phone(s) carrying a '
+        f'migrated account: <span class="pill ok">{can} can connect</span> '
+        f'({_pct(can)}) — already signed in, or holding a password Instagram '
+        f'has accepted or has not been asked about yet. '
+        f'<span class="pill bad">{cannot} cannot</span> ({_pct(cannot)}) — the '
+        f'account or its password is the problem. '
+        f'<span class="pill warn">{untested} untested</span> ({_pct(untested)}) '
+        f'— the phone or the mailbox failed, so the account was never actually '
+        f'tried. Those are not losses; they need running again.</p>')
+
+    # Every bucket, with the sentence that says what it means. The blurb matters
+    # more than the number: "needs a code" and "wrong password" look equally red
+    # in a bare table and mean opposite things for the migration.
+    bucket_rows = "".join(
+        f'<tr><td>{_geelark_state_pill(state, _gm.STATE_LABELS.get(state, state))}</td>'
+        f'<td class="num">{counts.get(state, 0)}</td>'
+        f'<td>{_e(_gm.STATE_BLURBS.get(state, ""))}</td></tr>'
+        for state in _gm.STATE_ORDER if counts.get(state)
+    )
+    buckets = (f'<div class="scroll"><table>'
+               f'<tr><th>State</th><th class="num">Phones</th><th>What it means</th></tr>'
+               f'{bucket_rows}</table></div>')
+
+    reasons = migration.get("reasons") or []
+    reason_block = ""
+    if reasons:
+        reason_rows = "".join(
+            f'<tr><td>{_e(why)}</td><td class="num">{count}</td></tr>'
+            for why, count in reasons)
+        reason_block = (
+            '<h3>Why the rest are not connected</h3>'
+            '<p class="sub">Grouped by cause rather than listed per phone, '
+            'because the shape of the problem is what decides whether this is '
+            'worth fixing account by account or needs one change that clears '
+            'many at once.</p>'
+            f'<div class="scroll"><table>'
+            f'<tr><th>Reason</th><th class="num">Phones</th></tr>'
+            f'{reason_rows}</table></div>')
+
+    # The per-phone table, which is what somebody works through. No password or
+    # mailbox address is rendered -- the remark holds both, and a dashboard is
+    # not a secret store.
+    detail_rows = "".join(
+        f'<tr><td class="mono">{_e(row["name"])}</td>'
+        f'<td>{_dash(row["folder"])}</td>'
+        f'<td>{_handle_cell(row["handle"])}</td>'
+        f'<td>{_geelark_state_pill(row["state"], row["state_label"])}</td>'
+        f'<td>{_e(row["why"])}</td>'
+        f'<td class="mono">{_dash(row["last_tried"], "never")}</td></tr>'
+        for row in rows
+    )
+    detail = (
+        '<h3>Every phone</h3>'
+        '<p class="sub">Sorted best-news first. “Last tried” is the day the '
+        'login was last attempted — <em>never</em> means this account has not '
+        'been tested against Geelark at all.</p>'
+        f'<div class="scroll"><table>'
+        f'<tr><th>Phone</th><th>Folder</th><th>Handle</th><th>State</th>'
+        f'<th>Why</th><th>Last tried</th></tr>{detail_rows}</table></div>')
+
+    return headline + buckets + reason_block + detail
+
+
+def _section_geelark_folders(geelark: dict) -> str:
+    """The same answer per model, because the fleet is run per model.
+
+    A migration that is 80% done overall but has lost one model entirely is a
+    different problem from one that is evenly 80% done, and the total cannot
+    tell those apart.
+    """
+    if not geelark.get("configured"):
+        return '<p class="empty">Needs Geelark credentials — see above.</p>'
+
+    folders = (geelark.get("migration") or {}).get("folders") or []
+    if not folders:
+        return '<p class="empty">No folders to show.</p>'
+
+    columns = [state for state in _gm.STATE_ORDER
+               if any(folder.get(state) for folder in folders)]
+    head = ("<tr><th>Folder</th><th class='num'>Phones</th>"
+            + "".join(f"<th class='num'>{_e(_gm.STATE_LABELS.get(state, state))}</th>"
+                      for state in columns)
+            + "</tr>")
+    body = "".join(
+        f'<tr><td class="mono">{_e(folder["folder"])}</td>'
+        f'<td class="num">{folder["total"]}</td>'
+        + "".join(f'<td class="num">{folder.get(state) or ""}</td>'
+                  for state in columns)
+        + '</tr>'
+        for folder in folders)
+
+    return (f'<p class="sub">One row per model folder, mirroring the '
+            f'MultiLogin folder names so the two sides can be read side by '
+            f'side.</p>'
+            f'<div class="scroll"><table>{head}{body}</table></div>')
+
+
+def _section_geelark_signup(geelark: dict) -> str:
+    """Phones set aside to create brand-new accounts, and what they produced.
+
+    Separate from the migration numbers above on purpose. A new account is not
+    migration progress -- it does not recover an MLX account, it adds a
+    different one -- and adding the two would make a fleet that is losing
+    accounts look like one that is holding steady.
+    """
+    signup = geelark.get("signup") or {}
+    migration = geelark.get("migration") or {}
+    set_aside = (migration.get("counts") or {}).get("new_account", 0)
+
+    made = migration.get("new_accounts_made", 0)
+
+    lead = ""
+    if geelark.get("configured"):
+        lead = (f'<p class="sub"><span class="pill ok">{made} account(s) '
+                f'made</span> on Geelark phones so far, with '
+                f'<strong>{set_aside}</strong> phone(s) tagged '
+                f'<span class="mono">new profile</span> still reserved for the '
+                f'signup flow. These are counted <em>apart from</em> the '
+                f'migration numbers above: a new account does not bring back a '
+                f'MultiLogin account, it adds a different one, and letting the '
+                f'two share a total would make a fleet that is losing accounts '
+                f'look like one holding steady.</p>'
+                f'<p class="sub">Accounts are made against a mailbox rather '
+                f'than a rented number — an account created on an SMS number '
+                f'cannot be recovered by anyone once the number is released, '
+                f'and roughly sixteen fleet profiles are already in that '
+                f'hole.</p>')
+
+    if not signup.get("exists"):
+        return lead + ('<p class="empty">No signup run has been recorded yet — '
+                       f'the ledger at <span class="mono">'
+                       f'{_e(signup.get("ledger") or "~/.adb_bot/signup/geelark_signups.jsonl")}'
+                       '</span> does not exist. It is written only by a run '
+                       'started with <span class="mono">--apply</span>; a dry '
+                       'run leaves nothing behind.</p>')
+
+    attempts = signup.get("attempts", 0)
+    created = signup.get("created", 0)
+    by_status = signup.get("by_status") or {}
+
+    rate = f"{(100.0 * created / attempts):.0f}%" if attempts else "—"
+    summary = (f'<p class="sub"><strong>{created}</strong> account(s) created '
+               f'from <strong>{attempts}</strong> attempt(s) ({rate}). '
+               f'Two phones run at a time — Geelark sells four parallel slots, '
+               f'and a started phone bills by the minute whether or not '
+               f'anything is driving it.</p>')
+
+    status_rows = "".join(
+        f'<tr><td class="mono">{_e(status)}</td><td class="num">{count}</td></tr>'
+        for status, count in sorted(by_status.items(), key=lambda kv: -kv[1]))
+    status_block = (f'<div class="scroll"><table>'
+                    f'<tr><th>Outcome</th><th class="num">Runs</th></tr>'
+                    f'{status_rows}</table></div>')
+
+    recent = signup.get("recent") or []
+    recent_block = ""
+    if recent:
+        recent_rows = "".join(
+            f'<tr><td class="mono">{_e(row["profile"])}</td>'
+            f'<td>{_dash(row["folder"])}</td>'
+            f'<td>{_handle_cell(row["handle"])}</td>'
+            f'<td class="mono">{_e(row["status"])}</td></tr>'
+            for row in recent)
+        recent_block = ('<h3>Most recent runs</h3>'
+                        f'<div class="scroll"><table>'
+                        f'<tr><th>Phone</th><th>Folder</th><th>Handle</th>'
+                        f'<th>Outcome</th></tr>{recent_rows}</table></div>')
+
+    return lead + summary + status_block + recent_block
+
+
+def _section_geelark(geelark: dict) -> str:
+    """The Geelark account, kept deliberately apart from the MultiLogin fleet.
+
+    Geelark is a second cloud-phone host under evaluation. Its phones have no
+    Airtable row, no model and no posting history, so nothing here is added to
+    an MLX number anywhere else on the page -- a combined count would be wrong
+    in both directions.
+    """
+    if not geelark.get("configured"):
+        return (f'<p class="sub"><span class="pill warn">not configured</span> '
+                f'{_e(geelark.get("error") or "No Geelark credentials on this host.")}</p>')
+
+    error_note = ""
+    if geelark.get("error"):
+        error_note = (f'<p class="sub"><span class="pill warn">partial</span> '
+                      f'<span class="mono">{_e(geelark["error"])}</span></p>')
+
+    rows = geelark.get("phones") or []
+    if not rows:
+        return (error_note or '') + '<p class="empty">No cloud phones on this Geelark account.</p>'
+
+    counts = geelark.get("counts") or {}
+
+    def _adb_pill(state: str) -> str:
+        if state == "active":
+            return '<span class="pill ok">reachable</span>'
+        if state == "adb-not-enabled":
+            return '<span class="pill warn">ADB off</span>'
+        # A stopped phone cannot answer ADB, which is expected rather than a
+        # fault -- showing it as an error made an idle account look broken.
+        if state == "phone-not-running":
+            return '<span class="empty">phone off</span>'
+        if state == "unknown":
+            return '<span class="empty">—</span>'
+        return f'<span class="pill bad">{_e(state)}</span>'
+
+    def _status_cell(status: str) -> str:
+        if status == "started":
+            return '<span class="pill ok">started</span>'
+        if status == "stopped":
+            return '<span class="pill">stopped</span>'
+        return f'<span class="pill warn">{_e(status)}</span>'
+
+    head = ("<tr><th>Phone</th><th>Status</th><th>ADB</th><th>Device</th>"
+            "<th>Android</th><th>Country</th><th>Proxy</th><th>Tags</th></tr>")
+    body = "".join(
+        f"<tr><td class='mono'>{_e(phone['name'])}</td>"
+        f"<td>{_status_cell(phone['status'])}</td>"
+        f"<td>{_adb_pill(phone['adb'])}</td>"
+        f"<td>{_e(phone['device'])}</td>"
+        f"<td>{_e(phone['os'])}</td>"
+        f"<td>{_e(phone['country'])}</td>"
+        f"<td class='mono'>{_e(phone['proxy']) or '<span class=\"empty\">—</span>'}</td>"
+        f"<td>{_e(', '.join(phone['tags'])) or '<span class=\"empty\">—</span>'}</td></tr>"
+        for phone in rows
+    )
+
+    summary = (f'<p class="sub">{counts.get("phones", 0)} cloud phone(s) — '
+               f'{counts.get("running", 0)} started, {counts.get("stopped", 0)} stopped, '
+               f'{counts.get("adb_enabled", 0)} reachable over ADB. '
+               f'A started phone bills by the minute whether or not anything is '
+               f'driving it, and a phone with ADB off cannot be driven by the bot '
+               f'at all — ADB is off per phone until switched on, and switching it '
+               f'on needs the phone already started.</p>')
+
+    proxies = geelark.get("proxies") or []
+    proxy_block = ""
+    if proxies:
+        proxy_rows = "".join(
+            f"<tr><td class='mono'>{_e(entry['endpoint'])}</td>"
+            f"<td class='num'>{entry['profiles']}</td></tr>"
+            for entry in proxies
+        )
+        shared = [entry for entry in proxies if entry["profiles"] > 1]
+        shared_note = ""
+        if shared:
+            shared_note = (' <span class="pill warn">shared</span> '
+                           f'{len(shared)} endpoint(s) carry more than one profile.')
+        proxy_block = (f'<h3>Proxies</h3><p class="sub">'
+                       f'{counts.get("proxies", 0)} proxy record(s) across '
+                       f'{len(proxies)} endpoint(s) on '
+                       f'{counts.get("gateways", 0)} gateway host(s).{shared_note} '
+                       f'The gateway host is <em>not</em> the exit IP — separate '
+                       f'ports on one host commonly leave from different '
+                       f'addresses. Geelark reports the real one through its proxy '
+                       f'check, not on the proxy record.</p>'
+                       f'<div class="scroll"><table>'
+                       f'<tr><th>Endpoint</th><th class="num">Profiles</th></tr>'
+                       f'{proxy_rows}</table></div>')
+
+    tags = geelark.get("tags") or []
+    tag_block = ""
+    if tags:
+        tag_block = ('<h3>Tags</h3><p class="sub">'
+                     + ", ".join(f'<span class="mono">{_e(tag["name"])}</span>'
+                                 for tag in tags)
+                     + '. Geelark tags are writable through its API, so the '
+                       'MultiLogin habit of using a tag pair to decide who may '
+                       'post has an equivalent here — but nothing reads these yet.</p>')
+
+    return (error_note + summary + _geelark_billing(geelark.get("billing") or {},
+                                                     counts)
+            + f'<div class="scroll"><table>{head}{body}</table></div>'
+            + proxy_block + tag_block)
+
+
+def _geelark_billing(billing: dict, counts: dict) -> str:
+    """Money: what is left, and how many phones can run without spending it.
+
+    Unlike MultiLogin -- where an exhausted allowance stops every launch and
+    every log blames the server -- Geelark reports this, so it is worth showing
+    prominently rather than waiting for launches to start failing.
+    """
+    if not billing:
+        return ('<p class="sub"><span class="pill warn">no billing read</span> '
+                'The plan and wallet endpoints could not be read. They are rate '
+                'limited to 10 and 1 calls per minute respectively.</p>')
+
+    parallels = billing.get("parallels", 0)
+    running = counts.get("running", 0)
+    minutes = billing.get("minutes_left", 0)
+    credit = billing.get("credit", 0.0)
+
+    over = max(0, running - parallels)
+    if over:
+        slot_note = (f'<span class="pill bad">{over} over</span> '
+                     f'{running} phone(s) running against {parallels} parallel '
+                     f'slot(s) — the extra {over} are billing per minute.')
+    else:
+        slot_note = (f'<span class="pill ok">within slots</span> '
+                     f'{running} of {parallels} parallel slot(s) in use — '
+                     f'nothing is billing per minute right now.')
+
+    runway = ""
+    if minutes:
+        hours = minutes / 60.0
+        runway = (f' About <strong>{minutes:,} minute(s)</strong> '
+                  f'(~{hours:,.0f}h) of per-minute runway at '
+                  f'${0.007:.3f}/min, counting ${credit:,.2f} of credit and '
+                  f'{billing.get("time_addon_minutes", 0):,} bought minute(s).')
+    else:
+        runway = (' <span class="pill bad">no runway</span> No credit and no '
+                  'bought minutes: any phone outside a parallel slot will fail '
+                  'to start.')
+
+    return (f'<p class="sub">{slot_note}{runway}</p>'
+            f'<p class="sub">Plan <strong>{_e(billing.get("plan"))}</strong>, '
+            f'{billing.get("profiles_available", 0)} of '
+            f'{billing.get("profiles", 0)} profile slot(s) free. '
+            f'Parallel slots are dynamic — stopping a phone frees its slot — '
+            f'and they cover phones started through the API and driven over ADB. '
+            f'They do <em>not</em> cover Geelark\'s own RPA tasks, which always '
+            f'bill per minute.</p>')
 
 
 def _counts_cell(counts: dict) -> str:
@@ -2519,6 +2926,7 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     <input type="radio" name="adbbot-tab" id="tab-schedules">
     <input type="radio" name="adbbot-tab" id="tab-warmup">
     <input type="radio" name="adbbot-tab" id="tab-profiles">
+    <input type="radio" name="adbbot-tab" id="tab-geelark">
     <input type="radio" name="adbbot-tab" id="tab-technical">
     <div class="tabs">
       <label for="tab-server">Server</label>
@@ -2527,6 +2935,7 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
       <label for="tab-schedules">Schedules</label>
       <label for="tab-warmup">Warm-up{warmup_badge}</label>
       <label for="tab-profiles">Profiles</label>
+      <label for="tab-geelark">Geelark</label>
       <label for="tab-technical">Technical</label>
     </div>
 
@@ -2595,6 +3004,20 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
 
       <h2>Phones with two accounts</h2>
       {_section_second_accounts(data.get('second_accounts') or {})}
+    </section>
+
+    <section class="panel" id="panel-geelark">
+      <h2>Can the fleet move?</h2>
+      {_section_geelark_migration(data.get('geelark') or {})}
+
+      <h2>By model folder</h2>
+      {_section_geelark_folders(data.get('geelark') or {})}
+
+      <h2>New accounts being created</h2>
+      {_section_geelark_signup(data.get('geelark') or {})}
+
+      <h2>Geelark cloud phones</h2>
+      {_section_geelark(data.get('geelark') or {})}
     </section>
 
     <section class="panel" id="panel-technical">
