@@ -459,6 +459,17 @@ MAX_STEPS = 30
 # rather than a generous one -- and a fourth rarely fixes what three could not.
 MAX_NUMBER_ATTEMPTS = 3
 
+# The country Instagram's own picker opens on, which follows the phone's proxy
+# and locale -- German, for this fleet. It decides how a number is typed, not
+# where numbers are bought: a number from this country goes in as its national
+# part, and any other has to be typed in full with its `+` code.
+#
+# Buying German is a separate decision, and on 2026-08-21 the evidence went
+# against it: fifteen German numbers across both providers delivered nothing,
+# every one of them from the same +49 1590 56xx block, and SMSPool prices
+# Germany at $0.60 against $0.30 for the UK.
+PICKER_COUNTRY = "DE"
+
 # The same screen this many times running, with its handler claiming success,
 # means the handler is not advancing anything.
 MAX_REPEATS = 4
@@ -505,7 +516,7 @@ _SUBMIT_LABELS = ("Next", "NEXT", "Continue", "Done")
 
 
 def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
-               sleep=None, mailbox=None) -> SignupResult:
+               sleep=None, mailbox=None, country: str | None = None) -> SignupResult:
     """Walk one account from "Join Instagram" to a working profile.
 
     Two chains, chosen by `identity.email`:
@@ -735,12 +746,22 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     if numbers_used >= MAX_NUMBER_ATTEMPTS:
                         return finish(RESULT_NO_NUMBER,
                                       f"{numbers_used} numbers, none delivered")
-                    lease = router.lease()
+                    lease = (router.lease(country=country) if country
+                             else router.lease())
                     numbers_used += 1
-                    log("info", "number %d: %s", numbers_used, lease.e164)
-                # The national part only: the picker is already on DE +49.
+                    log("info", "number %d: %s (%s)", numbers_used, lease.e164,
+                        country or PICKER_COUNTRY)
+                # The national part only while the number matches the picker,
+                # which these phones open on because their proxy and locale are
+                # German. A number from anywhere else must go in whole, with
+                # its `+` country code, or the picker silently prefixes +49 to
+                # a British national number and Instagram texts a number that
+                # does not exist.
+                typed = (lease.typed_number
+                         if (country or PICKER_COUNTRY) == PICKER_COUNTRY
+                         else lease.e164)
                 if not driver.fill(("mobile", "phone", "number"),
-                                   lease.typed_number, "mobile number"):
+                                   typed, "mobile number"):
                     release(False)
                     continue
                 progressed = True

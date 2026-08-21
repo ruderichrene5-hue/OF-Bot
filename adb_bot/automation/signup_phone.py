@@ -303,7 +303,8 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
             mailbox = None
             router = build_router(logger=logger)
         result = signup.run_signup(driver, router, identity, logger=logger,
-                                   mailbox=mailbox)
+                                   mailbox=mailbox,
+                                   country=getattr(args, "country", None))
         out["steps"]["signup"] = result.status
         out["status"] = result.status
         out["detail"] = result.detail[:300]

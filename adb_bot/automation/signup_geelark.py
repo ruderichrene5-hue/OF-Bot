@@ -317,7 +317,11 @@ def main(argv=None) -> int:
     parser.add_argument("--no-verify", dest="verify", action="store_false",
                         help="stop at the checkpoint instead of clearing it. "
                              "Verification rents SMS numbers, which cost money")
-    parser.add_argument("--country", default=None)
+    parser.add_argument("--country", default=None,
+                        help="two-letter country to rent numbers from, e.g. "
+                             "GB. Defaults to the router's own default (DE), "
+                             "which delivered nothing in 15 attempts on "
+                             "2026-08-21 and costs twice what the UK does")
     parser.add_argument("--readiness-attempts", type=int, default=10)
     parser.add_argument("--readiness-wait", type=int, default=15)
     args = parser.parse_args(argv)

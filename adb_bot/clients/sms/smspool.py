@@ -34,6 +34,7 @@ import requests
 
 from adb_bot.clients.sms.base import (
     COUNTRY_DE,
+    COUNTRY_GB,
     COUNTRY_US,
     PROVIDER_SMSPOOL,
     DEFAULT_COUNTRY,
@@ -58,6 +59,13 @@ _COUNTRY_IDS = {
     COUNTRY_US: 1,                # "United States". 22 is "United States (Virtual)";
                                   # virtuals are cheaper but Instagram rejects many of
                                   # them, so the real pool is the default.
+    COUNTRY_GB: 2,                # "United Kingdom" (cc 44). $0.30 across four
+                                  # separate pools -- half what Germany costs,
+                                  # and a different carrier range, which is the
+                                  # point: on 2026-08-21 fifteen German numbers
+                                  # from BOTH providers delivered nothing and
+                                  # every one of them came out of the same
+                                  # +49 1590 56xx block.
     COUNTRY_DE: 24,               # "Germany" (cc 49). The default -- the profiles are
                                   # German and the challenge screen's picker is +49.
                                   # Dearer and less reliable than the US pool here:

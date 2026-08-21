@@ -33,6 +33,7 @@ PROVIDER_5SIM = "5sim"
 SERVICE_INSTAGRAM = "instagram"
 COUNTRY_US = "US"
 COUNTRY_DE = "DE"
+COUNTRY_GB = "GB"
 
 # International dialling code per canonical country. Used to split an
 # international number into the part Instagram's form actually wants: its phone
@@ -41,6 +42,7 @@ COUNTRY_DE = "DE"
 DIALLING_CODES = {
     COUNTRY_US: "1",
     COUNTRY_DE: "49",
+    COUNTRY_GB: "44",
 }
 
 # Where numbers are rented from unless a caller says otherwise.
