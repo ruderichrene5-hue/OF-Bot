@@ -22,6 +22,17 @@ Config, both from the environment (normally `/etc/adbbot/env`):
     TELEGRAM_TOPIC_ID    optional. In a forum group (one with topics), the
                          thread to post in; without it every message lands in
                          "General", which is not where anybody is looking.
+    ADBBOT_TELEGRAM_ALERTS
+                         optional comma-separated allowlist of alert categories
+                         (see CATEGORIES). Unset means every category is sent,
+                         which is what a box that has never heard of this does.
+
+**Why an allowlist and not four separate switches.** One token feeds every
+alerting loop, so switching the token on switches all of them on together --
+which is how re-enabling it on 2026-08-21, after ten days off, silently re-armed
+the daily digest and the profile-flag alerts as well as the thing somebody
+actually wanted. Narrowing the channel has to be one decision in one place, or
+it is not a decision anybody can check.
 
 Finding the topic id: open the topic in Telegram and copy its link. For a
 private supergroup that is `t.me/c/<chat>/<topic>` -- the last number is the
@@ -45,6 +56,18 @@ MAX_MESSAGE_CHARS = 4096
 # waiting on a chat server is not worth a second of that.
 TIMEOUT_SECONDS = 10
 
+# Every kind of message this deployment can send, and which loop sends it.
+# Named here rather than at the call sites so the set can be read off in one
+# place -- an allowlist you have to grep four modules to understand is one
+# nobody will maintain.
+CATEGORIES = {
+    "proxy": "MultiLogin proxy traffic: out, running low, and back (mlx-guard)",
+    "minutes": "MultiLogin minutes: out (mlx-guard) and running low (mlx-minutes)",
+    "fleet": "nothing is launching, cause unattributed (mlx-minutes)",
+    "flags": "profiles tagged as needing a person (issue-tags)",
+    "digest": "the daily summary (digest)",
+}
+
 
 class TelegramNotifier:
     """Posts to one chat. Never raises."""
@@ -64,13 +87,42 @@ class TelegramNotifier:
     def configured(self) -> bool:
         return bool(self.token and self.chat_id)
 
-    def send(self, text: str, logger=None) -> bool:
+    @property
+    def allowed(self) -> set:
+        """The categories this box is willing to send, or an empty set for all.
+
+        Read per call rather than cached at construction: these objects are
+        built once per loop run, and a change to `/etc/adbbot/env` should take
+        effect on the next tick rather than the next deploy.
+        """
+        raw = (os.environ.get("ADBBOT_TELEGRAM_ALERTS") or "").strip()
+        return {part.strip() for part in raw.replace(",", " ").split() if part.strip()}
+
+    def allows(self, category: str = "") -> bool:
+        """Whether `category` may be sent.
+
+        An unset allowlist allows everything, and an uncategorised message is
+        always allowed -- narrowing the channel is opt-in, so a caller that has
+        not been taught about categories keeps working rather than going quiet
+        without anyone deciding it should.
+        """
+        allowed = self.allowed
+        return not allowed or not category or category in allowed
+
+    def send(self, text: str, logger=None, category: str = "") -> bool:
         """True if Telegram accepted the message.
 
-        False covers both "not configured" and "it did not work"; the caller
-        treats them the same, because neither is worth failing a loop over.
+        False covers "not configured", "suppressed by the allowlist" and "it did
+        not work"; the caller treats them the same, because none is worth
+        failing a loop over. Callers that distinguish -- to keep a suppressed
+        alert out of a "could not send" warning -- should ask `allows()` first.
         """
         if not self.configured:
+            return False
+        if not self.allows(category):
+            _emit(logger, "info",
+                  "telegram: %s alerts are not in ADBBOT_TELEGRAM_ALERTS; "
+                  "not sending", category)
             return False
         body = text if len(text) <= MAX_MESSAGE_CHARS else (
             text[:MAX_MESSAGE_CHARS - 20].rsplit("\n", 1)[0] + "\n… (truncated)")
@@ -116,8 +168,18 @@ class TelegramNotifier:
                                       ("TELEGRAM_CHAT_ID", self.chat_id)) if not v]
             return f"not configured (missing {', '.join(missing)})"
         where = f"chat {self.chat_id}"
-        return f"configured for {where}" + (
+        line = f"configured for {where}" + (
             f", topic {self.topic_id}" if self.topic_id else " (no topic -- General)")
+        allowed = self.allowed
+        if allowed:
+            unknown = allowed - set(CATEGORIES)
+            line += f"; sending only {', '.join(sorted(allowed))}"
+            # A typo in the allowlist silences a category rather than erroring,
+            # so it has to be visible somewhere a person looks -- this string is
+            # what `doctor` prints.
+            if unknown:
+                line += f" (unrecognised: {', '.join(sorted(unknown))})"
+        return line
 
 
 def _emit(logger, level: str, message: str, *args) -> None:

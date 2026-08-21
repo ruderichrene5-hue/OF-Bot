@@ -658,9 +658,12 @@ class TelegramNotifyTest(unittest.TestCase):
             self.ok = ok
             self.sent = []
 
-        def send(self, text, logger=None):
+        def send(self, text, logger=None, category=""):
             self.sent.append(text)
             return self.ok
+
+        def allows(self, category=""):
+            return True
 
     def test_it_names_every_profile_and_its_reason(self):
         n = self._Notifier()
@@ -724,7 +727,8 @@ class TelegramWordingTest(unittest.TestCase):
     class _N:
         configured = True
         def __init__(self): self.sent = []
-        def send(self, text, logger=None): self.sent.append(text); return True
+        def send(self, text, logger=None, category=""): self.sent.append(text); return True
+        def allows(self, category=""): return True
 
     def _headline(self, count):
         n = self._N()

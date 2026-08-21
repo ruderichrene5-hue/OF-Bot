@@ -130,6 +130,17 @@ DEFAULT_CYCLE_WARN_FRACTION = 0.85
 
 STATE_FILE = Path.home() / ".adb_bot" / "mlx_guard.json"
 
+# Which Telegram category each alert belongs to, for `ADBBOT_TELEGRAM_ALERTS`.
+# Proxy and minutes are separate categories because they are separate products
+# with separate top-ups: somebody who wants to hear about one may not want to
+# hear about the other.
+ALERT_CATEGORIES = {
+    "proxy_out": "proxy",
+    "proxy_low": "proxy",
+    "proxy_back": "proxy",
+    "minutes_out": "minutes",
+}
+
 
 @dataclass
 class Probe:
@@ -633,7 +644,15 @@ def run_check(logger=None, notifier=None, now=None, state_path=None,
         from adb_bot.clients.telegram import TelegramNotifier
         notifier = TelegramNotifier()
     for name, body in alerts:
-        if notifier is not None and notifier.send(body, logger=logger):
+        category = ALERT_CATEGORIES.get(name, "")
+        if notifier is not None and not notifier.allows(category):
+            # Asked before sending so a deliberately narrowed channel does not
+            # show up as a delivery failure in the log or in `report.sent`.
+            _log(logger, "info", "mlx_guard: %s alert suppressed (%s not in "
+                 "ADBBOT_TELEGRAM_ALERTS)", name, category)
+            continue
+        if notifier is not None and notifier.send(body, logger=logger,
+                                                  category=category):
             report.sent.append(name)
         else:
             _log(logger, "warning", "mlx_guard: could not send %s alert", name)

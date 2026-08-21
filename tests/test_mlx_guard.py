@@ -384,7 +384,10 @@ class _Silent:
     def __init__(self, log):
         self.log = log
 
-    def send(self, body, logger=None):
+    def allows(self, category=""):
+        return True
+
+    def send(self, body, logger=None, category=""):
         self.log.append("proxy_out" if "Out of MultiLogin proxy" in body
                         else "other")
         return True
