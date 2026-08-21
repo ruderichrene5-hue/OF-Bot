@@ -162,6 +162,43 @@ def looks_like_another_app(text: str | None) -> bool:
     haystack = text.lower()
     return any(marker in haystack for marker in _OTHER_APP_MARKERS)
 
+
+# Instagram naming the account back to us, on the screens it shows once one
+# exists. This is ground truth for the handle: the flow's own idea of it is a
+# guess about what the username box ended up holding, and the two have already
+# diverged in production.
+_HANDLE_PHRASES = (
+    "to use your account, ",
+    "confirm you're human to use your account, ",
+)
+
+# Instagram handles: letters, digits, dots, underscores, up to 30.
+_HANDLE_RE = re.compile(r"([a-z0-9._]{1,30})")
+
+
+def handle_from_text(text: str | None) -> str:
+    """The account handle Instagram itself names, or "" if it names none.
+
+    Deliberately narrow. A wrong answer here renames a real account in our own
+    records, which is worse than no answer: an empty result leaves the flow's
+    own guess in place, while a wrong one overwrites a handle that was right.
+    """
+    if not text:
+        return ""
+    haystack = text.lower()
+    for phrase in _HANDLE_PHRASES:
+        index = haystack.find(phrase)
+        if index < 0:
+            continue
+        match = _HANDLE_RE.match(haystack[index + len(phrase):].lstrip())
+        if not match:
+            continue
+        handle = match.group(1).strip(".")
+        # A bare word that is really the start of a sentence is not a handle.
+        if len(handle) >= 3 and not handle.isdigit():
+            return handle
+    return ""
+
 _EMAIL_MARKERS = (
     "what's your email address",
     "whats your email address",
@@ -859,6 +896,20 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                         RESULT_OCCUPIED,
                         "a checkpoint for an account already on this phone -- "
                         "nothing was created, and nothing on it was touched")
+                # Instagram names the account on this screen, and it is the
+                # only source that cannot be wrong. Everything upstream is a
+                # guess about what the username box ended up holding: the flow
+                # may have accepted Instagram's own suggestion, or the field
+                # may render a value it never received. On 2026-08-21
+                # @nora450960 was written down as @nora.brandt, which puts a
+                # real password under a handle that does not exist -- the one
+                # unrecoverable way to lose an account.
+                named = handle_from_text(text)
+                if named and named != identity.username:
+                    log("info", "instagram calls this account @%s, not @%s; "
+                                "believing instagram", named,
+                        identity.username)
+                    identity.username = named
                 log("info", "the account exists but is held for verification: "
                             "@%s", identity.username)
                 release(False)
