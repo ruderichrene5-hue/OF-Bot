@@ -249,6 +249,34 @@ def test_autoresume_is_off_unless_asked_for(monkeypatch, tmp_path):
     assert "proxy_back" in report.sent
 
 
+def test_recovery_does_not_also_warn_that_traffic_is_nearly_gone(monkeypatch,
+                                                                 tmp_path):
+    """The estimate is measured from the top-up that just ran dry, so on the
+    recovery tick it reads ~0. Sending "nearly gone" in the same tick as "it is
+    back" is the sort of contradiction that gets an alert channel muted."""
+    monkeypatch.setenv("MLX_PROXY_GB_ALLOWANCE", "10")
+    monkeypatch.delenv("ADBBOT_GUARD_AUTORESUME", raising=False)
+    _patch_get(monkeypatch, [FakeResponse(200, {"city": "Stuttgart",
+                                                "query": "5.6.7.8"})] * 4)
+    monkeypatch.setattr(g, "refusals_501", lambda **kw: 0)
+    # Point the minute counter at a log dir holding one long dead cycle, so the
+    # test does not depend on whatever this machine's real fleet has been doing.
+    monkeypatch.setenv("MLX_LOG_DIR", str(tmp_path))
+    (tmp_path / "launcher_20260820.log").write_text(SESSIONS)
+    # A cycle that burned the whole 10 GB at the calibrated rate.
+    state_path = tmp_path / "s.json"
+    state_path.write_text('{"gateway": "exhausted", '
+                          '"topped_up_at": "2026-08-20T15:17:00", '
+                          '"gb_per_minute": 0.5}')
+
+    report = g.run_check(profiles=_profiles(4), state_path=state_path,
+                         dry_run=True)
+
+    assert "proxy_back" in report.sent
+    assert "proxy_low" not in report.sent
+    assert report.gb_left == 10.0        # the new cycle, not the dead one
+
+
 def test_a_healthy_fleet_is_left_alone(monkeypatch, tmp_path):
     _patch_get(monkeypatch, [FakeResponse(200, {"city": "Mannheim",
                                                 "query": "1.2.3.4"})] * 4)

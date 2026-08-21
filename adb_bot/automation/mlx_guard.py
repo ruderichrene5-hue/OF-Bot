@@ -520,6 +520,14 @@ def run_check(logger=None, notifier=None, now=None, state_path=None,
                 # Recovery. A fresh top-up starts a fresh cycle, so the minute
                 # counter restarts here rather than at any wall-clock boundary.
                 state["topped_up_at"] = now.isoformat()
+                # Re-read the estimate against the *new* cycle before anything
+                # judges it. The figure above was measured from the top-up that
+                # just ran dry, so it is ~0 -- and leaving it would fire
+                # "traffic is nearly gone" in the same tick as "traffic is
+                # back", which is the sort of contradiction that gets an alert
+                # channel muted.
+                (report.gb_left, report.gb_allowance, report.burn_rate,
+                 report.minutes_this_cycle) = estimate_gb(state, now=now)
                 if (os.environ.get("ADBBOT_GUARD_AUTORESUME") or "").strip() == "1":
                     report.resumed = resume_burners(
                         state.get("stopped_by_guard"), dry_run=dry_run,
