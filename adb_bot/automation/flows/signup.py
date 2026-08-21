@@ -60,6 +60,7 @@ SCREEN_PERMISSION_DIALOG = "permission_dialog"   # Android's own allow/deny
 SCREEN_INTERSTITIAL = "interstitial"    # feed personalisation, nav tips
 SCREEN_SAVE_PASSWORD = "save_password"  # Android autofill, not Instagram
 SCREEN_LAUNCHER = "launcher"            # the phone's home screen -- start the app
+SCREEN_NOT_INSTAGRAM = "not_instagram"  # some other app is in front -- same fix
 SCREEN_LOADING = "loading"              # mid-render -- wait, do not act
 SCREEN_DONE = "done"                    # a working account
 SCREEN_BANNED = "banned"                # created and immediately disabled
@@ -139,6 +140,27 @@ _METHOD_CHOOSER_MARKERS = (
     "change mobile number",
     "confirm by email",
 )
+
+# Surfaces belonging to some *other* app, seen when Instagram has left the
+# foreground. Only the Play Store so far, which is what these phones fall back
+# to; add others as they turn up rather than guessing at them.
+#
+# Each marker has to be unmistakably not-Instagram. A loose one here is worse
+# than a missing one: it would restart Instagram in the middle of a signup that
+# was going fine, and a restarted signup begins again at "Join Instagram" and
+# throws away everything it had.
+_OTHER_APP_MARKERS = (
+    "sign in to find the latest android apps, games, movies, music",
+    "google play store",
+)
+
+
+def looks_like_another_app(text: str | None) -> bool:
+    """True when the screen belongs to an app that is not Instagram."""
+    if not text:
+        return False
+    haystack = text.lower()
+    return any(marker in haystack for marker in _OTHER_APP_MARKERS)
 
 _EMAIL_MARKERS = (
     "what's your email address",
@@ -387,6 +409,15 @@ def classify_signup_screen(text: str | None) -> str:
     # is not in front. Verification learned this the expensive way on `Jil 6`.
     if looks_like_launcher(haystack):
         return SCREEN_LAUNCHER
+
+    # Instagram can disappear *mid-signup*, not only before it starts. On
+    # 2026-08-21 a run tapped the number field, found the field list empty ten
+    # seconds later, and read the Play Store on the next dump -- Instagram had
+    # gone and the store was simply what lay behind it. Classified as unknown,
+    # that ends the run; classified here, it is the same cheap fix as the home
+    # screen, which is to start Instagram again.
+    if looks_like_another_app(haystack):
+        return SCREEN_NOT_INSTAGRAM
 
     for kind, markers in _ORDERED_MARKERS:
         if any(marker in haystack for marker in markers):
@@ -708,14 +739,16 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
             log("info", "step %d: %s", step + 1, screen)
             steps.append(screen)
 
-            if screen == SCREEN_LAUNCHER:
+            if screen in (SCREEN_LAUNCHER, SCREEN_NOT_INSTAGRAM):
                 # Not a signup screen and not a verdict: Instagram is simply
                 # not in front. Starting it again is nearly free.
                 starter = getattr(driver, "restart_app", None)
                 if app_restarts < MAX_APP_RESTARTS and callable(starter) and starter():
                     app_restarts += 1
-                    log("info", "on the home screen; starting Instagram again "
-                                "(%d/%d)", app_restarts, MAX_APP_RESTARTS)
+                    log("info", "%s; starting Instagram again (%d/%d)",
+                        "on the home screen" if screen == SCREEN_LAUNCHER
+                        else "another app is in front",
+                        app_restarts, MAX_APP_RESTARTS)
                     steps.pop()
                     sleep(6)
                     continue
