@@ -1209,7 +1209,14 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 # Arrives holding Instagram's own suggestion, which is why this
                 # is a fill and not a "tap Next".
                 progressed = True
-                if (username_filled
+                # Our handle must still be in the box. Instagram bounces back
+                # to the name screen after a submit and returns the username
+                # screen holding **its own suggestion** again -- so
+                # `input username is valid` is true, just not about us. Without
+                # this check the flow submits a field it never retyped, four
+                # times, and calls itself stuck; three phones went that way.
+                ours_on_screen = identity.username.lower() in text
+                if (username_filled and ours_on_screen
                         and not any(marker in text
                                     for marker in _USERNAME_TAKEN_MARKERS)
                         and any(marker in text
@@ -1256,6 +1263,14 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                         return finish(RESULT_STUCK,
                                       f"{rejections} usernames rejected in a "
                                       f"row, last {rejected}")
+                if username_filled and not ours_on_screen:
+                    # Retyping after Instagram put its suggestion back. The
+                    # submit counter resets with it: the next submit is a first
+                    # attempt at this value, and going straight to the keyboard
+                    # route would skip the tap that works everywhere else.
+                    log("info", "the box holds instagram's suggestion again; "
+                                "retyping %s", identity.username)
+                    username_submits = 0
                 driver.fill(("username",), identity.username, "username")
                 username_filled = True
                 driver.dismiss_keyboard()

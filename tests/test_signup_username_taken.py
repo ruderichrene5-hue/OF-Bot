@@ -90,6 +90,45 @@ class UsernameAcceptedTest(unittest.TestCase):
                          signup.SCREEN_USERNAME)
 
 
+# Verbatim from `Nikki new 5`. The flow had typed `lina.berg`, submitted it,
+# been bounced to the name screen, and come back to find Instagram's own
+# suggestion in the box -- valid, and not ours.
+REVERTED_SCREEN = (
+    "create a username create a username add a username or use our "
+    "suggestion. you can change this at any time. username username "
+    "lina830030 username,lina830030 input username is valid. next next next "
+    "back"
+)
+
+
+class UsernameRevertedTest(unittest.TestCase):
+    """"Valid" is not the same as "valid for the handle we chose".
+
+    Instagram returns to the name screen after a submit and comes back with its
+    own suggestion in the box. The screen still says `input username is valid`,
+    because it is -- about the suggestion. A flow that submits on the marker
+    alone re-submits a field it never retyped, four times, and reports itself
+    stuck. Three phones went that way.
+    """
+
+    def test_the_screen_still_reads_as_valid(self):
+        """Which is exactly why the marker alone cannot be trusted."""
+        self.assertTrue(any(marker in REVERTED_SCREEN
+                            for marker in signup._USERNAME_VALID_MARKERS))
+
+    def test_our_handle_is_absent_from_it(self):
+        self.assertNotIn("lina.berg", REVERTED_SCREEN)
+
+    def test_our_handle_is_present_when_the_box_holds_it(self):
+        typed = ("create a username username username lina.berg "
+                 "username,lina830030 input username is valid. next")
+        self.assertIn("lina.berg", typed)
+
+    def test_instagrams_suggestion_is_not_our_handle(self):
+        """The two differ by more than punctuation, so the check is real."""
+        self.assertNotEqual("lina.berg", "lina830030")
+
+
 class NextUsernameTest(unittest.TestCase):
 
     def test_the_new_handle_differs_from_the_rejected_one(self):
