@@ -308,6 +308,12 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
         out["steps"]["signup"] = result.status
         out["status"] = result.status
         out["detail"] = result.detail[:300]
+        # Re-read the handle: the signup changes it when Instagram says the
+        # first choice is taken, and `out` was filled in before the phone was
+        # touched. Reporting the intended handle for a live account is how
+        # somebody goes looking for @lena.berg and finds nothing, while
+        # @lena.berg1968 sits there unclaimed.
+        out["username"] = identity.username
         print(f"  signup: {result.status}  {result.detail[:160]}")
 
         record_account(profile_id, name, identity, status=result.status)
