@@ -550,9 +550,13 @@ class SignupResult:
 # and screens that repeat while something loads.
 MAX_STEPS = 30
 
-# Each number costs real money and about 150 seconds of waiting. The German
-# pool delivers roughly one time in two or three, so three is a real budget
-# rather than a generous one -- and a fourth rarely fixes what three could not.
+# Each number costs real money and a `CODE_WAIT_SECONDS` wait. The US pool
+# delivered 11 of 15 on 2026-08-21 -- about 73% -- so three attempts carry a
+# run past a bad draw without spending the whole phone on numbers.
+#
+# An undelivered number is refunded, so the cost of an extra attempt is the
+# phone's life rather than money; that is what bounds this, and it is why the
+# wait was cut to 90s.
 MAX_NUMBER_ATTEMPTS = 3
 
 # The country Instagram's own picker opens on, which follows the phone's proxy
@@ -571,7 +575,19 @@ PICKER_COUNTRY = "DE"
 MAX_REPEATS = 4
 
 # How long to wait for an SMS before writing the number off.
-CODE_WAIT_SECONDS = 150
+#
+# Ninety, not a hundred and fifty. Every code that has ever arrived here
+# arrived fast: measured across all of 2026-08-21's runs, the delivery
+# latencies were 0s, 0s, 3s and 77s, and **nothing has ever landed between 77s
+# and the old 150s ceiling**. So the last minute of each wait was spent on an
+# outcome never once observed, at 73 seconds a number out of a phone that lives
+# about fifteen minutes -- often the difference between getting a third number
+# tried and running out of phone first.
+#
+# Raise it again only against new evidence of a slow delivery, not on the
+# general feeling that longer is safer: longer is only safer if something
+# actually arrives late, and so far nothing has.
+CODE_WAIT_SECONDS = 90
 
 # How long to wait for the mail. Longer than the SMS budget because nothing is
 # ageing while we wait -- no number is rented -- but still bounded by the phone,
