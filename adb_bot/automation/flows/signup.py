@@ -42,6 +42,7 @@ SCREEN_PHONE = "phone"                  # "What's your mobile number?"
 SCREEN_EMAIL = "email"                  # "What's your email address?" (we avoid it)
 SCREEN_CODE = "code"                    # "Enter the confirmation code"
 SCREEN_CALL_CONFIRM = "call_confirm"    # "Confirm ... automatically with a phone call"
+SCREEN_SEND_SMS = "send_sms"            # "Send SMS to confirm your account" (outbound!)
 SCREEN_PASSWORD = "password"            # "Create a password"
 SCREEN_BIRTHDAY = "birthday"            # "What's your date of birth?"
 SCREEN_DATE_PICKER = "date_picker"      # the Android spinner dialog
@@ -108,6 +109,20 @@ _PHONE_MARKERS = (
 _CALL_CONFIRM_MARKERS = (
     "confirm your account automatically with a phone call",
     "we'll call your mobile number and end the call automatically",
+)
+
+# Instagram asking the PHONE to send an SMS out, rather than sending one in:
+# it opens the handset's own messaging app with a prefilled code addressed to
+# Instagram. Seen 2026-08-21 immediately after declining the phone call.
+#
+# It cannot work here whichever way you look at it. The message would be sent
+# by the cloud phone's own SIM, which is not the number Instagram is trying to
+# confirm; and these phones have no usable SIM to send it with anyway. The
+# screen's `Try another way` is the route onward.
+_SEND_SMS_MARKERS = (
+    "send sms to confirm your account",
+    "send a prefilled code from",
+    "tap to open your default sms app",
 )
 
 _EMAIL_MARKERS = (
@@ -270,6 +285,7 @@ _ORDERED_MARKERS = (
     # same wording, and mistaking it for the number form retypes a number
     # Instagram has already accepted.
     (SCREEN_CALL_CONFIRM, _CALL_CONFIRM_MARKERS),
+    (SCREEN_SEND_SMS, _SEND_SMS_MARKERS),
     (SCREEN_EMAIL, _EMAIL_MARKERS),
     (SCREEN_PHONE, _PHONE_MARKERS),
     (SCREEN_PERMISSIONS, _PERMISSIONS_MARKERS),
@@ -541,6 +557,12 @@ _CONFIRM_WITH_CODE_LABELS = (
     "Send a code", "Use a code", "Confirm another way",
 )
 
+# The way off any verification method this fleet cannot perform.
+_ANOTHER_WAY_LABELS = (
+    "Try another way", "TRY ANOTHER WAY", "Try Another Way",
+    "Another way", "Choose another way", "Use another method",
+)
+
 
 def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                sleep=None, mailbox=None, country: str | None = None) -> SignupResult:
@@ -808,6 +830,21 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                                       str(x) for x in
                                       (driver.clickable_labels() or ())[:8]))
                 log("info", "declined the phone call; asking for a code")
+                progressed = True
+                sleep(6)
+
+            elif screen == SCREEN_SEND_SMS:
+                # `Open SMS app` would send from the cloud phone's own SIM,
+                # which is not the number being confirmed -- and these phones
+                # have no usable SIM to send with. `Try another way` is the
+                # only move.
+                if not driver.tap_label(_ANOTHER_WAY_LABELS):
+                    return finish(RESULT_STUCK,
+                                  "no way off the outbound-SMS screen: "
+                                  + ", ".join(str(x) for x in
+                                              (driver.clickable_labels()
+                                               or ())[:8]))
+                log("info", "declined sending an SMS; asking for another way")
                 progressed = True
                 sleep(6)
 
