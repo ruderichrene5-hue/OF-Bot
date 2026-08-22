@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from adb_bot.automation import schedule_spec, warmup_completion
+from adb_bot.automation import geelark_migration, schedule_spec, warmup_completion
 
 # How long a collected snapshot may be reused. Short enough that the page is
 # honest about "running now", long enough that holding the refresh key cannot
@@ -3693,6 +3693,11 @@ def geelark_status() -> dict:
         "billing": {},
         "counts": {"phones": 0, "running": 0, "stopped": 0,
                    "adb_enabled": 0, "proxies": 0, "gateways": 0},
+        # Always present, so every early return below still hands the renderer
+        # the same shape and the tab degrades to empty sections rather than a
+        # KeyError on the one day Geelark is unreachable.
+        "migration": {},
+        "signup": {},
         "error": "",
     }
 
@@ -3710,11 +3715,29 @@ def geelark_status() -> dict:
         out["error"] = f"Geelark client unavailable: {exc}"
         return out
 
-    transport = GeelarkTransport()
+    # Constructing the transport reads the credentials, which means it can fail
+    # on a host where the settings module does not know about Geelark at all.
+    # That has to be caught here: `_slow` requires its builder to report
+    # failures in its return value rather than raise, so an exception escaping
+    # this function does not cost the Geelark tab -- it costs the whole
+    # dashboard, every tab, for everybody.
+    try:
+        transport = GeelarkTransport()
+    except Exception as exc:
+        out["error"] = f"Geelark credentials could not be read: {exc}"
+        return out
+
     if not transport.is_configured:
         # Not an error: the credentials are simply not installed on this host.
         out["error"] = ("Not configured -- set GEELARK_APP_ID and "
                         "GEELARK_API_KEY in /etc/adbbot/env.")
+        # The signup ledger is a local file, so it is still readable and still
+        # worth showing -- the new-account pipeline's progress does not depend
+        # on being able to reach Geelark's API right now.
+        try:
+            out["signup"] = geelark_migration.signup_progress()
+        except Exception:
+            out["signup"] = {}
         return out
     out["configured"] = True
 
@@ -3756,6 +3779,13 @@ def geelark_status() -> dict:
                       if proxy.get("server") else ""),
             "tags": [str(tag.get("name") or "") for tag in row.get("tags") or []],
             "group": str((row.get("group") or {}).get("name") or ""),
+            # The remark is where the whole migration state lives -- whose
+            # account this is, whether a password was ever recovered for it,
+            # and how the last login attempt ended. `geelark_migration` parses
+            # it; it is carried here raw so there is one read of the phone list
+            # rather than two. It holds passwords, so it is consumed into
+            # counts and never rendered.
+            "remark": str(row.get("remark") or ""),
         })
 
     out["phones"].sort(key=lambda p: p["name"].lower())
@@ -3797,6 +3827,23 @@ def geelark_status() -> dict:
         # Money is the one reading here that is rate limited hard enough to fail
         # on its own; the inventory above is still worth showing without it.
         out["billing"] = {}
+
+    # How far the migration is, read back out of the remarks the provisioner and
+    # the login flow wrote onto the phones. Pure parsing of what was already
+    # fetched above -- no extra API call, so it cannot fail on a rate limit and
+    # cannot cost money.
+    try:
+        out["migration"] = geelark_migration.summarise(out["phones"])
+    except Exception as exc:
+        out["migration"] = {}
+        out["error"] = out["error"] or f"Could not read the migration state: {exc}"
+
+    # The other half of the tab: phones set aside to create *new* accounts on,
+    # and what the signup runs have produced so far. Local file, no API.
+    try:
+        out["signup"] = geelark_migration.signup_progress()
+    except Exception:
+        out["signup"] = {}
 
     return out
 
