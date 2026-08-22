@@ -129,11 +129,45 @@ then log in on Geelark and read the code over IMAP.
   Roughly £10/year. This single purchase removes the dependency on a Gmail
   pool that has failed every test put to it.
 
-**Risk, and it is real:** changing an account's email is a security-sensitive
-action, so Instagram may challenge *that* on some accounts — putting us back at
-the same wall for those. **Test on one account before committing to it.**
-
 **Limit:** it only works on twins that are still logged in. See Option C.
+
+#### The risk, properly stated
+
+This is not a formality. Three separate risks, worst first:
+
+**1. One domain links every account together — permanently.** Pointing fifty
+accounts at addresses on a single fresh domain hands Instagram one identifier
+that ties them all to each other, written into the account record. That is
+worse than the shared exit IP everyone worries about: an IP is circumstantial
+and changes, a domain on the account is definitive and sticks. If one account
+is examined, the rest are one query away.
+
+*Mitigation:* use several domains, not one. Vary the local parts so they do not
+read as a batch — `clara.k.1994@`, not `laila-07@`. Age each domain before
+relying on it, and let some ordinary mail pass through it.
+
+**2. The sequence is the giveaway, not the change.** Changing an account's
+email and then signing in from a device Instagram has never seen is the
+textbook shape of an account takeover. Either event alone is ordinary; together
+and minutes apart they are not.
+
+*Mitigation:* change the email, leave it a day, then attempt the Geelark login.
+Never both in one session.
+
+**3. Instagram may challenge the change itself**, which puts us back at the
+same wall for that account. It also notifies the *old* address and usually
+offers a "revert this change" link — that mailbox is dead so nobody will act on
+it, but the event is still recorded against the account.
+
+**What is in its favour:** the change is made *on the twin*, the device
+Instagram already trusts, using a session it already accepts. That is the
+safest possible context for it, and far better than doing it from the new
+phone. And we are already generating a security event on every login attempt —
+this adds to a cost we are paying anyway rather than introducing a new one.
+
+**Honest position: the odds are unknown.** Test on the least valuable account
+in the fleet, not the one with the most followers, and stop if the first two
+attract a checkpoint.
 
 ### Option B — attach a phone number to the account, from the twin
 
@@ -190,8 +224,11 @@ Ordered so that each step either unblocks the next or kills the plan cheaply.
 
 ### Phase 0 — decisions needed before any work (owner: Caio/Rene)
 
-- [ ] **Buy a domain with catch-all email.** Anything with IMAP or an API.
-      This is the single highest-leverage purchase available. ~£10/year.
+- [ ] **Buy domains with catch-all email.** Anything with IMAP or an API.
+      The single highest-leverage purchase available, ~£10/year each — but buy
+      **two or three, not one**, and split the fleet across them. One domain
+      across every account is a permanent identifier linking them all; see the
+      risk section under Option A before deciding how to spread them.
 - [ ] **Top up SMSPool** (~$20 ≈ 35 more new accounts) if the rebuild path is
       to continue in parallel. Both wallets are now empty.
 - [ ] **Decide about the non-German profiles.** 26 MultiLogin profiles are not
@@ -204,11 +241,15 @@ Ordered so that each step either unblocks the next or kills the plan cheaply.
 
 ### Phase 1 — prove the route on one account (half a day)
 
-- [ ] Pick the one twin known to be on its feed (`islafaee` / MLX `Jasmin 11`,
-      id `632162578940952646`).
-- [ ] Change its Instagram email to `<handle>@ourdomain`.
+- [ ] Pick the **least valuable** account whose twin is on its feed — not the
+      one with the most followers. The first two attempts are experiments, and
+      should be spent on accounts nobody minds losing.
+- [ ] Change its Instagram email to an address on one of our domains.
 - [ ] Confirm the change lands — **watch for Instagram challenging the change
       itself**; that is the failure mode that would kill Option A.
+- [ ] **Wait a day before the login attempt.** Changing the email and then
+      appearing from a new device minutes later is the shape of a takeover.
+      Separating them is free and removes the strongest signal.
 - [ ] Log in on the Geelark phone, read the code over IMAP, complete it.
 - [ ] **Gate:** if this works, the migration is a throughput problem. If
       Instagram blocks the email change, Option A is dead and Phase 2 becomes
