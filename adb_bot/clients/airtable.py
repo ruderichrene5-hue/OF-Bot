@@ -314,6 +314,17 @@ F_MODEL_REEL_TIMES = "Reel Post Times"
 # filled, where the count of selected times IS the daily number.
 F_MODEL_REELS_PER_DAY = "Reels Per Day"
 
+# text: the Geelark material-library tag holding this model's profile
+# pictures, e.g. "Nikki" -- looked up via /material/tag/search, then
+# /material/search, to get a usable fileUrl (adb_bot/clients/geelark/library.py).
+F_MODEL_GEELARK_TAG = "GeeLark Tag"
+# text: this model's bio-link destination. Per model, not shared -- each
+# model's Instagram profiles all point at the same one of these.
+F_MODEL_LINK_URL = "Link URL"
+# long text: bio variations, one per line. Blank lines are dropped, so
+# spacing between entries in the Airtable cell does not matter.
+F_MODEL_BIO_POOL = "Bio Pool"
+
 # singleSelect status labels shared across the three synced tables
 STATUS_SELECT_ACTIVE = "Active"
 STATUS_SELECT_INACTIVE = "Inactive"
@@ -905,6 +916,33 @@ class AirtableClient:
             name = str((record.get("fields", {}) or {}).get(F_MODEL_NAME) or "").strip()
             if name:
                 out[name.lower()] = record.get("id")
+        return out
+
+    def model_profile_configs(self) -> dict:
+        """Model Name -> {geelark_tag, link_url, bio_pool}, for the
+        instagramEdit RPA task (adb_bot/automation/check_profile_readiness.py).
+
+        A field left blank in Airtable comes back as an empty string/list
+        here, not a made-up value -- the caller decides what "not
+        configured yet" means (skip the phone, in this case).
+        """
+        out: dict = {}
+        for record in self._list_table(
+                TABLE_MODELS,
+                fields=[F_MODEL_NAME, F_MODEL_GEELARK_TAG, F_MODEL_LINK_URL,
+                       F_MODEL_BIO_POOL]):
+            fields = record.get("fields", {}) or {}
+            name = str(fields.get(F_MODEL_NAME) or "").strip()
+            if not name:
+                continue
+            bio_pool = [line.strip()
+                       for line in str(fields.get(F_MODEL_BIO_POOL) or "").splitlines()
+                       if line.strip()]
+            out[name] = {
+                "geelark_tag": str(fields.get(F_MODEL_GEELARK_TAG) or "").strip(),
+                "link_url": str(fields.get(F_MODEL_LINK_URL) or "").strip(),
+                "bio_pool": bio_pool,
+            }
         return out
 
     def create_device(self, fields: dict) -> str | None:

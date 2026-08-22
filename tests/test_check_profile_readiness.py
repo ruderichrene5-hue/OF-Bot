@@ -17,6 +17,10 @@ def _phone(phone_id, tags, model="Nikki"):
            "tags": [{"name": t} for t in tags], "group": {"name": model}}
 
 
+FULL_CONFIG = {"geelark_tag": "Nikki", "link_url": "https://x.example/go",
+              "bio_pool": ["hey ⬇️", "check below ⬇️"]}
+
+
 class PhonesToCheckTest(unittest.TestCase):
     def test_ig_connected_without_post_ready_is_included(self):
         phone = _phone("1", ["IG connected"])
@@ -52,60 +56,76 @@ class RunOneTest(unittest.TestCase):
         self.fake_phones_cls = self.phones_patch.start()
         self.addCleanup(self.phones_patch.stop)
 
-        self.link_patch = mock.patch.object(c, "LINK_URL", "https://x.example/go")
-        self.link_patch.start()
-        self.addCleanup(self.link_patch.stop)
-
-        self.picture_patch = mock.patch.object(
-            c.model_media, "picture_url_for",
-            return_value="https://example.com/nikki.jpg")
-        self.picture_patch.start()
-        self.addCleanup(self.picture_patch.stop)
-
-    def test_no_picture_configured_skips_without_triggering_anything(self):
-        """A model with no picture yet must never get a two-of-three
-        instagramEdit request -- the field is simply not ready to check."""
+    def test_no_link_url_in_airtable_skips_without_triggering_anything(self):
         phone = _phone("1", ["IG connected"])
+        config = {**FULL_CONFIG, "link_url": ""}
 
-        with mock.patch.object(c.model_media, "picture_url_for",
-                               return_value=""), \
-             mock.patch.object(c.rpa, "trigger_instagram_edit_profile") as trigger:
-            out = c.run_one(phone, Args(), mock.Mock(), transport=None)
-
-        self.assertEqual(out["status"], "no-picture-configured")
-        trigger.assert_not_called()
-
-    def test_no_link_url_configured_skips_without_triggering_anything(self):
-        phone = _phone("1", ["IG connected"])
-
-        with mock.patch.object(c, "LINK_URL", ""), \
-             mock.patch.object(c.rpa, "trigger_instagram_edit_profile") as trigger:
-            out = c.run_one(phone, Args(), mock.Mock(), transport=None)
+        with mock.patch.object(c.rpa, "trigger_instagram_edit_profile") as trigger:
+            out = c.run_one(phone, config, Args(), mock.Mock(), transport=None)
 
         self.assertEqual(out["status"], "no-link-configured")
         trigger.assert_not_called()
 
+    def test_no_bio_pool_in_airtable_skips_without_triggering_anything(self):
+        phone = _phone("1", ["IG connected"])
+        config = {**FULL_CONFIG, "bio_pool": []}
+
+        with mock.patch.object(c.rpa, "trigger_instagram_edit_profile") as trigger:
+            out = c.run_one(phone, config, Args(), mock.Mock(), transport=None)
+
+        self.assertEqual(out["status"], "no-bio-pool-configured")
+        trigger.assert_not_called()
+
+    def test_no_geelark_tag_in_airtable_skips_without_looking_up_a_picture(self):
+        phone = _phone("1", ["IG connected"])
+        config = {**FULL_CONFIG, "geelark_tag": ""}
+
+        with mock.patch.object(c.library, "picture_url_for_tag") as lookup, \
+             mock.patch.object(c.rpa, "trigger_instagram_edit_profile") as trigger:
+            out = c.run_one(phone, config, Args(), mock.Mock(), transport=None)
+
+        self.assertEqual(out["status"], "no-geelark-tag-configured")
+        lookup.assert_not_called()
+        trigger.assert_not_called()
+
+    def test_a_tag_with_no_picture_in_the_library_skips(self):
+        """The model is fully set up in Airtable, but nobody has uploaded
+        her picture to the GeeLark Library under that tag yet."""
+        phone = _phone("1", ["IG connected"])
+
+        with mock.patch.object(c.library, "picture_url_for_tag",
+                               return_value=""), \
+             mock.patch.object(c.rpa, "trigger_instagram_edit_profile") as trigger:
+            out = c.run_one(phone, FULL_CONFIG, Args(), mock.Mock(), transport=None)
+
+        self.assertEqual(out["status"], "no-picture-in-library")
+        trigger.assert_not_called()
+
     def test_a_completed_task_marks_post_ready(self):
         phone = _phone("1", ["IG connected"])
-        with mock.patch.object(c.rpa, "trigger_instagram_edit_profile",
+        with mock.patch.object(c.library, "picture_url_for_tag",
+                               return_value="https://x/nikki.jpg"), \
+             mock.patch.object(c.rpa, "trigger_instagram_edit_profile",
                                return_value="t1"), \
              mock.patch.object(c.rpa, "wait_for_task",
                                return_value={"status": rpa.STATUS_COMPLETED}), \
              mock.patch.object(c, "mark_post_ready") as mark:
-            out = c.run_one(phone, Args(), mock.Mock(), transport=None)
+            out = c.run_one(phone, FULL_CONFIG, Args(), mock.Mock(), transport=None)
 
         self.assertEqual(out["status"], "post-ready")
         mark.assert_called_once()
 
     def test_a_failed_task_never_marks_post_ready(self):
         phone = _phone("1", ["IG connected"])
-        with mock.patch.object(c.rpa, "trigger_instagram_edit_profile",
+        with mock.patch.object(c.library, "picture_url_for_tag",
+                               return_value="https://x/nikki.jpg"), \
+             mock.patch.object(c.rpa, "trigger_instagram_edit_profile",
                                return_value="t1"), \
              mock.patch.object(c.rpa, "wait_for_task",
                                return_value={"status": rpa.STATUS_FAILED,
                                             "failDesc": "no such user"}), \
              mock.patch.object(c, "mark_post_ready") as mark:
-            out = c.run_one(phone, Args(), mock.Mock(), transport=None)
+            out = c.run_one(phone, FULL_CONFIG, Args(), mock.Mock(), transport=None)
 
         self.assertEqual(out["status"], "failed")
         mark.assert_not_called()
@@ -114,23 +134,39 @@ class RunOneTest(unittest.TestCase):
         """Timing out is not the same as Geelark saying it failed, but it is
         just as much a reason not to claim the profile is ready."""
         phone = _phone("1", ["IG connected"])
-        with mock.patch.object(c.rpa, "trigger_instagram_edit_profile",
+        with mock.patch.object(c.library, "picture_url_for_tag",
+                               return_value="https://x/nikki.jpg"), \
+             mock.patch.object(c.rpa, "trigger_instagram_edit_profile",
                                return_value="t1"), \
              mock.patch.object(c.rpa, "wait_for_task",
                                return_value={"status": rpa.STATUS_IN_PROGRESS}), \
              mock.patch.object(c, "mark_post_ready") as mark:
-            out = c.run_one(phone, Args(), mock.Mock(), transport=None)
+            out = c.run_one(phone, FULL_CONFIG, Args(), mock.Mock(), transport=None)
 
         self.assertTrue(out["status"].startswith("unfinished"))
         mark.assert_not_called()
 
     def test_a_dry_run_never_triggers_a_real_task(self):
         phone = _phone("1", ["IG connected"])
-        with mock.patch.object(c.rpa, "trigger_instagram_edit_profile") as trigger:
-            out = c.run_one(phone, Args(apply=False), mock.Mock(), transport=None)
+        with mock.patch.object(c.library, "picture_url_for_tag",
+                               return_value="https://x/nikki.jpg"), \
+             mock.patch.object(c.rpa, "trigger_instagram_edit_profile") as trigger:
+            out = c.run_one(phone, FULL_CONFIG, Args(apply=False), mock.Mock(),
+                           transport=None)
 
         self.assertEqual(out["status"], "dry-run")
         trigger.assert_not_called()
+
+    def test_the_bio_is_drawn_from_the_models_own_pool(self):
+        phone = _phone("1", ["IG connected"])
+        with mock.patch.object(c.library, "picture_url_for_tag",
+                               return_value="https://x/nikki.jpg"), \
+             mock.patch.object(c.rpa, "trigger_instagram_edit_profile",
+                               return_value="") as trigger:
+            c.run_one(phone, FULL_CONFIG, Args(), mock.Mock(), transport=None)
+
+        self.assertIn(trigger.call_args.kwargs["biography"],
+                     FULL_CONFIG["bio_pool"])
 
 
 class _FakeTags:

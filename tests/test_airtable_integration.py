@@ -63,6 +63,49 @@ class AirtableClientTest(TestCase):
             self.assertFalse(client.update_record("rec1", {"Status": "Done"}))
 
 
+class ModelProfileConfigsTest(TestCase):
+    """Per-model Bio/Link/GeeLark-tag config for the instagramEdit RPA task."""
+
+    ROWS = [
+        {"id": "m1", "fields": {
+            "Model Name": "Nikki", "GeeLark Tag": "Nikki",
+            "Link URL": "https://nikki.example/go",
+            "Bio Pool": "hey it's nikki, check below ⬇️\n"
+                       "\n"  # a blank line, dropped
+                       "click the link \U0001f447",
+        }},
+        # No GeeLark Tag/Link URL/Bio Pool filled in yet -- a real state
+        # while models are still being onboarded, not a malformed row.
+        {"id": "m2", "fields": {"Model Name": "Jasmin"}},
+        # No Model Name at all: cannot be looked up by anything, so it is
+        # dropped rather than kept under a blank key.
+        {"id": "m3", "fields": {"GeeLark Tag": "Orphan"}},
+    ]
+
+    def _configs(self):
+        client = AirtableClient("tok", "app123", "Models")
+        with patch.object(AirtableClient, "_list_table", return_value=self.ROWS):
+            return client.model_profile_configs()
+
+    def test_a_fully_configured_model_reads_correctly(self):
+        configs = self._configs()
+        self.assertEqual(configs["Nikki"]["geelark_tag"], "Nikki")
+        self.assertEqual(configs["Nikki"]["link_url"], "https://nikki.example/go")
+        self.assertEqual(configs["Nikki"]["bio_pool"],
+                         ["hey it's nikki, check below ⬇️",
+                          "click the link \U0001f447"])
+
+    def test_blank_fields_come_back_empty_not_fabricated(self):
+        configs = self._configs()
+        self.assertEqual(configs["Jasmin"],
+                         {"geelark_tag": "", "link_url": "", "bio_pool": []})
+
+    def test_a_row_with_no_model_name_is_dropped(self):
+        configs = self._configs()
+        self.assertNotIn("", configs)
+        self.assertEqual(len(configs), 2)
+
+
 class ProfileTargetsByModelTest(TestCase):
     """Grouping the MLX profile inventory by model, for targets='profiles'."""
 
