@@ -17,8 +17,10 @@ from unittest import mock
 
 from adb_bot.automation import signup_geelark
 from adb_bot.automation.flows import signup
-from adb_bot.automation.signup_geelark import (failed_mailboxes,
-                                               reached_instagram, skip_locked)
+from adb_bot.automation.signup_geelark import (CONNECTED_TAG, FAILED_TAG,
+                                               NEW_TAG, failed_mailboxes,
+                                               reached_instagram, skip_locked,
+                                               signup_status_tag, write_back)
 from adb_bot.core import locks
 
 
@@ -168,6 +170,112 @@ class SkipLockedTest(unittest.TestCase):
 
         self.assertEqual(free, phones)
         self.assertEqual(busy, [])
+
+
+class SignupStatusTagTest(unittest.TestCase):
+    """The three lifecycle tags, and what earns each one.
+
+    Before this, a phone that had genuinely tried and failed kept the exact
+    same `new profile` tag as one nobody had ever touched -- no way to tell
+    a spent phone from a fresh one without reading its remark.
+    """
+
+    def test_a_created_account_earns_connected(self):
+        self.assertEqual(signup_status_tag(signup.RESULT_CREATED),
+                         CONNECTED_TAG)
+
+    def test_no_attempt_statuses_earn_nothing(self):
+        for status in ("busy", "not-ready", "dry-run", "unreachable"):
+            with self.subTest(status=status):
+                self.assertIsNone(signup_status_tag(status))
+
+    def test_a_checkpoint_is_progress_not_a_failure(self):
+        """`created_unverified` is a real account, just not a finished one --
+        `write_back`'s own rule is that only a finished signup earns
+        `IG connected`, and it would be wrong to call this a failure too."""
+        self.assertIsNone(
+            signup_status_tag(signup.RESULT_CREATED_UNVERIFIED))
+
+    def test_everything_else_is_a_genuine_failure(self):
+        for status in (signup.RESULT_STUCK, "google_robot_check",
+                       "wrong_password", "error", "install-gmail-timed_out"):
+            with self.subTest(status=status):
+                self.assertEqual(signup_status_tag(status), FAILED_TAG)
+
+
+class _FakeTagClient:
+    """Enough of `GeelarkTagClient` for `write_back` to run against."""
+
+    def __init__(self, existing=None):
+        self.existing = dict(existing or {NEW_TAG: "id-new-profile"})
+        self.ensured = []
+
+    def tag_ids_by_name(self, refresh=False):
+        return dict(self.existing)
+
+    def ensure_tag(self, name, color="blue"):
+        self.existing.setdefault(name, f"id-{name}")
+        self.ensured.append((name, color))
+        return self.existing[name]
+
+
+class WriteBackTagsTest(unittest.TestCase):
+    """`write_back` resolves tag *names* to ids through a fresh list every
+    call, so the fake has to behave like the real lookup: known names in,
+    ids out, nothing invented.
+    """
+
+    def setUp(self):
+        self.identity = mock.Mock(username="alina", password="pw123")
+        self.phones_patch = mock.patch.object(signup_geelark,
+                                              "GeelarkPhoneClient")
+        self.fake_phones_cls = self.phones_patch.start()
+        self.addCleanup(self.phones_patch.stop)
+
+    def _run(self, phone, status, fake_tags):
+        with mock.patch("adb_bot.clients.geelark.tags.GeelarkTagClient",
+                        return_value=fake_tags):
+            write_back(phone, self.identity, "a@gmail.com", status,
+                      transport=None, logger=mock.Mock())
+        update = self.fake_phones_cls.return_value.update_phone
+        tag_ids = update.call_args.kwargs["tag_ids"]
+        by_id = {v: k for k, v in fake_tags.existing.items()}
+        return [by_id.get(i, i) for i in (tag_ids or [])]
+
+    def test_a_success_replaces_new_profile_with_ig_connected(self):
+        phone = {"id": "1", "tags": [{"name": NEW_TAG}]}
+        names = self._run(phone, signup.RESULT_CREATED, _FakeTagClient())
+
+        self.assertIn(CONNECTED_TAG, names)
+        self.assertNotIn(NEW_TAG, names)
+
+    def test_a_genuine_failure_gets_signup_failed_not_new_profile(self):
+        phone = {"id": "1", "tags": [{"name": NEW_TAG}]}
+        names = self._run(phone, signup.RESULT_STUCK, _FakeTagClient())
+
+        self.assertIn(FAILED_TAG, names)
+        self.assertNotIn(NEW_TAG, names)
+
+    def test_a_checkpoint_leaves_new_profile_alone(self):
+        phone = {"id": "1", "tags": [{"name": NEW_TAG}]}
+        names = self._run(phone, signup.RESULT_CREATED_UNVERIFIED,
+                          _FakeTagClient())
+
+        self.assertIn(NEW_TAG, names)
+        self.assertNotIn(CONNECTED_TAG, names)
+        self.assertNotIn(FAILED_TAG, names)
+
+    def test_a_success_after_an_earlier_failure_clears_signup_failed(self):
+        """A phone can be retried after `Signup Failed` -- succeeding this
+        time must not leave the old failure tag sitting alongside the new
+        `IG connected` one."""
+        phone = {"id": "1", "tags": [{"name": FAILED_TAG}]}
+        fake_tags = _FakeTagClient(
+            existing={NEW_TAG: "id-new-profile", FAILED_TAG: "id-failed"})
+        names = self._run(phone, signup.RESULT_CREATED, fake_tags)
+
+        self.assertIn(CONNECTED_TAG, names)
+        self.assertNotIn(FAILED_TAG, names)
 
 
 if __name__ == "__main__":

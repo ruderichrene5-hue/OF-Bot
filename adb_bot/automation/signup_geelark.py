@@ -43,6 +43,12 @@ from adb_bot.core.logger import get_logger
 
 NEW_TAG = "new profile"
 CONNECTED_TAG = "IG connected"
+FAILED_TAG = "Signup Failed"
+
+# Statuses where the phone was never actually touched -- another operator's
+# lock, a dry run, a launch that never came up. `new profile` still describes
+# these correctly, so nothing about the tag should change.
+NO_ATTEMPT_STATUSES = frozenset({"busy", "not-ready", "dry-run", "unreachable"})
 
 # Where each run's outcome is appended, so a later run can see what has already
 # been tried on a phone without asking Geelark to interpret its own remark.
@@ -195,6 +201,25 @@ def record_outcome(row: dict) -> None:
             handle.write(json.dumps(row) + "\n")
 
 
+def signup_status_tag(status: str) -> str | None:
+    """Which of the three lifecycle tags a finished attempt earns.
+
+    `None` means leave `new profile` alone: either nothing was actually
+    attempted (`NO_ATTEMPT_STATUSES`), or the account is real but not yet
+    finished (`created_unverified` -- held behind a checkpoint, which is
+    progress, not a failure, but is also not `IG connected` per
+    `write_back`'s own rule that only a finished, verified signup earns
+    that tag). Before this, `new profile` never came off a phone that had
+    genuinely tried and failed, so it could not be told apart from one that
+    had never been touched.
+    """
+    if status == signup.RESULT_CREATED:
+        return CONNECTED_TAG
+    if status in NO_ATTEMPT_STATUSES or status == signup.RESULT_CREATED_UNVERIFIED:
+        return None
+    return FAILED_TAG
+
+
 def write_back(phone: dict, identity, address: str, status: str,
                transport, logger) -> None:
     """Put the result on the Geelark phone itself.
@@ -228,9 +253,17 @@ def write_back(phone: dict, identity, address: str, status: str,
         by_name = tags.tag_ids_by_name()
         wanted = [str(t.get("name")) for t in (phone.get("tags") or [])
                   if t.get("name")]
-        if status == signup.RESULT_CREATED and CONNECTED_TAG not in wanted:
-            wanted.append(CONNECTED_TAG)
-            tags.ensure_tag(CONNECTED_TAG, "green")
+        outcome_tag = signup_status_tag(status)
+        if outcome_tag is not None and outcome_tag not in wanted:
+            wanted.append(outcome_tag)
+            tags.ensure_tag(outcome_tag,
+                           "green" if outcome_tag == CONNECTED_TAG else "orange")
+            # `new profile` is the phone's "untried" state; a finished
+            # attempt, success or failure, has left it either way.
+            wanted = [name for name in wanted if name != NEW_TAG]
+            if outcome_tag == CONNECTED_TAG and FAILED_TAG in wanted:
+                # An earlier failed attempt on this phone is moot now.
+                wanted = [name for name in wanted if name != FAILED_TAG]
             by_name = tags.tag_ids_by_name(refresh=True)
         tag_ids = [by_name[name] for name in wanted if name in by_name]
         if wanted and not tag_ids:
