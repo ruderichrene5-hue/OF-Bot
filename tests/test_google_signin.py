@@ -230,6 +230,60 @@ class _StubDriver:
         return True
 
 
+class _RetryPageAdb(_StubAdb):
+    """Like `_StubAdb`, but `dumpsys account` starts empty and can start
+    reporting the address once Play Store/Google Services are force-closed --
+    manual signups found the account already signed in only *after* that
+    restart, not before it (2026-08-22), so the stub must not show it any
+    earlier than the real phone did."""
+
+    def __init__(self, shows_up_after_restart: bool):
+        super().__init__()
+        self.shows_up_after_restart = shows_up_after_restart
+        self.restarted = False
+
+    def run_command(self, command):
+        self.commands.append(command)
+        if "force-stop" in command:
+            self.restarted = True
+        if "dumpsys account" in command:
+            if self.restarted and self.shows_up_after_restart:
+                return "Account {name=a@gmail.com, type=com.google}"
+            return "Accounts: 0"
+        return ""
+
+
+def test_the_retry_page_checks_for_a_real_sign_in_before_tapping_anything():
+    """The retry page is a Play Store UI glitch, not proof the sign-in
+    failed -- so the real source of truth, `dumpsys account`, is checked
+    before spending a retry on the on-screen button, which walks the whole
+    flow from scratch and can lose a sign-in that already went through."""
+    driver = _StubDriver(RETRY_PAGE)
+    adb = _RetryPageAdb(shows_up_after_restart=True)
+
+    result = g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "S",
+                       sleep=lambda _s: None)
+
+    assert result == g.RESULT_SIGNED_IN
+    assert any("force-stop" in c and g.PLAY_PACKAGE in c for c in adb.commands)
+    assert any("force-stop" in c and "com.google.android.gms" in c
+              for c in adb.commands)
+    assert not driver.taps, "tapped the retry button instead of trusting " \
+                            "the real account state"
+
+
+def test_the_retry_page_still_falls_back_to_tapping_when_nothing_landed():
+    """If the account genuinely is not on the device, the old behaviour --
+    tap through the retry page -- must still run."""
+    driver = _StubDriver(RETRY_PAGE)
+    adb = _RetryPageAdb(shows_up_after_restart=False)
+
+    g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "S",
+             sleep=lambda _s: None)
+
+    assert driver.taps, "never fell back to the on-screen retry button"
+
+
 def test_the_code_screen_falls_back_to_the_keyboards_own_action(monkeypatch):
     """`NEXT` does not submit Google's forms -- four fresh codes were typed and
     tapped in on 2026-08-17 and the screen simply redrew each time. The email

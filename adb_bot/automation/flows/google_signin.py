@@ -721,6 +721,32 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             continue
 
         if screen == SCREEN_RETRY:
+            # Manual signups hit this exact page and found the account
+            # already signed in once Play Store and Google Services were
+            # force-closed and reopened -- the page is a Play Store UI
+            # glitch, not proof the sign-in failed server-side (confirmed by
+            # hand, 2026-08-22; matches the 2026-08-17 note above about a
+            # finished 2FA nearly being thrown away here). Check the real
+            # source of truth, `dumpsys account`, before spending a retry on
+            # the on-screen button, which walks the whole flow from
+            # scratch and can lose a sign-in that already succeeded.
+            if not retry_pages:
+                log("info", "force-closing Play Store and Google Services to "
+                            "check whether the sign-in already went through")
+                adb_client.run_command(
+                    f"adb -s {target} shell am force-stop {PLAY_PACKAGE}")
+                adb_client.run_command(
+                    f"adb -s {target} shell am force-stop "
+                    f"com.google.android.gms")
+                sleep(3)
+                _start_play_store(adb_client, target, logger=logger)
+                sleep(6)
+                if address in accounts_on_device(adb_client, target):
+                    log("info", "%s is on the device after all -- the retry "
+                                "page was a UI glitch, not a real failure",
+                        address)
+                    return RESULT_SIGNED_IN
+
             # One button, and taking it is the whole point of the page. The
             # repeat guard cannot see terms -> retry -> terms as going nowhere,
             # so this is bounded on its own.
