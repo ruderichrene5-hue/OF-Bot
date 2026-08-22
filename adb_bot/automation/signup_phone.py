@@ -107,16 +107,49 @@ class GeelarkHost:
 
         self.transport = transport or GeelarkTransport()
         self.args = args
+        # The proxy lease that must outlive the phone it belongs to. Held from
+        # launch to shutdown so the port cannot be handed to another phone --
+        # or rotated out from under this one -- while a signup is in flight.
+        self._sessions: dict[str, object] = {}
 
     def launch(self, profile_id: str, logger):
-        from adb_bot.clients.geelark import prepare_geelark_profile_for_adb
+        # Go through Rene's session layer, not the bare readiness helper. It
+        # leases this phone's proxy port exclusively, waits out the vendor's
+        # rotation cooldown, rotates the IP and verifies it, THEN launches --
+        # which is the "exclusive rotation before launch" the fleet now relies
+        # on. Launching bare (as this did before) skips the rotation and lets
+        # two phones collide on one port, which Instagram sees as one account
+        # from two IPs.
+        from adb_bot.clients.geelark import session as geelark_session
 
-        return prepare_geelark_profile_for_adb(
-            profile_id, self.transport, logger=logger)
+        try:
+            started = geelark_session.start_session(
+                str(profile_id), self.transport, logger=logger,
+                owner="signup-%s" % profile_id)
+        except Exception as exc:
+            # A port busy with another phone (Rene's, or a sibling run) raises
+            # here rather than silently sharing it. Report it as not-ready so
+            # the phone stays in the queue for a later pass.
+            logger.warning("signup_phone: could not start a proxied session "
+                           "for %s (%s)", profile_id, exc)
+            return None
+        self._sessions[str(profile_id)] = started
+        return started.profile
 
     def shutdown(self, profile_id: str, logger) -> None:
         from adb_bot.clients.geelark import release_geelark_phone
+        from adb_bot.clients.geelark import session as geelark_session
 
+        started = self._sessions.pop(str(profile_id), None)
+        if started is not None:
+            # Stops the phone AND releases the proxy lease together.
+            try:
+                geelark_session.stop_session(started, logger=logger)
+                return
+            except Exception as exc:
+                logger.warning("signup_phone: session shutdown failed for %s "
+                               "(%s); falling back to a bare release",
+                               profile_id, exc)
         try:
             release_geelark_phone(profile_id, self.transport, logger=logger)
         except Exception as exc:
