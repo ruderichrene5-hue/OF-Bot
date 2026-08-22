@@ -748,9 +748,12 @@ def next_username(rejected: str, attempt: int) -> str:
     """
     import random as _random
 
-    tail = str(_random.randint(10, 9999))
-    stem = "".join(ch for ch in rejected if ch.isalnum() or ch in "._")
-    stem = stem.rstrip("0123456789") or "user"
+    # A four-digit tail, never two: Instagram pads a handle it thinks is too
+    # short, and the underscore is dropped from the stem -- both mangle the box
+    # so the submit loop cannot reconcile it. Dots are kept; they type cleanly.
+    tail = str(_random.randint(1000, 9999))
+    stem = "".join(ch for ch in rejected if ch.isalnum() or ch == ".")
+    stem = stem.rstrip("0123456789").rstrip(".") or "user"
     return (stem[:30 - len(tail)] + tail)
 
 
@@ -804,6 +807,10 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
     # work -- repeating an identical action is what the repeat guard exists to
     # catch, and it caught this.
     username_submits = 0
+    # Retypes spent trying to straighten a handle the input path garbled. One
+    # retype is allowed before the box is submitted as-is, so a scramble costs
+    # a single extra pass rather than the whole phone.
+    username_garble_retries = 0
     empty_reads = 0
     code_submitted = False
     done_flags = set()
@@ -1283,12 +1290,47 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                                       f"{rejections} usernames rejected in a "
                                       f"row, last {rejected}")
                 if username_filled and not ours_on_screen:
-                    # Retyping after Instagram put its suggestion back. The
-                    # submit counter resets with it: the next submit is a first
-                    # attempt at this value, and going straight to the keyboard
-                    # route would skip the tap that works everywhere else.
-                    log("info", "the box holds instagram's suggestion again; "
-                                "retyping %s", identity.username)
+                    # The box does not hold our exact handle. Two cases with the
+                    # same symptom: Instagram put its own suggestion back, or
+                    # the input path garbled what we typed (`alina_koenig` came
+                    # back `ali_nakoenig` -- the field's own readback was right,
+                    # the value drifted after). Retyping fixes the first and
+                    # loops forever on the second, so it is bounded.
+                    suggestion = ""
+                    fields = getattr(driver, "_edit_fields", None)
+                    root = getattr(driver, "_root", None)
+                    box_value = ""
+                    if callable(fields) and root is not None:
+                        for candidate in fields(root):
+                            hint = str(candidate.get("hint", "") or "").lower()
+                            if "username" in hint:
+                                box_value = str(candidate.get("value", "")
+                                                or "").strip()
+                                # Instagram's suggestion travels in the hint,
+                                # after the comma: `username,alina771990`.
+                                if "," in hint:
+                                    suggestion = hint.split(",", 1)[1].strip()
+                                break
+                    garbled = (box_value and box_value.lower() != suggestion
+                               and box_value.lower()
+                               != identity.username.lower())
+                    if (garbled and username_garble_retries >= 1
+                            and any(marker in text
+                                    for marker in _USERNAME_VALID_MARKERS)):
+                        # Retyping has not straightened it and Instagram calls
+                        # what is there valid. Submit the box as-is rather than
+                        # burn the phone; `handle_from_text` reads the true
+                        # handle off the post-creation screen afterwards.
+                        log("info", "the box holds a garbled but valid handle "
+                                    "%r; submitting it as-is", box_value)
+                        identity.username = box_value
+                        driver.dismiss_keyboard()
+                        driver.tap_label(_SUBMIT_LABELS)
+                        sleep(8)
+                        continue
+                    username_garble_retries += 1
+                    log("info", "the box holds %r, not %s; retyping",
+                        box_value or "(suggestion)", identity.username)
                     username_submits = 0
                 driver.fill(("username",), identity.username, "username")
                 username_filled = True

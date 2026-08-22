@@ -49,8 +49,12 @@ LAST_NAMES = (
 # handle that short (`mia38` came back as `mia385506`), so the field never
 # echoes what was typed and the submit loop spends the whole username budget.
 # Every remaining shape carries the surname, so none is short enough to pad.
-_PATTERNS = ("{first}.{last}", "{first}_{last}", "{first}{last}{n}",
-             "{first}.{last}{n}", "{first}.{last}_{n}")
+# No underscores. The input path garbles a handle containing `_`:
+# `alina_koenig` was read back correctly by the fill, then drifted to
+# `ali_nakoenig` on the next screen, and the submit loop could never reconcile
+# it. The dot shapes go in cleanly (they built every account that succeeded),
+# so the handle stays a dot-or-plain form.
+_PATTERNS = ("{first}.{last}", "{first}{last}{n}", "{first}.{last}{n}")
 
 # The one word a handle may never contain: link-in-bio profiles are excluded
 # from posting, so a handle carrying it would quietly opt the account out.
