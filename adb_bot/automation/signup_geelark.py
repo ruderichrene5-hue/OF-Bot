@@ -103,10 +103,21 @@ def spent_locally() -> set[str]:
 
 
 def mailbox_queue(token: str | None = None) -> list[dict]:
-    """Free mailboxes, best batch first, minus any already spent here."""
+    """Free mailboxes usable by the email route, best batch first.
+
+    A 2FA key is not a preference here, it is a requirement: signing the
+    mailbox into the phone goes through Google's own login, which asks for an
+    authenticator code, and a mailbox without the key cannot answer it. Ranking
+    keyless mailboxes lower was not enough -- once the keyed ones were spent the
+    run fell through to `adil32gmail@` from the `aass1122` batch (no key) and
+    stuck at Google's email step. So they are excluded outright; an email run
+    with no keyed mailbox left should report an empty queue, not fail on one it
+    could never use.
+    """
     used = spent_locally() | failed_mailboxes()
     free = [r for r in signup_mailboxes.free_mailboxes(token=token)
-            if str((r.get("fields") or {}).get("Gmail Account") or "").lower()
+            if (r.get("fields") or {}).get("2FA Secret Key")
+            and str((r.get("fields") or {}).get("Gmail Account") or "").lower()
             not in used]
     return sorted(free, key=lambda r: (
         batch_rank(r), str((r.get("fields") or {}).get("Gmail Account") or "")))
