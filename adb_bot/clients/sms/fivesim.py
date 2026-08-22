@@ -29,7 +29,9 @@ from __future__ import annotations
 import requests
 
 from adb_bot.clients.sms.base import (
+    COUNTRY_CA,
     COUNTRY_DE,
+    COUNTRY_GB,
     DEFAULT_COUNTRY,
     DIALLING_CODES,
     COUNTRY_US,
@@ -53,6 +55,11 @@ _PRODUCTS = {
 _COUNTRIES = {
     COUNTRY_US: "usa",
     COUNTRY_DE: "germany",
+    # Added 2026-08-21. Both providers were serving German numbers out of the
+    # same +49 1590 56xx block, so falling back from one to the other was never
+    # reaching a different pool -- which is the only thing a fallback is for.
+    COUNTRY_GB: "england",
+    COUNTRY_CA: "canada",
 }
 # "any" lets 5sim pick the cheapest operator with stock, which is what keeps the
 # fallback useful when one operator's pool is the burned one.

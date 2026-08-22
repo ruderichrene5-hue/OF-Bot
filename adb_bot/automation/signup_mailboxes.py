@@ -46,11 +46,17 @@ class MailboxPoolError(Exception):
 
 
 def _token(explicit: str | None = None) -> str:
-    token = explicit or os.environ.get("VA_AIRTABLE_TOKEN")
+    # `VA_AIRTABLE_TOKEN` first, because that is the token this base was set up
+    # with. The bot's own `AIRTABLE_TOKEN` was rejected here when this module
+    # was written and now reaches the base -- checked 2026-08-21, HTTP 200 --
+    # so the fleet's token is a real fallback rather than a guess. Keeping the
+    # dedicated one ahead of it means nothing changes for anyone who has it.
+    token = (explicit or os.environ.get("VA_AIRTABLE_TOKEN")
+             or os.environ.get("AIRTABLE_TOKEN"))
     if not token:
         raise MailboxPoolError(
-            "no token for the VA base. Set VA_AIRTABLE_TOKEN -- it is a "
-            "different base from the bot's, with its own token.")
+            "no token for the VA base. Set VA_AIRTABLE_TOKEN (or the fleet's "
+            "AIRTABLE_TOKEN, which also reaches it).")
     return token
 
 

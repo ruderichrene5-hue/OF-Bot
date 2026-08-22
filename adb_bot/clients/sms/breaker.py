@@ -48,7 +48,22 @@ from adb_bot.core import locks
 
 # --- policy constants ---------------------------------------------------------
 MAX_CONSECUTIVE_FAILURES = 10       # trip after this many failures in a row
-CODE_WAIT_SECONDS = 45              # how long one number gets to deliver a code
+# How long one number gets to deliver a code.
+#
+# Ninety, not forty-five, and the reason is that delivery here is **bimodal**.
+# Measured across a day of runs: codes arrive in 0-3 seconds, or they arrive at
+# 68-77 seconds, and never in between -- the slow ones are a provider backlog
+# flushing, not individual numbers being sluggish. Forty-five sits squarely in
+# the dead zone: it catches every instant delivery and misses every delayed one,
+# so it looks like a working timeout while quietly discarding a whole mode.
+#
+# It cost a real diagnosis. A verification run rented three numbers, gave each
+# 45s, delivered nothing, and reported `needs_human` -- a verdict about the
+# account, drawn from a timeout that could not have seen half the outcomes.
+#
+# `flows/signup.py` reaches the same number from the same evidence; keep them
+# together if either moves.
+CODE_WAIT_SECONDS = 90
 COOLDOWN_SECONDS = 30 * 60          # how long a tripped provider is left alone
 POLL_INTERVAL_SECONDS = 3           # gap between check calls inside the wait
 

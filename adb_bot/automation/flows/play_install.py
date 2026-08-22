@@ -78,7 +78,8 @@ def packages_named(out: str) -> set:
             if line.startswith("package:") and ":" in line}
 
 
-def is_installed(adb_client, target: str, package: str) -> bool:
+def is_installed(adb_client, target: str, package: str,
+                 attempts: int = 3, sleep=time.sleep) -> bool:
     """The only trustworthy answer to "is it on the phone".
 
     Exact names, never a substring. `pm list packages com.google.android.gm`
@@ -86,10 +87,28 @@ def is_installed(adb_client, target: str, package: str) -> bool:
     every phone -- so a substring test says Gmail is installed on a phone that
     has never had it. That answer sent three launches looking for a mail app
     that was not there (2026-08-17).
+
+    **An empty answer is ambiguous and must not be read as "no".** On a phone
+    that has just booted, the shell answers before the package manager does,
+    and `pm list packages <name>` comes back empty for an app that is sitting
+    right there. So an empty result is checked against the *unfiltered* list:
+    if that is empty too, it is the package manager that is missing, not the
+    package. Believing the first answer sent Geelark phones to the Play Store
+    to install an Instagram they already had, at 100-200 seconds a time out of
+    a phone that lives about fifteen minutes.
     """
-    out = adb_client.run_command(
-        f"adb -s {target} shell pm list packages {package}") or ""
-    return package in packages_named(out)
+    for attempt in range(1, attempts + 1):
+        out = adb_client.run_command(
+            f"adb -s {target} shell pm list packages {package}") or ""
+        if package in packages_named(out):
+            return True
+        everything = adb_client.run_command(
+            f"adb -s {target} shell pm list packages") or ""
+        if packages_named(everything):
+            return False        # the package manager answered; it is not here
+        if attempt < attempts:
+            sleep(5)
+    return False
 
 
 def open_listing(adb_client, target: str, package: str) -> None:

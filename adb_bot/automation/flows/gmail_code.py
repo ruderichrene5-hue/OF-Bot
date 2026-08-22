@@ -40,6 +40,7 @@ import re
 import time
 
 from adb_bot.automation.flows import play_install
+from adb_bot.core import adb_commands
 
 GMAIL_PACKAGE = "com.google.android.gm"
 GMAIL_ACTIVITY = f"{GMAIL_PACKAGE}/.ConversationListActivityGmail"
@@ -59,6 +60,10 @@ _INSTAGRAM_HINTS = (
 # A standalone six-digit run. `\b` on both sides so a longer number -- an order
 # id, a year range, a phone number -- cannot supply a "code".
 _CODE_RE = re.compile(r"\b(\d{6})\b")
+_PKG_RE = re.compile(r"\bpkg=(\S+)")
+_WHEN_RE = re.compile(r"\bwhen=(\d+)")
+_TEXT_FIELD_RE = re.compile(
+    r"android\.(title|text|bigText|subText|summaryText)=")
 
 # What Gmail says when an account is on the phone but not syncing. This is a
 # tip, not an error, and it renders where a person expects to see mail.
@@ -116,18 +121,58 @@ def code_from_notifications(dump: str | None) -> str:
     to get wrong. Gmail posts the mail's subject -- "123456 is your Instagram
     code" -- and the shade keeps it whatever else is on screen.
 
-    Only ever a code on the same line as Instagram's name. A `dumpsys` dump is
-    thousands of lines of numbers, so there is deliberately no fallback to
-    "any six digits somewhere in the text".
+    Three things narrow the search, and each one was added because the version
+    without it returned a confident wrong answer:
+
+    * **Gmail's records only.** A `dumpsys` dump is thousands of lines of
+      numbers from every app on the phone, and Instagram itself posts pushes
+      that mention its own name.
+    * **The human-readable fields only.** The code is in the subject Gmail
+      posts; the rest of a record is machine data.
+    * **The newest of them.** Several codes accumulate in one thread and only
+      the last is live; an older one is already spent, and typing it drops the
+      login back to the password screen looking like a bad password.
     """
     if not dump:
         return ""
+    best_when, best_code = -1, ""
+    when, package = -1, ""
     for line in dump.splitlines():
-        if "instagram" in line.lower():
-            match = _CODE_RE.search(line)
+        stripped = line.strip()
+        if "NotificationRecord(" in stripped:
+            # A new record begins: everything below belongs to it until the
+            # next one. Without this the scan was line-at-a-time across the
+            # whole dump, and matched an unrelated app's *notification id* --
+            # `pkg=com.zixun.cmp ... id=100215` -- on a line that merely
+            # happened to contain the word "instagram" too. That id was then
+            # typed into Instagram as a security code.
+            when, package = -1, ""
+            match = _PKG_RE.search(stripped)
             if match:
-                return match.group(1)
-    return ""
+                package = match.group(1)
+            continue
+        if stripped.startswith("when="):
+            match = _WHEN_RE.search(stripped)
+            if match:
+                when = int(match.group(1))
+            continue
+        # Only the human-readable fields, and only Gmail's own records. The
+        # code lives in the subject line Gmail posts; every other line in a
+        # record is machine data full of six-digit numbers.
+        if package != GMAIL_PACKAGE:
+            continue
+        if not _TEXT_FIELD_RE.match(stripped):
+            continue
+        if "instagram" not in stripped.lower():
+            continue
+        match = _CODE_RE.search(stripped)
+        if match and when >= best_when:
+            # `>=` not `>`: several mails can share a timestamp, and later in
+            # the dump is the safer tie-break. The newest code is the live one
+            # -- an older one from the same thread is already spent, and
+            # typing it puts the login straight back on the password screen.
+            best_when, best_code = when, match.group(1)
+    return best_code
 
 
 def sync_enabled_in_dump(dump: str | None) -> bool | None:
@@ -250,6 +295,28 @@ MAX_SETTINGS_SCROLLS = 4
 # Two goes at turning sync on. If the switch cannot be found twice, the run is
 # better off saying so than tapping around Android's settings.
 MAX_SYNC_ATTEMPTS = 2
+
+# Only this exact label on the settings route. `_SYNC_SWITCH_LABELS` ends in a
+# bare "Sync", which is safe beside a banner that has already named the account
+# but not on a settings page where several rows begin with the word.
+_SYNC_GMAIL_LABEL = ("Sync Gmail",)
+
+# Gmail's settings, reached without needing the banner. Gmail's own
+# `.Gmail2PreferenceActivity` is NOT exported and `am start` throws on it, so
+# the way in is this public alias, which lands on the same screen.
+GMAIL_SETTINGS_COMPONENT = (
+    f"{GMAIL_PACKAGE}/com.android.mail.ui.settings.PublicPreferenceActivity")
+
+# The per-account page is long -- Gmail's rows, then Meet's -- and `Sync Gmail`
+# sits under `Data usage` near the bottom. Eight pages is more than it takes by
+# hand and few enough that a page which will not scroll ends the attempt.
+MAX_SYNC_SCROLLS = 8
+
+# What `ensure_sync_on` can conclude.
+RESULT_SYNC_ALREADY_ON = "already_on"
+RESULT_SYNC_TURNED_ON = "turned_on"
+RESULT_SYNC_UNKNOWN = "unknown"      # the authority row was not there to read
+RESULT_SYNC_FAILED = "failed"
 
 # Enough for a multi-page tour, few enough that a screen which simply will not
 # move on ends the run instead of eating the phone.
@@ -597,6 +664,91 @@ class PhoneMailbox:
             # A driver that does not know the argument. Not worth failing over:
             # the strict attempt above is the one that usually works.
             return False
+
+    def _scroll_to_sync_switch(self) -> bool:
+        """Page down the account's settings until `Sync Gmail` is on screen."""
+        for page in range(MAX_SYNC_SCROLLS):
+            text = (self._read() or "").lower()
+            if "sync gmail" in text:
+                return True
+            # Down a page, not to the bottom: the switch sits above Meet's own
+            # rows, and a swipe to the end scrolls straight past it.
+            self._shell(adb_commands.swipe(610, 1900, 610, 800, 300))
+            time.sleep(2)
+            self._log("info", "looking for the sync switch (%d/%d)",
+                      page + 1, MAX_SYNC_SCROLLS)
+        return False
+
+    def ensure_sync_on(self) -> str:
+        """Make sure Gmail will actually fetch mail for this address.
+
+        A Google account signed into one of these phones arrives with mail sync
+        **off**, and nothing about the phone says so: Gmail opens on the right
+        account and reports "Nothing in Primary", which is what an empty inbox
+        looks like too. Instagram's code then never reaches the device, the
+        shade and the inbox are empty for the same reason, and the run reports
+        "no code arrived" -- which reads as Instagram's fault.
+
+        Deliberately NOT driven from Gmail's "account sync is off" banner: that
+        banner is offered once, on the same screen as the welcome tip, and
+        dismissing the tip takes the banner with it. This route needs neither.
+        """
+        state = self.sync_enabled()
+        if state is True:
+            self._log("info", "%s is already syncing", self.address)
+            return RESULT_SYNC_ALREADY_ON
+        if state is None:
+            # Not "off" -- the authority row simply was not in the dump. Saying
+            # so and continuing beats abandoning a phone that was fine.
+            self._log("warning", "cannot tell whether %s syncs (%s missing "
+                                 "from dumpsys content)",
+                      self.address, GMAIL_SYNC_AUTHORITY)
+            return RESULT_SYNC_UNKNOWN
+        if self.driver is None:
+            self._log("warning", "%s is not syncing and there is no driver to "
+                                 "turn it on with", self.address)
+            return RESULT_SYNC_FAILED
+
+        self._log("info", "%s is not syncing; turning Gmail's sync on",
+                  self.address)
+        try:
+            self._start(GMAIL_SETTINGS_COMPONENT)
+            time.sleep(6)
+            # require_clickable=False on purpose, and `tap_label`'s own
+            # docstring names this exact screen: Gmail's settings list renders
+            # the account row's address on a plain view, and the only clickable
+            # things on the page are "Navigate up" and "More options". Under
+            # the strict rule the row is untappable and the account's settings
+            # cannot be reached at all.
+            if not self.driver.tap_label((self.address,),
+                                         require_clickable=False):
+                self._log("warning", "Gmail's settings do not list %s",
+                          self.address)
+                return RESULT_SYNC_FAILED
+            time.sleep(5)
+            if not self._scroll_to_sync_switch():
+                self._log("warning", "no 'Sync Gmail' row after %d pages",
+                          MAX_SYNC_SCROLLS)
+                return RESULT_SYNC_FAILED
+            # Same reason: the switch's label sits on a plain view beside the
+            # checkbox rather than on anything Android marks clickable.
+            if not self.driver.tap_label(_SYNC_GMAIL_LABEL,
+                                         require_clickable=False):
+                return RESULT_SYNC_FAILED
+
+            # Ask the sync manager, not the checkbox: the tick is drawn before
+            # the setting is stored, so the screen agrees a moment early.
+            for _ in range(4):
+                time.sleep(3)
+                if self.sync_enabled() is True:
+                    self._log("info", "%s is syncing now", self.address)
+                    return RESULT_SYNC_TURNED_ON
+            self._log("warning", "tapped 'Sync Gmail' but %s is still off",
+                      GMAIL_SYNC_AUTHORITY)
+            return RESULT_SYNC_FAILED
+        finally:
+            self.back_to_instagram()
+            time.sleep(4)
 
     def notification_code(self) -> str:
         """Instagram's code from the notification shade, or ""."""

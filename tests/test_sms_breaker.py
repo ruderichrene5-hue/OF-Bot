@@ -18,6 +18,7 @@ from adb_bot.clients.sms.base import (
     SmsProviderError,
 )
 from adb_bot.clients.sms.breaker import (
+    CODE_WAIT_SECONDS,
     COOLDOWN_SECONDS,
     MAX_CONSECUTIVE_FAILURES,
     SWITCH_WARNING,
@@ -204,7 +205,14 @@ class SuccessPathTest(RouterTestCase):
 
 
 class TimeoutPathTest(RouterTestCase):
-    def test_no_code_within_45s_refunds_and_counts_one_failure(self):
+    def test_no_code_within_the_budget_refunds_and_counts_one_failure(self):
+        """The budget is `CODE_WAIT_SECONDS`, not a number spelled out here.
+
+        It was 45s, which sat in the dead zone of a bimodal delivery curve --
+        codes arrive at 0-3s or at 68-77s and never between -- so it caught
+        every instant delivery and missed every delayed one while looking like
+        a working timeout.
+        """
         primary = FakeProvider(PROVIDER_SMSPOOL, code=None)     # never delivers
         router = self.build(primary, FakeProvider(PROVIDER_5SIM))
 
@@ -212,8 +220,8 @@ class TimeoutPathTest(RouterTestCase):
         with router.lease() as lease:
             self.assertIsNone(lease.wait_for_code())
 
-        self.assertEqual(self.clock.now - started, 45,
-                         "the wait must last exactly the 45s budget")
+        self.assertEqual(self.clock.now - started, CODE_WAIT_SECONDS,
+                         "the wait must last exactly the configured budget")
         self.assertEqual(primary.cancelled, ["smspool-1"],
                          "a number that never received must be refunded")
         self.assertEqual(primary.finished, [])

@@ -64,6 +64,123 @@ MIN_VERIFY_SECONDS = 150
 ASSIGNMENTS = Path.home() / ".adb_bot" / "mailboxes.json"
 
 
+class MlxHost:
+    """Launch and stop one MultiLogin phone.
+
+    The three steps between -- sign the mailbox in, install the apps, create the
+    account -- are the same wherever the phone is hosted, and were written
+    against MultiLogin only because that is where the fleet lived. Keeping the
+    host behind this seam is what lets the identical, hard-won chain run on
+    Geelark without a second copy of it drifting out of step.
+    """
+
+    def __init__(self, clients, args) -> None:
+        self.clients = clients
+        self.args = args
+
+    def launch(self, profile_id: str, logger):
+        self.clients.launcher.start_profiles([profile_id])
+        return prepare_profile_for_adb(
+            profile_id, self.clients.api, self.clients.adb_enable, logger,
+            max_attempts=self.args.readiness_attempts,
+            wait_seconds=self.args.readiness_wait,
+            launcher_client=self.clients.launcher)
+
+    def shutdown(self, profile_id: str, logger) -> None:
+        try:
+            self.clients.shutdown.shutdown_profiles([profile_id])
+        except Exception as exc:
+            logger.warning("signup_phone: shutdown failed for %s (%s)",
+                           profile_id, exc)
+
+
+class GeelarkHost:
+    """Launch and stop one Geelark cloud phone.
+
+    Stopping matters more here than on MultiLogin: a Geelark phone left running
+    bills by the minute *and* holds one of only four parallel slots, so a
+    forgotten phone stalls the next run as well as costing money.
+    """
+
+    def __init__(self, transport=None, args=None) -> None:
+        from adb_bot.clients.geelark import GeelarkTransport
+
+        self.transport = transport or GeelarkTransport()
+        self.args = args
+
+    def launch(self, profile_id: str, logger):
+        from adb_bot.clients.geelark import prepare_geelark_profile_for_adb
+
+        return prepare_geelark_profile_for_adb(
+            profile_id, self.transport, logger=logger)
+
+    def shutdown(self, profile_id: str, logger) -> None:
+        from adb_bot.clients.geelark import release_geelark_phone
+
+        try:
+            release_geelark_phone(profile_id, self.transport, logger=logger)
+        except Exception as exc:
+            logger.warning("signup_phone: shutdown failed for %s (%s)",
+                           profile_id, exc)
+
+
+def open_instagram(driver, adb_client, target: str, logger=None,
+                   attempts: int = 5, wait_seconds: int = 8) -> bool:
+    """Bring Instagram to the front, and prove it got there.
+
+    Two things this replaces, both of which failed silently.
+
+    **The launcher intent was missing.** Every other Instagram launch in this
+    repo -- reels, stories, the posting flow -- fires
+    `monkey -c android.intent.category.LAUNCHER` *before* naming the activity.
+    Only the signup path named `.activity.MainTabActivity` directly, and a
+    freshly installed Instagram does not always expose it, so the start was a
+    no-op that returned nothing anyone looked at.
+
+    **The wait was a fixed twelve seconds.** Whatever was on screen when it
+    elapsed became the signup's first screen. On Geelark that was the Play
+    Store's signed-out page, which the flow could not name, so four phones were
+    written off for `unknown_screen` at step 1 with Instagram never opened and
+    no number ever rented.
+
+    So: launcher intent first, then the activity, then *look* -- and if
+    Instagram is not there yet, say so and try again.
+    """
+    def log(level, message, *args):
+        if logger is not None:
+            getattr(logger, level)("open_instagram: " + message, *args)
+
+    for attempt in range(1, attempts + 1):
+        adb_client.run_command(
+            f"adb -s {target} shell monkey -p {INSTAGRAM_PACKAGE} "
+            f"-c android.intent.category.LAUNCHER 1")
+        adb_client.run_command(
+            f"adb -s {target} shell am start -n "
+            f"{INSTAGRAM_PACKAGE}/.activity.MainTabActivity")
+        time.sleep(wait_seconds)
+        screen = driver.read_screen() or ""
+        # Ask the dump who drew the screen, and only fall back to "does the
+        # classifier recognise it" when the driver cannot say. The classifier
+        # answers no for every screen nobody has named yet -- Instagram's
+        # "set up on new device" onboarding and Meta's ads consent among them --
+        # so judging by it relaunched Instagram five times over an app that was
+        # fully drawn and in front.
+        showing = getattr(driver, "showing_package", None)
+        if callable(showing):
+            if showing(INSTAGRAM_PACKAGE):
+                log("info", "instagram is in front after %d attempt(s)",
+                    attempt)
+                return True
+        elif signup.classify_signup_screen(screen) != signup.SCREEN_UNKNOWN:
+            log("info", "instagram is in front after %d attempt(s)", attempt)
+            return True
+        log("info", "instagram is not in front yet (%d/%d); on screen: %r",
+            attempt, attempts, screen[:120])
+    log("warning", "instagram would not come to the front after %d attempts",
+        attempts)
+    return False
+
+
 def load_assignment(profile_name: str, path: Path | None = None) -> dict:
     path = path or ASSIGNMENTS
     if not path.exists():
@@ -78,18 +195,29 @@ def load_assignment(profile_name: str, path: Path | None = None) -> dict:
     return data[profile_name]
 
 
-def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
+def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
     profile_id = str(profile_item.get("id"))
     name = str(profile_item.get("serial_name") or profile_id)
     identity = make_identity()
-    identity.email = box["address"]
-    identity.email_password = box.get("password", "")
+    if box is not None:
+        # `run_signup` picks its chain off `identity.email`: an address takes
+        # the "sign up with email" hatch, no address takes the mobile-number
+        # screen Instagram offers first. Leaving it unset is how the SMS
+        # fallback is selected.
+        identity.email = box["address"]
+        identity.email_password = box.get("password", "")
 
-    out = {"profile": name, "id": profile_id, "email": box["address"],
-           "username": identity.username, "steps": {}}
+    out = {"profile": name, "id": profile_id,
+           "email": box["address"] if box else "",
+           "username": identity.username, "steps": {},
+           # The object itself, not just its handle: a caller that has to write
+           # the account somewhere else afterwards -- the Geelark remark, the
+           # mailbox claim -- needs the password and full name too, and
+           # rebuilding an identity from its username would invent a new one.
+           "identity": identity}
 
     print(f"\n{'=' * 68}\n{name} ({profile_id})")
-    print(f"  mailbox  {box['address']}")
+    print(f"  mailbox  {box['address'] if box else '(none -- SMS)'}")
     print(f"  identity {identity.summary()}")
     if not args.apply:
         out["status"] = "dry-run"
@@ -106,12 +234,7 @@ def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
 
     started = time.monotonic()
     try:
-        clients.launcher.start_profiles([profile_id])
-        profile = prepare_profile_for_adb(
-            profile_id, clients.api, clients.adb_enable, logger,
-            max_attempts=args.readiness_attempts,
-            wait_seconds=args.readiness_wait,
-            launcher_client=clients.launcher)
+        profile = host.launch(profile_id, logger)
         if not profile:
             out["status"] = "not-ready"
             return out
@@ -134,24 +257,33 @@ def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
                                  screenshots=args.screenshots)
 
         # --- 1. the mailbox ---------------------------------------------------
-        verdict = google_signin.sign_in(
-            driver, adb_client, target, box["address"], box["password"],
-            box["totp_secret"], logger=logger)
-        out["steps"]["google_signin"] = verdict
-        print(f"  google sign-in: {verdict} "
-              f"({int(time.monotonic() - started)}s)")
-        if verdict not in (google_signin.RESULT_SIGNED_IN,
-                           google_signin.RESULT_ALREADY):
-            out["status"] = f"mailbox-{verdict}"
-            return out
+        # Skipped entirely when there is no mailbox to sign in: the account
+        # then verifies by SMS instead. That is the worse account -- a rented
+        # number is released and nobody can ever recover it -- so it is a
+        # deliberate fallback for when the mailbox pool cannot deliver, never
+        # the default.
+        if box is not None:
+            verdict = google_signin.sign_in(
+                driver, adb_client, target, box["address"], box["password"],
+                box["totp_secret"], logger=logger)
+            out["steps"]["google_signin"] = verdict
+            print(f"  google sign-in: {verdict} "
+                  f"({int(time.monotonic() - started)}s)")
+            if verdict not in (google_signin.RESULT_SIGNED_IN,
+                               google_signin.RESULT_ALREADY):
+                out["status"] = f"mailbox-{verdict}"
+                return out
 
         # --- 2. Instagram, and Gmail to read its code out of -------------------
         # Gmail is *not* preinstalled on these phones -- `Blank caio 2` spent a
         # whole launch on 2026-08-17 waiting for a code from an app that was
         # not there. Instagram first: it is the one the run cannot proceed
-        # without, and the phone's life is finite.
-        for package, what in ((INSTAGRAM_PACKAGE, "instagram"),
-                              (GMAIL_PACKAGE, "gmail")):
+        # without, and the phone's life is finite. With no mailbox there is
+        # nothing to read a code out of, so Gmail is not worth the minutes.
+        wanted = [(INSTAGRAM_PACKAGE, "instagram")]
+        if box is not None:
+            wanted.append((GMAIL_PACKAGE, "gmail"))
+        for package, what in wanted:
             verdict = play_install.install(driver, adb_client, target,
                                            package, logger=logger)
             out["steps"][f"install-{what}"] = verdict
@@ -163,23 +295,43 @@ def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
                 return out
 
         # --- 3. the account ---------------------------------------------------
-        adb_client.run_command(
-            f"adb -s {target} shell am start -n "
-            f"{INSTAGRAM_PACKAGE}/.activity.MainTabActivity")
-        time.sleep(12)
+        if not open_instagram(driver, adb_client, target, logger=logger):
+            # Deliberately its own status, and deliberately not one of the
+            # signup results: Instagram never opened, so nothing was typed
+            # anywhere and the phone is as unused as before the launch.
+            out["status"] = "app-instagram-would-not-open"
+            return out
 
-        mailbox = PhoneMailbox(target, adb_client, box["address"],
-                               logger=logger, driver=driver)
-        result = signup.run_signup(driver, None, identity, logger=logger,
-                                   mailbox=mailbox)
+        if box is not None:
+            mailbox = PhoneMailbox(target, adb_client, box["address"],
+                                   logger=logger, driver=driver)
+            router = None
+        else:
+            # Built here, not earlier: a router that is never asked for a
+            # number costs nothing, but building one proves the keys are
+            # present before a phone has been launched on the assumption.
+            from adb_bot.clients.sms.router import build_router
+
+            mailbox = None
+            router = build_router(logger=logger)
+        result = signup.run_signup(driver, router, identity, logger=logger,
+                                   mailbox=mailbox,
+                                   country=getattr(args, "country", None))
         out["steps"]["signup"] = result.status
         out["status"] = result.status
         out["detail"] = result.detail[:300]
+        # Re-read the handle: the signup changes it when Instagram says the
+        # first choice is taken, and `out` was filled in before the phone was
+        # touched. Reporting the intended handle for a live account is how
+        # somebody goes looking for @lena.berg and finds nothing, while
+        # @lena.berg1968 sits there unclaimed.
+        out["username"] = identity.username
         print(f"  signup: {result.status}  {result.detail[:160]}")
 
         record_account(profile_id, name, identity, status=result.status)
         if result.ok:
-            print(f"  CREATED @{identity.username} on {box['address']}")
+            where = box["address"] if box else "a rented number"
+            print(f"  CREATED @{identity.username} on {where}")
 
         # --- 4. the checkpoint ------------------------------------------------
         # Instagram holds a brand-new account behind "confirm you're human"
@@ -207,11 +359,7 @@ def run_phone(profile_item, box, clients, adb_client, args, logger) -> dict:
         return out
     finally:
         out["elapsed"] = int(time.monotonic() - started)
-        try:
-            clients.shutdown.shutdown_profiles([profile_id])
-        except Exception as exc:
-            logger.warning("signup_phone: shutdown failed for %s (%s)",
-                           profile_id, exc)
+        host.shutdown(profile_id, logger)
         locks.release(profile_id)
 
 
@@ -251,6 +399,20 @@ def verify_account(profile_id: str, name: str, identity, target: str,
     country = getattr(args, "country", None) or DEFAULT_COUNTRY
     print(f"  verification: starting, {int(seconds)}s of phone left "
           f"(numbers cost money)")
+
+    # Android's own dialogs sit on top of whatever Instagram is showing, and
+    # the verification loop has no idea what they are: on 2026-08-21 an account
+    # behind "confirm you're human" was read as `needs_human` because
+    # "allow instagram to send you notifications?" was in front of it. The
+    # challenge was never seen, and the report blamed the account.
+    from adb_bot.automation.flows import interruptions
+
+    try:
+        interruptions.handle_permission_prompts(target, adb_client,
+                                                logger=logger, flow="signup")
+    except Exception as exc:
+        logger.warning("signup_phone: could not clear permission prompts (%s)",
+                       exc)
     challenge_driver = AdbChallengeDriver(target, adb_client, logger=logger,
                                           act=True,
                                           screenshots=args.screenshots)
@@ -308,7 +470,8 @@ def main(argv=None) -> int:
             print(f"[skip] no MLX profile named {wanted!r}", file=sys.stderr)
             continue
         box = load_assignment(str(item.get("serial_name")), args.assignments)
-        results.append(run_phone(item, box, clients, adb_client, args, logger))
+        results.append(run_phone(item, box, MlxHost(clients, args), adb_client,
+                                 args, logger))
 
     print(f"\n{'=' * 68}")
     for r in results:

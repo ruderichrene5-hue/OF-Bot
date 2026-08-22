@@ -81,11 +81,22 @@ _HUMAN_VERIFICATION_MARKERS = (
 
 _PERMISSION_MARKERS = (
     "allow instagram to access",
+    # Android words the notifications prompt "send you", not "access" -- so
+    # none of the markers below matched it and the dialog was invisible to this
+    # handler. It sat in front of a password-reset flow through eight rounds of
+    # "answering an android permission dialog" that answered nothing, because
+    # detection had already failed before any button was looked for.
+    "allow instagram to send you",
+    "to send you notifications",
     "to use location services",
     "location services",
     "while using the app",
     "only this time",
+    # Both apostrophes. Android renders U+2019 here, and a marker typed with
+    # the ASCII one never matches it -- the same mismatch that stalled a
+    # created account on this exact dialog earlier today.
     "don't allow",
+    "don’t allow",
     "dont allow",
     "access photos",
     "photos and videos",

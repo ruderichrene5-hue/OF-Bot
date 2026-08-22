@@ -41,6 +41,9 @@ SCREEN_ENTRY = "entry"                  # "Join Instagram" -- the start
 SCREEN_PHONE = "phone"                  # "What's your mobile number?"
 SCREEN_EMAIL = "email"                  # "What's your email address?" (we avoid it)
 SCREEN_CODE = "code"                    # "Enter the confirmation code"
+SCREEN_CALL_CONFIRM = "call_confirm"    # "Confirm ... automatically with a phone call"
+SCREEN_SEND_SMS = "send_sms"            # "Send SMS to confirm your account" (outbound!)
+SCREEN_METHOD_CHOOSER = "method_chooser"  # "Change mobile number / Confirm by email"
 SCREEN_PASSWORD = "password"            # "Create a password"
 SCREEN_BIRTHDAY = "birthday"            # "What's your date of birth?"
 SCREEN_DATE_PICKER = "date_picker"      # the Android spinner dialog
@@ -57,6 +60,7 @@ SCREEN_PERMISSION_DIALOG = "permission_dialog"   # Android's own allow/deny
 SCREEN_INTERSTITIAL = "interstitial"    # feed personalisation, nav tips
 SCREEN_SAVE_PASSWORD = "save_password"  # Android autofill, not Instagram
 SCREEN_LAUNCHER = "launcher"            # the phone's home screen -- start the app
+SCREEN_NOT_INSTAGRAM = "not_instagram"  # some other app is in front -- same fix
 SCREEN_LOADING = "loading"              # mid-render -- wait, do not act
 SCREEN_DONE = "done"                    # a working account
 SCREEN_BANNED = "banned"                # created and immediately disabled
@@ -90,7 +94,110 @@ _PHONE_MARKERS = (
     "what's your mobile number",
     "whats your mobile number",
     "enter the mobile number on which you can be contacted",
+    # Instagram now words it "where you can be contacted" here too, which used
+    # to belong to the post-creation prompt alone. See `_ADD_PHONE_MARKERS`.
+    "enter the mobile number where you can be contacted",
 )
+
+# Instagram's offer to verify by ringing the number instead of texting it.
+# Seen first on 2026-08-21, on the first UK number ever used here -- twenty-four
+# German numbers never produced it, so it appears to follow the country.
+#
+# It has to be answered, not skipped: it wants the `manage phone calls`
+# permission so it can ring the handset and hang up automatically, and a rented
+# SMS number cannot take a call. The screen offers `Confirm with a code`, which
+# is the SMS route we already know how to drive, so that is the button -- NOT
+# `Next`, which is the one that asks for the permission.
+_CALL_CONFIRM_MARKERS = (
+    "confirm your account automatically with a phone call",
+    "we'll call your mobile number and end the call automatically",
+)
+
+# Instagram asking the PHONE to send an SMS out, rather than sending one in:
+# it opens the handset's own messaging app with a prefilled code addressed to
+# Instagram. Seen 2026-08-21 immediately after declining the phone call.
+#
+# It cannot work here whichever way you look at it. The message would be sent
+# by the cloud phone's own SIM, which is not the number Instagram is trying to
+# confirm; and these phones have no usable SIM to send it with anyway. The
+# screen's `Try another way` is the route onward.
+_SEND_SMS_MARKERS = (
+    "send sms to confirm your account",
+    "send a prefilled code from",
+    "tap to open your default sms app",
+)
+
+# What `Try another way` actually leads to, seen 2026-08-21 on a UK number:
+# `Dismiss / Change mobile number / Confirm by email / Close`.
+#
+# Read that list carefully, because it is the whole finding. There is **no
+# option to receive an SMS code**. Instagram offered this number a phone call,
+# an outbound SMS, a different number, or email -- and never once offered to
+# text it. German numbers were offered the code route and simply never
+# received; British ones are refused it outright. Both are the same wall from
+# opposite sides: a rented virtual number cannot finish this signup.
+_METHOD_CHOOSER_MARKERS = (
+    "change mobile number",
+    "confirm by email",
+)
+
+# Surfaces belonging to some *other* app, seen when Instagram has left the
+# foreground. Only the Play Store so far, which is what these phones fall back
+# to; add others as they turn up rather than guessing at them.
+#
+# Each marker has to be unmistakably not-Instagram. A loose one here is worse
+# than a missing one: it would restart Instagram in the middle of a signup that
+# was going fine, and a restarted signup begins again at "Join Instagram" and
+# throws away everything it had.
+_OTHER_APP_MARKERS = (
+    "sign in to find the latest android apps, games, movies, music",
+    "google play store",
+)
+
+
+def looks_like_another_app(text: str | None) -> bool:
+    """True when the screen belongs to an app that is not Instagram."""
+    if not text:
+        return False
+    haystack = text.lower()
+    return any(marker in haystack for marker in _OTHER_APP_MARKERS)
+
+
+# Instagram naming the account back to us, on the screens it shows once one
+# exists. This is ground truth for the handle: the flow's own idea of it is a
+# guess about what the username box ended up holding, and the two have already
+# diverged in production.
+_HANDLE_PHRASES = (
+    "to use your account, ",
+    "confirm you're human to use your account, ",
+)
+
+# Instagram handles: letters, digits, dots, underscores, up to 30.
+_HANDLE_RE = re.compile(r"([a-z0-9._]{1,30})")
+
+
+def handle_from_text(text: str | None) -> str:
+    """The account handle Instagram itself names, or "" if it names none.
+
+    Deliberately narrow. A wrong answer here renames a real account in our own
+    records, which is worse than no answer: an empty result leaves the flow's
+    own guess in place, while a wrong one overwrites a handle that was right.
+    """
+    if not text:
+        return ""
+    haystack = text.lower()
+    for phrase in _HANDLE_PHRASES:
+        index = haystack.find(phrase)
+        if index < 0:
+            continue
+        match = _HANDLE_RE.match(haystack[index + len(phrase):].lstrip())
+        if not match:
+            continue
+        handle = match.group(1).strip(".")
+        # A bare word that is really the start of a sentence is not a handle.
+        if len(handle) >= 3 and not handle.isdigit():
+            return handle
+    return ""
 
 _EMAIL_MARKERS = (
     "what's your email address",
@@ -118,6 +225,14 @@ _BIRTHDAY_MARKERS = (
     "whats your date of birth",
     "use your own date of birth",
     "why do i need to provide my date of birth",
+    # The US build says "birthday" where the German one says "date of birth".
+    # Same screen, same field, different noun -- and on 2026-08-21 it stopped
+    # the first run ever to get a code delivered, one screen past the wall
+    # everything else had been stuck behind.
+    "what's your birthday",
+    "whats your birthday",
+    "use your own birthday",
+    "why do i need to provide my birthday",
 )
 
 # The Android date-picker dialog. It has no Instagram wording at all -- just the
@@ -163,6 +278,13 @@ _COOKIES_MARKERS = (
     "allow the use of cookies",
     "we use cookies",
     "allow all cookies",
+    # Meta's ads-consent screen, which is a separate gate from the cookie one
+    # and carries only `Get started`. Seen on an MLX twin on 2026-08-21, where
+    # it stopped a login cold: the screen IS Instagram, so `open_instagram`
+    # read "not in front" and gave up after five relaunches against an app
+    # that was already there.
+    "choose if we process your data for ads",
+    "whether you consent to us processing your personal data",
 )
 
 _ADD_EMAIL_MARKERS = (
@@ -175,7 +297,17 @@ _ADD_EMAIL_MARKERS = (
 # answer: the account is already made.
 _ADD_PHONE_MARKERS = (
     "add a mobile number",
-    "enter the mobile number where you can be contacted",
+    # "enter the mobile number where you can be contacted" USED to be here and
+    # must not come back: Instagram now says exactly that on the *signup*
+    # mobile-number screen as well, and this screen is classified first -- so
+    # the marker turned every signup into a post-creation prompt the flow then
+    # tried to skip. There is no Skip on it, so two Geelark runs looped thirty
+    # screens and gave up with the account never started (2026-08-21).
+    #
+    # "add a mobile number" is the heading only the post-creation prompt has.
+    # If this ever needs a second marker, use something the signup screen
+    # cannot carry -- it still offers "Sign up with email" and "I already have
+    # an account", neither of which can appear once an account exists.
 )
 
 # Android's own runtime permission dialogs, raised by the screen below. Contacts
@@ -238,6 +370,12 @@ _ORDERED_MARKERS = (
     (SCREEN_PERMISSION_DIALOG, _PERMISSION_DIALOG_MARKERS),
     (SCREEN_ADD_EMAIL, _ADD_EMAIL_MARKERS),
     (SCREEN_ADD_PHONE, _ADD_PHONE_MARKERS),
+    # Before SCREEN_PHONE: this screen repeats the number and can carry the
+    # same wording, and mistaking it for the number form retypes a number
+    # Instagram has already accepted.
+    (SCREEN_CALL_CONFIRM, _CALL_CONFIRM_MARKERS),
+    (SCREEN_SEND_SMS, _SEND_SMS_MARKERS),
+    (SCREEN_METHOD_CHOOSER, _METHOD_CHOOSER_MARKERS),
     (SCREEN_EMAIL, _EMAIL_MARKERS),
     (SCREEN_PHONE, _PHONE_MARKERS),
     (SCREEN_PERMISSIONS, _PERMISSIONS_MARKERS),
@@ -315,6 +453,15 @@ def classify_signup_screen(text: str | None) -> str:
     # is not in front. Verification learned this the expensive way on `Jil 6`.
     if looks_like_launcher(haystack):
         return SCREEN_LAUNCHER
+
+    # Instagram can disappear *mid-signup*, not only before it starts. On
+    # 2026-08-21 a run tapped the number field, found the field list empty ten
+    # seconds later, and read the Play Store on the next dump -- Instagram had
+    # gone and the store was simply what lay behind it. Classified as unknown,
+    # that ends the run; classified here, it is the same cheap fix as the home
+    # screen, which is to start Instagram again.
+    if looks_like_another_app(haystack):
+        return SCREEN_NOT_INSTAGRAM
 
     for kind, markers in _ORDERED_MARKERS:
         if any(marker in haystack for marker in markers):
@@ -408,6 +555,12 @@ RESULT_CREATED = "created"
 RESULT_CREATED_UNVERIFIED = "created_unverified"
 RESULT_UNKNOWN_SCREEN = "unknown_screen"
 RESULT_NO_NUMBER = "no_number"
+# Instagram would not text this number at all -- it offered a call, an outbound
+# SMS, a different number or email, and never the code route. Deliberately not
+# `no_number`, which means the opposite: Instagram *did* send a code and the
+# number never received it. One says the pool is burned, the other says the
+# number type is refused, and they need different answers.
+RESULT_NUMBER_REFUSED = "number_refused"
 RESULT_BANNED = "banned"
 RESULT_STUCK = "stuck"
 RESULT_PHONE_LOST = "phone_lost"
@@ -441,17 +594,59 @@ class SignupResult:
 # and screens that repeat while something loads.
 MAX_STEPS = 30
 
-# Each number costs real money and about 150 seconds of waiting. The German
-# pool delivers roughly one time in two or three, so three is a real budget
-# rather than a generous one -- and a fourth rarely fixes what three could not.
+# Each number costs real money and a `CODE_WAIT_SECONDS` wait. The US pool
+# delivered 11 of 15 on 2026-08-21 -- about 73% -- so three attempts carry a
+# run past a bad draw without spending the whole phone on numbers.
+#
+# An undelivered number is refunded, so the cost of an extra attempt is the
+# phone's life rather than money; that is what bounds this, and it is why the
+# wait was cut to 90s.
 MAX_NUMBER_ATTEMPTS = 3
+
+# The country Instagram's own picker opens on, which follows the phone's proxy
+# and locale -- German, for this fleet. It decides how a number is typed, not
+# where numbers are bought: a number from this country goes in as its national
+# part, and any other has to be typed in full with its `+` code.
+#
+# Buying German is a separate decision, and on 2026-08-21 the evidence went
+# against it: fifteen German numbers across both providers delivered nothing,
+# every one of them from the same +49 1590 56xx block, and SMSPool prices
+# Germany at $0.60 against $0.30 for the UK.
+PICKER_COUNTRY = "DE"
 
 # The same screen this many times running, with its handler claiming success,
 # means the handler is not advancing anything.
 MAX_REPEATS = 4
 
 # How long to wait for an SMS before writing the number off.
-CODE_WAIT_SECONDS = 150
+#
+# Ninety, not a hundred and fifty. Every code that has ever arrived here
+# arrived fast: measured across all of 2026-08-21's runs, the delivery
+# latencies were 0s, 0s, 3s and 77s, and **nothing has ever landed between 77s
+# and the old 150s ceiling**. So the last minute of each wait was spent on an
+# outcome never once observed, at 73 seconds a number out of a phone that lives
+# about fifteen minutes -- often the difference between getting a third number
+# tried and running out of phone first.
+#
+# Raise it again only against new evidence of a slow delivery, not on the
+# general feeling that longer is safer: longer is only safer if something
+# actually arrives late, and across 40 numbers that waited the full 150s, not
+# one ever did.
+#
+# **Delivery here is bimodal, and that shapes how this can bite.** The two slow
+# codes -- 68s and 77s, on different phones in different runs -- arrived within
+# one second of each other. They were not drifting; the provider was holding a
+# backlog and flushed it at 16:12:24, while every other code that day came in
+# 0s or 3s. So a number is either answered at once or stuck behind a stall that
+# clears for everyone together.
+#
+# The failure that implies is not gradual. A stall lasting a little longer than
+# that one costs not one number but every number waiting in the window, across
+# every phone running -- so it will present as a fleet-wide SMS outage rather
+# than as variance. Several runs reporting `no_number` in the same minute is
+# that signature, and it means "the provider stalled", not "the pool is
+# burned".
+CODE_WAIT_SECONDS = 90
 
 # How long to wait for the mail. Longer than the SMS budget because nothing is
 # ageing while we wait -- no number is rented -- but still bounded by the phone,
@@ -490,9 +685,84 @@ _SKIP_LABELS = ("Skip", "SKIP", "Not now", "NOT NOW", "Got it", "GOT IT",
 
 _SUBMIT_LABELS = ("Next", "NEXT", "Continue", "Done")
 
+# The way off the phone-call offer and back onto SMS. Several spellings,
+# because this screen has only been seen once and Instagram varies its wording
+# between builds and locales.
+_CONFIRM_WITH_CODE_LABELS = (
+    "Confirm with a code", "CONFIRM WITH A CODE", "Confirm with code",
+    "Send a code", "Use a code", "Confirm another way",
+)
+
+# Instagram saying the handle is spoken for. Both wordings appear together on
+# the same screen: a human sentence and an accessibility label.
+_USERNAME_TAKEN_MARKERS = (
+    "is not available",
+    "input username is invalid",
+    "username isn't available",
+    "that username is taken",
+)
+
+# Instagram saying the box is fine as it stands. Checked only after the
+# rejection markers, which must win: "input username is invalid" is not
+# matched by "input username is valid", but the reverse order would still be
+# asking for trouble the day Instagram rewords one of them.
+#
+# This is what breaks the retype loop. Instagram decorates the value it renders
+# -- a handle typed as `emma8613` came back as `emma8_613` -- so a fill that
+# insists the field echo back exactly what was typed can never succeed, and the
+# flow retyped a username Instagram had already accepted until its budget ran
+# out, with `Next` sitting there enabled the whole time.
+_USERNAME_VALID_MARKERS = (
+    "input username is valid",
+    "username is available",
+)
+
+# Instagram refusing a number as malformed, before it ever tries to text it.
+# This is about the number, not the format we typed it in: `+12274442163` was
+# rejected this way while `+19382778361` went through in exactly the same
+# shape minutes earlier. Retrying the same number cannot help -- the flow has
+# to swap it, which is what it already does when no code arrives.
+_PHONE_INVALID_MARKERS = (
+    "mobile number is invalid",
+    "your mobile number may be incorrect",
+    "phone number is invalid",
+)
+
+# How many rejected handles to work through before giving up. Each costs about
+# 28 seconds of a phone that lives roughly fifteen minutes.
+MAX_USERNAME_REJECTIONS = 4
+
+
+def next_username(rejected: str, attempt: int) -> str:
+    """A different handle after Instagram refuses one.
+
+    Deliberately not Instagram's own suggestion, which sits in the field's hint
+    and is tempting to reuse: those are minted from the real name and collide
+    with the pattern every other account here already uses. A short numeric
+    tail keeps the handle recognisably ours and is what the identity generator
+    would have produced anyway.
+
+    Bounded to Instagram's 30-character limit by trimming the stem, never the
+    tail -- a truncated tail is how two accounts end up asking for the same
+    handle again.
+    """
+    import random as _random
+
+    tail = str(_random.randint(10, 9999))
+    stem = "".join(ch for ch in rejected if ch.isalnum() or ch in "._")
+    stem = stem.rstrip("0123456789") or "user"
+    return (stem[:30 - len(tail)] + tail)
+
+
+# The way off any verification method this fleet cannot perform.
+_ANOTHER_WAY_LABELS = (
+    "Try another way", "TRY ANOTHER WAY", "Try Another Way",
+    "Another way", "Choose another way", "Use another method",
+)
+
 
 def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
-               sleep=None, mailbox=None) -> SignupResult:
+               sleep=None, mailbox=None, country: str | None = None) -> SignupResult:
     """Walk one account from "Join Instagram" to a working profile.
 
     Two chains, chosen by `identity.email`:
@@ -521,6 +791,19 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
     repeats = 0
     loading_waits = 0
     app_restarts = 0
+    # Handles Instagram has refused. Counted so a run cannot spend its whole
+    # phone cycling through names.
+    rejections = 0
+    # Whether our handle has been put in the box at all. The screen arrives
+    # holding Instagram's own suggestion, which is also "valid" -- accepting
+    # that without typing first would take a handle minted from the real name,
+    # which is the pattern every other account here already uses.
+    username_filled = False
+    # How many times an accepted username has been submitted. The second
+    # submit takes a different route rather than repeating one that did not
+    # work -- repeating an identical action is what the repeat guard exists to
+    # catch, and it caught this.
+    username_submits = 0
     empty_reads = 0
     code_submitted = False
     done_flags = set()
@@ -567,17 +850,34 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
             log("info", "step %d: %s", step + 1, screen)
             steps.append(screen)
 
-            if screen == SCREEN_LAUNCHER:
+            if screen in (SCREEN_LAUNCHER, SCREEN_NOT_INSTAGRAM):
                 # Not a signup screen and not a verdict: Instagram is simply
                 # not in front. Starting it again is nearly free.
                 starter = getattr(driver, "restart_app", None)
                 if app_restarts < MAX_APP_RESTARTS and callable(starter) and starter():
+                    # Give the number back first. A restart puts Instagram at
+                    # "Join Instagram" and the flow walks from the top, leasing
+                    # a fresh number -- so any number already rented is now
+                    # unreachable, and holding it means paying for one nobody
+                    # will ever type. Not counted as a failure: the number was
+                    # fine, the app went away.
+                    release(False)
                     app_restarts += 1
-                    log("info", "on the home screen; starting Instagram again "
-                                "(%d/%d)", app_restarts, MAX_APP_RESTARTS)
+                    log("info", "%s; starting Instagram again (%d/%d)",
+                        "on the home screen" if screen == SCREEN_LAUNCHER
+                        else "another app is in front",
+                        app_restarts, MAX_APP_RESTARTS)
                     steps.pop()
                     sleep(6)
                     continue
+                # Released here, not left to `finish`, which counts every
+                # non-created outcome against the provider. The number was
+                # delivered to us perfectly well; Instagram died on the phone
+                # seventeen seconds later. Charging that to the provider walks
+                # a healthy one toward its breaker -- and we have already
+                # watched that breaker misfire, cooling every provider down and
+                # then renting anyway.
+                release(False)
                 return finish(RESULT_STUCK,
                               "Instagram is not running and would not start")
 
@@ -649,6 +949,20 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                         RESULT_OCCUPIED,
                         "a checkpoint for an account already on this phone -- "
                         "nothing was created, and nothing on it was touched")
+                # Instagram names the account on this screen, and it is the
+                # only source that cannot be wrong. Everything upstream is a
+                # guess about what the username box ended up holding: the flow
+                # may have accepted Instagram's own suggestion, or the field
+                # may render a value it never received. On 2026-08-21
+                # @nora450960 was written down as @nora.brandt, which puts a
+                # real password under a handle that does not exist -- the one
+                # unrecoverable way to lose an account.
+                named = handle_from_text(text)
+                if named and named != identity.username:
+                    log("info", "instagram calls this account @%s, not @%s; "
+                                "believing instagram", named,
+                        identity.username)
+                    identity.username = named
                 log("info", "the account exists but is held for verification: "
                             "@%s", identity.username)
                 release(False)
@@ -718,22 +1032,91 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     sleep(6)
                     continue
 
+                if lease is not None and any(marker in text
+                                             for marker in
+                                             _PHONE_INVALID_MARKERS):
+                    # Instagram will not even try this number. Retyping it just
+                    # earns the same rejection -- four times, then a spent
+                    # phone. Swap it, and do not count it against the provider:
+                    # the number was delivered to us fine, Instagram declined
+                    # to use it.
+                    log("info", "instagram calls %s invalid; swapping it",
+                        lease.e164)
+                    release(False)
                 if lease is None:
                     if numbers_used >= MAX_NUMBER_ATTEMPTS:
                         return finish(RESULT_NO_NUMBER,
                                       f"{numbers_used} numbers, none delivered")
-                    lease = router.lease()
+                    lease = (router.lease(country=country) if country
+                             else router.lease())
                     numbers_used += 1
-                    log("info", "number %d: %s", numbers_used, lease.e164)
-                # The national part only: the picker is already on DE +49.
+                    log("info", "number %d: %s (%s)", numbers_used, lease.e164,
+                        country or PICKER_COUNTRY)
+                # The national part only while the number matches the picker,
+                # which these phones open on because their proxy and locale are
+                # German. A number from anywhere else must go in whole, with
+                # its `+` country code, or the picker silently prefixes +49 to
+                # a British national number and Instagram texts a number that
+                # does not exist.
+                typed = (lease.typed_number
+                         if (country or PICKER_COUNTRY) == PICKER_COUNTRY
+                         else lease.e164)
                 if not driver.fill(("mobile", "phone", "number"),
-                                   lease.typed_number, "mobile number"):
+                                   typed, "mobile number"):
                     release(False)
                     continue
                 progressed = True
                 driver.dismiss_keyboard()
                 driver.tap_label(_SUBMIT_LABELS)
                 sleep(6)
+
+            elif screen == SCREEN_CALL_CONFIRM:
+                # Take the code, not the call. `Next` here grants Instagram the
+                # `manage phone calls` permission so it can ring the handset --
+                # which a rented SMS number can never answer, and which would
+                # spend the number for nothing.
+                if not driver.tap_label(_CONFIRM_WITH_CODE_LABELS):
+                    return finish(RESULT_STUCK,
+                                  "no way from the phone-call offer back to a "
+                                  "code: " + ", ".join(
+                                      str(x) for x in
+                                      (driver.clickable_labels() or ())[:8]))
+                log("info", "declined the phone call; asking for a code")
+                progressed = True
+                sleep(6)
+
+            elif screen == SCREEN_SEND_SMS:
+                # `Open SMS app` would send from the cloud phone's own SIM,
+                # which is not the number being confirmed -- and these phones
+                # have no usable SIM to send with. `Try another way` is the
+                # only move.
+                if not driver.tap_label(_ANOTHER_WAY_LABELS):
+                    return finish(RESULT_STUCK,
+                                  "no way off the outbound-SMS screen: "
+                                  + ", ".join(str(x) for x in
+                                              (driver.clickable_labels()
+                                               or ())[:8]))
+                log("info", "declined sending an SMS; asking for another way")
+                progressed = True
+                sleep(6)
+
+            elif screen == SCREEN_METHOD_CHOOSER:
+                labels = [str(x) for x in (driver.clickable_labels() or ())]
+                if mailbox is not None and driver.tap_label(
+                        ("Confirm by email", "CONFIRM BY EMAIL")):
+                    log("info", "no SMS option offered; confirming by email")
+                    progressed = True
+                    sleep(6)
+                    continue
+                # Nothing here can be done with a rented number. Another
+                # number from the same pool would be refused the same way, so
+                # spending two more to be told twice more is waste: stop and
+                # say which methods were actually offered.
+                release(False)
+                return finish(
+                    RESULT_NUMBER_REFUSED,
+                    "Instagram offered no SMS-code option for this number; "
+                    "it offered: " + ", ".join(labels[:8]))
 
             elif screen == SCREEN_CODE:
                 if code_submitted:
@@ -833,7 +1216,82 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 # Arrives holding Instagram's own suggestion, which is why this
                 # is a fill and not a "tap Next".
                 progressed = True
+                # Our handle must still be in the box. Instagram bounces back
+                # to the name screen after a submit and returns the username
+                # screen holding **its own suggestion** again -- so
+                # `input username is valid` is true, just not about us. Without
+                # this check the flow submits a field it never retyped, four
+                # times, and calls itself stuck; three phones went that way.
+                # Equality against the field, never a search of the screen
+                # text. Instagram mutates a submitted handle by appending
+                # digits -- `sara65` comes back as `sara652203` -- so a
+                # substring test reports our handle present while the box holds
+                # something else, and the accept path then submits Instagram's
+                # value while logging ours. One run went seven times round a
+                # name/username loop that way before giving up at thirty
+                # screens. Short handles make it near-certain.
+                holds = getattr(driver, "field_holds", None)
+                if callable(holds):
+                    ours_on_screen = holds(("username",), identity.username)
+                else:
+                    ours_on_screen = identity.username.lower() in text
+                if (username_filled and ours_on_screen
+                        and not any(marker in text
+                                    for marker in _USERNAME_TAKEN_MARKERS)
+                        and any(marker in text
+                                for marker in _USERNAME_VALID_MARKERS)):
+                    # Instagram has already accepted what is in the box, so
+                    # there is nothing left to type -- only a button to press.
+                    # Retyping here is the loop that spent a run's whole
+                    # budget while the screen said the handle was valid.
+                    username_submits += 1
+                    if username_submits == 1:
+                        log("info", "instagram accepts %s; submitting",
+                            identity.username)
+                        driver.dismiss_keyboard()
+                        driver.tap_label(_SUBMIT_LABELS)
+                    else:
+                        # The tap landed and the screen did not move: five
+                        # identical reads, `Next` enabled, `input username is
+                        # valid` on screen. Same shape as Google's email form,
+                        # and the same answer -- submit the field with the
+                        # IME's own action, which is the one thing a tap on the
+                        # button cannot do.
+                        log("info", "tapping Next did not move the username "
+                                    "screen; submitting with the keyboard")
+                        submitter = getattr(driver, "submit_with_keyboard",
+                                            None)
+                        if callable(submitter):
+                            submitter()
+                        else:
+                            driver.tap_label(_SUBMIT_LABELS)
+                    sleep(8)
+                    continue
+                if any(marker in text for marker in _USERNAME_TAKEN_MARKERS):
+                    # Instagram has rejected this handle, and it will reject it
+                    # every time: retyping the same one is what the repeat
+                    # guard sees, so the run died "username did not advance in
+                    # 4 tries" on a screen that was telling us plainly what was
+                    # wrong. Change the handle instead.
+                    rejected = identity.username
+                    identity.username = next_username(rejected, rejections)
+                    rejections += 1
+                    log("info", "username %s is taken; trying %s",
+                        rejected, identity.username)
+                    if rejections > MAX_USERNAME_REJECTIONS:
+                        return finish(RESULT_STUCK,
+                                      f"{rejections} usernames rejected in a "
+                                      f"row, last {rejected}")
+                if username_filled and not ours_on_screen:
+                    # Retyping after Instagram put its suggestion back. The
+                    # submit counter resets with it: the next submit is a first
+                    # attempt at this value, and going straight to the keyboard
+                    # route would skip the tap that works everywhere else.
+                    log("info", "the box holds instagram's suggestion again; "
+                                "retyping %s", identity.username)
+                    username_submits = 0
                 driver.fill(("username",), identity.username, "username")
+                username_filled = True
                 driver.dismiss_keyboard()
                 driver.tap_label(_SUBMIT_LABELS)
                 sleep(8)
@@ -872,7 +1330,10 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 # only because a screen that will not answer is worse than
                 # either answer.
                 if not driver.tap_label(("Allow all cookies", "ALLOW ALL COOKIES",
-                                         "Allow", "Decline optional cookies")):
+                                         "Allow", "Decline optional cookies",
+                                         # Meta's ads-consent gate carries only
+                                         # this, and leads on to the choices.
+                                         "Get started", "GET STARTED")):
                     log("warning", "nothing to answer on the cookie screen")
                 sleep(5)
 

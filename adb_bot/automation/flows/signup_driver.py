@@ -33,6 +33,35 @@ MAX_CLEAR = 60
 # real button rather than on a keyboard that is still animating away.
 KEYBOARD_SETTLE = 1.0
 
+# Characters Android and Instagram render as punctuation but which are not the
+# ASCII ones anybody types into a label list. Android's own permission dialog
+# spells its button `DON’T ALLOW` with U+2019, so a list containing "DON'T
+# ALLOW" matched nothing and the run sat on the dialog until its repeat guard
+# gave up -- one screen after the tap that creates the account.
+#
+# Normalising both sides is the fix rather than adding a second spelling of
+# every label: the same character turns up in "I didn’t get the code" and
+# anywhere else Instagram writes an apostrophe, and each of those would
+# otherwise be its own silent miss.
+_PUNCTUATION = {
+    "’": "'",      # right single quotation mark
+    "‘": "'",      # left single quotation mark
+    "ʼ": "'",      # modifier letter apostrophe
+    "“": '"',
+    "”": '"',
+    "–": "-",      # en dash
+    "—": "-",      # em dash
+    " ": " ",      # non-breaking space
+}
+
+
+def normalise_label(value) -> str:
+    """A label reduced to what two spellings of it have in common."""
+    text = str(value or "")
+    for fancy, plain in _PUNCTUATION.items():
+        text = text.replace(fancy, plain)
+    return " ".join(text.split()).strip().lower()
+
 
 class AdbSignupDriver(AdbChallengeDriver):
     """The signup flow's device seam."""
@@ -75,11 +104,11 @@ class AdbSignupDriver(AdbChallengeDriver):
             self._log("warning", "no screen to tap %s on", list(labels))
             return False
 
-        wanted = [str(label).strip().lower() for label in labels]
+        wanted = [normalise_label(label) for label in labels]
         for node in root.iter():
             attrs = node.attrib
             for key in ("text", "content-desc"):
-                value = str(attrs.get(key, "") or "").strip().lower()
+                value = normalise_label(attrs.get(key, ""))
                 if not value or value not in wanted:
                     continue
                 target = self._clickable_ancestor(node, root)
@@ -166,6 +195,84 @@ class AdbSignupDriver(AdbChallengeDriver):
             self._refuse("dismiss the keyboard")
             return
         self.adb_client.run_command(f"adb -s {self.target} shell input keyevent 4")
+        time.sleep(KEYBOARD_SETTLE)
+
+    def showing_package(self, package: str) -> bool:
+        """Is `package` the one that drew the screen?
+
+        Asked of the UI dump itself, where every node carries the package that
+        owns it. That is authoritative, unlike "does the classifier recognise
+        this screen" -- which is what callers were using, and which answers no
+        for every screen nobody has named yet. Instagram's "set up on new
+        device" onboarding was in front, fully drawn, while a relaunch loop
+        declared five times that Instagram would not come to the front.
+
+        `dumpsys window` would also answer, and is what this deliberately
+        avoids: it times out under concurrency and returns empty, which reads
+        as "not in front" for a phone that is merely busy.
+        """
+        root = self._root
+        if root is None:
+            root, _xml = self._dump()
+            if root is None:
+                return False
+            self._root = root
+        wanted = str(package).strip().lower()
+        for node in root.iter():
+            if str(node.attrib.get("package", "") or "").lower() == wanted:
+                return True
+        return False
+
+    def field_holds(self, hints, value: str) -> bool:
+        """Does an input field currently hold exactly `value`?
+
+        Equality against the field, not a search of the screen text. The
+        difference is not academic: Instagram mutates a submitted handle by
+        appending digits, so `sara65` becomes `sara652203` -- and a substring
+        test against the whole screen says our handle is present when the box
+        holds something else entirely. That misfire submitted Instagram's
+        value while logging ours, seven times round a name/username loop,
+        until the run gave up after thirty screens.
+
+        Returns False when the screen cannot be read: "I cannot see it" must
+        not be reported as "it is there".
+        """
+        root = self._root
+        if root is None:
+            root, _xml = self._dump()
+            if root is None:
+                return False
+            self._root = root
+        wanted = str(value).strip().lower()
+        if not wanted:
+            return False
+        hints = tuple(str(h).lower() for h in (hints or ()))
+        for candidate in self._edit_fields(root):
+            if hints:
+                hint = str(candidate.get("hint", "") or "").lower()
+                if not any(h in hint for h in hints):
+                    continue
+            if str(candidate.get("value", "") or "").strip().lower() == wanted:
+                return True
+        return False
+
+    def submit_with_keyboard(self) -> None:
+        """Submit the focused field using the IME's own action key.
+
+        The thing a tap on the button cannot do. Google's email screen needed
+        this when tapping NEXT left the form redrawing itself, and Instagram's
+        username screen does the same: it reports `input username is valid`,
+        keeps `Next` enabled, and does not move when it is tapped.
+
+        Deliberately without dismissing the keyboard first -- the IME action
+        only exists while the keyboard is up, which is exactly why this reaches
+        a case tapping cannot.
+        """
+        if not self.act:
+            self._refuse("submit with the keyboard")
+            return
+        self.adb_client.run_command(
+            f"adb -s {self.target} shell input keyevent 66")
         time.sleep(KEYBOARD_SETTLE)
 
     # --- the date picker ------------------------------------------------------

@@ -1011,10 +1011,47 @@ class _Session:
                                 f"could not rent a number: {exc}")
 
         self.numbers_used += 1
-        self._check_country_picker()
-        if not self.driver.enter_phone(self.lease.typed_number):
+        # Type the whole number when it does not belong to the country the
+        # picker is showing. `typed_number` is the national part, which is only
+        # right while the two agree: a US number entered nationally into a
+        # `DE +49` picker is submitted as +49 5715406263, a number that does not
+        # exist, so no code can ever arrive. That was diagnosed and *reported*
+        # here for months while the flow went on submitting it anyway.
+        typed = self.lease.typed_number
+        if self._picker_disagrees():
+            typed = self.lease.e164
+            self._log("info", "verification: typing the full number %s, "
+                              "because the picker is not on its country",
+                      typed)
+        if not self.driver.enter_phone(typed):
             return self._result(RESULT_FAILED, "could not enter the phone number")
         return None
+
+    def _picker_disagrees(self) -> bool:
+        """True when the picker's country is not the rented number's.
+
+        Returns False whenever it cannot tell -- an unreadable picker, no
+        lease, a provider that did not say where the split is. Guessing "they
+        disagree" would type a full international number into a picker that was
+        already correct, which breaks the case that works today.
+        """
+        read = getattr(self.driver, "read_country_code", None)
+        if not callable(read) or self.lease is None:
+            return False
+        try:
+            on_screen = read()
+        except Exception:
+            return False
+        expected = getattr(self.lease.order, "country_code", None)
+        if not on_screen or not expected:
+            return False
+        disagrees = str(on_screen).lstrip("+") != str(expected).lstrip("+")
+        if disagrees:
+            self._log("warning",
+                      "verification: the picker is on +%s but the rented "
+                      "number is +%s; typing it in full instead",
+                      on_screen, expected)
+        return disagrees
 
     def _check_country_picker(self) -> None:
         """Warn when the on-screen country does not match the rented number.

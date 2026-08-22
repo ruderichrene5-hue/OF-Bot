@@ -419,10 +419,41 @@ class CountryPickerTest(FlowTestCase):
 
     def test_a_mismatched_picker_is_called_out(self):
         """A US number under a +49 prefix can never receive its code."""
-        self.assertIn("country picker", self._warnings("49"))
+        self.assertIn("picker is on +49", self._warnings("49"))
 
     def test_a_matching_picker_says_nothing(self):
-        self.assertNotIn("country picker", self._warnings("1"))
+        self.assertNotIn("picker is on", self._warnings("1"))
+
+    def test_a_mismatched_picker_types_the_whole_number(self):
+        """The warning was never the point -- the fix is what gets typed.
+
+        A national US number under a +49 picker is submitted as +49 5715406263,
+        which does not exist, so no code can arrive and the breaker blames the
+        provider for it. This was diagnosed and reported here for months while
+        the flow went on submitting it anyway.
+        """
+        driver = self.PickerDriver([SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED],
+                                   "49")
+        provider = FakeProvider("smspool", code="885485")
+        run_verification(driver, self.router(provider), solver=FakeSolver(),
+                         sleep=self.clock.sleep, clock=self.clock.time)
+        entered = [n for kind, n in driver.actions if kind == "phone"]
+        self.assertTrue(entered and str(entered[0]).startswith("+"),
+                        "a number from another country must be typed in full, "
+                        "got %r" % (entered,))
+
+    def test_a_matching_picker_still_types_the_national_part(self):
+        """The case that already worked must keep working."""
+        driver = self.PickerDriver([SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED],
+                                   "1")
+        provider = FakeProvider("smspool", code="885485")
+        run_verification(driver, self.router(provider), solver=FakeSolver(),
+                         sleep=self.clock.sleep, clock=self.clock.time)
+        entered = [n for kind, n in driver.actions if kind == "phone"]
+        self.assertTrue(entered, "no number was entered at all")
+        self.assertFalse(str(entered[0]).startswith("+"),
+                         "a number matching the picker goes in nationally, "
+                         "got %r" % (entered,))
 
     def test_a_driver_without_the_method_still_runs(self):
         result, _driver, _provider = self.run_chain(
