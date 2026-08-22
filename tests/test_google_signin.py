@@ -728,3 +728,42 @@ def test_a_zero_budget_does_not_look_at_all():
 
     assert g.settle(driver, EMAIL, 0) == EMAIL
     assert driver.reads == 0
+
+
+# --- the email/password submit no longer dismisses the keyboard first --------
+class _TapScriptDriver:
+    """Scripted tap_label results, and a dismiss counter -- enough to prove
+    `_submit_after_typing` tries the direct tap before ever touching the
+    keyboard."""
+
+    def __init__(self, tap_results=None):
+        self.dismissals = 0
+        self.taps = []
+        self._tap_results = list(tap_results) if tap_results is not None else None
+
+    def tap_label(self, labels):
+        self.taps.append(labels)
+        if self._tap_results is not None:
+            return self._tap_results.pop(0) if self._tap_results else True
+        return True
+
+    def dismiss_keyboard(self):
+        self.dismissals += 1
+
+
+def test_submit_after_typing_taps_directly_when_the_button_is_reachable():
+    driver = _TapScriptDriver()
+    assert g._submit_after_typing(driver, g._NEXT) is True
+    assert driver.dismissals == 0
+    assert driver.taps == [g._NEXT]
+
+
+def test_submit_after_typing_falls_back_to_dismissing_if_the_first_tap_misses():
+    """The case this exists for on some devices: BACK (what dismiss_keyboard
+    sends) is not reliably consumed by the IME, and steps the sign-in flow
+    itself back a screen -- so this must never dismiss unless the direct tap
+    genuinely could not find the button."""
+    driver = _TapScriptDriver(tap_results=[False, True])
+    assert g._submit_after_typing(driver, g._NEXT) is True
+    assert driver.dismissals == 1
+    assert driver.taps == [g._NEXT, g._NEXT]
