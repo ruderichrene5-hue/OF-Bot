@@ -8,14 +8,18 @@ the same run.
 """
 
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from adb_bot.automation import signup_geelark
 from adb_bot.automation.flows import signup
-from adb_bot.automation.signup_geelark import failed_mailboxes, reached_instagram
+from adb_bot.automation.signup_geelark import (failed_mailboxes,
+                                               reached_instagram, skip_locked)
+from adb_bot.core import locks
 
 
 class FailedMailboxesTest(unittest.TestCase):
@@ -130,6 +134,40 @@ class ReachedInstagramTest(unittest.TestCase):
                        "error"):
             with self.subTest(status=status):
                 self.assertTrue(reached_instagram(status))
+
+
+class SkipLockedTest(unittest.TestCase):
+    """A phone another operator is already driving must not eat a batch slot.
+
+    Two operators running batches from the same untried-phone pool at once
+    (2026-08-22: this operator and a manager, both hitting Geelark's four
+    slots) turned every collision into a wasted "busy" result instead of the
+    next phone in the queue getting a real attempt.
+    """
+
+    def setUp(self):
+        self.locked_id = f"test_locked_{os.getpid()}_{time.time_ns()}"
+        self.addCleanup(locks.release, self.locked_id)
+        locks.acquire(self.locked_id, owner="someone-else")
+
+    def test_a_locked_phone_is_set_aside(self):
+        free_id = f"test_free_{os.getpid()}_{time.time_ns()}"
+        phones = [{"id": self.locked_id, "serialName": "Locked One"},
+                 {"id": free_id, "serialName": "Free One"}]
+
+        free, busy = skip_locked(phones)
+
+        self.assertEqual([p["id"] for p in free], [free_id])
+        self.assertEqual([p["id"] for p in busy], [self.locked_id])
+
+    def test_nothing_locked_means_nothing_set_aside(self):
+        free_id = f"test_free_{os.getpid()}_{time.time_ns()}"
+        phones = [{"id": free_id, "serialName": "Free One"}]
+
+        free, busy = skip_locked(phones)
+
+        self.assertEqual(free, phones)
+        self.assertEqual(busy, [])
 
 
 if __name__ == "__main__":

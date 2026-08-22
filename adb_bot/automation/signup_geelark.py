@@ -38,6 +38,7 @@ from adb_bot.automation.signup_phone import GeelarkHost, run_phone
 from adb_bot.clients.adb import ADBClient
 from adb_bot.clients.geelark import GeelarkTransport
 from adb_bot.clients.geelark.phones import GeelarkPhoneClient
+from adb_bot.core import locks
 from adb_bot.core.logger import get_logger
 
 NEW_TAG = "new profile"
@@ -296,6 +297,23 @@ def run_one(phone: dict, record: dict | None, args, logger,
     return out
 
 
+def skip_locked(phones: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split `phones` into (free, locked-by-someone-else).
+
+    Another run -- another operator, or this one's own earlier batch -- can
+    already hold a phone's lock. `run_phone` would report that pair as
+    "busy" and waste the slot, so this filters it out beforehand and lets a
+    phone further down the queue fill it. Does not close every race (a
+    phone can still be claimed between this check and the real `acquire`
+    inside `run_phone`), but clears the common case: two operators running
+    batches from the same untried-phone pool at the same time.
+    """
+    free, busy = [], []
+    for phone in phones:
+        (busy if locks.is_locked(str(phone["id"])) else free).append(phone)
+    return free, busy
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Instagram accounts on the new Geelark phones.")
@@ -337,6 +355,11 @@ def main(argv=None) -> int:
                   in wanted]
     spent = already_attempted()
     phones = [p for p in phones if str(p["id"]) not in spent]
+
+    phones, busy = skip_locked(phones)
+    if busy:
+        print(f"skipping {len(busy)} phone(s) locked by another run: "
+              f"{', '.join(str(p.get('serialName')) for p in busy)}")
 
     if args.sms:
         mailboxes = [None] * len(phones)
