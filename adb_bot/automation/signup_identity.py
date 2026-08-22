@@ -43,8 +43,14 @@ LAST_NAMES = (
     "sommer", "reich", "kraus", "engel", "falk", "sturm", "weiss", "koenig",
 )
 # Handle shapes that read like a person rather than a generated string.
+#
+# `{first}{n}` is gone. With a short first name and a small `n` it minted
+# handles like `mia38` -- and Instagram silently appends its own digits to a
+# handle that short (`mia38` came back as `mia385506`), so the field never
+# echoes what was typed and the submit loop spends the whole username budget.
+# Every remaining shape carries the surname, so none is short enough to pad.
 _PATTERNS = ("{first}.{last}", "{first}_{last}", "{first}{last}{n}",
-             "{first}.{last}{n}", "{first}{n}")
+             "{first}.{last}{n}", "{first}.{last}_{n}")
 
 # The one word a handle may never contain: link-in-bio profiles are excluded
 # from posting, so a handle carrying it would quietly opt the account out.
@@ -98,8 +104,10 @@ def make_identity(rng: random.Random | None = None, avoid=None) -> Identity:
     for _ in range(200):
         first = rng.choice(FIRST_NAMES)
         last = rng.choice(LAST_NAMES)
+        # A four-digit tail, never two: Instagram pads a handle it considers
+        # too short, and a short numeric tail is exactly what invites that.
         username = rng.choice(_PATTERNS).format(
-            first=first, last=last, n=rng.randint(2, 99))
+            first=first, last=last, n=rng.randint(1000, 9999))
         if any(word in username for word in FORBIDDEN):
             continue
         if username.lower() in used or not (3 <= len(username) <= 28):
