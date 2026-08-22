@@ -292,6 +292,9 @@ CODE_WAIT_SECONDS = 8
 # progress -- so each needs a bound of its own.
 MAX_RETRY_PAGES = 3
 MAX_SERVICES_TAPS = 8
+# How many times the services page may read back blank (still drawing) before
+# it is treated as genuinely stuck. Each blank read waits ~8s.
+MAX_SERVICES_BLANK = 6
 
 # A dump that comes back empty. Worth several looks -- these phones produce one
 # while a screen is mid-transition -- but not forever, since a phone that has
@@ -531,6 +534,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     server_errors = 0
     retry_pages = 0
     services_taps = 0
+    services_blank = 0
     blank_reads = 0
     add_account_starts = 0
     password_waits = 0
@@ -876,8 +880,24 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             if not driver.tap_label(("Accept", "ACCEPT", "I agree", "AGREE",
                                      "Agree", "Turn on", "More", "MORE",
                                      "Next", "NEXT")):
-                log("warning", "nothing to tap on the Google services page")
-                return RESULT_STUCK
+                # A services page that reads as bare "google services" with no
+                # buttons is still drawing, not a dead end -- it arrives right
+                # after "I agree" on the terms page and takes a moment to
+                # render its consents. Failing here threw away a sign-in that
+                # had already passed the password and 2FA, one screen from done
+                # (`cicirahmaputrimu`, 2026-08-22). Wait and re-read instead,
+                # bounded by the same tap budget so it cannot spin forever.
+                services_blank += 1
+                if services_blank > MAX_SERVICES_BLANK:
+                    log("warning", "the Google services page never rendered a "
+                                   "button after %d reads", services_blank)
+                    return RESULT_STUCK
+                log("info", "the services page is still drawing (%d/%d); "
+                            "waiting", services_blank, MAX_SERVICES_BLANK)
+                services_taps -= 1  # a blank read is not a tap
+                pending = settle(driver, text, 6, sleep=sleep, clock=clock)
+                sleep(2)
+                continue
             # Scrolling the same page is progress, not a screen that failed to
             # advance, so this is bounded by its own counter instead.
             last, repeats = None, 0
