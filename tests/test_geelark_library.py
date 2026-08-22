@@ -84,5 +84,29 @@ class PictureUrlForTagTest(unittest.TestCase):
         self.assertEqual(body["tagIds"], ["t1"])
 
 
+class RequiredPaginationTest(unittest.TestCase):
+    """`page`/`pageSize` read as optional in Geelark's own CLI reference,
+    but the live API rejects a request missing either with code 40004
+    ("Page ... required") -- confirmed live, 2026-08-22."""
+
+    def test_tag_search_always_sends_page_and_page_size(self):
+        transport = _FakeTransport(responses=[{"list": []}])
+
+        library.search_tags("Nikki", transport=transport)
+
+        _path, body = transport.calls[0]
+        self.assertIn("page", body)
+        self.assertIn("pageSize", body)
+
+    def test_material_search_always_sends_page_and_page_size(self):
+        transport = _FakeTransport(responses=[{"list": []}])
+
+        library.search_materials(["t1"], transport=transport)
+
+        _path, body = transport.calls[0]
+        self.assertIn("page", body)
+        self.assertIn("pageSize", body)
+
+
 if __name__ == "__main__":
     unittest.main()

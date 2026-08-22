@@ -76,8 +76,23 @@ class RunOneTest(unittest.TestCase):
         self.assertEqual(out["status"], "no-bio-pool-configured")
         trigger.assert_not_called()
 
-    def test_no_geelark_tag_in_airtable_skips_without_looking_up_a_picture(self):
-        phone = _phone("1", ["IG connected"])
+    def test_an_empty_geelark_tag_falls_back_to_the_model_name(self):
+        """"Every model's GeeLark tag matches her name" (2026-08-22) -- the
+        Airtable field is only for the rare exception, so blank means "use
+        the model name", not "not set up"."""
+        phone = _phone("1", ["IG connected"], model="Nikki")
+        config = {**FULL_CONFIG, "geelark_tag": ""}
+
+        with mock.patch.object(c.library, "picture_url_for_tag",
+                               return_value="https://x/nikki.jpg") as lookup, \
+             mock.patch.object(c.rpa, "trigger_instagram_edit_profile",
+                               return_value=""):
+            c.run_one(phone, config, Args(), mock.Mock(), transport=None)
+
+        lookup.assert_called_once_with("Nikki", transport=None)
+
+    def test_a_phone_with_no_model_folder_at_all_still_skips(self):
+        phone = _phone("1", ["IG connected"], model="")
         config = {**FULL_CONFIG, "geelark_tag": ""}
 
         with mock.patch.object(c.library, "picture_url_for_tag") as lookup, \

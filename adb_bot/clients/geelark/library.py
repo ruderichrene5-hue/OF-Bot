@@ -19,9 +19,15 @@ FILE_TYPE_VIDEO = 2
 
 
 def search_tags(name: str, transport: GeelarkTransport | None = None) -> list[dict]:
-    """Material tags whose name matches `name` (Geelark does the matching)."""
+    """Material tags whose name matches `name` (Geelark does the matching).
+
+    `page`/`pageSize` are required by the live API despite reading as
+    optional in Geelark's own CLI reference -- omitting them is rejected
+    with code 40004, "Page ... required" (confirmed live, 2026-08-22).
+    """
     transport = transport or GeelarkTransport()
-    data = transport.post(MATERIAL_TAG_SEARCH_PATH, {"name": name})
+    data = transport.post(MATERIAL_TAG_SEARCH_PATH,
+                          {"name": name, "page": 1, "pageSize": 100})
     return list(data.get("list") or [])
 
 
@@ -40,7 +46,7 @@ def search_materials(tag_ids: list[str], *, file_type: int = FILE_TYPE_IMAGE,
                      transport: GeelarkTransport | None = None) -> list[dict]:
     transport = transport or GeelarkTransport()
     body = {"tagIds": list(tag_ids), "fileType": [file_type],
-           "pageSize": page_size}
+           "page": 1, "pageSize": page_size}
     data = transport.post(MATERIAL_SEARCH_PATH, body)
     return list(data.get("list") or [])
 

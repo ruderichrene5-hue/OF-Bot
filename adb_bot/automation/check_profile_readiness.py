@@ -88,7 +88,10 @@ def run_one(phone: dict, model_config: dict, args, logger, transport) -> dict:
 
     link_url = model_config.get("link_url") or ""
     bio_pool = model_config.get("bio_pool") or []
-    geelark_tag = model_config.get("geelark_tag") or ""
+    # "Every model's GeeLark tag matches her name" (2026-08-22) -- the
+    # Airtable field only exists for the rare model where that is not true,
+    # so an empty field means "same as Model Name", not "not set up yet".
+    geelark_tag = model_config.get("geelark_tag") or model
 
     if not link_url:
         out["status"] = "no-link-configured"
@@ -100,7 +103,8 @@ def run_one(phone: dict, model_config: dict, args, logger, transport) -> dict:
         return out
     if not geelark_tag:
         out["status"] = "no-geelark-tag-configured"
-        print(f"  {name:18} skipped -- no GeeLark Tag for {model!r} in Airtable")
+        print(f"  {name:18} skipped -- {model!r} has no name to use as a "
+              f"GeeLark tag")
         return out
 
     picture_url = library.picture_url_for_tag(geelark_tag, transport=transport)
