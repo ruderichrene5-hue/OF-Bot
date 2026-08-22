@@ -751,6 +751,15 @@ def next_username(rejected: str, attempt: int) -> str:
     tail keeps the handle recognisably ours and is what the identity generator
     would have produced anyway.
 
+    A `.` sits between the stem and the tail on purpose. Without it (a bare
+    `stem + tail`, e.g. `maja6658`) Instagram silently reformats the box --
+    observed 2026-08-22 as `maja6658` coming back `maja6_658`, deterministically,
+    every single retype -- and the mismatch-detection this file already has
+    for Instagram's *own* suggestions correctly saw the box no longer held
+    what was typed and retyped the same rejected shape forever. Two of five
+    accounts in one batch died that way. A separator already in the box
+    leaves Instagram nothing to insert.
+
     Bounded to Instagram's 30-character limit by trimming the stem, never the
     tail -- a truncated tail is how two accounts end up asking for the same
     handle again.
@@ -759,8 +768,9 @@ def next_username(rejected: str, attempt: int) -> str:
 
     tail = str(_random.randint(10, 9999))
     stem = "".join(ch for ch in rejected if ch.isalnum() or ch in "._")
-    stem = stem.rstrip("0123456789") or "user"
-    return (stem[:30 - len(tail)] + tail)
+    stem = stem.rstrip("0123456789").rstrip("._") or "user"
+    budget = 30 - len(tail) - 1  # 1 for the separator
+    return f"{stem[:budget]}.{tail}"
 
 
 # The way off any verification method this fleet cannot perform.
