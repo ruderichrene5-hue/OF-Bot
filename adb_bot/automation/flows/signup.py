@@ -203,6 +203,15 @@ _EMAIL_MARKERS = (
     "what's your email address",
     "whats your email address",
     "enter the email address at which you can be contacted",
+    # Instagram now titles the signup email screen "what's your email?" and
+    # subtitles it "enter the email where you can be contacted" -- the second
+    # of which used to belong to the post-creation add-email prompt alone. The
+    # title is what tells them apart: the signup screen asks the question, the
+    # prompt says "add an email address". Missing this classified the signup
+    # email field as the prompt and the flow toggled between it and the phone
+    # screen forever, never typing the address (2026-08-22).
+    "what's your email?",
+    "whats your email?",
 )
 
 # Strong enough to beat the phone markers, which is why CODE is ordered first:
@@ -289,7 +298,11 @@ _COOKIES_MARKERS = (
 
 _ADD_EMAIL_MARKERS = (
     "add an email address",
-    "enter the email where you can be contacted",
+    # "enter the email where you can be contacted" was here and had to go: the
+    # signup email screen now carries that exact subtitle under a "what's your
+    # email?" title, so this pair matched both. The post-creation prompt is the
+    # only one that says "add an email address", so that heading alone tells
+    # them apart -- exactly as with the two mobile-number screens.
 )
 
 # Post-creation, Instagram also asks for a phone number. Not the signup phone
