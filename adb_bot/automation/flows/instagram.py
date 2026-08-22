@@ -6,7 +6,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
 import os
 import shutil
@@ -4217,18 +4216,6 @@ def _adb_read_bio_field_value(root) -> str:
     return _adb_read_labeled_field_value(root, ("bio",))
 
 
-def _adb_read_link_field_value(root) -> str:
-    """Read the Links field's current value from the Edit profile screen dump.
-
-    Returns the existing link text, or '' if empty/unreadable. The row's own
-    label has been seen as both "Links" and "Link" in this codebase's other
-    Edit-profile constants (`_EDIT_PROFILE_LABEL_WORDS`), so both are tried;
-    "Add link", the empty-state hint, is excluded by
-    `_EDIT_PROFILE_FIELD_LABELS` the same way "Add your bio" is for Bio.
-    """
-    return _adb_read_labeled_field_value(root, ("links", "link"))
-
-
 def _root_is_bio_editor(root) -> bool:
     """True when `root` looks like the Bio edit screen. Uses several markers so
     it does not depend on any single label: the 'N/150' character counter, the
@@ -4639,48 +4626,6 @@ class InstagramUpdateBioFlow(InstagramNotificationsFlow):
 
         _emit(logger, "warning", "Could not verify the bio was set for %s", target)
         return "failed"
-
-
-@dataclass
-class ProfileReadiness:
-    """Which parts of the Edit Profile form are already filled in.
-
-    `blocked` carries `_open_edit_profile`'s own non-"ok" outcomes
-    (`"human_verification"`, `"failed"`) when the screen could not be
-    reached at all -- `bio`/`link` are meaningless in that case, not just
-    `False`, so callers must check `blocked` first.
-    """
-    bio: bool = False
-    link: bool = False
-    blocked: str = ""
-
-
-class InstagramProfileReadinessFlow(InstagramUpdateBioFlow):
-    """Read-only: is this account's Bio and Links row already filled in.
-
-    Answers the question a GeeLark tag needs ("is this profile ready to
-    post") without setting anything -- reuses the same navigation
-    (`_open_edit_profile`) as the flow that actually writes the bio, since
-    reaching the screen is the hard part and already works.
-    """
-    name = "profile_readiness"
-
-    def check(self, target, adb_client, logger=None) -> ProfileReadiness:
-        outcome = self._open_edit_profile(target, adb_client, logger=logger)
-        if outcome != "ok":
-            return ProfileReadiness(blocked=outcome)
-
-        root = self._ensure_screen(target, adb_client, ("username",),
-                                   logger=logger)
-        bio = bool(_adb_read_bio_field_value(root))
-        link = bool(_adb_read_link_field_value(root))
-
-        # Leave the phone where every other flow expects to find it: back on
-        # the feed, not sitting in the editor.
-        adb_client.run_command(f"adb -s {target} shell input keyevent 4")
-        time.sleep(1)
-
-        return ProfileReadiness(bio=bio, link=link)
 
 
 class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):

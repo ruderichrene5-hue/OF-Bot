@@ -1,21 +1,20 @@
-"""Tag Geelark phones with what their Instagram profile still needs.
+"""Tag Geelark phones `Post Ready` via Geelark's own `instagramEdit` RPA task.
 
     python -m adb_bot.automation.check_profile_readiness --list
     python -m adb_bot.automation.check_profile_readiness --limit 5 --apply
 
-Walks phones tagged `IG connected` that are not yet `Post Ready`, opens
-Instagram's Edit Profile screen, and tags `Bio Done` / `Link Done` based on
-what is actually there right now -- not what somebody asked for, since a
-bio update can fail silently and a checkbox does not know that.
+Walks phones tagged `IG connected` that are not yet `Post Ready`, triggers
+Geelark's own `instagramEdit` task with a randomized bio, the fixed
+Website link, and the model's profile-picture URL, then polls the task
+until it finishes.
 
-**`Post Ready` needs a third thing this cannot check yet.** It is only
-meant to fire once Bio, Link AND Profile Picture are all confirmed --
-picture detection is a separate, harder piece (no existing code reads a
-profile picture's state; it is an image, not text) that has not landed.
-Until it does, `Post Ready` is never set here, on purpose, rather than
-claiming a profile is ready to post when a third of the check was skipped.
+**`Post Ready` means all three, always.** A phone is skipped entirely --
+never sent a two-of-three request -- when either `LINK_URL` is unset or
+the model has no picture URL configured yet in `model_media`, and the tag
+is only applied once Geelark itself reports the task `Completed`. Calling
+a profile ready off a partial request would say more than is true.
 
-Dry run by default. `--apply` is what launches phones and writes tags.
+Dry run by default. `--apply` is what triggers real Geelark tasks.
 """
 
 from __future__ import annotations
@@ -25,19 +24,21 @@ import sys
 import threading
 import time
 
-from adb_bot.automation.flows.instagram import InstagramProfileReadinessFlow
-from adb_bot.automation.signup_phone import GeelarkHost
-from adb_bot.automation.workflow import connect_with_retries
-from adb_bot.clients.adb import ADBClient
-from adb_bot.clients.geelark import GeelarkTransport
+from adb_bot.automation import bio_variations, model_media
+from adb_bot.clients.geelark import GeelarkTransport, rpa
 from adb_bot.clients.geelark.phones import GeelarkPhoneClient
 from adb_bot.clients.geelark.tags import GeelarkTagClient
 from adb_bot.core.logger import get_logger
 
 CONNECTED_TAG = "IG connected"
-BIO_TAG = "Bio Done"
-LINK_TAG = "Link Done"
 POST_READY_TAG = "Post Ready"
+
+# The one destination every profile's bio link points at -- one link for
+# everyone, not per model ("always feed our standard link URL", 2026-08-22).
+# Left blank on purpose: a real, wrong-for-nobody-in-particular URL has to
+# be supplied here before `--apply` will touch any phone.
+LINK_URL = ""
+LINK_TITLE = ""
 
 
 def phones_to_check(transport=None) -> list[dict]:
@@ -53,24 +54,13 @@ def phones_to_check(transport=None) -> list[dict]:
         str(p.get("serialName") or "")))
 
 
-def apply_tags(phone: dict, readiness, transport, logger) -> None:
-    """Write `Bio Done`/`Link Done` onto the phone, replacing nothing else.
-
-    Additive, unlike `signup_geelark.write_back`'s terminal-tag swap: a
-    profile can be `IG connected` AND `Bio Done` AND `Link Done` all at
-    once, so existing tags are kept, not replaced.
-    """
+def mark_post_ready(phone: dict, transport, logger) -> None:
+    """Add `Post Ready`, keeping every tag the phone already carries."""
     tags = GeelarkTagClient(transport)
-    by_name = tags.tag_ids_by_name()
     wanted = {str(t.get("name")) for t in (phone.get("tags") or [])
              if t.get("name")}
-
-    if readiness.bio:
-        wanted.add(BIO_TAG)
-        tags.ensure_tag(BIO_TAG, "green")
-    if readiness.link:
-        wanted.add(LINK_TAG)
-        tags.ensure_tag(LINK_TAG, "green")
+    wanted.add(POST_READY_TAG)
+    tags.ensure_tag(POST_READY_TAG, "green")
     by_name = tags.tag_ids_by_name(refresh=True)
 
     tag_ids = [by_name[name] for name in wanted if name in by_name]
@@ -86,52 +76,63 @@ def apply_tags(phone: dict, readiness, transport, logger) -> None:
 def run_one(phone: dict, args, logger, transport) -> dict:
     profile_id = str(phone["id"])
     name = str(phone.get("serialName") or profile_id)
-    out = {"profile": name, "id": profile_id, "status": "dry-run"}
-    if not args.apply:
-        print(f"  {name:18} DRY RUN")
+    model = str((phone.get("group") or {}).get("name") or "")
+    out = {"profile": name, "id": profile_id, "model": model}
+
+    picture_url = model_media.picture_url_for(model)
+    if not picture_url:
+        out["status"] = "no-picture-configured"
+        print(f"  {name:18} skipped -- no profile picture URL configured "
+              f"for {model!r} yet")
+        return out
+    if not LINK_URL:
+        out["status"] = "no-link-configured"
+        print(f"  {name:18} skipped -- LINK_URL is not set")
         return out
 
-    host = GeelarkHost(transport, args)
-    adb_client = ADBClient()
-    try:
-        profile = host.launch(profile_id, logger)
-        if not profile:
-            out["status"] = "not-ready"
-            return out
-        target = connect_with_retries(adb_client, profile, logger,
-                                      profile_id, max_attempts=8,
-                                      retry_delay_seconds=5)
-        if not target:
-            out["status"] = "unreachable"
-            return out
+    bio = bio_variations.build_bio()
+    if not args.apply:
+        out["status"] = "dry-run"
+        print(f"  {name:18} DRY RUN -- bio={bio!r} link={LINK_URL!r} "
+              f"picture={picture_url!r}")
+        return out
 
-        readiness = InstagramProfileReadinessFlow().check(
-            target, adb_client, logger=logger)
-        if readiness.blocked:
-            out["status"] = f"blocked-{readiness.blocked}"
-            print(f"  {name:18} blocked ({readiness.blocked})")
-            return out
+    task_id = rpa.trigger_instagram_edit_profile(
+        profile_id, biography=bio, link_url=LINK_URL, link_title=LINK_TITLE,
+        profile_picture=picture_url, transport=transport)
+    if not task_id:
+        out["status"] = "no-task-id"
+        print(f"  {name:18} instagramEdit did not return a task id")
+        return out
+    out["task_id"] = task_id
 
-        apply_tags(phone, readiness, transport, logger)
-        out["status"] = "checked"
-        out["bio"], out["link"] = readiness.bio, readiness.link
-        print(f"  {name:18} bio={'yes' if readiness.bio else 'no':<3} "
-              f"link={'yes' if readiness.link else 'no'}")
-    finally:
-        host.shutdown(profile_id, logger)
+    detail = rpa.wait_for_task(task_id, transport=transport,
+                               timeout_seconds=args.task_timeout)
+    status = detail.get("status")
+    if status == rpa.STATUS_COMPLETED:
+        mark_post_ready(phone, transport, logger)
+        out["status"] = "post-ready"
+        print(f"  {name:18} Post Ready (task {task_id})")
+    elif status == rpa.STATUS_FAILED:
+        out["status"] = "failed"
+        print(f"  {name:18} failed: {detail.get('failDesc')}")
+    else:
+        out["status"] = f"unfinished-{status}"
+        print(f"  {name:18} still not finished after {args.task_timeout}s "
+              f"(status={status})")
     return out
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Tag Geelark phones with Bio/Link readiness.")
+        description="Tag Geelark phones Post Ready via instagramEdit.")
     parser.add_argument("--list", action="store_true",
                         help="show the phones that would be checked")
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--apply", action="store_true")
-    parser.add_argument("--readiness-attempts", type=int, default=10)
-    parser.add_argument("--readiness-wait", type=int, default=15)
+    parser.add_argument("--task-timeout", type=int, default=300,
+                        help="seconds to wait for one instagramEdit task")
     args = parser.parse_args(argv)
 
     logger = get_logger("adb_bot")
@@ -145,8 +146,7 @@ def main(argv=None) -> int:
     if args.list or not phones:
         return 0
     if not args.apply:
-        print("\nDRY RUN -- pass --apply to launch phones and write tags")
-        return 0
+        print("\nDRY RUN -- pass --apply to trigger real Geelark tasks")
 
     results: list[dict] = []
 
@@ -166,8 +166,8 @@ def main(argv=None) -> int:
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join(15 * 60)
-        time.sleep(5)
+            thread.join(args.task_timeout + 60)
+        time.sleep(2)
 
     print(f"\nchecked {len(results)} phone(s)")
     return 0
