@@ -8,6 +8,8 @@
     python -m adb_bot.clients.geelark.cli shell ID -- CMD   # one adb shell command
     python -m adb_bot.clients.geelark.cli start ID --apply
     python -m adb_bot.clients.geelark.cli stop  ID --apply
+    python -m adb_bot.clients.geelark.cli session ID --apply  # proxy pool + start + connect,
+                                                               # held open for a manual check
     python -m adb_bot.clients.geelark.cli create --amount 2 --android 5 --apply
     python -m adb_bot.clients.geelark.cli clone ID --amount 2 --apply
 
@@ -16,10 +18,12 @@ so a person can bring a Geelark phone up, prove the bot can reach it, and put it
 back down again, without any of that becoming scheduled behaviour.
 
 **Anything that changes state or costs money is a dry run unless `--apply` is
-passed.** `start`, `stop`, `create`, `clone` and `install` all refuse to act
-without it, and print exactly what they would have done instead. `create` and
-`clone` make phones, which cost real money; `start` begins billing minutes,
-which is why `connect` prints the reminder to stop the phone afterwards.
+passed.** `start`, `stop`, `create`, `clone`, `install` and `session` all
+refuse to act without it, and print exactly what they would have done
+instead. `create` and `clone` make phones, which cost real money; `start`
+begins billing minutes, which is why `connect` prints the reminder to stop
+the phone afterwards. `session --apply` also performs a REAL proxy rotation
+-- this vendor has no dry-run rotation endpoint (see `ip_rotation.py`).
 
 `connect` is the one that answers "can the bot drive Geelark at all". It starts
 the phone if it is stopped, enables ADB (off per phone by default, and only
@@ -453,6 +457,74 @@ def cmd_connect(args) -> int:
     return 0
 
 
+def cmd_session(args) -> int:
+    """Lease + rotate this phone's own proxy, start it, connect over ADB, and
+    hold everything open until the person testing it says to stop.
+
+    One process for the whole session on purpose: the proxy lease is tagged
+    with this process's pid and is reclaimed the moment it exits, so a
+    separate later `stop` call would find the lease already gone and let a
+    different phone reuse the same exit IP while this one might still be
+    live. See `session.py`'s module docstring.
+    """
+    from adb_bot.clients.geelark.session import SessionError, phone_proxy_port
+    from adb_bot.clients.geelark.session import start_session, stop_session
+
+    transport = _transport()
+    phone = _resolve(transport, args.phone)
+    port = phone_proxy_port(phone)
+
+    if not args.apply:
+        print(f"DRY RUN: would lease + rotate proxy port {port or '(none)'} "
+              f"for {phone['serialName']} ({phone['id']}), then start it and "
+              f"connect over ADB. This begins billing minutes and performs a "
+              f"REAL proxy rotation -- this vendor has no dry-run rotation "
+              f"endpoint. Re-run with --apply.")
+        return 0
+
+    try:
+        session = start_session(str(phone["id"]), transport, logger=_PrintLogger(),
+                                owner=str(phone["id"]))
+    except SessionError as error:
+        print(f"could not start the session: {error}")
+        return 1
+
+    print(f"\nleased + rotated proxy port {session.rotation['port']}: "
+          f"{session.rotation['before']} -> {session.rotation['after']} "
+          f"(changed={session.rotation['changed']}, "
+          f"{session.rotation['seconds']}s)")
+    print(f"ADB endpoint: {session.profile.target}")
+
+    adb = ADBClient()
+    if _connect_with_retries(adb, session.profile) and adb.authenticate(session.profile):
+        print("adb connect + glogin ok -- the phone is drivable now.")
+    else:
+        print("WARNING: could not confirm adb connect/glogin; the phone may "
+              "still be usable by eye through the Geelark console.")
+
+    print("\nDo the manual checks now, e.g. from inside the phone's browser:")
+    print("  https://browserleaks.com/dns   (DNS leak -- traffic should "
+          "resolve through the SOCKS5 tunnel, not leak to a local resolver)")
+    print("  check whether the Instagram / mail verification code arrives")
+    print(f"\nThe proxy on port {session.rotation['port']} is exclusively "
+          f"yours until this stops -- no other phone on that port can start "
+          f"meanwhile.")
+    print("\nPress Enter when done to stop the phone and release the proxy lease...")
+    try:
+        input()
+    except (KeyboardInterrupt, EOFError):
+        print()
+    finally:
+        if stop_session(session, logger=_PrintLogger()):
+            print("stopped and released.")
+        else:
+            print("WARNING: the phone did not confirm stopping -- the proxy "
+                  "lease was kept held rather than risk a collision. Check "
+                  "its status by hand (`cli phones`) and stop it manually if "
+                  "it is still running.")
+    return 0
+
+
 def cmd_shell(args) -> int:
     transport = _transport()
     phone = _resolve(transport, args.phone)
@@ -546,6 +618,13 @@ def build_parser() -> argparse.ArgumentParser:
     connect.add_argument("--no-adb", action="store_true",
                          help="get the endpoint but do not run adb locally")
     connect.set_defaults(func=cmd_connect)
+
+    session = subparsers.add_parser(
+        "session", help="lease + rotate a phone's proxy, start it, connect, "
+                       "and hold it open for a manual check (costs money)")
+    session.add_argument("phone")
+    session.add_argument("--apply", action="store_true")
+    session.set_defaults(func=cmd_session)
 
     shell = subparsers.add_parser("shell", help="run one adb shell command")
     shell.add_argument("phone")
