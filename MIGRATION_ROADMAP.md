@@ -62,6 +62,29 @@ even with notification permission granted directly over ADB.
 
 **One broken component, both routes.** That is why every workaround failed.
 
+**The device-side fixes were tried, and do not work (2026-08-22).** On the
+`Blank (1)` twin: `pm clear com.google.android.gm` succeeded (Gmail's local
+state fully wiped), followed by an auto-sync toggle and running the scheduler
+jobs directly. The sync ledger stayed on `Total 0 / initialize=true` for three
+minutes across twelve reads, and no mail arrived — a freshly reset Gmail never
+registered a sync job at all. So the block is not a stuck app or a bad
+schedule; it is the account. Gmail cannot sync because Google will not
+authorise it (`Account action required`), and that needs re-authentication with
+a working Google password — the same wall as everything else. **No amount of
+ADB or app manipulation reaches it.** Do not re-run these; the answer is
+settled.
+
+**Rene confirmed the IP finding independently.** He put the exact historical
+MLX exit IPs on `Kathi 4` and `Jil 20` and the login barrier still fired — the
+same conclusion reached here from the other direction. The shared/foreign-IP
+theory is dead from both sides. His read of the cause is that Instagram is
+strict on a *fresh login from an unrecognised cloud device* versus *resuming an
+established session* — which is the trigger; the reason we cannot answer the
+resulting challenge is the dead Google stack above. Note also his standing
+request: **no app-directory inspection** (reading Gmail's private
+`content://gmail-ls` provider or `data/data`). Everything in Phase 1 below —
+the email change and a normal login — stays inside that boundary.
+
 ### What is *not* the problem — all checked, all ruled out
 
 | Suspected | Measured | Verdict |
@@ -207,7 +230,24 @@ The cost is not money. It is the followers, history and age of the existing
 accounts. Rebuilding is the right answer for accounts whose twin is logged out
 or dead, and the wrong answer for anything with real reach.
 
-### Option E — fix the Gmail pool at source
+### Option E — transfer the logged-in session, don't re-login ★ ask Rene
+
+Rene's own framing points at this: Instagram is strict on a *fresh login* but
+lets a *resumed session* through untouched. The twins already hold a
+logged-in, established Instagram session. If that session state can be moved to
+the Geelark phone rather than logging in again, **there is no confirmation
+barrier at all** — no code, no push, no mailbox needed, and the whole problem
+above evaporates.
+
+Whether it is possible depends entirely on the platform. It needs either
+Geelark's own migrate/clone tooling to carry an app's login state, or a
+supported way to move Instagram's session between the twin and the cloud phone.
+That is a question for Rene and Geelark, not something to reverse-engineer —
+and it deliberately stays clear of app-directory inspection, which he has asked
+us not to do. **If the answer is yes, this becomes Option 1 and the domain
+purchase is unnecessary.**
+
+### Option F — fix the Gmail pool at source
 
 Get working Google passwords, sign in, mint app passwords, use IMAP.
 
