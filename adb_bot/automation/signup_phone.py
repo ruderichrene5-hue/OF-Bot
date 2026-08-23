@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -384,6 +385,36 @@ def seconds_left_for_verification(elapsed: float) -> float | None:
     return left if left >= MIN_VERIFY_SECONDS else None
 
 
+def _download_model_photo(name: str, logger) -> str:
+    """A local copy of the model's own photo, for the verification photo
+    challenge (`AdbChallengeDriver.upload_photo`). "" if there is no model
+    to derive, no picture on her Geelark tag, or the download fails --
+    callers must treat that as "none available", never invent a path.
+    """
+    model = name.split()[0] if name else ""
+    if not model:
+        return ""
+    try:
+        import requests
+
+        from adb_bot.clients.geelark import GeelarkTransport, library
+
+        url = library.picture_url_for_tag(model, transport=GeelarkTransport())
+        if not url:
+            return ""
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        suffix = Path(url).suffix or ".jpg"
+        dest = Path(tempfile.gettempdir()) / f"verify-photo-{model}{suffix}"
+        dest.write_bytes(response.content)
+        return str(dest)
+    except Exception as exc:
+        if logger:
+            logger.warning("signup_phone: could not fetch %s's photo for "
+                           "the verification challenge (%s)", model, exc)
+        return ""
+
+
 def verify_account(profile_id: str, name: str, identity, target: str,
                    adb_client, args, logger, seconds: float) -> dict:
     """Clear the checkpoint Instagram just put the new account behind.
@@ -417,9 +448,10 @@ def verify_account(profile_id: str, name: str, identity, target: str,
     except Exception as exc:
         logger.warning("signup_phone: could not clear permission prompts (%s)",
                        exc)
-    challenge_driver = AdbChallengeDriver(target, adb_client, logger=logger,
-                                          act=True,
-                                          screenshots=args.screenshots)
+    challenge_driver = AdbChallengeDriver(
+        target, adb_client, logger=logger, act=True,
+        screenshots=args.screenshots,
+        photo_source_path=_download_model_photo(name, logger))
     verdict = verification.run_verification(
         challenge_driver, build_router(logger=logger), logger=logger,
         country=country, max_seconds=seconds)

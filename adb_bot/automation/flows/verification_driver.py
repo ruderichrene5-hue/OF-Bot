@@ -309,7 +309,8 @@ class AdbChallengeDriver:
     def __init__(self, target: str, adb_client, logger=None, flow=None,
                  recorder: VerificationRecorder | None = None,
                  act: bool = True, settle_seconds: float = SETTLE_SECONDS,
-                 screenshots: bool = True) -> None:
+                 screenshots: bool = True,
+                 photo_source_path: str = "") -> None:
         self.target = target
         self.adb_client = adb_client
         self.logger = logger
@@ -317,6 +318,11 @@ class AdbChallengeDriver:
         self.recorder = recorder
         self.act = act
         self.settle_seconds = settle_seconds
+        # A local file for `upload_photo` -- the model's own photo, already
+        # downloaded from wherever her picture lives (Geelark's Library,
+        # resolved by `signup_phone.verify_account`). Empty means "none
+        # configured", which keeps upload_photo's original refusal.
+        self.photo_source_path = photo_source_path
         # A screenshot off an MLX cloud phone is ~2MB and takes about ten
         # seconds, which dominates the time between looks. Worth it on a real
         # run -- the picture is often the only way to understand a screen the
@@ -826,19 +832,104 @@ class AdbChallengeDriver:
         return True
 
     def upload_photo(self) -> bool:
-        """Not implemented, on purpose -- see TODO_2026-08-12 §5.1.
+        """Satisfy the photo challenge with the model's own photo.
 
-        The photo challenge wants a picture of a person. Nothing in this repo
-        owns one: the model's media folder holds reel clips, and a frame from a
-        reel may not pass Instagram's check. Worse, the wrong face on the wrong
-        account is a real harm that failing this step is not, so this returns
-        False and the profile goes back to a human. Implementing it is a
-        decision about *which* picture, not a coding problem.
+        TODO_2026-08-12 §5.1's original reasoning was against a random or
+        unowned picture -- "the wrong face on the wrong account is a real
+        harm". The model's own photo, resolved by the caller from Geelark's
+        material Library and passed in as `photo_source_path`, is the one
+        case that reasoning does not rule out: it is her own account. With
+        nothing configured this keeps the original refusal.
+
+        Not yet confirmed live past the "Upload photo instead" tap -- the
+        gallery/system picker that follows is new ground (2026-08-23);
+        picking a thumbnail reuses the same signal the u2 profile-picture
+        flow already relies on (`InstagramUpdateProfilePictureU2Flow.
+        _select_first_gallery_photo_u2`): a picker cell's `content-desc`
+        starts with "Photo".
         """
-        self._log("warning",
-                  "photo challenge: no picture source is configured, so this "
-                  "profile needs a person (TODO_2026-08-12 §5.1)")
-        return False
+        if not self.photo_source_path:
+            self._log("warning",
+                      "photo challenge: no picture source is configured, so "
+                      "this profile needs a person (TODO_2026-08-12 §5.1)")
+            return False
+
+        from pathlib import Path
+
+        from adb_bot.automation.flows.instagram import (
+            _adb_push_media_to_device, _adb_verify_remote_media_exists,
+            _adb_verify_remote_media_matches_local,
+            _adb_wait_for_media_store_index)
+
+        local = Path(self.photo_source_path)
+        if not local.exists():
+            self._log("warning", "photo challenge: configured picture %s "
+                                 "does not exist", local)
+            return False
+        if not self.act:
+            return self._refuse(f"upload {local.name} for the photo challenge")
+
+        remote = f"/sdcard/Download/{local.name.replace(' ', '_')}"
+        if not _adb_push_media_to_device(self.target, str(local), remote,
+                                         logger=self.logger):
+            self._log("warning", "photo challenge: could not push %s to "
+                                 "the device", local)
+            return False
+        verified = False
+        for attempt in range(1, 4):
+            if (_adb_verify_remote_media_exists(self.target, remote,
+                                                logger=self.logger)
+                    and _adb_verify_remote_media_matches_local(
+                        self.target, str(local), remote, logger=self.logger)):
+                verified = True
+                break
+            if attempt < 3:
+                _adb_push_media_to_device(self.target, str(local), remote,
+                                          logger=self.logger)
+        if not verified:
+            self._log("warning", "photo challenge: could not verify the "
+                                 "pushed photo on the device")
+            return False
+        _adb_wait_for_media_store_index(self.target, remote, logger=self.logger)
+
+        center = self._find_exact(("Upload photo instead", "UPLOAD PHOTO INSTEAD"))
+        if center is None:
+            self._log("warning", "photo challenge: no 'Upload photo "
+                                 "instead' button (labels were %s)",
+                      self._clickable_labels(self._root)[:20])
+            return False
+        if not self._tap(center, "upload photo instead"):
+            return False
+        time.sleep(max(self.settle_seconds, 3.0))
+
+        root, _xml = self._dump()
+        if root is None:
+            self._log("warning", "photo challenge: no dump after 'Upload "
+                                 "photo instead'")
+            return False
+        photo_center = None
+        for node in root.iter():
+            desc = str(node.attrib.get("content-desc", "") or "")
+            if desc.lower().startswith("photo"):
+                photo_center = self._center(node.attrib)
+                if photo_center is not None:
+                    break
+        if photo_center is None:
+            self._log("warning", "photo challenge: no photo cell found in "
+                                 "the picker (labels were %s)",
+                      self._clickable_labels(root)[:20])
+            return False
+        if not self._tap(photo_center, "the pushed photo in the picker"):
+            return False
+        time.sleep(self.settle_seconds)
+
+        self._root, _xml = self._dump()
+        done_center = self._find_exact(("Done", "DONE", "Select", "SELECT",
+                                        "Next", "NEXT"))
+        if done_center is not None:
+            self._tap(done_center, "confirm the selected photo")
+            time.sleep(max(self.settle_seconds, 3.0))
+        return True
 
     def capture_captcha_image(self, attempts: int = _CAPTCHA_RENDER_ATTEMPTS
                               ) -> str | None:
