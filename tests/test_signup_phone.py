@@ -181,10 +181,49 @@ class _FakeLease:
         self.port = port
 
 
-def test_no_proxy_port_means_no_lease_is_attempted(monkeypatch):
-    """Existing callers that do not pass `proxy_port` (e.g. the readiness
-    check before this fix) must see identical behaviour to before."""
+class _FakePhoneClient:
+    """Stands in for GeelarkPhoneClient in the auto-lookup path."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __call__(self, transport):
+        return self
+
+    def list_phones(self):
+        return self._rows
+
+
+def test_no_proxy_port_given_falls_back_to_an_auto_lookup(monkeypatch):
+    """Nothing may construct a `GeelarkHost` that starts a phone without a
+    lease -- a caller that does not already know the port (any future
+    one-off script included) still gets it looked up and leased."""
+    leased = []
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.phones.GeelarkPhoneClient",
+        _FakePhoneClient([{"id": "profile-1", "proxy": {"port": 54018}}]))
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.proxy_pool.acquire_proxy",
+        lambda ports, **kw: leased.append(ports) or _FakeLease(ports[0]))
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.prepare_geelark_profile_for_adb",
+        lambda *a, **kw: "a-profile")
+
+    host = signup_phone.GeelarkHost(transport=object(), args=None)
+    result = host.launch("profile-1", logger=None)
+
+    assert result == "a-profile"
+    assert leased == [[54018]]
+
+
+def test_a_phone_the_lookup_cannot_find_launches_without_a_lease(monkeypatch):
+    """No proxy on record means no port to collide on -- this must not block
+    the launch, just skip leasing."""
     calls = []
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.phones.GeelarkPhoneClient",
+        _FakePhoneClient([{"id": "some-other-profile",
+                          "proxy": {"port": 54018}}]))
     monkeypatch.setattr("adb_bot.clients.geelark.proxy_pool.acquire_proxy",
                         lambda *a, **kw: calls.append((a, kw)) or _FakeLease(1))
     monkeypatch.setattr(
