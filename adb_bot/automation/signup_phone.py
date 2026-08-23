@@ -198,7 +198,11 @@ def load_assignment(profile_name: str, path: Path | None = None) -> dict:
 def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
     profile_id = str(profile_item.get("id"))
     name = str(profile_item.get("serial_name") or profile_id)
-    identity = make_identity()
+    # The join key everywhere else in this codebase is the first word of the
+    # profile name (ONBOARDING_A_MODEL.md) -- "Cloe new 1" -> "Cloe" -- so
+    # reusing it here needs no extra field threaded through from the caller.
+    model = name.split()[0] if name and not name == profile_id else ""
+    identity = make_identity(model=model)
     if box is not None:
         # `run_signup` picks its chain off `identity.email`: an address takes
         # the "sign up with email" hatch, no address takes the mobile-number

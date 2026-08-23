@@ -277,6 +277,25 @@ def test_a_known_username_is_not_handed_out_again():
     assert again.username != first.username
 
 
+def test_a_model_name_makes_the_username_carry_it():
+    """Reversed on 2026-08-23 from the earlier "organic, no branding"
+    choice: a real person asked for the model's name back in the @handle
+    for signup specifically."""
+    rng = random.Random(11)
+    for _ in range(20):
+        identity = make_identity(rng, model="Cloe")
+        assert identity.username.lower().startswith("cloe")
+        assert 3 <= len(identity.username) <= 28
+
+
+def test_no_model_name_keeps_the_organic_pattern():
+    """The default (no `model`) must be untouched -- still used for the
+    instagramEdit path, which stays name-agnostic on purpose."""
+    rng = random.Random(12)
+    identity = make_identity(rng)
+    assert not identity.username.lower().startswith("cloe")
+
+
 # --- screens caught mid-render ------------------------------------------------
 def test_a_half_drawn_screen_is_loading_not_unknown():
     """Both of these are real: replaying the 2026-08-13 recordings through the

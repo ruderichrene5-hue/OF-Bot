@@ -140,3 +140,27 @@ def test_the_verification_verdict_does_not_erase_how_the_run_got_here(monkeypatc
     assert "steps" not in out, (
         "verify_account must not own `steps`; run_phone merges the one key it "
         "contributes")
+
+
+# --- the username carries the model's name (2026-08-23) --------------------
+
+def test_the_username_starts_with_the_models_name():
+    """The join key everywhere else in this codebase is the first word of
+    the profile name (ONBOARDING_A_MODEL.md) -- "Cloe new 1" -> "Cloe" --
+    reused here so the signup itself needs no extra model field threaded
+    through from the caller."""
+    out = signup_phone.run_phone(
+        {"id": "1", "serial_name": "Cloe new 1"}, None,
+        host=None, adb_client=None, args=_args(apply=False), logger=None)
+
+    assert out["username"].lower().startswith("cloe")
+
+
+def test_a_profile_with_no_serial_name_falls_back_to_organic():
+    """No profile name means no model to derive -- the id alone (used as
+    the fallback name) must never be typed in as a username stem."""
+    out = signup_phone.run_phone(
+        {"id": "633822713504334096"}, None,
+        host=None, adb_client=None, args=_args(apply=False), logger=None)
+
+    assert not out["username"].startswith("633822713504334096")

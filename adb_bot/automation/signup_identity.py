@@ -46,6 +46,12 @@ LAST_NAMES = (
 _PATTERNS = ("{first}.{last}", "{first}_{last}", "{first}{last}{n}",
              "{first}.{last}{n}", "{first}{n}")
 
+# For a model-branded handle: separator options, and the digit-tail range --
+# same floor as signup.next_username's, so it does not read as sequential or
+# machine-generated.
+_MODEL_SEPARATORS = (".", "_")
+_MODEL_TAIL_MIN, _MODEL_TAIL_MAX = 10, 9999
+
 # The one word a handle may never contain: link-in-bio profiles are excluded
 # from posting, so a handle carrying it would quietly opt the account out.
 FORBIDDEN = ("link",)
@@ -86,11 +92,22 @@ def taken_usernames() -> set:
             if record.get("username")}
 
 
-def make_identity(rng: random.Random | None = None, avoid=None) -> Identity:
+def make_identity(rng: random.Random | None = None, avoid=None,
+                  model: str = "") -> Identity:
     """A fresh identity whose handle collides with nothing we know about.
 
     `avoid` is any extra handles the caller knows are taken -- MLX remarks,
     Airtable rows -- so the uniqueness check is not limited to this file.
+
+    `model`, when given, makes the username itself carry the model's name
+    -- her name exactly, then a separator and a digit tail -- reversing the
+    "organic, no branding" choice from earlier the same night: kept for the
+    still-unset instagramEdit path, changed here because a real person
+    asked for it back for signup specifically, more than once, wanting an
+    exact prefix rather than the doubled-letter variation `bio_variations`
+    uses elsewhere (2026-08-23). `full_name` (the profile's real-name
+    field, not the @handle) is untouched either way -- still a random
+    person's name.
     """
     rng = rng or random.Random()
     used = taken_usernames() | {str(name).lower() for name in (avoid or ())}
@@ -98,8 +115,17 @@ def make_identity(rng: random.Random | None = None, avoid=None) -> Identity:
     for _ in range(200):
         first = rng.choice(FIRST_NAMES)
         last = rng.choice(LAST_NAMES)
-        username = rng.choice(_PATTERNS).format(
-            first=first, last=last, n=rng.randint(2, 99))
+        if model:
+            # No doubled-letter variation here (unlike bio_variations'
+            # nickname/username generator) -- "must start directly with the
+            # model name" (2026-08-23, said more than once) means an exact,
+            # unambiguous prefix every time, not a recognisable-but-altered
+            # one.
+            username = (f"{model}{rng.choice(_MODEL_SEPARATORS)}"
+                       f"{rng.randint(_MODEL_TAIL_MIN, _MODEL_TAIL_MAX)}")
+        else:
+            username = rng.choice(_PATTERNS).format(
+                first=first, last=last, n=rng.randint(2, 99))
         if any(word in username for word in FORBIDDEN):
             continue
         if username.lower() in used or not (3 <= len(username) <= 28):
