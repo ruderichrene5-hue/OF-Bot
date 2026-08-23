@@ -21,10 +21,12 @@ generated here is the Instagram handle.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import random
 import string
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +35,27 @@ from adb_bot.automation.flows.signup import Identity
 
 ACCOUNTS_DIR = Path.home() / ".adb_bot" / "accounts"
 ACCOUNTS_FILE = ACCOUNTS_DIR / "accounts.json"
+ACCOUNTS_LOCK_FILE = ACCOUNTS_DIR / "accounts.json.lock"
+
+
+@contextmanager
+def _accounts_lock():
+    """Serialize read-modify-write access to accounts.json.
+
+    `--concurrency 2`+ signup workers each do load-modify-write with no
+    coordination -- confirmed live 2026-08-23: a batch of 20 phones collapsed
+    a file that had ~30+ recorded accounts down to 2, because a later writer's
+    `load_accounts()` snapshot raced an earlier writer's not-yet-flushed
+    write and clobbered it. A file already meant to be "the smallest thing
+    that is not lossy" was, in fact, lossy under its own real concurrency.
+    """
+    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(ACCOUNTS_LOCK_FILE, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 FIRST_NAMES = (
     "mia", "lena", "emma", "nora", "lina", "clara", "julia", "sara", "elif",
@@ -146,23 +169,30 @@ def record_account(profile_id: str, profile_name: str, identity: Identity,
 
     Keyed by MLX profile id, so a second account on the same phone does not
     overwrite the first -- roughly twenty phones in this fleet hold two.
+
+    Locked end to end (`_accounts_lock`) -- concurrent signup workers each do
+    this same load-modify-write, and unlocked they clobber each other.
     """
-    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
-    accounts = load_accounts()
-    key = f"{profile_id}:{identity.username}"
-    accounts[key] = {
-        "profile_id": profile_id,
-        "profile_name": profile_name,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "phone_number": phone_number,
-        "status": status,
-        "recovery_email": "",
-        **asdict(identity),
-    }
-    ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2, sort_keys=True))
-    # Passwords: readable by this user only.
-    try:
-        os.chmod(ACCOUNTS_FILE, 0o600)
-    except OSError:
-        pass
+    with _accounts_lock():
+        accounts = load_accounts()
+        key = f"{profile_id}:{identity.username}"
+        accounts[key] = {
+            "profile_id": profile_id,
+            "profile_name": profile_name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "phone_number": phone_number,
+            "status": status,
+            "recovery_email": "",
+            **asdict(identity),
+        }
+        # Atomic replace, not an in-place write -- so a reader outside the
+        # lock (taken_usernames, an operator's `cat`) never sees a half
+        # written file, only the old version or the new one.
+        tmp = ACCOUNTS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(accounts, indent=2, sort_keys=True))
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, ACCOUNTS_FILE)
     return ACCOUNTS_FILE
