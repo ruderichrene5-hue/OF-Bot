@@ -115,15 +115,21 @@ def run_one(phone: dict, model_config: dict, args, logger, transport) -> dict:
         return out
 
     bio = bio_variations.build_bio(pool=bio_pool)
+    # Nickname and Username share one generated handle -- the model's name,
+    # sometimes with a doubled letter, then a separator and a digit tail
+    # (2026-08-23). Regenerated per phone, so a batch for one model does not
+    # all claim the exact same handle.
+    handle = bio_variations.build_username(model)
     if not args.apply:
         out["status"] = "dry-run"
         print(f"  {name:18} DRY RUN -- bio={bio!r} link={link_url!r} "
-              f"picture={picture_url!r}")
+              f"picture={picture_url!r} handle={handle!r}")
         return out
 
     task_id = rpa.trigger_instagram_edit_profile(
         profile_id, biography=bio, link_url=link_url,
-        profile_picture=picture_url, transport=transport)
+        profile_picture=picture_url, nickname=handle, username=handle,
+        transport=transport)
     if not task_id:
         out["status"] = "no-task-id"
         print(f"  {name:18} instagramEdit did not return a task id")
@@ -155,7 +161,7 @@ def main(argv=None) -> int:
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--apply", action="store_true")
-    parser.add_argument("--task-timeout", type=int, default=300,
+    parser.add_argument("--task-timeout", type=int, default=600,
                         help="seconds to wait for one instagramEdit task")
     args = parser.parse_args(argv)
 

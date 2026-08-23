@@ -43,5 +43,54 @@ class BuildBioTest(unittest.TestCase):
         self.assertTrue(bio.startswith("hey "))
 
 
+class BuildUsernameTest(unittest.TestCase):
+    def test_a_blank_model_returns_empty_not_a_bare_separator_and_digits(self):
+        self.assertEqual(bv.build_username(""), "")
+        self.assertEqual(bv.build_username("   "), "")
+
+    def test_has_exactly_one_separator_and_a_digit_tail(self):
+        rand = random.Random(1)
+        for _ in range(30):
+            name = bv.build_username("Nikki", rand=rand)
+            self.assertEqual(sum(name.count(s) for s in bv.SEPARATORS), 1)
+            tail = name.rsplit(".", 1)[-1] if "." in name else name.rsplit("_", 1)[-1]
+            self.assertTrue(tail.isdigit())
+
+    def test_the_stem_is_the_model_name_or_the_model_name_with_one_letter_doubled(self):
+        rand = random.Random(2)
+        for _ in range(30):
+            name = bv.build_username("Nikki", rand=rand)
+            stem = name.rsplit(".", 1)[0] if "." in name else name.rsplit("_", 1)[0]
+            self.assertEqual(stem[0], "N", "the first letter must never change")
+            if stem == "Nikki":
+                continue
+            # Otherwise `stem` must be "Nikki" with exactly one extra
+            # character that is a duplicate of its neighbour.
+            self.assertEqual(len(stem), len("Nikki") + 1)
+            reconstructed = any(stem[:i] + stem[i + 1:] == "Nikki"
+                               for i in range(len(stem)))
+            self.assertTrue(reconstructed,
+                            f"{stem!r} is not Nikki with one letter doubled")
+
+    def test_both_a_plain_and_a_doubled_letter_stem_are_possible(self):
+        rand = random.Random(3)
+        stems = set()
+        for _ in range(40):
+            name = bv.build_username("Nikki", rand=rand)
+            stem = name.rsplit(".", 1)[0] if "." in name else name.rsplit("_", 1)[0]
+            stems.add(len(stem))
+        self.assertIn(len("Nikki"), stems, "never used the name exactly")
+        self.assertIn(len("Nikki") + 1, stems, "never doubled a letter")
+
+    def test_the_digit_tail_is_not_a_suspiciously_round_or_short_number(self):
+        """A one- or two-digit tail (or "0") reads as obviously generated --
+        the same floor `next_username` in signup.py already uses."""
+        rand = random.Random(4)
+        for _ in range(30):
+            name = bv.build_username("Nikki", rand=rand)
+            tail = name.rsplit(".", 1)[-1] if "." in name else name.rsplit("_", 1)[-1]
+            self.assertGreaterEqual(int(tail), bv._TAIL_MIN)
+
+
 if __name__ == "__main__":
     unittest.main()

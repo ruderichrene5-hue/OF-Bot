@@ -183,6 +183,18 @@ class RunOneTest(unittest.TestCase):
         self.assertIn(trigger.call_args.kwargs["biography"],
                      FULL_CONFIG["bio_pool"])
 
+    def test_nickname_and_username_share_one_generated_handle(self):
+        phone = _phone("1", ["IG connected"], model="Nikki")
+        with mock.patch.object(c.library, "picture_url_for_tag",
+                               return_value="https://x/nikki.jpg"), \
+             mock.patch.object(c.rpa, "trigger_instagram_edit_profile",
+                               return_value="") as trigger:
+            c.run_one(phone, FULL_CONFIG, Args(), mock.Mock(), transport=None)
+
+        kwargs = trigger.call_args.kwargs
+        self.assertTrue(kwargs["nickname"])
+        self.assertEqual(kwargs["nickname"], kwargs["username"])
+
 
 class _FakeTags:
     def __init__(self, existing):
