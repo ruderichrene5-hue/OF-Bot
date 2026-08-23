@@ -1551,3 +1551,36 @@ def test_a_driver_that_cannot_restart_still_hands_back_cleanly():
     driver = _RestartingDriver(restarts_needed=99, can_restart=False)
     result = _run(driver)
     assert result.status == verification.RESULT_NEEDS_HUMAN
+
+
+# --- Instagram refusing further SMS codes for the account ---------------------
+# Verbatim off `Luisa 6` and `Jil 22`, 2026-08-23. Between them they burned 14
+# rented numbers in one pass against this refusal, because the banner rides on
+# an ordinary code screen that still offers "Update mobile number".
+LUISA_6_SMS_RATE_LIMITED = (
+    "get support menu we sent a code to whatsapp we sent a code to whatsapp "
+    "enter the 6-digit confirmation code we sent via whatsapp to "
+    "+491791697531. it may take up to a minute for you to receive this code. "
+    "too many sms codes: you have requested too many sms codes. you must wait "
+    "before requesting another. 6-digit code send code via sms send code via "
+    "sms next next update mobile number"
+)
+
+
+def test_the_sms_rate_limit_banner_is_recognised():
+    assert verification.looks_sms_rate_limited(LUISA_6_SMS_RATE_LIMITED)
+
+
+def test_an_ordinary_code_screen_is_not_rate_limited():
+    """The banner is the only difference; without it the screen is workable."""
+    for text in ("enter the 6-digit confirmation code we sent via sms to +49123",
+                 "we sent a code to whatsapp send code via sms",
+                 "enter your mobile number de +49 send code"):
+        assert not verification.looks_sms_rate_limited(text)
+
+
+def test_a_rate_limited_screen_still_classifies_as_a_code_screen():
+    """Why the check cannot live in `classify_challenge`: the banner does not
+    stop the screen underneath from being a perfectly ordinary code screen, so
+    classification alone would send the loop back for another number."""
+    assert verification.classify_challenge(LUISA_6_SMS_RATE_LIMITED) == CHALLENGE_CODE

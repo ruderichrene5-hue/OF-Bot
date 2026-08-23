@@ -583,6 +583,41 @@ _LAUNCHER_STRONG_MARKERS = ("play store", "google play store")
 _LAUNCHER_SUPPORTING_MARKERS = ("telephone", "messaging", "gallery", "camera",
                                 "chrome", "music")
 
+# Instagram rate-limiting the *account*, not the number. Seen live 2026-08-23 on
+# `Luisa 6` and `Jil 22`: verbatim "Too many SMS codes: You have requested too
+# many SMS codes. You must wait before requesting another."
+#
+# This is the one refusal that renting another number cannot answer, and the
+# loop's ordinary reflex makes it worse. The code screen still offers "Update
+# mobile number", so without this the run taps it, rents a fresh number, submits
+# it, is refused again, and repeats -- 7 numbers each on those two profiles, 14
+# in one pass, none of which could ever have received a code. The limit follows
+# the account, so the only thing that clears it is time.
+#
+# Kept out of `classify_challenge`: it is not a challenge to answer but a reason
+# to stop, and the banner rides on top of an ordinary code screen that would
+# otherwise classify perfectly well.
+_SMS_RATE_LIMIT_MARKERS = (
+    "too many sms codes",
+    "requested too many sms codes",
+    "you must wait before requesting another",
+    "wait before requesting another code",
+)
+
+
+def looks_sms_rate_limited(text: str | None) -> bool:
+    """True when Instagram is refusing further SMS codes for this account.
+
+    A plain substring test, unlike `looks_like_launcher`'s strong/supporting
+    pair: these phrases are specific enough that no healthy screen carries one,
+    and the cost of missing it (a number rented against a refusal) is higher
+    than the cost of stopping a run early.
+    """
+    if not text:
+        return False
+    haystack = text.lower()
+    return any(marker in haystack for marker in _SMS_RATE_LIMIT_MARKERS)
+
 
 def looks_like_launcher(text: str | None) -> bool:
     """True when the phone is showing its home screen rather than Instagram.
@@ -745,6 +780,27 @@ class _Session:
                     RESULT_NEEDS_HUMAN,
                     "Instagram is not running on this phone and would not start, "
                     "so nothing here says anything about the account")
+
+            # Checked before classification, and before anything decides to
+            # fetch another number: the banner sits on an ordinary code screen,
+            # so classification would return CHALLENGE_CODE and the loop would
+            # go straight back to the phone screen for a number that is refused
+            # on arrival. Nothing this flow can do clears an account-level
+            # limit, so stopping now is the whole fix -- see
+            # `_SMS_RATE_LIMIT_MARKERS`.
+            if looks_sms_rate_limited(text):
+                self._log("warning",
+                          "verification: Instagram is refusing further SMS "
+                          "codes for this account ('too many SMS codes'). "
+                          "Renting another number cannot clear that -- the "
+                          "limit follows the account, not the number. Stopping "
+                          "with %d number(s) used.", self.numbers_used)
+                return self._result(
+                    RESULT_NEEDS_HUMAN,
+                    "Instagram is rate-limiting SMS codes for this account "
+                    "('too many SMS codes -- you must wait before requesting "
+                    "another'). No number can clear this; it needs time, then "
+                    "a later pass.")
 
             challenge = classify_challenge(text)
 
