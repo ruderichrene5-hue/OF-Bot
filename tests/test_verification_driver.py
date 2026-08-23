@@ -904,6 +904,45 @@ class NewCaptchaTest(unittest.TestCase):
         self.assertEqual(adb.commands, [])
 
 
+class SwitchToSmsTest(unittest.TestCase):
+    """"Send code via SMS" on the "we sent a code to WhatsApp" screen.
+
+    Confirmed live 2026-08-23 (Cloe new 21, @cloe.5214): a number rented from
+    an SMS pool can never receive a WhatsApp message, so three numbers in a
+    row timed out on this exact screen before this existed.
+    """
+
+    def test_it_taps_the_switch_link(self):
+        adb = FakeAdb()
+        driver = _driver(_root(_button("Send code via SMS")), act=True, adb=adb)
+        self.assertTrue(driver.offers_sms_instead())
+        self.assertTrue(driver.request_sms_instead())
+        self.assertTrue(adb.taps)
+
+    def test_it_reports_when_the_screen_offers_no_such_link(self):
+        """The normal case once already on SMS -- no button, nothing to tap."""
+        driver = _driver(_root(_button("Update mobile number")), act=True,
+                         adb=FakeAdb())
+        self.assertFalse(driver.offers_sms_instead())
+        self.assertFalse(driver.request_sms_instead())
+
+    def test_it_does_not_borrow_the_change_number_link(self):
+        """`Update mobile number` belongs to a different screen (the code
+        timeout retry). Tapping it here would abandon a rented number."""
+        adb = FakeAdb()
+        driver = _driver(_root(_button("Update mobile number")), act=True,
+                         adb=adb)
+        self.assertFalse(driver.request_sms_instead())
+        self.assertEqual(adb.taps, [])
+
+    def test_observe_mode_does_not_tap(self):
+        adb = FakeAdb()
+        driver = _driver(_root(_button("Send code via SMS")), act=False, adb=adb)
+        self.assertTrue(driver.offers_sms_instead())
+        self.assertFalse(driver.request_sms_instead())
+        self.assertEqual(adb.commands, [])
+
+
 class LateRenderingCaptchaTest(unittest.TestCase):
     """Instagram draws the captcha screen before the image arrives.
 

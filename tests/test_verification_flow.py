@@ -130,14 +130,24 @@ class FakeProvider:
 class FakeDriver:
     """Walks a scripted list of screens; every successful action advances one."""
 
-    def __init__(self, screens, can_upload=True, captcha_image="/tmp/fake.png"):
+    def __init__(self, screens, can_upload=True, captcha_image="/tmp/fake.png",
+                offers_sms_instead=False):
         self.screens = list(screens)
         self.can_upload = can_upload
         self.captcha_image = captcha_image
         self.actions = []
+        self._offers_sms_instead = offers_sms_instead
 
     def read_screen(self):
         return self.screens[0] if self.screens else SCREEN_FEED
+
+    def offers_sms_instead(self):
+        return self._offers_sms_instead
+
+    def request_sms_instead(self):
+        self.actions.append(("switch_to_sms", None))
+        self._offers_sms_instead = False
+        return True
 
     def _advance(self):
         if self.screens:
@@ -260,6 +270,50 @@ class OrderIndependenceTest(FlowTestCase):
         result, driver, provider = self.run_chain([SCREEN_BANNED])
         self.assertEqual(result.status, RESULT_BANNED)
         self.assertEqual(provider.purchases, 0, "a banned account must not cost a number")
+
+
+class SwitchToSmsTest(FlowTestCase):
+    """A rented SMS-pool number can never receive a WhatsApp message --
+    confirmed live 2026-08-23 (Cloe new 21, @cloe.5214): three numbers in a
+    row timed out waiting on a code Instagram had sent to WhatsApp. The code
+    screen offers a "Send code via SMS" switch; using it before the wait
+    starts turns a guaranteed miss into a normal SMS wait.
+    """
+
+    def test_the_switch_is_used_before_waiting_for_the_code(self):
+        driver = FakeDriver([SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED],
+                            offers_sms_instead=True)
+        result, driver, _ = self.run_chain(
+            [SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED], driver=driver)
+
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertEqual([a[0] for a in driver.actions],
+                         ["phone", "switch_to_sms", "code"])
+
+    def test_a_screen_that_never_offers_the_switch_is_not_touched(self):
+        """The common case (already SMS, or a driver without the optional
+        method) must not tap anything that is not there."""
+        driver = FakeDriver([SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED],
+                            offers_sms_instead=False)
+        result, driver, _ = self.run_chain(
+            [SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED], driver=driver)
+
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertEqual([a[0] for a in driver.actions], ["phone", "code"])
+
+    def test_a_driver_without_the_optional_methods_still_works(self):
+        """Most drivers in these tests (and the fake used elsewhere in this
+        file) do not implement `offers_sms_instead` at all -- the loop must
+        treat that exactly like "no switch offered", not raise."""
+        class _MinimalDriver(FakeDriver):
+            offers_sms_instead = None
+            request_sms_instead = None
+
+        driver = _MinimalDriver([SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED])
+        result, driver, _ = self.run_chain(
+            [SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED], driver=driver)
+
+        self.assertEqual(result.status, RESULT_SOLVED)
 
 
 class RealScreenTest(FlowTestCase):
