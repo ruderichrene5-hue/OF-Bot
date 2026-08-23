@@ -102,14 +102,22 @@ class GeelarkHost:
     bills by the minute *and* holds one of only four parallel slots, so a
     forgotten phone stalls the next run as well as costing money.
 
-    `proxy_port`, when given, is leased exclusively for the phone's whole
-    life (`launch` acquires, `shutdown` releases) -- confirmed live
-    2026-08-23: this pipeline was starting phones on their statically
-    assigned proxy with no check that another phone was already running on
-    the same port, which the four-modem pool cannot tell apart as two
-    devices. `adb_bot.clients.geelark.session` already solved this for its
-    own single-phone manual path; this reuses the same `proxy_pool` rather
-    than inventing a second mechanism.
+    The phone's own proxy port is leased exclusively for its whole life
+    (`launch` acquires, `shutdown` releases) -- confirmed live 2026-08-23:
+    this pipeline was starting phones on their statically assigned proxy
+    with no check that another phone was already running on the same port,
+    which the four-modem pool cannot tell apart as two devices.
+    `adb_bot.clients.geelark.session` already solved this for its own
+    single-phone manual path; this reuses the same `proxy_pool`.
+
+    Callers that already have the phone's `proxy` dict (both batch
+    pipelines do, from the same `list_phones()` call that built their
+    worklist) should pass `proxy_port` to skip a second lookup. Callers
+    that do not -- including any future one-off script -- still get the
+    same protection: leaving `proxy_port` unset makes `launch` resolve it
+    itself before starting anything, rather than silently skipping the
+    lease. There is deliberately no way to construct a `GeelarkHost` that
+    starts a phone without going through this.
     """
 
     def __init__(self, transport=None, args=None, proxy_port=None) -> None:
@@ -120,18 +128,40 @@ class GeelarkHost:
         self.proxy_port = proxy_port
         self._lease = None
 
+    def _resolve_proxy_port(self, profile_id: str, logger):
+        """The port already bound to `profile_id`, or None if it truly has
+        none. One `list_phones()` call -- the fleet fits in a few pages, and
+        this only runs when the caller has not already handed the port in."""
+        from adb_bot.clients.geelark.phones import GeelarkPhoneClient
+
+        try:
+            for row in GeelarkPhoneClient(self.transport).list_phones():
+                if str(row.get("id")) == str(profile_id):
+                    port = (row.get("proxy") or {}).get("port")
+                    return int(port) if port else None
+        except Exception as exc:
+            if logger:
+                logger.warning(
+                    "signup_phone: could not look up %s's proxy port (%s); "
+                    "launching without a lease", profile_id, exc)
+        return None
+
     def launch(self, profile_id: str, logger):
         from adb_bot.clients.geelark import prepare_geelark_profile_for_adb
         from adb_bot.clients.geelark import proxy_pool
 
-        if self.proxy_port is not None:
+        port = self.proxy_port
+        if port is None:
+            port = self._resolve_proxy_port(profile_id, logger)
+
+        if port is not None:
             self._lease = proxy_pool.acquire_proxy(
-                [self.proxy_port], owner=str(profile_id), wait_seconds=60.0)
+                [port], owner=str(profile_id), wait_seconds=60.0)
             if self._lease is None:
                 logger.warning(
                     "signup_phone: proxy port %s is already leased by "
                     "another running phone; not starting %s on it",
-                    self.proxy_port, profile_id)
+                    port, profile_id)
                 return None
 
         profile = prepare_geelark_profile_for_adb(
