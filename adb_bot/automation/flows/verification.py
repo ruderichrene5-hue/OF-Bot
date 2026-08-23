@@ -452,6 +452,25 @@ class ChallengeDriver(Protocol):
         takes the cautious branch.
         """
 
+    def offers_sms_instead(self) -> bool:
+        """Whether *this* screen (already showing 'we sent a code to
+        WhatsApp') offers to switch delivery to SMS.
+
+        Optional, same convention as `can_request_new_number`: a driver
+        without it is treated as unable to say, and the code wait proceeds
+        on whatever channel Instagram already picked.
+        """
+
+    def request_sms_instead(self) -> bool:
+        """Switch code delivery from WhatsApp to SMS on the current screen.
+
+        A number rented from an SMS pool can never receive a WhatsApp
+        message -- see `adb-bot`'s own "WhatsApp code delivery" finding.
+        Calling this before the wait starts turns a guaranteed miss into a
+        normal SMS wait, rather than burning a number on a channel it was
+        never going to receive.
+        """
+
     def upload_photo(self) -> bool:
         """Satisfy the photo challenge by uploading a picture from the device.
 
@@ -1131,6 +1150,22 @@ class _Session:
                 RESULT_NEEDS_HUMAN,
                 "a code was requested for a number the bot does not control")
 
+        # A rented SMS-pool number can never receive a WhatsApp message --
+        # confirmed live 2026-08-23 (Cloe new 21, @cloe.5214): three numbers
+        # in a row timed out waiting on a code Instagram had sent to
+        # WhatsApp. Switch the channel, if this screen offers to, before
+        # spending the wait on a delivery method that was never going to
+        # arrive.
+        if self._sms_instead_offered():
+            switch = getattr(self.driver, "request_sms_instead", None)
+            if callable(switch):
+                try:
+                    switch()
+                except Exception as exc:
+                    self._log("warning",
+                              "verification: could not switch to SMS delivery "
+                              "(%s)", exc)
+
         code = self.lease.wait_for_code()
         if code:
             self.code_received = True
@@ -1275,6 +1310,24 @@ class _Session:
             return bool(starter())
         except Exception as exc:
             self._log("warning", "verification: restarting Instagram raised (%s)", exc)
+            return False
+
+    def _sms_instead_offered(self) -> bool:
+        """Whether the code screen we are on offers to switch to SMS.
+
+        Same cautious-driver convention as `_change_number_offered`: a driver
+        that cannot answer counts as "no", so the wait just proceeds on
+        whatever channel Instagram already picked.
+        """
+        ask = getattr(self.driver, "offers_sms_instead", None)
+        if not callable(ask):
+            return False
+        try:
+            return bool(ask())
+        except Exception as exc:
+            self._log("warning",
+                      "verification: could not tell whether the code screen "
+                      "offers SMS instead (%s)", exc)
             return False
 
     def _change_number_offered(self) -> bool:

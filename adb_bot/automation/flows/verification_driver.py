@@ -73,6 +73,16 @@ _SMS_OPTION_LABELS = (
     "send code to phone", "text",
 )
 
+# A *different* screen from the chooser above: Instagram already sent the
+# code somewhere and offers to switch, after the fact -- "We sent a code to
+# WhatsApp" with a "Send code via SMS" link. Confirmed live 2026-08-23
+# (Cloe new 21, @cloe.5214): a number rented from an SMS pool can never
+# receive a WhatsApp message, so waiting out the 90s budget on that screen is
+# certain to fail regardless of the number itself -- the fleet's own
+# documented "WhatsApp code delivery" trap. This switches the channel before
+# the wait ever starts, rather than after burning a number on the wrong one.
+_SWITCH_TO_SMS_LABELS = ("Send code via SMS", "SEND CODE VIA SMS")
+
 # Getting from the code screen back to the phone screen, so a *different*
 # number can be rented. Confirmed off the real code screen (`Blank (13)`,
 # 2026-08-11), which offers exactly two ways on: "Update mobile number" and
@@ -706,6 +716,27 @@ class AdbChallengeDriver:
         # missing submit button here is normal, so its absence is not a failure.
         self.read_screen()
         self._submit()
+        return True
+
+    def offers_sms_instead(self) -> bool:
+        """Whether *this* screen (already showing 'we sent a code to
+        WhatsApp') offers to switch delivery to SMS.
+
+        Reads nothing itself, same convention as `can_request_new_number`: it
+        answers about the dump `read_screen` last produced.
+        """
+        return self._find_exact(_SWITCH_TO_SMS_LABELS) is not None
+
+    def request_sms_instead(self) -> bool:
+        center = self._find_exact(_SWITCH_TO_SMS_LABELS)
+        if center is None:
+            return False
+        self._log("info", "switching code delivery from WhatsApp to SMS "
+                          "(a rented number can never receive WhatsApp)")
+        if not self._tap(center, "send code via sms"):
+            return False
+        time.sleep(max(self.settle_seconds, 2.0))
+        self.read_screen()
         return True
 
     def enter_phone(self, number: str) -> bool:
