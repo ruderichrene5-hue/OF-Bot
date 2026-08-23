@@ -7,15 +7,30 @@ Walks phones tagged `IG connected` that are not yet `Post Ready`, and for
 each one's model: looks up her profile-picture URL from Geelark's own
 material Library (by the model's material tag, resolved through
 `Models.GeeLark Tag`), pulls her Bio Pool and Link URL from Airtable, then
-triggers `instagramEdit` with a randomized bio, the fixed link, and the
+triggers `instagramEdit` with a randomized bio and the fixed link and
 picture, and polls the task until it finishes.
 
-**`Post Ready` means all three, always.** A phone is skipped entirely --
-never sent a two-of-three request -- when the model's Airtable row has no
-Link URL or no Bio Pool, or her GeeLark tag has no picture material on it
-yet, and the tag is only applied once Geelark itself reports the task
-`Completed`. Calling a profile ready off a partial request would say more
-than is true.
+**Never sets Username/Nickname.** Confirmed live, 2026-08-23: asking
+`instagramEdit` to change the @handle of an account that is already
+signed in put two real accounts (`frida.sturm90`, `hanna.falk30`) behind
+Instagram's own "confirm you're human" checkpoint, both times -- an
+identity change on a live session reads as suspicious in a way that
+choosing a handle during signup itself does not. The signup flow's own
+username generation (organic-looking, e.g. `mia.berg`) is untouched and
+is not affected by this.
+
+**Geelark's own "Completed" status is not proof anything actually
+landed.** The same two accounts got a `status=3`/"Run successfully" task
+result while the real device sat on that checkpoint with nothing
+changed -- Geelark's script log is full of "No element found" lines for
+steps it still reports as finished. `verify_setup_on_device` connects to
+the real phone after the task and checks for a block screen and that the
+Bio field actually holds something before `Post Ready` is applied.
+
+**`Post Ready` means Bio, Link and Picture, always.** A phone is skipped
+entirely -- never sent a two-of-three request -- when the model's
+Airtable row has no Link URL or no Bio Pool, or her GeeLark tag has no
+picture material on it yet.
 
 Dry run by default. `--apply` is what triggers real Geelark tasks.
 """
@@ -27,7 +42,13 @@ import sys
 import threading
 import time
 
-from adb_bot.automation import bio_variations
+from adb_bot.automation import ban_detection, bio_variations
+from adb_bot.automation.flows.instagram import (InstagramUpdateBioFlow,
+                                                 _adb_capture_ui_dump,
+                                                 _adb_read_bio_field_value)
+from adb_bot.automation.signup_phone import GeelarkHost
+from adb_bot.automation.workflow import connect_with_retries
+from adb_bot.clients.adb import ADBClient
 from adb_bot.clients.airtable import AirtableClient
 from adb_bot.clients.geelark import GeelarkTransport, library, rpa
 from adb_bot.clients.geelark.phones import GeelarkPhoneClient
@@ -37,6 +58,8 @@ from adb_bot.core.logger import get_logger
 
 CONNECTED_TAG = "IG connected"
 POST_READY_TAG = "Post Ready"
+
+INSTAGRAM_PACKAGE = "com.instagram.android"
 
 
 def airtable_client() -> AirtableClient:
@@ -115,24 +138,18 @@ def run_one(phone: dict, model_config: dict, args, logger, transport) -> dict:
         return out
 
     bio = bio_variations.build_bio(pool=bio_pool)
-    # Nickname is always the plain model name. Username is the generated
-    # handle -- sometimes a doubled letter, then a separator and a digit
-    # tail (2026-08-23) -- since that is Instagram's own @handle and has to
-    # be unique; the nickname is just a display label and does not.
-    # Regenerated per phone, so a batch for one model does not all claim
-    # the exact same @handle.
-    username = bio_variations.build_username(model)
     if not args.apply:
         out["status"] = "dry-run"
         print(f"  {name:18} DRY RUN -- bio={bio!r} link={link_url!r} "
-              f"picture={picture_url!r} nickname={model!r} "
-              f"username={username!r}")
+              f"picture={picture_url!r}")
         return out
 
+    # Never nickname/username -- see the module docstring. Changing either
+    # on an account already signed in is what put two real accounts behind
+    # a human-verification checkpoint (2026-08-23).
     task_id = rpa.trigger_instagram_edit_profile(
         profile_id, biography=bio, link_url=link_url,
-        profile_picture=picture_url, nickname=model, username=username,
-        transport=transport)
+        profile_picture=picture_url, transport=transport)
     if not task_id:
         out["status"] = "no-task-id"
         print(f"  {name:18} instagramEdit did not return a task id")
@@ -142,18 +159,80 @@ def run_one(phone: dict, model_config: dict, args, logger, transport) -> dict:
     detail = rpa.wait_for_task(task_id, transport=transport,
                                timeout_seconds=args.task_timeout)
     status = detail.get("status")
-    if status == rpa.STATUS_COMPLETED:
-        mark_post_ready(phone, transport, logger)
-        out["status"] = "post-ready"
-        print(f"  {name:18} Post Ready (task {task_id})")
-    elif status == rpa.STATUS_FAILED:
-        out["status"] = "failed"
-        print(f"  {name:18} failed: {detail.get('failDesc')}")
-    else:
-        out["status"] = f"unfinished-{status}"
-        print(f"  {name:18} still not finished after {args.task_timeout}s "
-              f"(status={status})")
+    if status != rpa.STATUS_COMPLETED:
+        if status == rpa.STATUS_FAILED:
+            out["status"] = "failed"
+            print(f"  {name:18} failed: {detail.get('failDesc')}")
+        else:
+            out["status"] = f"unfinished-{status}"
+            print(f"  {name:18} still not finished after "
+                  f"{args.task_timeout}s (status={status})")
+        return out
+
+    # Geelark's own "Completed" is not proof -- see the module docstring.
+    verified, reason = verify_setup_on_device(profile_id, logger=logger)
+    if not verified:
+        out["status"] = f"verify-failed-{reason}"
+        print(f"  {name:18} Geelark reported Completed but the real device "
+              f"disagrees: {reason}")
+        return out
+
+    mark_post_ready(phone, transport, logger)
+    out["status"] = "post-ready"
+    print(f"  {name:18} Post Ready (task {task_id}, verified on-device)")
     return out
+
+
+def verify_setup_on_device(profile_id: str, logger=None,
+                           transport=None) -> tuple[bool, str]:
+    """Connect to the real phone and check what Geelark's task actually did.
+
+    Returns (True, "ok") only if Instagram shows no block/checkpoint screen
+    and the Bio field genuinely holds something. Link and Picture are not
+    independently re-checked here -- Link would need the same UI-dump
+    field-reading Bio already has (not yet rebuilt after the RPA-task
+    switch) and Picture cannot be read from a UI dump at all (an image, not
+    text) -- so a clean Bio read plus no block screen is treated as strong
+    enough evidence the whole edit went through, not proof of all three.
+    """
+    host = GeelarkHost(transport or GeelarkTransport(), None)
+    adb_client = ADBClient()
+    try:
+        profile = host.launch(profile_id, logger)
+        if not profile:
+            return False, "phone-not-ready"
+        target = connect_with_retries(adb_client, profile, logger,
+                                      profile_id, max_attempts=8,
+                                      retry_delay_seconds=5)
+        if not target:
+            return False, "unreachable"
+
+        adb_client.run_command(
+            f"adb -s {target} shell monkey -p {INSTAGRAM_PACKAGE} "
+            f"-c android.intent.category.LAUNCHER 1")
+        time.sleep(8)
+
+        root = _adb_capture_ui_dump(target, logger=logger)
+        screen_text = " ".join(
+            str(node.attrib.get("text") or "") for node in root.iter()
+        ) if root is not None else ""
+        block_kind = ban_detection.classify_block_text(screen_text.lower())
+        if block_kind:
+            return False, f"blocked-{block_kind}"
+
+        flow = InstagramUpdateBioFlow()
+        outcome = flow._open_edit_profile(target, adb_client, logger=logger)
+        if outcome != "ok":
+            return False, f"edit-profile-{outcome}"
+        edit_root = flow._ensure_screen(target, adb_client, ("username",),
+                                        logger=logger)
+        bio = _adb_read_bio_field_value(edit_root)
+        adb_client.run_command(f"adb -s {target} shell input keyevent 4")
+        if not bio:
+            return False, "bio-not-set"
+        return True, "ok"
+    finally:
+        host.shutdown(profile_id, logger)
 
 
 def main(argv=None) -> int:

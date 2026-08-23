@@ -6,10 +6,16 @@ before Geelark itself reports the task Completed.
 """
 
 import unittest
+import xml.etree.ElementTree as ET
 from unittest import mock
 
 from adb_bot.automation import check_profile_readiness as c
 from adb_bot.clients.geelark import rpa
+
+
+def _fake_root(screen_text: str) -> ET.Element:
+    return ET.fromstring(
+        f'<hierarchy><node text="{screen_text}" bounds="[0,0][1,1]"/></hierarchy>')
 
 
 def _phone(phone_id, tags, model="Nikki"):
@@ -116,7 +122,7 @@ class RunOneTest(unittest.TestCase):
         self.assertEqual(out["status"], "no-picture-in-library")
         trigger.assert_not_called()
 
-    def test_a_completed_task_marks_post_ready(self):
+    def test_a_completed_task_verified_on_device_marks_post_ready(self):
         phone = _phone("1", ["IG connected"])
         with mock.patch.object(c.library, "picture_url_for_tag",
                                return_value="https://x/nikki.jpg"), \
@@ -124,11 +130,32 @@ class RunOneTest(unittest.TestCase):
                                return_value="t1"), \
              mock.patch.object(c.rpa, "wait_for_task",
                                return_value={"status": rpa.STATUS_COMPLETED}), \
+             mock.patch.object(c, "verify_setup_on_device",
+                               return_value=(True, "ok")), \
              mock.patch.object(c, "mark_post_ready") as mark:
             out = c.run_one(phone, FULL_CONFIG, Args(), mock.Mock(), transport=None)
 
         self.assertEqual(out["status"], "post-ready")
         mark.assert_called_once()
+
+    def test_a_completed_task_that_fails_on_device_verification_never_marks_post_ready(self):
+        """Geelark's own two real accounts (2026-08-23) got a "Completed"
+        task result while the real device sat behind a human-verification
+        checkpoint -- this is the case that finding demands a test for."""
+        phone = _phone("1", ["IG connected"])
+        with mock.patch.object(c.library, "picture_url_for_tag",
+                               return_value="https://x/nikki.jpg"), \
+             mock.patch.object(c.rpa, "trigger_instagram_edit_profile",
+                               return_value="t1"), \
+             mock.patch.object(c.rpa, "wait_for_task",
+                               return_value={"status": rpa.STATUS_COMPLETED}), \
+             mock.patch.object(c, "verify_setup_on_device",
+                               return_value=(False, "blocked-human_verification")), \
+             mock.patch.object(c, "mark_post_ready") as mark:
+            out = c.run_one(phone, FULL_CONFIG, Args(), mock.Mock(), transport=None)
+
+        self.assertEqual(out["status"], "verify-failed-blocked-human_verification")
+        mark.assert_not_called()
 
     def test_a_failed_task_never_marks_post_ready(self):
         phone = _phone("1", ["IG connected"])
@@ -183,9 +210,11 @@ class RunOneTest(unittest.TestCase):
         self.assertIn(trigger.call_args.kwargs["biography"],
                      FULL_CONFIG["bio_pool"])
 
-    def test_nickname_is_always_the_plain_model_name(self):
-        """Only Username is Instagram's unique @handle and needs the
-        generated variation -- Nickname is just a display label."""
+    def test_nickname_and_username_are_never_sent(self):
+        """Changing either on an account already signed in put two real
+        accounts behind Instagram's own human-verification checkpoint
+        (`frida.sturm90`, `hanna.falk30`, 2026-08-23) even though Geelark
+        reported the task Completed both times."""
         phone = _phone("1", ["IG connected"], model="Nikki")
         with mock.patch.object(c.library, "picture_url_for_tag",
                                return_value="https://x/nikki.jpg"), \
@@ -194,10 +223,8 @@ class RunOneTest(unittest.TestCase):
             c.run_one(phone, FULL_CONFIG, Args(), mock.Mock(), transport=None)
 
         kwargs = trigger.call_args.kwargs
-        self.assertEqual(kwargs["nickname"], "Nikki")
-        self.assertTrue(kwargs["username"])
-        self.assertNotEqual(kwargs["username"], "Nikki",
-                           "username never got its separator/digit tail")
+        self.assertNotIn("nickname", kwargs)
+        self.assertNotIn("username", kwargs)
 
 
 class _FakeTags:
@@ -225,6 +252,76 @@ class MarkPostReadyTest(unittest.TestCase):
         by_id = {v: k for k, v in fake_tags.existing.items()}
         names = {by_id.get(i, i) for i in (call.kwargs["tag_ids"] or [])}
         self.assertEqual(names, {"IG connected", "Post Ready"})
+
+
+class VerifySetupOnDeviceTest(unittest.TestCase):
+    """Geelark's own "Completed" status was wrong twice in a row
+    (2026-08-23): two real accounts ended up behind a human-verification
+    checkpoint with nothing actually changed. This is the real check.
+    """
+
+    def setUp(self):
+        self.host_patch = mock.patch.object(c, "GeelarkHost")
+        self.fake_host_cls = self.host_patch.start()
+        self.addCleanup(self.host_patch.stop)
+        self.fake_host = self.fake_host_cls.return_value
+        self.fake_host.launch.return_value = {"target": "fake-profile"}
+
+        self.adb_patch = mock.patch.object(c, "ADBClient")
+        self.adb_patch.start()
+        self.addCleanup(self.adb_patch.stop)
+
+        self.connect_patch = mock.patch.object(c, "connect_with_retries",
+                                               return_value="host:1")
+        self.connect_patch.start()
+        self.addCleanup(self.connect_patch.stop)
+
+    def test_a_block_screen_fails_verification(self):
+        with mock.patch.object(
+                c, "_adb_capture_ui_dump",
+                return_value=_fake_root("Confirm you're human to use your account")):
+            ok, reason = c.verify_setup_on_device("1")
+
+        self.assertFalse(ok)
+        self.assertTrue(reason.startswith("blocked-"))
+
+    def test_a_missing_bio_fails_verification(self):
+        with mock.patch.object(c, "_adb_capture_ui_dump",
+                               return_value=_fake_root("some normal feed text")), \
+             mock.patch.object(c, "InstagramUpdateBioFlow") as flow_cls, \
+             mock.patch.object(c, "_adb_read_bio_field_value", return_value=""):
+            flow_cls.return_value._open_edit_profile.return_value = "ok"
+            ok, reason = c.verify_setup_on_device("1")
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "bio-not-set")
+
+    def test_bio_present_and_no_block_screen_verifies(self):
+        with mock.patch.object(c, "_adb_capture_ui_dump",
+                               return_value=_fake_root("some normal feed text")), \
+             mock.patch.object(c, "InstagramUpdateBioFlow") as flow_cls, \
+             mock.patch.object(c, "_adb_read_bio_field_value",
+                               return_value="Klick unten rein"):
+            flow_cls.return_value._open_edit_profile.return_value = "ok"
+            ok, reason = c.verify_setup_on_device("1")
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+
+    def test_a_phone_that_never_comes_up_fails_cleanly(self):
+        self.fake_host.launch.return_value = None
+
+        ok, reason = c.verify_setup_on_device("1")
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "phone-not-ready")
+
+    def test_the_phone_is_always_shut_down_even_on_failure(self):
+        self.fake_host.launch.return_value = None
+
+        c.verify_setup_on_device("1")
+
+        self.fake_host.shutdown.assert_called_once()
 
 
 if __name__ == "__main__":
