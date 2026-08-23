@@ -936,14 +936,66 @@ class AdbChallengeDriver:
                 break
             time.sleep(2.0)
         if gallery_center is not None:
-            if not self._tap(gallery_center, "choose from gallery"):
+            # The tap itself is sometimes swallowed, not just slow to render
+            # -- confirmed live 2026-08-23: a screenshot taken right after
+            # tapping showed the identical, untouched sheet, at coordinates
+            # provably inside the row's own clickable bounds (its parent
+            # ViewGroup, not the label text node). Re-tap while the sheet is
+            # still showing, rather than assume one tap always lands.
+            for tap_attempt in range(3):
+                if not self._tap(gallery_center, "choose from gallery"):
+                    return False
+                time.sleep(max(self.settle_seconds, 3.0))
+                self._root, _xml = self._dump()
+                if self._find_exact(("Choose From Gallery",
+                                    "CHOOSE FROM GALLERY")) is None:
+                    break
+                self._log("info", "photo challenge: still on the gallery "
+                                  "sheet after tapping it (attempt %d); "
+                                  "retapping", tap_attempt)
+
+        # The real blocker, confirmed live 2026-08-23 via `dumpsys` and a
+        # screenshot (not the uiautomator-timing theory the two retry loops
+        # above were written for): "Choose From Gallery" hands off to
+        # Android's own permission dialog --
+        # `com.android.permissioncontroller/.../GrantPermissionsActivity`,
+        # "Allow Instagram to access photos and videos on this device?" --
+        # and the picker never opens until it is answered. A completely
+        # different package from Instagram's own UI, which is why searching
+        # Instagram's screen for a picker never found anything: there was no
+        # picker yet, just this dialog sitting untouched.
+        # A single dump right after the tap missed it live -- the activity
+        # transition into GrantPermissionsActivity is not instant, same as
+        # the two dialogs before it. Same patient retry, not a longer fixed
+        # wait: a fixed 3s dump found nothing at t+3s and the caller moved
+        # straight on to searching for a picker that was not there yet.
+        allow_center = None
+        for attempt in range(5):
+            self._root, _xml = self._dump()
+            allow_center = self._find_exact(("ALLOW", "Allow"))
+            if allow_center is not None:
+                break
+            time.sleep(2.0)
+        if allow_center is not None:
+            self._log("info", "photo challenge: permission dialog found on "
+                              "attempt %d, tapping Allow", attempt)
+            if not self._tap(allow_center, "allow photo/video access"):
                 return False
             time.sleep(max(self.settle_seconds, 3.0))
+        else:
+            # Not necessarily wrong -- a phone that already granted this
+            # earlier will not see the dialog again. Logged because "no
+            # dialog" and "the dialog wasn't captured" look identical from
+            # here, and only the log line tells them apart afterwards.
+            self._log("info", "photo challenge: no permission dialog after "
+                              "'Choose From Gallery' (labels were %s); "
+                              "assuming access was already granted",
+                      self._clickable_labels(self._root)[:20])
 
-        # Same story again: 'Choose From Gallery' opens the system picker as
-        # its own activity, which renders visibly well before uiautomator's
-        # dump reliably includes its thumbnails. Patient retry, not a
-        # coordinate guess.
+        # Only now does the system picker actually open, as its own activity
+        # -- it renders visibly before uiautomator's dump reliably includes
+        # its thumbnails, so this still retries patiently rather than
+        # falling back to a coordinate guess.
         root, photo_center = None, None
         for attempt in range(5):
             root, _xml = self._dump()
