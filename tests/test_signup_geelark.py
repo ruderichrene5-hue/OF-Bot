@@ -19,6 +19,7 @@ from adb_bot.automation import signup_geelark
 from adb_bot.automation.flows import signup
 from adb_bot.automation.signup_geelark import (CONNECTED_TAG, FAILED_TAG,
                                                NEW_TAG, failed_mailboxes,
+                                               increment_profiles_created,
                                                reached_instagram, skip_locked,
                                                signup_status_tag, write_back)
 from adb_bot.core import locks
@@ -276,6 +277,65 @@ class WriteBackTagsTest(unittest.TestCase):
 
         self.assertIn(CONNECTED_TAG, names)
         self.assertNotIn(FAILED_TAG, names)
+
+
+class IncrementProfilesCreatedTest(unittest.TestCase):
+    """`Models.Profiles Created` is a convenience counter, not the source of
+    truth -- a model missing from Airtable or a request that fails must
+    never stop the signup itself from being recorded.
+    """
+
+    def setUp(self):
+        self.at_patch = mock.patch.object(signup_geelark, "AirtableClient")
+        self.fake_at_cls = self.at_patch.start()
+        self.addCleanup(self.at_patch.stop)
+        self.fake_client = self.fake_at_cls.return_value
+
+        self.settings_patch = mock.patch.object(signup_geelark, "settings")
+        fake_settings = self.settings_patch.start()
+        self.addCleanup(self.settings_patch.stop)
+        fake_settings.get_saved_airtable_token.return_value = "tok"
+        fake_settings.get_saved_airtable_base_id.return_value = "app123"
+
+    def test_a_blank_model_never_calls_airtable_at_all(self):
+        increment_profiles_created("", mock.Mock())
+
+        self.fake_at_cls.assert_not_called()
+
+    def test_a_known_model_gets_its_count_bumped_by_one(self):
+        self.fake_client.models_by_name.return_value = {"nikki": "recNikki"}
+        self.fake_client._get_fields.return_value = {"Profiles Created": 4}
+
+        increment_profiles_created("Nikki", mock.Mock())
+
+        self.fake_client._patch_in.assert_called_once_with(
+            signup_geelark.TABLE_MODELS, "recNikki", {"Profiles Created": 5})
+
+    def test_a_missing_count_field_starts_from_zero(self):
+        self.fake_client.models_by_name.return_value = {"nikki": "recNikki"}
+        self.fake_client._get_fields.return_value = {}
+
+        increment_profiles_created("Nikki", mock.Mock())
+
+        self.fake_client._patch_in.assert_called_once_with(
+            signup_geelark.TABLE_MODELS, "recNikki", {"Profiles Created": 1})
+
+    def test_a_model_with_no_models_row_is_skipped_without_crashing(self):
+        self.fake_client.models_by_name.return_value = {}
+        logger = mock.Mock()
+
+        increment_profiles_created("Nikki", logger)
+
+        self.fake_client._patch_in.assert_not_called()
+        logger.warning.assert_called_once()
+
+    def test_an_airtable_exception_is_caught_not_raised(self):
+        self.fake_client.models_by_name.side_effect = RuntimeError("boom")
+        logger = mock.Mock()
+
+        increment_profiles_created("Nikki", logger)  # must not raise
+
+        logger.warning.assert_called_once()
 
 
 if __name__ == "__main__":

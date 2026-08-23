@@ -36,8 +36,10 @@ from adb_bot.automation import signup_mailboxes
 from adb_bot.automation.flows import signup
 from adb_bot.automation.signup_phone import GeelarkHost, run_phone
 from adb_bot.clients.adb import ADBClient
+from adb_bot.clients.airtable import AirtableClient, TABLE_MODELS
 from adb_bot.clients.geelark import GeelarkTransport
 from adb_bot.clients.geelark.phones import GeelarkPhoneClient
+from adb_bot.config import settings
 from adb_bot.core import locks
 from adb_bot.core.logger import get_logger
 
@@ -257,7 +259,7 @@ def write_back(phone: dict, identity, address: str, status: str,
         if outcome_tag is not None and outcome_tag not in wanted:
             wanted.append(outcome_tag)
             tags.ensure_tag(outcome_tag,
-                           "green" if outcome_tag == CONNECTED_TAG else "orange")
+                           "green" if outcome_tag == CONNECTED_TAG else "red")
             # `new profile` is the phone's "untried" state; a finished
             # attempt, success or failure, has left it either way.
             wanted = [name for name in wanted if name != NEW_TAG]
@@ -277,6 +279,35 @@ def write_back(phone: dict, identity, address: str, status: str,
     except Exception as exc:
         logger.warning("signup_geelark: could not write back to %s (%s)",
                        phone.get("serialName"), exc)
+
+
+def increment_profiles_created(model: str, logger) -> None:
+    """+1 on that model's `Models.Profiles Created`, so Airtable carries a
+    running count of finished signups without anyone tallying it by hand.
+
+    Best-effort: a model with no Models row (nothing to increment) or an
+    Airtable hiccup logs a warning and moves on -- the phone's own tags and
+    remark are the real record of a successful signup, this is a convenience
+    counter on top of them, not the source of truth.
+    """
+    if not model:
+        return
+    try:
+        client = AirtableClient(settings.get_saved_airtable_token(),
+                               settings.get_saved_airtable_base_id(),
+                               TABLE_MODELS)
+        record_id = client.models_by_name().get(model.lower())
+        if not record_id:
+            logger.warning("signup_geelark: no Models row for %r; "
+                           "Profiles Created not incremented", model)
+            return
+        current = client._get_fields(TABLE_MODELS, record_id)
+        count = int((current or {}).get("Profiles Created") or 0)
+        client._patch_in(TABLE_MODELS, record_id,
+                         {"Profiles Created": count + 1})
+    except Exception as exc:
+        logger.warning("signup_geelark: could not increment Profiles "
+                       "Created for %r (%s)", model, exc)
 
 
 def claim_mailbox(record: dict, identity, phone: dict, apply: bool,
@@ -315,6 +346,8 @@ def run_one(phone: dict, record: dict | None, args, logger,
             status = str(out.get("status"))
             address = box["address"] if box else "(sms, no mailbox)"
             write_back(phone, identity, address, status, transport, logger)
+            if status == signup.RESULT_CREATED:
+                increment_profiles_created(out.get("folder") or "", logger)
             # Claimed only once Instagram has actually seen the address.
             # Claiming on a failed Google sign-in costs a pool row and writes a
             # `Profile Creation` entry for somebody who does not exist -- which
