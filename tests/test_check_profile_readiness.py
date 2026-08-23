@@ -323,6 +323,37 @@ class VerifySetupOnDeviceTest(unittest.TestCase):
 
         self.fake_host.shutdown.assert_called_once()
 
+    def test_the_proxy_port_is_passed_through_to_geelarkhost(self):
+        """This batch runs at the same concurrency as the signup pipeline
+        and hits the same four-modem collision risk (2026-08-23) -- the
+        lease has to actually reach `GeelarkHost`, not just exist."""
+        with mock.patch.object(
+                c, "_adb_capture_ui_dump",
+                return_value=_fake_root("some normal feed text")), \
+             mock.patch.object(c, "InstagramUpdateBioFlow") as flow_cls, \
+             mock.patch.object(c, "_adb_read_bio_field_value",
+                               return_value="a real bio"):
+            flow_cls.return_value._open_edit_profile.return_value = "ok"
+            c.verify_setup_on_device("1", proxy_port=54018)
+
+        self.assertEqual(self.fake_host_cls.call_args.kwargs.get("proxy_port"),
+                         54018)
+
+
+class PhoneProxyPortTest(unittest.TestCase):
+    """Same extraction as `signup_geelark._phone_proxy_port` -- the phone
+    dict already carries its proxy from the same `list_phones()` call
+    `phones_to_check()` uses to build the worklist."""
+
+    def test_a_phones_own_port_is_read_from_its_proxy_field(self):
+        phone = {"id": "1", "proxy": {"type": "socks5",
+                                      "server": "162.55.84.35", "port": 54018}}
+
+        self.assertEqual(c._phone_proxy_port(phone), 54018)
+
+    def test_no_proxy_field_is_none_not_zero(self):
+        self.assertIsNone(c._phone_proxy_port({"id": "1"}))
+
 
 if __name__ == "__main__":
     unittest.main()

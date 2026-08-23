@@ -101,23 +101,54 @@ class GeelarkHost:
     Stopping matters more here than on MultiLogin: a Geelark phone left running
     bills by the minute *and* holds one of only four parallel slots, so a
     forgotten phone stalls the next run as well as costing money.
+
+    `proxy_port`, when given, is leased exclusively for the phone's whole
+    life (`launch` acquires, `shutdown` releases) -- confirmed live
+    2026-08-23: this pipeline was starting phones on their statically
+    assigned proxy with no check that another phone was already running on
+    the same port, which the four-modem pool cannot tell apart as two
+    devices. `adb_bot.clients.geelark.session` already solved this for its
+    own single-phone manual path; this reuses the same `proxy_pool` rather
+    than inventing a second mechanism.
     """
 
-    def __init__(self, transport=None, args=None) -> None:
+    def __init__(self, transport=None, args=None, proxy_port=None) -> None:
         from adb_bot.clients.geelark import GeelarkTransport
 
         self.transport = transport or GeelarkTransport()
         self.args = args
+        self.proxy_port = proxy_port
+        self._lease = None
 
     def launch(self, profile_id: str, logger):
         from adb_bot.clients.geelark import prepare_geelark_profile_for_adb
+        from adb_bot.clients.geelark import proxy_pool
 
-        return prepare_geelark_profile_for_adb(
+        if self.proxy_port is not None:
+            self._lease = proxy_pool.acquire_proxy(
+                [self.proxy_port], owner=str(profile_id), wait_seconds=60.0)
+            if self._lease is None:
+                logger.warning(
+                    "signup_phone: proxy port %s is already leased by "
+                    "another running phone; not starting %s on it",
+                    self.proxy_port, profile_id)
+                return None
+
+        profile = prepare_geelark_profile_for_adb(
             profile_id, self.transport, logger=logger)
+        if profile is None and self._lease is not None:
+            # Never strand a lease on a launch that did not happen.
+            proxy_pool.release_proxy(self._lease)
+            self._lease = None
+        return profile
 
     def shutdown(self, profile_id: str, logger) -> None:
         from adb_bot.clients.geelark import release_geelark_phone
+        from adb_bot.clients.geelark import proxy_pool
 
+        if self._lease is not None:
+            proxy_pool.release_proxy(self._lease)
+            self._lease = None
         try:
             release_geelark_phone(profile_id, self.transport, logger=logger)
         except Exception as exc:

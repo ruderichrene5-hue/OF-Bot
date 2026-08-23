@@ -323,6 +323,17 @@ def claim_mailbox(record: dict, identity, phone: dict, apply: bool,
         return ""
 
 
+def _phone_proxy_port(phone: dict) -> int | None:
+    """The SOCKS5 port already bound to this phone -- Geelark's `/phone/list`
+    nests it under `proxy`. Same field `session.py`'s single-phone path
+    reads; duplicated as one small pure function rather than importing that
+    module here, which would also pull in its rotation/cooldown machinery
+    this batch path has no use for."""
+    proxy = phone.get("proxy") or {}
+    port = proxy.get("port")
+    return int(port) if port else None
+
+
 def run_one(phone: dict, record: dict | None, args, logger,
             transport) -> dict:
     if record is None:
@@ -334,8 +345,8 @@ def run_one(phone: dict, record: dict | None, args, logger,
                "totp_secret": str(fields.get("2FA Secret Key") or "")}
     item = {"id": str(phone["id"]), "serial_name": phone.get("serialName")}
 
-    out = run_phone(item, box, GeelarkHost(transport, args), ADBClient(),
-                    args, logger)
+    host = GeelarkHost(transport, args, proxy_port=_phone_proxy_port(phone))
+    out = run_phone(item, box, host, ADBClient(), args, logger)
     out["phone_id"] = str(phone["id"])
     out["folder"] = (phone.get("group") or {}).get("name")
     out["mailbox_record"] = record["id"] if record else ""

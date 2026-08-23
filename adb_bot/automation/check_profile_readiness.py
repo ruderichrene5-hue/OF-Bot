@@ -170,7 +170,9 @@ def run_one(phone: dict, model_config: dict, args, logger, transport) -> dict:
         return out
 
     # Geelark's own "Completed" is not proof -- see the module docstring.
-    verified, reason = verify_setup_on_device(profile_id, logger=logger)
+    verified, reason = verify_setup_on_device(
+        profile_id, logger=logger, transport=transport,
+        proxy_port=_phone_proxy_port(phone))
     if not verified:
         out["status"] = f"verify-failed-{reason}"
         print(f"  {name:18} Geelark reported Completed but the real device "
@@ -183,8 +185,16 @@ def run_one(phone: dict, model_config: dict, args, logger, transport) -> dict:
     return out
 
 
-def verify_setup_on_device(profile_id: str, logger=None,
-                           transport=None) -> tuple[bool, str]:
+def _phone_proxy_port(phone: dict) -> int | None:
+    """The SOCKS5 port already bound to this phone -- see the identical
+    helper's docstring in `signup_geelark.py`."""
+    proxy = phone.get("proxy") or {}
+    port = proxy.get("port")
+    return int(port) if port else None
+
+
+def verify_setup_on_device(profile_id: str, logger=None, transport=None,
+                           proxy_port=None) -> tuple[bool, str]:
     """Connect to the real phone and check what Geelark's task actually did.
 
     Returns (True, "ok") only if Instagram shows no block/checkpoint screen
@@ -194,8 +204,14 @@ def verify_setup_on_device(profile_id: str, logger=None,
     switch) and Picture cannot be read from a UI dump at all (an image, not
     text) -- so a clean Bio read plus no block screen is treated as strong
     enough evidence the whole edit went through, not proof of all three.
+
+    `proxy_port`, when given, is leased exclusively for the launch -- this
+    batch runs at `--concurrency 2`+ same as `signup_geelark.py`, and the
+    same four-modem-pool collision risk applies here (see `GeelarkHost`'s
+    docstring).
     """
-    host = GeelarkHost(transport or GeelarkTransport(), None)
+    host = GeelarkHost(transport or GeelarkTransport(), None,
+                       proxy_port=proxy_port)
     adb_client = ADBClient()
     try:
         profile = host.launch(profile_id, logger)

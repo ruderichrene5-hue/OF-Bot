@@ -338,5 +338,25 @@ class IncrementProfilesCreatedTest(unittest.TestCase):
         logger.warning.assert_called_once()
 
 
+class PhoneProxyPortTest(unittest.TestCase):
+    """The batch pipeline was starting phones with no check that another
+    phone was already running on the same statically-assigned proxy port --
+    confirmed live 2026-08-23, fixed by leasing this port through
+    `GeelarkHost`. This is the extraction half of that fix: the phone dict
+    already carries its proxy (from the same `list_phones()` call `main()`
+    uses to build the worklist), so no extra API call is needed."""
+
+    def test_a_phones_own_port_is_read_from_its_proxy_field(self):
+        phone = {"id": "1", "proxy": {"type": "socks5",
+                                      "server": "162.55.84.35", "port": 54018}}
+
+        self.assertEqual(signup_geelark._phone_proxy_port(phone), 54018)
+
+    def test_no_proxy_field_is_none_not_zero(self):
+        self.assertIsNone(signup_geelark._phone_proxy_port({"id": "1"}))
+        self.assertIsNone(
+            signup_geelark._phone_proxy_port({"id": "1", "proxy": {}}))
+
+
 if __name__ == "__main__":
     unittest.main()
