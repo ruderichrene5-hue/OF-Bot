@@ -184,7 +184,17 @@ def install(driver, adb_client, target: str, package: str, logger=None,
 
         labels = (driver.clickable_labels()
                   if hasattr(driver, "clickable_labels") else [])
-        if (says_any(text, _WORKING_MARKERS) and not offers_install(labels)):
+        # Google's "complete account setup" sheet reads "...to continue
+        # **installing** apps on Google Play" -- an unrelated sentence that
+        # still contains the word a real progress screen uses. That false
+        # match made the loop wait out a `Continue` button for 565 seconds
+        # (`lucas18anosff@gmail.com`, 2026-08-22) instead of tapping it: a
+        # real download in progress never offers a dismiss button, so seeing
+        # one is proof the "working" marker is a false hit, not real progress.
+        has_dismiss_button = any(str(label).strip() in _DISMISS_LABELS
+                                 for label in (labels or ()))
+        if (says_any(text, _WORKING_MARKERS) and not offers_install(labels)
+                and not has_dismiss_button):
             # "pending…" is the Play Store's queue, not a download. Gmail sat
             # in it for a full four minutes without ever starting
             # (2026-08-17). Waiting longer does not clear it; cancelling and

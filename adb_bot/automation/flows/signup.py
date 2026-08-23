@@ -344,6 +344,15 @@ _ACCOUNT_EXISTS_MARKERS = (
     "edit profile",
     "share profile",
     "add your bio",
+    # The interest-picker screen ("Pick what you want to see more of", real
+    # account suggestions like "bkblend_official"), observed 2026-08-22 on
+    # `nora.sommer62`: the run had already tapped "I agree" -- the account
+    # was created -- walked every post-creation prompt correctly (permissions,
+    # photo, follow, add-email), and only fell through to `unknown_screen`
+    # because this one, final onboarding step had no marker. The account and
+    # its credentials were real and already saved; only the ledger status was
+    # wrong.
+    "pick what you want to see more of",
 )
 # NOT "your profile.": half the signup says "no one will see this on your
 # profile", and so does the post-creation "Add a mobile number" prompt. Reading
@@ -742,6 +751,15 @@ def next_username(rejected: str, attempt: int) -> str:
     tail keeps the handle recognisably ours and is what the identity generator
     would have produced anyway.
 
+    A `.` sits between the stem and the tail on purpose. Without it (a bare
+    `stem + tail`, e.g. `maja6658`) Instagram silently reformats the box --
+    observed 2026-08-22 as `maja6658` coming back `maja6_658`, deterministically,
+    every single retype -- and the mismatch-detection this file already has
+    for Instagram's *own* suggestions correctly saw the box no longer held
+    what was typed and retyped the same rejected shape forever. Two of five
+    accounts in one batch died that way. A separator already in the box
+    leaves Instagram nothing to insert.
+
     Bounded to Instagram's 30-character limit by trimming the stem, never the
     tail -- a truncated tail is how two accounts end up asking for the same
     handle again.
@@ -750,8 +768,9 @@ def next_username(rejected: str, attempt: int) -> str:
 
     tail = str(_random.randint(10, 9999))
     stem = "".join(ch for ch in rejected if ch.isalnum() or ch in "._")
-    stem = stem.rstrip("0123456789") or "user"
-    return (stem[:30 - len(tail)] + tail)
+    stem = stem.rstrip("0123456789").rstrip("._") or "user"
+    budget = 30 - len(tail) - 1  # 1 for the separator
+    return f"{stem[:budget]}.{tail}"
 
 
 # The way off any verification method this fleet cannot perform.
@@ -759,6 +778,33 @@ _ANOTHER_WAY_LABELS = (
     "Try another way", "TRY ANOTHER WAY", "Try Another Way",
     "Another way", "Choose another way", "Use another method",
 )
+
+
+def _submit_after_typing(driver, labels) -> bool:
+    """Tap `labels` after typing, without dismissing the keyboard first.
+
+    Mirrors `instagram_login._submit_after_typing`, found the same day
+    (2026-08-22) chasing the mirror-image bug: the username screen never
+    truly submits on some devices, and looks instead like Instagram
+    re-suggesting a name forever (`hanna3` -> `hanna6337` -> `hanna63372026`,
+    two of three accounts in one batch). The likely mechanism is the same one
+    proved live against a real Geelark phone that day -- `dismiss_keyboard()`
+    sends BACK, and BACK is not reliably consumed by the IME on that device;
+    it falls through and steps the signup flow itself back a screen, so
+    re-entering "create a username" hands back a fresh suggestion rather than
+    confirming what was typed. Because the box then holds Instagram's
+    suggestion instead of ours, the existing "box holds Instagram's
+    suggestion again" branch fires and retypes from scratch every time --
+    never reaching the `submit_with_keyboard()` fallback already written for
+    a *different* failure shape (button enabled, tap lands, screen just does
+    not move). This tries the tap with the keyboard still open first, which
+    cannot suffer that failure at all; only if the button truly is not
+    reachable does it fall back to the old dismiss-first sequence.
+    """
+    if driver.tap_label(labels):
+        return True
+    driver.dismiss_keyboard()
+    return driver.tap_label(labels)
 
 
 def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
@@ -1248,8 +1294,7 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     if username_submits == 1:
                         log("info", "instagram accepts %s; submitting",
                             identity.username)
-                        driver.dismiss_keyboard()
-                        driver.tap_label(_SUBMIT_LABELS)
+                        _submit_after_typing(driver, _SUBMIT_LABELS)
                     else:
                         # The tap landed and the screen did not move: five
                         # identical reads, `Next` enabled, `input username is
@@ -1292,8 +1337,7 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     username_submits = 0
                 driver.fill(("username",), identity.username, "username")
                 username_filled = True
-                driver.dismiss_keyboard()
-                driver.tap_label(_SUBMIT_LABELS)
+                _submit_after_typing(driver, _SUBMIT_LABELS)
                 sleep(8)
 
             elif screen == SCREEN_TERMS:

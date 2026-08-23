@@ -4167,42 +4167,53 @@ _EDIT_PROFILE_FIELD_LABELS = {
 }
 
 
-def _adb_read_bio_field_value(root) -> str:
-    """Read the Bio field's current value from the Edit profile screen dump.
+def _adb_read_labeled_field_value(root, label_texts) -> str:
+    """Read the value sitting in the field box below one of `label_texts`.
 
-    Returns the existing bio text, or '' if empty/unreadable. Locates the 'Bio'
-    field label, then returns the nearby non-label text (the value that sits
-    inside the same field box). Works on the Edit profile screen, which -- being
-    a static form -- dumps reliably (unlike the feed/profile/bio-editor screens).
+    Shared by the Bio and Links readers: locate a label node whose text
+    matches one of `label_texts` (case-insensitive), then return the nearest
+    non-label text within roughly one field-height below it -- the value
+    that sits inside the same field box. Works on the Edit profile screen,
+    which -- being a static form -- dumps reliably (unlike the
+    feed/profile/bio-editor screens).
     """
     if root is None:
         return ""
-    bio_bounds = None
+    wanted = {t.lower() for t in label_texts}
+    label_bounds = None
     for node in root.iter():
         attrs = node.attrib
-        if str(attrs.get("text", "") or "").strip().lower() == "bio":
+        if str(attrs.get("text", "") or "").strip().lower() in wanted:
             match = re.search(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", attrs.get("bounds", "") or "")
             if match:
-                bio_bounds = tuple(map(int, match.groups()))
+                label_bounds = tuple(map(int, match.groups()))
                 break
-    if bio_bounds is None:
+    if label_bounds is None:
         return ""
-    _bl_x1, bl_y1, _bl_x2, bl_y2 = bio_bounds
+    _bl_x1, bl_y1, _bl_x2, bl_y2 = label_bounds
     for node in root.iter():
         attrs = node.attrib
         text = str(attrs.get("text", "") or "").strip()
-        if not text or text.lower() in _EDIT_PROFILE_FIELD_LABELS:
+        if not text or text.lower() in _EDIT_PROFILE_FIELD_LABELS or text.lower() in wanted:
             continue
         match = re.search(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", attrs.get("bounds", "") or "")
         if not match:
             continue
         _x1, y1, _x2, y2 = map(int, match.groups())
         cy = (y1 + y2) // 2
-        # The value sits within the Bio field box: from the label row down to
+        # The value sits within the field box: from the label row down to
         # roughly one field-height below it.
         if bl_y1 - 10 <= cy <= bl_y2 + 170:
             return text
     return ""
+
+
+def _adb_read_bio_field_value(root) -> str:
+    """Read the Bio field's current value from the Edit profile screen dump.
+
+    Returns the existing bio text, or '' if empty/unreadable.
+    """
+    return _adb_read_labeled_field_value(root, ("bio",))
 
 
 def _root_is_bio_editor(root) -> bool:

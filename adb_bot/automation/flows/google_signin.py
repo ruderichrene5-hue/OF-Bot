@@ -407,6 +407,28 @@ def _press_enter(adb_client, target: str) -> None:
     adb_client.run_command(f"adb -s {target} shell input keyevent 66")
 
 
+def _submit_after_typing(driver, labels) -> bool:
+    """Tap `labels` after typing, without dismissing the keyboard first.
+
+    Same fix as `instagram_login._submit_after_typing` and
+    `signup._submit_after_typing`, found the same day (2026-08-22): both of
+    those flows dismissed the keyboard (`KEYCODE_BACK`) before their first tap
+    attempt, and BACK is not reliably consumed by the IME on some devices --
+    it falls through and steps the *flow itself* back a screen, which reads
+    as "stuck" or "the form keeps re-rendering" rather than what it is. The
+    email and password steps here have exactly the same dismiss-then-tap
+    shape, so the same fix applies: try the tap with the keyboard still open
+    first, and only dismiss as a fallback if the button truly is not
+    reachable that way. The existing `_press_enter` escalation on a *second*
+    failed submit is untouched -- it answers a different failure (the tap
+    lands and the form redraws anyway), not this one.
+    """
+    if driver.tap_label(labels):
+        return True
+    driver.dismiss_keyboard()
+    return driver.tap_label(labels)
+
+
 # How long to leave between looks while waiting for a screen to move. A
 # `uiautomator` dump costs about 2-3 seconds on these phones (measured on
 # `Blank caio 2`, 2026-08-18), so the real cadence is ~4s and there is nothing
@@ -699,6 +721,32 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             continue
 
         if screen == SCREEN_RETRY:
+            # Manual signups hit this exact page and found the account
+            # already signed in once Play Store and Google Services were
+            # force-closed and reopened -- the page is a Play Store UI
+            # glitch, not proof the sign-in failed server-side (confirmed by
+            # hand, 2026-08-22; matches the 2026-08-17 note above about a
+            # finished 2FA nearly being thrown away here). Check the real
+            # source of truth, `dumpsys account`, before spending a retry on
+            # the on-screen button, which walks the whole flow from
+            # scratch and can lose a sign-in that already succeeded.
+            if not retry_pages:
+                log("info", "force-closing Play Store and Google Services to "
+                            "check whether the sign-in already went through")
+                adb_client.run_command(
+                    f"adb -s {target} shell am force-stop {PLAY_PACKAGE}")
+                adb_client.run_command(
+                    f"adb -s {target} shell am force-stop "
+                    f"com.google.android.gms")
+                sleep(3)
+                _start_play_store(adb_client, target, logger=logger)
+                sleep(6)
+                if address in accounts_on_device(adb_client, target):
+                    log("info", "%s is on the device after all -- the retry "
+                                "page was a UI glitch, not a real failure",
+                        address)
+                    return RESULT_SIGNED_IN
+
             # One button, and taking it is the whole point of the page. The
             # repeat guard cannot see terms -> retry -> terms as going nowhere,
             # so this is bounded on its own.
@@ -800,8 +848,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
                 return RESULT_STUCK
             email_submits += 1
             if email_submits == 1:
-                driver.dismiss_keyboard()
-                driver.tap_label(_NEXT)
+                _submit_after_typing(driver, _NEXT)
             else:
                 # The tap lands -- the dump reports the same `NEXT` bounds every
                 # time and the address stays in the field -- and Google simply
@@ -821,8 +868,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
                 return RESULT_STUCK
             password_submits += 1
             if password_submits == 1:
-                driver.dismiss_keyboard()
-                driver.tap_label(_NEXT)
+                _submit_after_typing(driver, _NEXT)
             else:
                 _press_enter(adb_client, target)
             pending = settle(driver, text, 10, sleep=sleep, clock=clock)

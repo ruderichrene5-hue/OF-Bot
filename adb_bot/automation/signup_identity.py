@@ -21,10 +21,12 @@ generated here is the Instagram handle.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import random
 import string
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +35,27 @@ from adb_bot.automation.flows.signup import Identity
 
 ACCOUNTS_DIR = Path.home() / ".adb_bot" / "accounts"
 ACCOUNTS_FILE = ACCOUNTS_DIR / "accounts.json"
+ACCOUNTS_LOCK_FILE = ACCOUNTS_DIR / "accounts.json.lock"
+
+
+@contextmanager
+def _accounts_lock():
+    """Serialize read-modify-write access to accounts.json.
+
+    `--concurrency 2`+ signup workers each do load-modify-write with no
+    coordination -- confirmed live 2026-08-23: a batch of 20 phones collapsed
+    a file that had ~30+ recorded accounts down to 2, because a later writer's
+    `load_accounts()` snapshot raced an earlier writer's not-yet-flushed
+    write and clobbered it. A file already meant to be "the smallest thing
+    that is not lossy" was, in fact, lossy under its own real concurrency.
+    """
+    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(ACCOUNTS_LOCK_FILE, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 FIRST_NAMES = (
     "mia", "lena", "emma", "nora", "lina", "clara", "julia", "sara", "elif",
@@ -45,6 +68,12 @@ LAST_NAMES = (
 # Handle shapes that read like a person rather than a generated string.
 _PATTERNS = ("{first}.{last}", "{first}_{last}", "{first}{last}{n}",
              "{first}.{last}{n}", "{first}{n}")
+
+# For a model-branded handle: separator options, and the digit-tail range --
+# same floor as signup.next_username's, so it does not read as sequential or
+# machine-generated.
+_MODEL_SEPARATORS = (".", "_")
+_MODEL_TAIL_MIN, _MODEL_TAIL_MAX = 10, 9999
 
 # The one word a handle may never contain: link-in-bio profiles are excluded
 # from posting, so a handle carrying it would quietly opt the account out.
@@ -86,11 +115,22 @@ def taken_usernames() -> set:
             if record.get("username")}
 
 
-def make_identity(rng: random.Random | None = None, avoid=None) -> Identity:
+def make_identity(rng: random.Random | None = None, avoid=None,
+                  model: str = "") -> Identity:
     """A fresh identity whose handle collides with nothing we know about.
 
     `avoid` is any extra handles the caller knows are taken -- MLX remarks,
     Airtable rows -- so the uniqueness check is not limited to this file.
+
+    `model`, when given, makes the username itself carry the model's name
+    -- her name exactly, then a separator and a digit tail -- reversing the
+    "organic, no branding" choice from earlier the same night: kept for the
+    still-unset instagramEdit path, changed here because a real person
+    asked for it back for signup specifically, more than once, wanting an
+    exact prefix rather than the doubled-letter variation `bio_variations`
+    uses elsewhere (2026-08-23). `full_name` (the profile's real-name
+    field, not the @handle) is untouched either way -- still a random
+    person's name.
     """
     rng = rng or random.Random()
     used = taken_usernames() | {str(name).lower() for name in (avoid or ())}
@@ -98,8 +138,17 @@ def make_identity(rng: random.Random | None = None, avoid=None) -> Identity:
     for _ in range(200):
         first = rng.choice(FIRST_NAMES)
         last = rng.choice(LAST_NAMES)
-        username = rng.choice(_PATTERNS).format(
-            first=first, last=last, n=rng.randint(2, 99))
+        if model:
+            # No doubled-letter variation here (unlike bio_variations'
+            # nickname/username generator) -- "must start directly with the
+            # model name" (2026-08-23, said more than once) means an exact,
+            # unambiguous prefix every time, not a recognisable-but-altered
+            # one.
+            username = (f"{model}{rng.choice(_MODEL_SEPARATORS)}"
+                       f"{rng.randint(_MODEL_TAIL_MIN, _MODEL_TAIL_MAX)}")
+        else:
+            username = rng.choice(_PATTERNS).format(
+                first=first, last=last, n=rng.randint(2, 99))
         if any(word in username for word in FORBIDDEN):
             continue
         if username.lower() in used or not (3 <= len(username) <= 28):
@@ -120,23 +169,30 @@ def record_account(profile_id: str, profile_name: str, identity: Identity,
 
     Keyed by MLX profile id, so a second account on the same phone does not
     overwrite the first -- roughly twenty phones in this fleet hold two.
+
+    Locked end to end (`_accounts_lock`) -- concurrent signup workers each do
+    this same load-modify-write, and unlocked they clobber each other.
     """
-    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
-    accounts = load_accounts()
-    key = f"{profile_id}:{identity.username}"
-    accounts[key] = {
-        "profile_id": profile_id,
-        "profile_name": profile_name,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "phone_number": phone_number,
-        "status": status,
-        "recovery_email": "",
-        **asdict(identity),
-    }
-    ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2, sort_keys=True))
-    # Passwords: readable by this user only.
-    try:
-        os.chmod(ACCOUNTS_FILE, 0o600)
-    except OSError:
-        pass
+    with _accounts_lock():
+        accounts = load_accounts()
+        key = f"{profile_id}:{identity.username}"
+        accounts[key] = {
+            "profile_id": profile_id,
+            "profile_name": profile_name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "phone_number": phone_number,
+            "status": status,
+            "recovery_email": "",
+            **asdict(identity),
+        }
+        # Atomic replace, not an in-place write -- so a reader outside the
+        # lock (taken_usernames, an operator's `cat`) never sees a half
+        # written file, only the old version or the new one.
+        tmp = ACCOUNTS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(accounts, indent=2, sort_keys=True))
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, ACCOUNTS_FILE)
     return ACCOUNTS_FILE

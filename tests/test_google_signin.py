@@ -230,6 +230,60 @@ class _StubDriver:
         return True
 
 
+class _RetryPageAdb(_StubAdb):
+    """Like `_StubAdb`, but `dumpsys account` starts empty and can start
+    reporting the address once Play Store/Google Services are force-closed --
+    manual signups found the account already signed in only *after* that
+    restart, not before it (2026-08-22), so the stub must not show it any
+    earlier than the real phone did."""
+
+    def __init__(self, shows_up_after_restart: bool):
+        super().__init__()
+        self.shows_up_after_restart = shows_up_after_restart
+        self.restarted = False
+
+    def run_command(self, command):
+        self.commands.append(command)
+        if "force-stop" in command:
+            self.restarted = True
+        if "dumpsys account" in command:
+            if self.restarted and self.shows_up_after_restart:
+                return "Account {name=a@gmail.com, type=com.google}"
+            return "Accounts: 0"
+        return ""
+
+
+def test_the_retry_page_checks_for_a_real_sign_in_before_tapping_anything():
+    """The retry page is a Play Store UI glitch, not proof the sign-in
+    failed -- so the real source of truth, `dumpsys account`, is checked
+    before spending a retry on the on-screen button, which walks the whole
+    flow from scratch and can lose a sign-in that already went through."""
+    driver = _StubDriver(RETRY_PAGE)
+    adb = _RetryPageAdb(shows_up_after_restart=True)
+
+    result = g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "S",
+                       sleep=lambda _s: None)
+
+    assert result == g.RESULT_SIGNED_IN
+    assert any("force-stop" in c and g.PLAY_PACKAGE in c for c in adb.commands)
+    assert any("force-stop" in c and "com.google.android.gms" in c
+              for c in adb.commands)
+    assert not driver.taps, "tapped the retry button instead of trusting " \
+                            "the real account state"
+
+
+def test_the_retry_page_still_falls_back_to_tapping_when_nothing_landed():
+    """If the account genuinely is not on the device, the old behaviour --
+    tap through the retry page -- must still run."""
+    driver = _StubDriver(RETRY_PAGE)
+    adb = _RetryPageAdb(shows_up_after_restart=False)
+
+    g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "S",
+             sleep=lambda _s: None)
+
+    assert driver.taps, "never fell back to the on-screen retry button"
+
+
 def test_the_code_screen_falls_back_to_the_keyboards_own_action(monkeypatch):
     """`NEXT` does not submit Google's forms -- four fresh codes were typed and
     tapped in on 2026-08-17 and the screen simply redrew each time. The email
@@ -728,3 +782,42 @@ def test_a_zero_budget_does_not_look_at_all():
 
     assert g.settle(driver, EMAIL, 0) == EMAIL
     assert driver.reads == 0
+
+
+# --- the email/password submit no longer dismisses the keyboard first --------
+class _TapScriptDriver:
+    """Scripted tap_label results, and a dismiss counter -- enough to prove
+    `_submit_after_typing` tries the direct tap before ever touching the
+    keyboard."""
+
+    def __init__(self, tap_results=None):
+        self.dismissals = 0
+        self.taps = []
+        self._tap_results = list(tap_results) if tap_results is not None else None
+
+    def tap_label(self, labels):
+        self.taps.append(labels)
+        if self._tap_results is not None:
+            return self._tap_results.pop(0) if self._tap_results else True
+        return True
+
+    def dismiss_keyboard(self):
+        self.dismissals += 1
+
+
+def test_submit_after_typing_taps_directly_when_the_button_is_reachable():
+    driver = _TapScriptDriver()
+    assert g._submit_after_typing(driver, g._NEXT) is True
+    assert driver.dismissals == 0
+    assert driver.taps == [g._NEXT]
+
+
+def test_submit_after_typing_falls_back_to_dismissing_if_the_first_tap_misses():
+    """The case this exists for on some devices: BACK (what dismiss_keyboard
+    sends) is not reliably consumed by the IME, and steps the sign-in flow
+    itself back a screen -- so this must never dismiss unless the direct tap
+    genuinely could not find the button."""
+    driver = _TapScriptDriver(tap_results=[False, True])
+    assert g._submit_after_typing(driver, g._NEXT) is True
+    assert driver.dismissals == 1
+    assert driver.taps == [g._NEXT, g._NEXT]

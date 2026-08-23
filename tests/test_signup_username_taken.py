@@ -153,6 +153,24 @@ class NextUsernameTest(unittest.TestCase):
         out = next_username("sara.sommer_56", 1)
         self.assertTrue(all(ch.isalnum() or ch in "._" for ch in out))
 
+    def test_a_separator_sits_between_the_stem_and_the_tail(self):
+        """Without one, a bare `stem + tail` (e.g. `maja6658`) gets silently
+        reformatted by Instagram -- observed 2026-08-22 coming back as
+        `maja6_658`, deterministically, every retype. The mismatch-detection
+        for Instagram's own suggestions then saw the box no longer held what
+        was typed and retyped the same shape forever; two of five accounts in
+        one batch died that way. A separator Instagram cannot mistake for its
+        own insertion avoids the mismatch at the source."""
+        out = next_username("maja79", 1)
+        stem, sep, tail = out.rpartition(".")
+        self.assertEqual(sep, ".")
+        self.assertTrue(tail.isdigit())
+        self.assertTrue(stem)
+
+    def test_a_stem_that_already_ends_in_punctuation_does_not_double_up(self):
+        out = next_username("sara.", 1)
+        self.assertNotIn("..", out)
+
 
 if __name__ == "__main__":
     unittest.main()

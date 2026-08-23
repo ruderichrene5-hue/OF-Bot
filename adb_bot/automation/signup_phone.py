@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -100,23 +101,54 @@ class GeelarkHost:
     Stopping matters more here than on MultiLogin: a Geelark phone left running
     bills by the minute *and* holds one of only four parallel slots, so a
     forgotten phone stalls the next run as well as costing money.
+
+    `proxy_port`, when given, is leased exclusively for the phone's whole
+    life (`launch` acquires, `shutdown` releases) -- confirmed live
+    2026-08-23: this pipeline was starting phones on their statically
+    assigned proxy with no check that another phone was already running on
+    the same port, which the four-modem pool cannot tell apart as two
+    devices. `adb_bot.clients.geelark.session` already solved this for its
+    own single-phone manual path; this reuses the same `proxy_pool` rather
+    than inventing a second mechanism.
     """
 
-    def __init__(self, transport=None, args=None) -> None:
+    def __init__(self, transport=None, args=None, proxy_port=None) -> None:
         from adb_bot.clients.geelark import GeelarkTransport
 
         self.transport = transport or GeelarkTransport()
         self.args = args
+        self.proxy_port = proxy_port
+        self._lease = None
 
     def launch(self, profile_id: str, logger):
         from adb_bot.clients.geelark import prepare_geelark_profile_for_adb
+        from adb_bot.clients.geelark import proxy_pool
 
-        return prepare_geelark_profile_for_adb(
+        if self.proxy_port is not None:
+            self._lease = proxy_pool.acquire_proxy(
+                [self.proxy_port], owner=str(profile_id), wait_seconds=60.0)
+            if self._lease is None:
+                logger.warning(
+                    "signup_phone: proxy port %s is already leased by "
+                    "another running phone; not starting %s on it",
+                    self.proxy_port, profile_id)
+                return None
+
+        profile = prepare_geelark_profile_for_adb(
             profile_id, self.transport, logger=logger)
+        if profile is None and self._lease is not None:
+            # Never strand a lease on a launch that did not happen.
+            proxy_pool.release_proxy(self._lease)
+            self._lease = None
+        return profile
 
     def shutdown(self, profile_id: str, logger) -> None:
         from adb_bot.clients.geelark import release_geelark_phone
+        from adb_bot.clients.geelark import proxy_pool
 
+        if self._lease is not None:
+            proxy_pool.release_proxy(self._lease)
+            self._lease = None
         try:
             release_geelark_phone(profile_id, self.transport, logger=logger)
         except Exception as exc:
@@ -198,7 +230,11 @@ def load_assignment(profile_name: str, path: Path | None = None) -> dict:
 def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
     profile_id = str(profile_item.get("id"))
     name = str(profile_item.get("serial_name") or profile_id)
-    identity = make_identity()
+    # The join key everywhere else in this codebase is the first word of the
+    # profile name (ONBOARDING_A_MODEL.md) -- "Cloe new 1" -> "Cloe" -- so
+    # reusing it here needs no extra field threaded through from the caller.
+    model = name.split()[0] if name and not name == profile_id else ""
+    identity = make_identity(model=model)
     if box is not None:
         # `run_signup` picks its chain off `identity.email`: an address takes
         # the "sign up with email" hatch, no address takes the mobile-number
@@ -380,6 +416,36 @@ def seconds_left_for_verification(elapsed: float) -> float | None:
     return left if left >= MIN_VERIFY_SECONDS else None
 
 
+def _download_model_photo(name: str, logger) -> str:
+    """A local copy of the model's own photo, for the verification photo
+    challenge (`AdbChallengeDriver.upload_photo`). "" if there is no model
+    to derive, no picture on her Geelark tag, or the download fails --
+    callers must treat that as "none available", never invent a path.
+    """
+    model = name.split()[0] if name else ""
+    if not model:
+        return ""
+    try:
+        import requests
+
+        from adb_bot.clients.geelark import GeelarkTransport, library
+
+        url = library.picture_url_for_tag(model, transport=GeelarkTransport())
+        if not url:
+            return ""
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        suffix = Path(url).suffix or ".jpg"
+        dest = Path(tempfile.gettempdir()) / f"verify-photo-{model}{suffix}"
+        dest.write_bytes(response.content)
+        return str(dest)
+    except Exception as exc:
+        if logger:
+            logger.warning("signup_phone: could not fetch %s's photo for "
+                           "the verification challenge (%s)", model, exc)
+        return ""
+
+
 def verify_account(profile_id: str, name: str, identity, target: str,
                    adb_client, args, logger, seconds: float) -> dict:
     """Clear the checkpoint Instagram just put the new account behind.
@@ -413,9 +479,10 @@ def verify_account(profile_id: str, name: str, identity, target: str,
     except Exception as exc:
         logger.warning("signup_phone: could not clear permission prompts (%s)",
                        exc)
-    challenge_driver = AdbChallengeDriver(target, adb_client, logger=logger,
-                                          act=True,
-                                          screenshots=args.screenshots)
+    challenge_driver = AdbChallengeDriver(
+        target, adb_client, logger=logger, act=True,
+        screenshots=args.screenshots,
+        photo_source_path=_download_model_photo(name, logger))
     verdict = verification.run_verification(
         challenge_driver, build_router(logger=logger), logger=logger,
         country=country, max_seconds=seconds)

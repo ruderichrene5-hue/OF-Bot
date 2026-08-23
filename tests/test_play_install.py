@@ -193,6 +193,46 @@ def test_a_download_that_is_actually_moving_is_left_alone():
     assert not driver.cancelled
 
 
+SETUP_SHEET = ("complete account setup review your account to continue "
+              "installing apps on google play continue")
+
+
+def test_a_setup_sheet_is_not_read_as_a_real_download():
+    """"...to continue **installing** apps..." contains the word a real
+    progress screen uses, for an unrelated reason. A `Continue` button on
+    screen is what tells the two apart -- a real download never offers one."""
+    assert p.says_any(SETUP_SHEET, p._WORKING_MARKERS)  # the false hit itself
+    assert not p.offers_install(["Continue"])
+
+
+def test_a_setup_sheet_is_dismissed_not_waited_out():
+    """`lucas18anosff@gmail.com`, 2026-08-22: this sheet sat for 565 seconds
+    ("still working; waiting", every 10s) because the `installing` in its own
+    unrelated sentence made it look like an active download -- so the loop
+    never reached the tap that was already coded to clear it."""
+    adb = _Adb()
+
+    class SetupSheet(_Driver):
+        def __init__(self):
+            super().__init__(adb, SETUP_SHEET)
+
+        def clickable_labels(self):
+            return ["Continue"]
+
+        def tap_label(self, labels):
+            if "Continue" in labels or "CONTINUE" in labels:
+                self.dismissed = True
+                self.adb.installed = True
+                return True
+            return False
+
+    driver = SetupSheet()
+    verdict = p.install(driver, adb, "host:1", PACKAGE, sleep=lambda _s: None)
+
+    assert driver.dismissed, "waited out the sheet instead of tapping Continue"
+    assert verdict == p.RESULT_INSTALLED
+
+
 def test_an_app_already_on_the_phone_is_left_alone():
     """A reinstall can log an account out, and this runs on phones that have
     just been signed in."""

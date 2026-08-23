@@ -490,10 +490,15 @@ class VerificationResult:
 # retried numbers and screens that repeat.
 MAX_STEPS = 14
 
-# How many numbers one account gets before the run hands back to a human. Each
-# one costs 45 seconds and real money, and an account that has burned three
-# numbers is usually being refused for a reason a fourth will not fix.
-MAX_NUMBER_ATTEMPTS = 3
+# How many numbers one account gets before the run hands back to a human.
+# Raised from 3 to 10 on 2026-08-23: a number that never delivered a code
+# within its own 90s window is refunded, not charged, so a run that keeps
+# hitting bad numbers costs delivered-and-unused attempts, not money -- the
+# original "3 is usually Instagram refusing, not the pool" reasoning still
+# applies to a *different* failure shape (Instagram explicitly rejecting the
+# number as invalid), which the phone-screen's own markers catch separately
+# and swap the number for free without spending an attempt here at all.
+MAX_NUMBER_ATTEMPTS = 10
 
 # The same screen this many times in a row, with the step reporting success each
 # time, means the step is not actually advancing anything.

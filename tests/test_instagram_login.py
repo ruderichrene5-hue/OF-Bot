@@ -122,12 +122,16 @@ class FakeDriver:
     dump and would otherwise use a position from before the keyboard closed.
     """
 
-    def __init__(self, screens):
+    def __init__(self, screens, tap_results=None):
         self.screens = list(screens)
         self.filled = []
         self.tapped = []
         self.dismissed = False
         self.reads_before_tap = None
+        # None means every tap_label() call succeeds, matching every existing
+        # fixture. A list lets a test script specific taps failing, to drive
+        # `_submit_after_typing`'s dismiss-first fallback.
+        self._tap_results = list(tap_results) if tap_results is not None else None
 
     reads = 0
 
@@ -143,6 +147,8 @@ class FakeDriver:
         if self.reads_before_tap is None:
             self.reads_before_tap = self.reads
         self.tapped.append(tuple(labels))
+        if self._tap_results is not None:
+            return self._tap_results.pop(0) if self._tap_results else True
         return True
 
     def dismiss_keyboard(self):
@@ -185,15 +191,72 @@ class LogInTest(unittest.TestCase):
 
     def test_the_screen_is_re_read_before_tapping_log_in(self):
         """tap_label taps the driver's CACHED dump. Without a fresh read the
-        tap uses a position captured while the keyboard was still open, and the
-        Log in button has moved ~230px by then -- so the tap lands on nothing
-        and four accounts in a row get reported "stuck".
+        tap uses a position captured while the keyboard was still open, and on
+        a device where the button only becomes reachable after the keyboard
+        closes, a stale tap lands on nothing and the account gets reported
+        "stuck". Here the tap succeeds with the keyboard still open (see
+        `SubmitAfterTypingTest`), so dismiss_keyboard is never needed --
+        the property this test actually pins is the fresh read, not the
+        dismiss.
         """
         driver = FakeDriver([FORM, FORM, FEED])
         login.log_in(driver, "a", "b", sleep=lambda *_: None)
+        self.assertFalse(driver.dismissed)
+        # A read happened immediately before the (successful) first tap.
+        self.assertEqual(driver.reads_before_tap, 2)
+
+    def test_a_device_where_dismissing_the_keyboard_exits_the_flow_still_logs_in(self):
+        """Real bug, found 2026-08-22 testing a live Geelark phone: BACK
+        (what dismiss_keyboard sends) was not consumed by the IME on that
+        device and fell through to the activity, exiting the whole login flow
+        back to the Join Instagram screen with the typed credentials lost.
+
+        Simulated here by making dismiss_keyboard() corrupt the next screen --
+        if the fix regressed to a dismiss-first sequence, this would land back
+        on the join screen instead of the feed and the login would not
+        complete.
+        """
+        class FlakyDismissDriver(FakeDriver):
+            def dismiss_keyboard(self):
+                super().dismiss_keyboard()
+                self.screens.insert(0, JOIN)
+
+        driver = FlakyDismissDriver([FORM, FORM, FEED])
+        result = login.log_in(driver, "a", "b", sleep=lambda *_: None)
+        self.assertEqual(result, login.RESULT_LOGGED_IN)
+        self.assertFalse(driver.dismissed)
+
+
+class SubmitAfterTypingTest(unittest.TestCase):
+    """`_submit_after_typing` in isolation: the ordering that matters is tap
+    first with the keyboard open, dismiss only as a fallback -- never dismiss
+    first, which is what made BACK exit the whole flow on the device this was
+    found on."""
+
+    def test_taps_immediately_when_the_button_is_reachable_with_the_keyboard_open(self):
+        driver = FakeDriver([])
+        result = login._submit_after_typing(driver, ("Log in",),
+                                            lambda *_: None, 1)
+        self.assertTrue(result)
+        self.assertFalse(driver.dismissed)
+        self.assertEqual(driver.tapped, [("Log in",)])
+
+    def test_falls_back_to_dismissing_the_keyboard_if_the_first_tap_misses(self):
+        """The case the original code was written for: the button is not
+        reachable until the keyboard closes (measured ~230px shift)."""
+        driver = FakeDriver([], tap_results=[False, True])
+        result = login._submit_after_typing(driver, ("Log in",),
+                                            lambda *_: None, 1)
+        self.assertTrue(result)
         self.assertTrue(driver.dismissed)
-        # One read to see the form, then another after dismissing, before tap.
-        self.assertGreaterEqual(driver.reads_before_tap, 2)
+        self.assertEqual(driver.tapped, [("Log in",), ("Log in",)])
+
+    def test_reports_failure_only_if_neither_attempt_finds_the_button(self):
+        driver = FakeDriver([], tap_results=[False, False])
+        result = login._submit_after_typing(driver, ("Log in",),
+                                            lambda *_: None, 1)
+        self.assertFalse(result)
+        self.assertTrue(driver.dismissed)
 
     def test_a_near_miss_never_taps_continue(self):
         near = ("is this your account? we couldn\u2019t find an account that "

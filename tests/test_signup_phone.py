@@ -12,6 +12,7 @@ before the code can be typed.
 """
 
 from types import SimpleNamespace
+from unittest import mock
 
 from adb_bot.automation import signup_phone
 from adb_bot.automation.flows import signup, verification
@@ -140,3 +141,143 @@ def test_the_verification_verdict_does_not_erase_how_the_run_got_here(monkeypatc
     assert "steps" not in out, (
         "verify_account must not own `steps`; run_phone merges the one key it "
         "contributes")
+
+
+# --- the username carries the model's name (2026-08-23) --------------------
+
+def test_the_username_starts_with_the_models_name():
+    """The join key everywhere else in this codebase is the first word of
+    the profile name (ONBOARDING_A_MODEL.md) -- "Cloe new 1" -> "Cloe" --
+    reused here so the signup itself needs no extra model field threaded
+    through from the caller."""
+    out = signup_phone.run_phone(
+        {"id": "1", "serial_name": "Cloe new 1"}, None,
+        host=None, adb_client=None, args=_args(apply=False), logger=None)
+
+    assert out["username"].lower().startswith("cloe")
+
+
+def test_a_profile_with_no_serial_name_falls_back_to_organic():
+    """No profile name means no model to derive -- the id alone (used as
+    the fallback name) must never be typed in as a username stem."""
+    out = signup_phone.run_phone(
+        {"id": "633822713504334096"}, None,
+        host=None, adb_client=None, args=_args(apply=False), logger=None)
+
+    assert not out["username"].startswith("633822713504334096")
+
+
+# --- GeelarkHost leases its phone's proxy port (2026-08-23) -----------------
+#
+# Confirmed live: the batch pipeline was starting phones on their statically
+# assigned proxy with no check that another phone was already running on the
+# same port -- the four-modem pool cannot tell two devices apart on the same
+# port at the same time. `proxy_pool` already solved this for the single-
+# phone manual path (`adb_bot.clients.geelark.session`); these pin that
+# `GeelarkHost` now goes through the same mechanism.
+
+class _FakeLease:
+    def __init__(self, port):
+        self.port = port
+
+
+def test_no_proxy_port_means_no_lease_is_attempted(monkeypatch):
+    """Existing callers that do not pass `proxy_port` (e.g. the readiness
+    check before this fix) must see identical behaviour to before."""
+    calls = []
+    monkeypatch.setattr("adb_bot.clients.geelark.proxy_pool.acquire_proxy",
+                        lambda *a, **kw: calls.append((a, kw)) or _FakeLease(1))
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.prepare_geelark_profile_for_adb",
+        lambda *a, **kw: "a-profile")
+
+    host = signup_phone.GeelarkHost(transport=object(), args=None)
+    result = host.launch("profile-1", logger=None)
+
+    assert result == "a-profile"
+    assert calls == []
+
+
+def test_a_proxy_port_is_leased_before_the_phone_launches(monkeypatch):
+    leased = []
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.proxy_pool.acquire_proxy",
+        lambda ports, **kw: leased.append(ports) or _FakeLease(ports[0]))
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.prepare_geelark_profile_for_adb",
+        lambda *a, **kw: "a-profile")
+
+    host = signup_phone.GeelarkHost(transport=object(), args=None,
+                                    proxy_port=54018)
+    result = host.launch("profile-1", logger=None)
+
+    assert result == "a-profile"
+    assert leased == [[54018]]
+
+
+def test_a_port_already_held_by_another_phone_refuses_to_launch(monkeypatch):
+    """None means the lease is held elsewhere right now -- this phone must
+    not start on the same port a second one is already using."""
+    started = []
+    monkeypatch.setattr("adb_bot.clients.geelark.proxy_pool.acquire_proxy",
+                        lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.prepare_geelark_profile_for_adb",
+        lambda *a, **kw: started.append(1) or "a-profile")
+
+    host = signup_phone.GeelarkHost(transport=object(), args=None,
+                                    proxy_port=54018)
+    result = host.launch("profile-1", logger=mock.Mock())
+
+    assert result is None
+    assert started == []
+
+
+def test_a_lease_is_not_stranded_when_the_phone_never_comes_up(monkeypatch):
+    """The lease must be given back immediately if the launch it was taken
+    for never actually happens -- otherwise a phone that fails to start
+    parks a proxy nobody else can use for the whole TTL."""
+    released = []
+    monkeypatch.setattr("adb_bot.clients.geelark.proxy_pool.acquire_proxy",
+                        lambda *a, **kw: _FakeLease(54018))
+    monkeypatch.setattr("adb_bot.clients.geelark.proxy_pool.release_proxy",
+                        lambda lease: released.append(lease.port))
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.prepare_geelark_profile_for_adb",
+        lambda *a, **kw: None)  # phone never becomes ADB-ready
+
+    host = signup_phone.GeelarkHost(transport=object(), args=None,
+                                    proxy_port=54018)
+    result = host.launch("profile-1", logger=None)
+
+    assert result is None
+    assert released == [54018]
+    assert host._lease is None
+
+
+def test_shutdown_releases_the_held_lease(monkeypatch):
+    released = []
+    monkeypatch.setattr("adb_bot.clients.geelark.proxy_pool.acquire_proxy",
+                        lambda *a, **kw: _FakeLease(54018))
+    monkeypatch.setattr("adb_bot.clients.geelark.proxy_pool.release_proxy",
+                        lambda lease: released.append(lease.port))
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.prepare_geelark_profile_for_adb",
+        lambda *a, **kw: "a-profile")
+    monkeypatch.setattr("adb_bot.clients.geelark.release_geelark_phone",
+                        lambda *a, **kw: True)
+
+    host = signup_phone.GeelarkHost(transport=object(), args=None,
+                                    proxy_port=54018)
+    host.launch("profile-1", logger=None)
+    host.shutdown("profile-1", logger=None)
+
+    assert released == [54018]
+
+
+def test_shutdown_without_a_held_lease_does_not_crash(monkeypatch):
+    monkeypatch.setattr("adb_bot.clients.geelark.release_geelark_phone",
+                        lambda *a, **kw: True)
+
+    host = signup_phone.GeelarkHost(transport=object(), args=None)
+    host.shutdown("profile-1", logger=None)  # must not raise

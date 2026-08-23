@@ -244,6 +244,32 @@ def classify_login_screen(text: str | None) -> str:
     return SCREEN_UNKNOWN
 
 
+def _submit_after_typing(driver, labels, sleep, settle_seconds: float) -> bool:
+    """Tap `labels` after typing, without assuming BACK is safe to close the IME.
+
+    Tried live against a real account on 2026-08-22: `dismiss_keyboard()`
+    sends `KEYCODE_BACK`, and on that device (Android 16, Geelark cloud
+    phone) BACK was not consumed by the keyboard at all -- it fell straight
+    through to the activity and exited the whole login flow back to
+    Instagram's "Join Instagram" entry screen, with the typed credentials
+    lost. Reproduced twice, not a fluke.
+
+    So this tries the button first with the keyboard still open -- confirmed
+    working on that same device, screenshot in hand, the button was fully
+    visible above the IME. Only if that fails (the button truly is covered
+    or off-screen, which is the case the original dismiss-first approach was
+    written for) does it fall back to `dismiss_keyboard()` -- preserving
+    whatever device the ~230px keyboard-close button shift was measured on.
+    """
+    driver.read_screen()
+    if driver.tap_label(labels):
+        return True
+    driver.dismiss_keyboard()
+    sleep(settle_seconds)
+    driver.read_screen()
+    return driver.tap_label(labels)
+
+
 def log_in(driver, username: str, password: str, logger=None,
            sleep=time.sleep, mailbox=None) -> str:
     """Sign `username` in on the phone `driver` is attached to.
@@ -336,11 +362,10 @@ def log_in(driver, username: str, password: str, logger=None,
             sleep(SETTLE_SECONDS)
             driver.fill(("code", "enter code", "confirmation code"), code,
                         "instagram email code")
-            driver.dismiss_keyboard()
-            sleep(KEYBOARD_SETTLE_SECONDS)
-            # Same cached-dump trap as the Log in button: re-read before tapping.
-            driver.read_screen()
-            driver.tap_label(("Continue", "Next", "Confirm"))
+            # Same cached-dump trap as the Log in button, and the same BACK
+            # risk -- see `_submit_after_typing`.
+            _submit_after_typing(driver, ("Continue", "Next", "Confirm"),
+                                sleep, KEYBOARD_SETTLE_SECONDS)
             sleep(SETTLE_SECONDS)
             continue
         if screen == SCREEN_SMS_CODE:
@@ -396,19 +421,20 @@ def log_in(driver, username: str, password: str, logger=None,
             driver.fill(("username, email or mobile number", "username"),
                         username, "instagram username")
             driver.fill(("password",), password, "instagram password")
-            driver.dismiss_keyboard()
-            sleep(KEYBOARD_SETTLE_SECONDS)
-            # Re-read the screen before tapping, and do NOT remove this.
-            # `tap_label` taps using the driver's *cached* dump and only
-            # re-reads when it has none -- so without this it taps a position
-            # captured while the keyboard was still open. The Log in button
-            # moves ~230px when the keyboard closes (measured: y=542 up,
-            # y=775 down on a 1440-tall screen), so the tap lands on nothing,
-            # and the form then sits there fully filled while the flow waits
-            # for an answer that was never asked for. Four accounts in a row
-            # were reported "stuck" by exactly this.
-            driver.read_screen()
-            driver.tap_label(("Log in", "Log In"))
+            # `_submit_after_typing` re-reads the screen before tapping, and
+            # that matters regardless of which branch it takes: `tap_label`
+            # taps using the driver's *cached* dump and only re-reads when it
+            # has none -- so without a fresh read this taps a position
+            # captured while the keyboard was still open. On the device the
+            # keyboard-close shift was measured on, the Log in button moves
+            # ~230px when the keyboard closes (y=542 up, y=775 down on a
+            # 1440-tall screen); on another device tested 2026-08-22, sending
+            # BACK to close the keyboard first exited the whole login flow
+            # instead. Trying the tap with the keyboard still open first is
+            # safe on both: it either lands directly, or fails harmlessly and
+            # falls back to the dismiss-first path.
+            _submit_after_typing(driver, ("Log in", "Log In"), sleep,
+                                 KEYBOARD_SETTLE_SECONDS)
             submitted = True
             sleep(SETTLE_SECONDS)
             continue

@@ -36,12 +36,21 @@ from adb_bot.automation import signup_mailboxes
 from adb_bot.automation.flows import signup
 from adb_bot.automation.signup_phone import GeelarkHost, run_phone
 from adb_bot.clients.adb import ADBClient
+from adb_bot.clients.airtable import AirtableClient, TABLE_MODELS
 from adb_bot.clients.geelark import GeelarkTransport
 from adb_bot.clients.geelark.phones import GeelarkPhoneClient
+from adb_bot.config import settings
+from adb_bot.core import locks
 from adb_bot.core.logger import get_logger
 
 NEW_TAG = "new profile"
 CONNECTED_TAG = "IG connected"
+FAILED_TAG = "Signup Failed"
+
+# Statuses where the phone was never actually touched -- another operator's
+# lock, a dry run, a launch that never came up. `new profile` still describes
+# these correctly, so nothing about the tag should change.
+NO_ATTEMPT_STATUSES = frozenset({"busy", "not-ready", "dry-run", "unreachable"})
 
 # Where each run's outcome is appended, so a later run can see what has already
 # been tried on a phone without asking Geelark to interpret its own remark.
@@ -194,6 +203,25 @@ def record_outcome(row: dict) -> None:
             handle.write(json.dumps(row) + "\n")
 
 
+def signup_status_tag(status: str) -> str | None:
+    """Which of the three lifecycle tags a finished attempt earns.
+
+    `None` means leave `new profile` alone: either nothing was actually
+    attempted (`NO_ATTEMPT_STATUSES`), or the account is real but not yet
+    finished (`created_unverified` -- held behind a checkpoint, which is
+    progress, not a failure, but is also not `IG connected` per
+    `write_back`'s own rule that only a finished, verified signup earns
+    that tag). Before this, `new profile` never came off a phone that had
+    genuinely tried and failed, so it could not be told apart from one that
+    had never been touched.
+    """
+    if status == signup.RESULT_CREATED:
+        return CONNECTED_TAG
+    if status in NO_ATTEMPT_STATUSES or status == signup.RESULT_CREATED_UNVERIFIED:
+        return None
+    return FAILED_TAG
+
+
 def write_back(phone: dict, identity, address: str, status: str,
                transport, logger) -> None:
     """Put the result on the Geelark phone itself.
@@ -227,9 +255,17 @@ def write_back(phone: dict, identity, address: str, status: str,
         by_name = tags.tag_ids_by_name()
         wanted = [str(t.get("name")) for t in (phone.get("tags") or [])
                   if t.get("name")]
-        if status == signup.RESULT_CREATED and CONNECTED_TAG not in wanted:
-            wanted.append(CONNECTED_TAG)
-            tags.ensure_tag(CONNECTED_TAG, "green")
+        outcome_tag = signup_status_tag(status)
+        if outcome_tag is not None and outcome_tag not in wanted:
+            wanted.append(outcome_tag)
+            tags.ensure_tag(outcome_tag,
+                           "green" if outcome_tag == CONNECTED_TAG else "red")
+            # `new profile` is the phone's "untried" state; a finished
+            # attempt, success or failure, has left it either way.
+            wanted = [name for name in wanted if name != NEW_TAG]
+            if outcome_tag == CONNECTED_TAG and FAILED_TAG in wanted:
+                # An earlier failed attempt on this phone is moot now.
+                wanted = [name for name in wanted if name != FAILED_TAG]
             by_name = tags.tag_ids_by_name(refresh=True)
         tag_ids = [by_name[name] for name in wanted if name in by_name]
         if wanted and not tag_ids:
@@ -245,6 +281,35 @@ def write_back(phone: dict, identity, address: str, status: str,
                        phone.get("serialName"), exc)
 
 
+def increment_profiles_created(model: str, logger) -> None:
+    """+1 on that model's `Models.Profiles Created`, so Airtable carries a
+    running count of finished signups without anyone tallying it by hand.
+
+    Best-effort: a model with no Models row (nothing to increment) or an
+    Airtable hiccup logs a warning and moves on -- the phone's own tags and
+    remark are the real record of a successful signup, this is a convenience
+    counter on top of them, not the source of truth.
+    """
+    if not model:
+        return
+    try:
+        client = AirtableClient(settings.get_saved_airtable_token(),
+                               settings.get_saved_airtable_base_id(),
+                               TABLE_MODELS)
+        record_id = client.models_by_name().get(model.lower())
+        if not record_id:
+            logger.warning("signup_geelark: no Models row for %r; "
+                           "Profiles Created not incremented", model)
+            return
+        current = client._get_fields(TABLE_MODELS, record_id)
+        count = int((current or {}).get("Profiles Created") or 0)
+        client._patch_in(TABLE_MODELS, record_id,
+                         {"Profiles Created": count + 1})
+    except Exception as exc:
+        logger.warning("signup_geelark: could not increment Profiles "
+                       "Created for %r (%s)", model, exc)
+
+
 def claim_mailbox(record: dict, identity, phone: dict, apply: bool,
                   logger) -> str:
     """Flag the mailbox as used, so no later run picks the same address."""
@@ -258,6 +323,17 @@ def claim_mailbox(record: dict, identity, phone: dict, apply: bool,
         return ""
 
 
+def _phone_proxy_port(phone: dict) -> int | None:
+    """The SOCKS5 port already bound to this phone -- Geelark's `/phone/list`
+    nests it under `proxy`. Same field `session.py`'s single-phone path
+    reads; duplicated as one small pure function rather than importing that
+    module here, which would also pull in its rotation/cooldown machinery
+    this batch path has no use for."""
+    proxy = phone.get("proxy") or {}
+    port = proxy.get("port")
+    return int(port) if port else None
+
+
 def run_one(phone: dict, record: dict | None, args, logger,
             transport) -> dict:
     if record is None:
@@ -269,8 +345,8 @@ def run_one(phone: dict, record: dict | None, args, logger,
                "totp_secret": str(fields.get("2FA Secret Key") or "")}
     item = {"id": str(phone["id"]), "serial_name": phone.get("serialName")}
 
-    out = run_phone(item, box, GeelarkHost(transport, args), ADBClient(),
-                    args, logger)
+    host = GeelarkHost(transport, args, proxy_port=_phone_proxy_port(phone))
+    out = run_phone(item, box, host, ADBClient(), args, logger)
     out["phone_id"] = str(phone["id"])
     out["folder"] = (phone.get("group") or {}).get("name")
     out["mailbox_record"] = record["id"] if record else ""
@@ -281,6 +357,8 @@ def run_one(phone: dict, record: dict | None, args, logger,
             status = str(out.get("status"))
             address = box["address"] if box else "(sms, no mailbox)"
             write_back(phone, identity, address, status, transport, logger)
+            if status == signup.RESULT_CREATED:
+                increment_profiles_created(out.get("folder") or "", logger)
             # Claimed only once Instagram has actually seen the address.
             # Claiming on a failed Google sign-in costs a pool row and writes a
             # `Profile Creation` entry for somebody who does not exist -- which
@@ -294,6 +372,23 @@ def run_one(phone: dict, record: dict | None, args, logger,
                 print(f"  mailbox left free: {box['address']} ({status})")
         record_outcome({k: v for k, v in out.items() if k != "identity"})
     return out
+
+
+def skip_locked(phones: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split `phones` into (free, locked-by-someone-else).
+
+    Another run -- another operator, or this one's own earlier batch -- can
+    already hold a phone's lock. `run_phone` would report that pair as
+    "busy" and waste the slot, so this filters it out beforehand and lets a
+    phone further down the queue fill it. Does not close every race (a
+    phone can still be claimed between this check and the real `acquire`
+    inside `run_phone`), but clears the common case: two operators running
+    batches from the same untried-phone pool at the same time.
+    """
+    free, busy = [], []
+    for phone in phones:
+        (busy if locks.is_locked(str(phone["id"])) else free).append(phone)
+    return free, busy
 
 
 def main(argv=None) -> int:
@@ -337,6 +432,11 @@ def main(argv=None) -> int:
                   in wanted]
     spent = already_attempted()
     phones = [p for p in phones if str(p["id"]) not in spent]
+
+    phones, busy = skip_locked(phones)
+    if busy:
+        print(f"skipping {len(busy)} phone(s) locked by another run: "
+              f"{', '.join(str(p.get('serialName')) for p in busy)}")
 
     if args.sms:
         mailboxes = [None] * len(phones)
