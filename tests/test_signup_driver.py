@@ -27,6 +27,11 @@ def _button(label, bounds="[700,1500][900,1600]"):
             f'text="{label}" content-desc="" clickable="true"/>')
 
 
+def _edit(bounds, text="", hint=""):
+    return (f'<node class="android.widget.EditText" bounds="{bounds}" '
+            f'text="{text}" content-desc="" hint="{hint}" clickable="true"/>')
+
+
 PICKER_BOUNDS = ("[100,1000][300,1100]", "[400,1000][600,1100]",
                  "[700,1000][900,1100]")
 
@@ -135,6 +140,66 @@ class TapLabelTest(unittest.TestCase):
         driver._root = _root(_button("Loading"))
         self.assertFalse(driver.tap_label(("Next",)))
         self.assertEqual(adb.taps, [])
+
+
+class FillFallbackIndexTest(unittest.TestCase):
+    """`fill(..., fallback_index=N)` -- confirmed live 2026-08-23 (@daudkim272):
+    a real Instagram login screen had two EditTexts with no `hint` and no
+    `content-desc` at all (the labels were separate text elsewhere on
+    screen), so `_pick_field` correctly refused both fields and the login
+    form was never typed into. Position is a safe fallback here specifically
+    because a wrong guess on a login form just earns a visible "incorrect
+    password", not a silently wasted resource like a phone number would be.
+    """
+
+    def _two_hintless_fields(self):
+        return _root(_edit("[0,500][900,600]"), _edit("[0,700][900,800]"))
+
+    def test_falls_back_to_the_field_at_that_position(self):
+        after_typing = _root(_edit("[0,500][900,600]", text="daudkim272"),
+                             _edit("[0,700][900,800]"))
+        adb = FakeAdb()
+        driver = ScriptedDriver(adb, [after_typing])
+        driver._root = self._two_hintless_fields()
+
+        self.assertTrue(driver.fill(("username",), "daudkim272", "username",
+                                    fallback_index=0))
+        self.assertTrue(adb.taps)
+
+    def test_without_fallback_index_it_still_refuses(self):
+        """The default behaviour for every other caller must not change."""
+        adb = FakeAdb()
+        driver = ScriptedDriver(adb, [])
+        driver._root = self._two_hintless_fields()
+
+        self.assertFalse(driver.fill(("username",), "daudkim272", "username"))
+        self.assertEqual(adb.taps, [])
+
+    def test_an_out_of_range_fallback_index_still_refuses(self):
+        adb = FakeAdb()
+        driver = ScriptedDriver(adb, [])
+        driver._root = self._two_hintless_fields()
+
+        self.assertFalse(driver.fill(("username",), "daudkim272", "username",
+                                     fallback_index=5))
+        self.assertEqual(adb.taps, [])
+
+    def test_a_matching_hint_never_needs_the_fallback(self):
+        """The fallback only ever fires once hint-matching has already
+        failed -- a real hint always wins."""
+        root = _root(_edit("[0,500][900,600]", hint="username"),
+                     _edit("[0,700][900,800]"))
+        after_typing = _root(_edit("[0,500][900,600]", text="daudkim272",
+                                   hint="username"),
+                             _edit("[0,700][900,800]"))
+        adb = FakeAdb()
+        driver = ScriptedDriver(adb, [after_typing])
+        driver._root = root
+
+        self.assertTrue(driver.fill(("username",), "daudkim272", "username",
+                                    fallback_index=1))
+        # Tapped the hinted field (y~550), not the fallback one (y~750).
+        self.assertIn("550", adb.taps[0])
 
 
 if __name__ == "__main__":

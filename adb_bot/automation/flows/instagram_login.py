@@ -418,9 +418,13 @@ def log_in(driver, username: str, password: str, logger=None,
                 log("warning", "login form still up after %ss; the submit did "
                                "not take", MAX_FORM_WAITS * FORM_WAIT_SECONDS)
                 return RESULT_STUCK
+            # fallback_index: this form is always username-then-password, and
+            # getting the fallback wrong here just earns "incorrect password"
+            # -- visible and recoverable, unlike a mistyped phone number.
             driver.fill(("username, email or mobile number", "username"),
-                        username, "instagram username")
-            driver.fill(("password",), password, "instagram password")
+                        username, "instagram username", fallback_index=0)
+            driver.fill(("password",), password, "instagram password",
+                       fallback_index=1)
             # `_submit_after_typing` re-reads the screen before tapping, and
             # that matters regardless of which branch it takes: `tap_label`
             # taps using the driver's *cached* dump and only re-reads when it
