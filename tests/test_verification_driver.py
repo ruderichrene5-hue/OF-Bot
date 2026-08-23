@@ -9,6 +9,7 @@ rented number with no error anywhere -- so they are pinned here instead.
 
 from __future__ import annotations
 
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -48,7 +49,19 @@ class FakeAdb:
 
     @property
     def taps(self):
-        return [c for c in self.commands if "input tap" in c]
+        """Plain taps, plus held taps (`_tap(press=True)`) -- a zero-distance
+        `input swipe x y x y ms`, distinct from a real scroll swipe whose
+        start and end coordinates differ."""
+        out = []
+        for c in self.commands:
+            if "input tap" in c:
+                out.append(c)
+                continue
+            match = re.search(r"input swipe (\d+) (\d+) (\d+) (\d+)", c)
+            if match and match.group(1) == match.group(3) \
+                    and match.group(2) == match.group(4):
+                out.append(c)
+        return out
 
     @property
     def typed(self):

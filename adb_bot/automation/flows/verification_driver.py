@@ -391,12 +391,24 @@ class AdbChallengeDriver:
             pass
         return root, xml
 
-    def _tap(self, center, description: str) -> bool:
+    def _tap(self, center, description: str, press: bool = False) -> bool:
+        """`press=True` sends a zero-distance swipe (a held-down tap) rather
+        than an instant `input tap`. Confirmed live 2026-08-23: the "Choose
+        From Gallery" row -- a RecyclerView item, ripple touch feedback --
+        did not register a plain `input tap` most of the time even though
+        `dumpsys` proved the coordinate was correct and the same window was
+        focused throughout (so it was not a "wrong screen" problem). An
+        instant down+up can land inside a gesture detector's touch-slop
+        window before the ripple/click machinery has armed; holding the
+        touch briefly does not have that race.
+        """
         x, y = center
         if not self.act:
             return self._refuse(f"tap {description} at ({x}, {y})")
-        self._log("info", "tapping %s at (%s, %s)", description, x, y)
-        self.adb_client.run_command(f"adb -s {self.target} shell {tap(x, y)}")
+        self._log("info", "tapping %s at (%s, %s)%s", description, x, y,
+                  " (held)" if press else "")
+        command = (swipe(x, y, x, y, 150) if press else tap(x, y))
+        self.adb_client.run_command(f"adb -s {self.target} shell {command}")
         time.sleep(self.settle_seconds)
         return True
 
@@ -943,7 +955,8 @@ class AdbChallengeDriver:
             # ViewGroup, not the label text node). Re-tap while the sheet is
             # still showing, rather than assume one tap always lands.
             for tap_attempt in range(3):
-                if not self._tap(gallery_center, "choose from gallery"):
+                if not self._tap(gallery_center, "choose from gallery",
+                                 press=True):
                     return False
                 time.sleep(max(self.settle_seconds, 3.0))
                 self._root, _xml = self._dump()
