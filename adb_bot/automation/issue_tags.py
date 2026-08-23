@@ -697,7 +697,7 @@ def notify_newly_flagged(flagged: list, logger=None, notifier=None) -> bool:
     if notifier is None:
         from adb_bot.clients.telegram import TelegramNotifier
         notifier = TelegramNotifier()
-    if not notifier.configured:
+    if not notifier.configured or not notifier.allows("flags"):
         return False
 
     n = len(flagged)
@@ -713,7 +713,7 @@ def notify_newly_flagged(flagged: list, logger=None, notifier=None) -> bool:
         "Airtable → Profiles (Cloning). The tag comes off and the profile starts "
         "posting again on its own; nothing else to do.",
     ]
-    sent = notifier.send("\n".join(lines), logger=logger)
+    sent = notifier.send("\n".join(lines), logger=logger, category="flags")
     if logger is not None:
         logger.info("issue tags: %s the group about %d newly flagged profile(s)",
                     "notified" if sent else "could not notify", len(flagged))
