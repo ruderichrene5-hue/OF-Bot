@@ -183,7 +183,9 @@ class RunOneTest(unittest.TestCase):
         self.assertIn(trigger.call_args.kwargs["biography"],
                      FULL_CONFIG["bio_pool"])
 
-    def test_nickname_and_username_share_one_generated_handle(self):
+    def test_nickname_is_always_the_plain_model_name(self):
+        """Only Username is Instagram's unique @handle and needs the
+        generated variation -- Nickname is just a display label."""
         phone = _phone("1", ["IG connected"], model="Nikki")
         with mock.patch.object(c.library, "picture_url_for_tag",
                                return_value="https://x/nikki.jpg"), \
@@ -192,8 +194,10 @@ class RunOneTest(unittest.TestCase):
             c.run_one(phone, FULL_CONFIG, Args(), mock.Mock(), transport=None)
 
         kwargs = trigger.call_args.kwargs
-        self.assertTrue(kwargs["nickname"])
-        self.assertEqual(kwargs["nickname"], kwargs["username"])
+        self.assertEqual(kwargs["nickname"], "Nikki")
+        self.assertTrue(kwargs["username"])
+        self.assertNotEqual(kwargs["username"], "Nikki",
+                           "username never got its separator/digit tail")
 
 
 class _FakeTags:

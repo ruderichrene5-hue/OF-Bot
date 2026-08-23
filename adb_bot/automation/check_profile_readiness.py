@@ -115,20 +115,23 @@ def run_one(phone: dict, model_config: dict, args, logger, transport) -> dict:
         return out
 
     bio = bio_variations.build_bio(pool=bio_pool)
-    # Nickname and Username share one generated handle -- the model's name,
-    # sometimes with a doubled letter, then a separator and a digit tail
-    # (2026-08-23). Regenerated per phone, so a batch for one model does not
-    # all claim the exact same handle.
-    handle = bio_variations.build_username(model)
+    # Nickname is always the plain model name. Username is the generated
+    # handle -- sometimes a doubled letter, then a separator and a digit
+    # tail (2026-08-23) -- since that is Instagram's own @handle and has to
+    # be unique; the nickname is just a display label and does not.
+    # Regenerated per phone, so a batch for one model does not all claim
+    # the exact same @handle.
+    username = bio_variations.build_username(model)
     if not args.apply:
         out["status"] = "dry-run"
         print(f"  {name:18} DRY RUN -- bio={bio!r} link={link_url!r} "
-              f"picture={picture_url!r} handle={handle!r}")
+              f"picture={picture_url!r} nickname={model!r} "
+              f"username={username!r}")
         return out
 
     task_id = rpa.trigger_instagram_edit_profile(
         profile_id, biography=bio, link_url=link_url,
-        profile_picture=picture_url, nickname=handle, username=handle,
+        profile_picture=picture_url, nickname=model, username=username,
         transport=transport)
     if not task_id:
         out["status"] = "no-task-id"
