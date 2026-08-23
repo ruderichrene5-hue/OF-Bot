@@ -264,11 +264,81 @@ class PhotoTest(unittest.TestCase):
 
             self.assertFalse(driver.upload_photo())
 
-    def test_the_full_happy_path_taps_photo_then_done(self):
+    def test_the_full_happy_path_taps_upload_photo_then_cell_then_submit(self):
+        """The real screen sequence, confirmed live 2026-08-23 (Nikki new 1):
+        'Upload photo instead' lands on an instructions screen ('Upload a
+        photo'), which opens a bottom sheet ('Choose From Gallery' / 'Take
+        photo') over the *same* screen, which finally opens the picker, then
+        'Submit' to confirm."""
+        intermediate_root = _root(_button("Menu"), _button("Upload a photo"),
+                                  _button("Submit"),
+                                  _button("Record video instead"))
+        sheet_root = _root(_button("Choose From Gallery"),
+                           _button("Take photo"), _button("Upload a photo"),
+                           _button("Submit"))
         picker_root = _root(
             '<node class="android.widget.ImageView" bounds="[0,300][300,600]" '
             'content-desc="Photo, taken today"/>',
-            _button("Done", bounds="[600,50][900,150]"),
+        )
+        confirm_root = _root(_button("Submit", bounds="[600,50][900,150]"))
+        adb = FakeAdb()
+        with mock.patch.object(ig, "_adb_push_media_to_device",
+                               return_value=True), \
+             mock.patch.object(ig, "_adb_verify_remote_media_exists",
+                               return_value=True), \
+             mock.patch.object(ig, "_adb_verify_remote_media_matches_local",
+                               return_value=True), \
+             mock.patch.object(ig, "_adb_wait_for_media_store_index",
+                               return_value=True), \
+             mock.patch.object(ig, "_adb_capture_ui_dump",
+                               side_effect=[intermediate_root, sheet_root,
+                                           picker_root, confirm_root]):
+            driver = self._photo_driver(adb=adb)
+
+            self.assertTrue(driver.upload_photo())
+        # Upload photo instead, Upload a photo, Choose From Gallery, the
+        # photo cell, then Submit.
+        self.assertEqual(len(adb.taps), 5)
+
+    def test_the_gallery_sheet_is_retried_before_giving_up(self):
+        """Confirmed live 2026-08-23: the sheet was visibly on screen (a real
+        screenshot showed it) while three uiautomator dumps 2s apart in a row
+        still missed it. Patience, not a coordinate guess, is the fix --
+        pinning that a late-arriving dump is still picked up."""
+        stale_root = _root(_button("Menu"), _button("Upload a photo"),
+                           _button("Submit"), _button("Record video instead"))
+        sheet_root = _root(_button("Choose From Gallery"),
+                           _button("Take photo"))
+        picker_root = _root(
+            '<node class="android.widget.ImageView" bounds="[0,300][300,600]" '
+            'content-desc="Photo, taken today"/>',
+        )
+        adb = FakeAdb()
+        with mock.patch.object(ig, "_adb_push_media_to_device",
+                               return_value=True), \
+             mock.patch.object(ig, "_adb_verify_remote_media_exists",
+                               return_value=True), \
+             mock.patch.object(ig, "_adb_verify_remote_media_matches_local",
+                               return_value=True), \
+             mock.patch.object(ig, "_adb_wait_for_media_store_index",
+                               return_value=True), \
+             mock.patch.object(ig, "_adb_capture_ui_dump",
+                               side_effect=[stale_root, stale_root, stale_root,
+                                           sheet_root, picker_root,
+                                           picker_root]):
+            driver = self._photo_driver(adb=adb)
+
+            self.assertTrue(driver.upload_photo())
+        # Upload photo instead, Upload a photo, Choose From Gallery (found on
+        # the 3rd retry), the photo cell. No Submit button on this fixture.
+        self.assertEqual(len(adb.taps), 4)
+
+    def test_a_picker_reached_without_the_intermediate_screen_still_works(self):
+        """Some accounts may skip straight to the picker -- the intermediate
+        tap is best-effort, not required."""
+        picker_root = _root(
+            '<node class="android.widget.ImageView" bounds="[0,300][300,600]" '
+            'content-desc="Photo, taken today"/>',
         )
         adb = FakeAdb()
         with mock.patch.object(ig, "_adb_push_media_to_device",
@@ -284,8 +354,9 @@ class PhotoTest(unittest.TestCase):
             driver = self._photo_driver(adb=adb)
 
             self.assertTrue(driver.upload_photo())
-        # Upload photo instead, the photo cell, then Done.
-        self.assertEqual(len(adb.taps), 3)
+        # Upload photo instead, then straight to the photo cell (no Submit
+        # button on this fixture, so no third tap).
+        self.assertEqual(len(adb.taps), 2)
 
 
 class ClearFieldTest(unittest.TestCase):

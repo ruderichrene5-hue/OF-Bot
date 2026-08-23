@@ -902,18 +902,64 @@ class AdbChallengeDriver:
             return False
         time.sleep(max(self.settle_seconds, 3.0))
 
-        root, _xml = self._dump()
-        if root is None:
-            self._log("warning", "photo challenge: no dump after 'Upload "
-                                 "photo instead'")
-            return False
-        photo_center = None
-        for node in root.iter():
-            desc = str(node.attrib.get("content-desc", "") or "")
-            if desc.lower().startswith("photo"):
-                photo_center = self._center(node.attrib)
-                if photo_center is not None:
-                    break
+        # "Upload photo instead" does not open the picker directly -- it lands
+        # on an instructions screen with its own "Upload a photo" button.
+        # Confirmed live 2026-08-23 (Nikki new 1): the dump right after the
+        # first tap was `['Menu', 'Upload a photo', 'Submit', 'Record video
+        # instead']`, not a picker. `Submit` was already present, greyed out
+        # until a photo is actually attached -- this is the confirmation
+        # screen for the *whole* challenge, not just the picker step.
+        self._root, _xml = self._dump()
+        upload_center = self._find_exact(("Upload a photo", "UPLOAD A PHOTO"))
+        if upload_center is not None:
+            if not self._tap(upload_center, "upload a photo"):
+                return False
+            time.sleep(max(self.settle_seconds, 3.0))
+
+        # That tap opens a bottom sheet, not the picker either -- confirmed
+        # live 2026-08-23: `Choose From Gallery` / `Take photo`, sitting over
+        # the same screen underneath (hence `Submit` and `Upload a photo`
+        # still show up in the same dump). Only after this tap does an actual
+        # thumbnail grid render.
+        #
+        # The sheet is visibly on screen (confirmed by screenshot) well before
+        # uiautomator's dump reliably includes it -- a real screenshot showed
+        # it fully rendered while three dumps 2s apart in a row still missed
+        # it. Retried patiently rather than falling back to a coordinate
+        # guess, which the rest of this driver never does.
+        gallery_center = None
+        for attempt in range(5):
+            self._root, _xml = self._dump()
+            gallery_center = self._find_exact(("Choose From Gallery",
+                                               "CHOOSE FROM GALLERY"))
+            if gallery_center is not None:
+                break
+            time.sleep(2.0)
+        if gallery_center is not None:
+            if not self._tap(gallery_center, "choose from gallery"):
+                return False
+            time.sleep(max(self.settle_seconds, 3.0))
+
+        # Same story again: 'Choose From Gallery' opens the system picker as
+        # its own activity, which renders visibly well before uiautomator's
+        # dump reliably includes its thumbnails. Patient retry, not a
+        # coordinate guess.
+        root, photo_center = None, None
+        for attempt in range(5):
+            root, _xml = self._dump()
+            if root is None:
+                self._log("warning", "photo challenge: no dump after "
+                                     "'Upload photo instead'")
+                return False
+            for node in root.iter():
+                desc = str(node.attrib.get("content-desc", "") or "")
+                if desc.lower().startswith("photo"):
+                    photo_center = self._center(node.attrib)
+                    if photo_center is not None:
+                        break
+            if photo_center is not None:
+                break
+            time.sleep(2.0)
         if photo_center is None:
             self._log("warning", "photo challenge: no photo cell found in "
                                  "the picker (labels were %s)",
@@ -924,8 +970,8 @@ class AdbChallengeDriver:
         time.sleep(self.settle_seconds)
 
         self._root, _xml = self._dump()
-        done_center = self._find_exact(("Done", "DONE", "Select", "SELECT",
-                                        "Next", "NEXT"))
+        done_center = self._find_exact(("Submit", "SUBMIT", "Done", "DONE",
+                                        "Select", "SELECT", "Next", "NEXT"))
         if done_center is not None:
             self._tap(done_center, "confirm the selected photo")
             time.sleep(max(self.settle_seconds, 3.0))
