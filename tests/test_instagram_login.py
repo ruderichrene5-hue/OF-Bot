@@ -139,8 +139,11 @@ class FakeDriver:
         self.reads += 1
         return self.screens.pop(0) if self.screens else ""
 
-    def fill(self, hints, value, what, submits_itself=False):
+    def fill(self, hints, value, what, submits_itself=False,
+             fallback_index=None):
         self.filled.append((what, value))
+        self.fallback_indices = getattr(self, "fallback_indices", [])
+        self.fallback_indices.append(fallback_index)
         return True
 
     def tap_label(self, labels, require_clickable=True):
@@ -176,6 +179,17 @@ class LogInTest(unittest.TestCase):
         login.log_in(driver, "alina", "secret", sleep=lambda *_: None)
         self.assertEqual([v for _w, v in driver.filled], ["alina", "secret"])
         self.assertIn(("Log in", "Log In"), driver.tapped)
+
+    def test_username_and_password_each_get_a_positional_fallback(self):
+        """Confirmed live 2026-08-23 (@daudkim272): a login screen with two
+        genuinely hint-less EditTexts made both fields unidentifiable, and
+        the run typed nothing into either. Username is always first,
+        password always second on this form -- pin that the fallback
+        indices actually reach `fill`, not just that credentials are
+        passed somewhere."""
+        driver = FakeDriver([FORM, FORM, FEED])
+        login.log_in(driver, "alina", "secret", sleep=lambda *_: None)
+        self.assertEqual(driver.fallback_indices, [0, 1])
 
     def test_an_email_challenge_is_a_result_not_a_failure(self):
         """The account is fine; something else answers the code. Treating this

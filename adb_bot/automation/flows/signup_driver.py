@@ -127,7 +127,7 @@ class AdbSignupDriver(AdbChallengeDriver):
 
     # --- typing ---------------------------------------------------------------
     def fill(self, hints, value: str, what: str,
-             submits_itself: bool = False) -> bool:
+             submits_itself: bool = False, fallback_index: int | None = None) -> bool:
         """Clear, type, and prove the field holds exactly `value`.
 
         `submits_itself` is for fields that act on the last character rather
@@ -136,8 +136,26 @@ class AdbSignupDriver(AdbChallengeDriver):
         having moved on, which is success; reading it as failure produced
         "the confirmation code did not land; fields now hold ['']" on a run
         where the code had in fact been accepted.
+
+        `fallback_index`, when given, is used only if no hint matches --
+        picking the Nth field by screen position rather than refusing.
+        `_pick_field`'s own refusal is right for a field whose *value* is
+        expensive to get wrong (a phone number, silently burning a rented
+        SMS lease) but wrong for a field whose worst case is a visible,
+        recoverable "incorrect password". Confirmed live 2026-08-23
+        (@daudkim272): a login screen with two genuinely hint-less fields
+        (no `hint`/`content-desc` on either EditText, the labels are plain
+        text elsewhere on screen) made the login form untypeable and the
+        run waited out the whole budget on a screen nothing was ever
+        entered into.
         """
         field = self._pick_field([h.lower() for h in hints])
+        if field is None and fallback_index is not None:
+            fields = self._edit_fields(self._root)
+            if 0 <= fallback_index < len(fields):
+                field = fields[fallback_index]
+                self._log("info", "no hint matched for %s; falling back to "
+                                  "field %d by position", what, fallback_index)
         if field is None:
             self._log("warning", "no field for %s (hints %s)", what, list(hints))
             return False
