@@ -127,8 +127,9 @@ class SendTest(unittest.TestCase):
         def __init__(self, configured=True):
             self.configured = configured
             self.sent = []
-        def send(self, text, logger=None):
+        def send(self, text, logger=None, category=""):
             self.sent.append(text); return True
+        def allows(self, category=""): return True
         def describe(self): return "test notifier"
 
     def test_a_dry_run_sends_nothing(self):

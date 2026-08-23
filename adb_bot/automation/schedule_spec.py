@@ -38,7 +38,7 @@ PLANNED_LOOPS = ("queue", "retry")
 RECOMMENDED_LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery",
                      "warmup", "warmup-state", "mlx-sync", "cleanup", "digest",
                      "doctor", "reap-phones", "second-accounts", "verification",
-                     "mlx-minutes")
+                     "mlx-minutes", "mlx-guard")
 
 # Loops the CLI can run that are deliberately NOT scheduled: arming them has to
 # be a separate, deliberate act by a person, not a side effect of running the
@@ -168,6 +168,13 @@ RECOMMENDED_INTERVALS = {
     # It is also what catches a fleet that has stopped launching, which is the
     # more urgent of its two alerts; 2026-08-18 went unnoticed for three hours.
     "mlx-minutes": 240,
+    # The guard stops the fleet when MultiLogin proxy traffic or minutes run
+    # out, so its cadence is the worst case for how long the loops keep paying
+    # for launches that cannot work. 2026-08-21 burned ~2h of them before a
+    # person noticed. 10 min bounds that, and the check is nearly free: four
+    # small GETs through the gateway, whose own traffic is the thing being
+    # protected -- more often would spend the allowance to watch it.
+    "mlx-guard": 10,
 }
 
 # Historical name -- the UI, both backends and install_units.sh read this.
@@ -210,6 +217,8 @@ DESCRIPTIONS = {
     "second-accounts": "ADB bot two-account watch (both accounts of a phone posting?)",
     "verification": "ADB bot verification loop (flagged profiles -> challenge answered)",
     "mlx-minutes": "ADB bot MultiLogin minute check (warns before the fleet stops)",
+    "mlx-guard": "ADB bot MultiLogin guard (stops the fleet when proxy traffic "
+                 "or minutes run out)",
 }
 
 # The same loops in words, for a person rather than a unit file. DESCRIPTIONS
@@ -275,6 +284,14 @@ WHAT_IT_DOES = {
     "reap-phones": "Closes phones no loop owns any more. Nothing else does — the "
                    "run that would have closed them died — and a leaked phone holds "
                    "a MultiLogin session open on a real account for hours.",
+    "mlx-guard": "Stops the posting loops when MultiLogin runs out of proxy "
+                 "traffic or minutes, instead of letting them launch phones "
+                 "into a wall for hours — which is what happened on "
+                 "2026-08-18, 08-20 and 08-21. There is no API for either "
+                 "balance, so it asks the proxy gateway directly: an empty "
+                 "allowance answers 402. Alerts on Telegram when it stops the "
+                 "fleet, when the traffic estimate drops near empty, and again "
+                 "when the gateway comes back.",
     "mlx-minutes": "Counts the MultiLogin phone-minutes the fleet has spent this "
                    "billing period, out of its own launcher log, because there is "
                    "no API that reports the balance. Warns on Telegram when what "

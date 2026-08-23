@@ -38,7 +38,7 @@ from adb_bot.core.logger import get_logger
 
 LOOPS = ("pipeline", "queue", "posting", "recheck", "retry", "recovery", "warmup",
          "warmup-state", "issue-tags", "mlx-sync", "cleanup", "second-accounts",
-         "digest", "verification", "mlx-minutes")
+         "digest", "verification", "mlx-minutes", "mlx-guard")
 # `doctor` isn't a loop -- it's the preflight check, runnable the same way.
 # `report` renders the operational page; like `doctor` it is a command rather
 # than a loop, and unlike `doctor` it is not in the recommended set, so it never
@@ -899,6 +899,23 @@ def _run_mlx_minutes(args, logger) -> int:
     return 0
 
 
+def _run_mlx_guard(args, logger) -> int:
+    """Stop the fleet when MultiLogin proxy traffic or minutes run out.
+
+    The one loop that switches other loops off, so it is also the one that must
+    never be switched off itself -- see `mlx_guard.DEFAULT_TIMERS`. Unlike
+    `mlx-minutes`, which only warns, this acts: 2026-08-20 and 08-21 both spent
+    hours launching phones into a dead proxy gateway because nothing did.
+
+    `--apply` is the same contract as every other loop: without it the check
+    probes and reports but stops nothing and sends nothing.
+    """
+    from adb_bot.automation import mlx_guard
+    report = mlx_guard.run_check(logger=logger, dry_run=not args.apply)
+    logger.info("mlx-guard: %s", report.summary())
+    return 0
+
+
 _DISPATCH = {
     "posting": _run_posting,
     "recheck": _run_recheck,
@@ -918,6 +935,7 @@ _DISPATCH = {
     "report": _run_report,
     "reap-phones": _run_reap_phones,
     "mlx-minutes": _run_mlx_minutes,
+    "mlx-guard": _run_mlx_guard,
 }
 
 

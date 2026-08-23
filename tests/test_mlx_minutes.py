@@ -191,8 +191,11 @@ class _Notifier:
     def __init__(self):
         self.sent = []
 
-    def send(self, text, logger=None):
+    def send(self, text, logger=None, category=""):
         self.sent.append(text)
+        return True
+
+    def allows(self, category=""):
         return True
 
 

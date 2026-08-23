@@ -390,7 +390,18 @@ def run_check(logger=None, notifier=None, now=None, state_path=None,
         from adb_bot.clients.telegram import TelegramNotifier
         notifier = TelegramNotifier()
     for name, body in alerts:
-        if notifier is not None and notifier.send(body, logger=logger):
+        # `all_failing` is "nothing is launching" with no cause attached, which
+        # is a different thing from the balance running out -- and since
+        # 2026-08-21 `mlx-guard` says the same thing with the cause named. Its
+        # own category so it can be silenced without silencing the balance
+        # warning this loop exists for.
+        category = "minutes" if name == "low_minutes" else "fleet"
+        if notifier is not None and not notifier.allows(category):
+            _log(logger, "info", "mlx_minutes: %s alert suppressed (%s not in "
+                 "ADBBOT_TELEGRAM_ALERTS)", name, category)
+            continue
+        if notifier is not None and notifier.send(body, logger=logger,
+                                                  category=category):
             out["sent"].append(name)
         else:
             _log(logger, "warning", "mlx_minutes: could not send %s alert", name)

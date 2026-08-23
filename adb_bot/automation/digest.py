@@ -350,5 +350,5 @@ def run_digest(airtable, notifier=None, dry_run: bool = True, logger=None,
         if logger is not None:
             logger.info("digest: %s, nothing sent", notifier.describe())
         return d
-    notifier.send(body, logger=logger)
+    notifier.send(body, logger=logger, category="digest")
     return d
