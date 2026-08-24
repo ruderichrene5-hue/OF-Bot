@@ -292,12 +292,20 @@ def finalize_variant(produced: Path, raw_name: str, handle: str) -> Path:
     return target
 
 
-def build_cli_spoofer(spoofer_python: str, spoofer_cwd: str, preset: str = "normal"):
+def build_cli_spoofer(spoofer_python: str, spoofer_cwd: str,
+                      preset: str = "low_bandwidth"):
     """Return a `spoof_fn(raw_path, out_dir, seed, logger) -> Path|None` that runs
     the video_spoofer CLI (`vtf run`) and returns the produced variant file.
 
     `spoofer_python` is the interpreter for the video_spoofer project (its own
     venv); `spoofer_cwd` is that project's root.
+
+    Default switched from "normal" 2026-08-24: "normal"'s bitrate target is
+    relative to the source (0.8-1.1x), so a high-bitrate raw clip passed
+    through nearly unchanged -- a measured 24.4 MB raw reel came out 23.3 MB.
+    "low_bandwidth" is identical on every other transform (crop, resize,
+    colour, fps) and only fixes the bitrate at 1200 kbps regardless of
+    source; the same reel came out 1.2 MB, ~20x smaller, same 60fps.
     """
     def spoof_fn(raw_path: str, out_dir: str, seed: int, logger=None) -> Path | None:
         out = Path(out_dir)

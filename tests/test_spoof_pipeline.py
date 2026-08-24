@@ -2,10 +2,13 @@ import logging
 import tempfile
 from pathlib import Path
 from unittest import TestCase
+from unittest.mock import patch
 
 from adb_bot.automation import attachments
 from adb_bot.automation import spoof_pipeline
-from adb_bot.automation.spoof_pipeline import LocalRawSource, RawVideo, _seed_for, run_pipeline
+from adb_bot.automation.spoof_pipeline import (
+    LocalRawSource, RawVideo, _seed_for, build_cli_spoofer, run_pipeline,
+)
 
 LOG = logging.getLogger("test")
 
@@ -578,3 +581,23 @@ class RunFolderLayoutTest(TestCase):
             self.assertEqual(client.variant_rows, [])
             self.assertEqual(len(report.errors), 1)
             self.assertEqual(client.spoofed_marks, [("recCP1", True)])   # marked failed
+
+
+class BuildCliSpooferPresetTest(TestCase):
+    """The one caller (run_loop.py) never passes `preset` explicitly, so the
+    default is what every real run actually uses -- 2026-08-24: switched from
+    "normal" (a 24.4 MB raw reel came out 23.3 MB, basically untouched) to
+    "low_bandwidth" (same reel: 1.2 MB, same 60fps)."""
+
+    def test_the_default_preset_is_low_bandwidth(self):
+        spoof_fn = build_cli_spoofer("python3", "/spoofer")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            with patch("subprocess.run") as run:
+                run.return_value.returncode = 0
+                run.return_value.stderr = ""
+                spoof_fn("/raw/clip.mp4", out_dir, seed=1, logger=None)
+
+        cmd = run.call_args.args[0]
+        self.assertIn("--preset", cmd)
+        self.assertEqual(cmd[cmd.index("--preset") + 1], "low_bandwidth")
