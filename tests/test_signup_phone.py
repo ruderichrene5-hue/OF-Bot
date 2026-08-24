@@ -188,9 +188,15 @@ class _FakeHost:
         self.shutdowns.append(profile_id)
 
 
-def test_a_robot_check_leaves_the_phone_and_lock_alone(monkeypatch):
-    sent = []
-    released = []
+def _wire_robot_check_run(monkeypatch, tmp_path, verdict, sent=None,
+                          released=None):
+    """Everything a `run_phone` call needs to reach the google_signin step,
+    with mailbox_robot_check pointed at an isolated file so tests never
+    touch the real ~/.adb_bot/mailbox_robot_check.json."""
+    sent = sent if sent is not None else []
+    released = released if released is not None else []
+    monkeypatch.setattr(signup_phone.mailbox_robot_check, "STATE_PATH",
+                        tmp_path / "mailbox_robot_check.json")
     monkeypatch.setattr(signup_phone.locks, "acquire", lambda *a, **kw: True)
     monkeypatch.setattr(signup_phone.locks, "release",
                         lambda name: released.append(name))
@@ -200,10 +206,16 @@ def test_a_robot_check_leaves_the_phone_and_lock_alone(monkeypatch):
     monkeypatch.setattr(signup_phone, "AdbSignupDriver",
                         lambda *a, **kw: object())
     monkeypatch.setattr(signup_phone.google_signin, "sign_in",
-                        lambda *a, **kw: signup_phone.google_signin.RESULT_ROBOT_CHECK)
+                        lambda *a, **kw: verdict)
     monkeypatch.setattr(signup_phone, "TelegramNotifier",
                         lambda *a, **kw: SimpleNamespace(
                             send=lambda text, **kw: sent.append(text)))
+    return sent, released
+
+
+def test_a_robot_check_leaves_the_phone_and_lock_alone(monkeypatch, tmp_path):
+    sent, released = _wire_robot_check_run(
+        monkeypatch, tmp_path, signup_phone.google_signin.RESULT_ROBOT_CHECK)
 
     host = _FakeHost()
     box = {"address": "a@gmail.com", "password": "pw", "totp_secret": "s"}
@@ -218,6 +230,86 @@ def test_a_robot_check_leaves_the_phone_and_lock_alone(monkeypatch):
     assert released == [], "the lock must stay held so nobody else grabs this phone"
     assert sent and "robot check" in sent[0].lower()
     assert "a@gmail.com" in sent[0]
+
+
+# --- a retry pins the same proxy, not a fresh one (2026-08-24) -------------
+
+def test_a_second_robot_check_on_the_same_profile_is_allowed_to_retry(
+        monkeypatch, tmp_path):
+    """The very case this exists for: retrying on the profile it already
+    failed on must never be refused by its own history."""
+    sent, released = _wire_robot_check_run(
+        monkeypatch, tmp_path, signup_phone.google_signin.RESULT_ROBOT_CHECK)
+    host = _FakeHost()
+    box = {"address": "a@gmail.com", "password": "pw", "totp_secret": "s"}
+    item = {"id": "profile-1", "serial_name": "Cloe new 1"}
+
+    first = signup_phone.run_phone(item, box, host=host, adb_client=object(),
+                                   args=_args(apply=True),
+                                   logger=logging.getLogger("test"))
+    second = signup_phone.run_phone(item, box, host=host, adb_client=object(),
+                                    args=_args(apply=True),
+                                    logger=logging.getLogger("test"))
+
+    assert first["status"] == second["status"] == "mailbox-google_robot_check"
+
+
+def test_a_fresh_profile_is_refused_once_the_rotation_budget_is_spent(
+        monkeypatch, tmp_path):
+    sent, released = _wire_robot_check_run(
+        monkeypatch, tmp_path, signup_phone.google_signin.RESULT_ROBOT_CHECK)
+    box = {"address": "a@gmail.com", "password": "pw", "totp_secret": "s"}
+
+    # profile-1 fails, then a rotation onto profile-2 is spent too.
+    signup_phone.run_phone({"id": "profile-1", "serial_name": "p1"}, box,
+                           host=_FakeHost(), adb_client=object(),
+                           args=_args(apply=True), logger=logging.getLogger("t"))
+    signup_phone.run_phone({"id": "profile-2", "serial_name": "p2"}, box,
+                           host=_FakeHost(), adb_client=object(),
+                           args=_args(apply=True), logger=logging.getLogger("t"))
+
+    out = signup_phone.run_phone({"id": "profile-3", "serial_name": "p3"}, box,
+                                 host=_FakeHost(), adb_client=object(),
+                                 args=_args(apply=True), logger=logging.getLogger("t"))
+
+    assert out["status"] == "mailbox-wrong-profile"
+    assert out["pinned_profile"] == "profile-2"
+
+
+def test_a_cooldown_refuses_before_touching_the_phone(monkeypatch, tmp_path):
+    sent, released = _wire_robot_check_run(
+        monkeypatch, tmp_path, signup_phone.google_signin.RESULT_ROBOT_CHECK)
+    box = {"address": "a@gmail.com", "password": "pw", "totp_secret": "s"}
+    item = {"id": "profile-1", "serial_name": "p1"}
+    launched = []
+    host = _FakeHost()
+    monkeypatch.setattr(host, "launch",
+                        lambda *a, **kw: launched.append(1) or "a-profile")
+
+    for _ in range(signup_phone.mailbox_robot_check.MAX_ATTEMPTS_BEFORE_COOLDOWN):
+        signup_phone.run_phone(item, box, host=host, adb_client=object(),
+                               args=_args(apply=True), logger=logging.getLogger("t"))
+
+    out = signup_phone.run_phone(item, box, host=host, adb_client=object(),
+                                 args=_args(apply=True), logger=logging.getLogger("t"))
+
+    assert out["status"] == "mailbox-cooldown"
+    assert out["cooldown_until"] > 0
+    assert len(launched) == signup_phone.mailbox_robot_check.MAX_ATTEMPTS_BEFORE_COOLDOWN, (
+        "the cooldown run itself must never launch the phone")
+
+
+def test_a_successful_signin_clears_the_pin_for_next_time(monkeypatch, tmp_path):
+    sent, released = _wire_robot_check_run(
+        monkeypatch, tmp_path, signup_phone.google_signin.RESULT_SIGNED_IN)
+    box = {"address": "a@gmail.com", "password": "pw", "totp_secret": "s"}
+    item = {"id": "profile-1", "serial_name": "p1"}
+
+    signup_phone.run_phone(item, box, host=_FakeHost(), adb_client=object(),
+                           args=_args(apply=True), logger=logging.getLogger("t"))
+
+    assert signup_phone.mailbox_robot_check.pinned_profile(
+        "a@gmail.com", tmp_path / "mailbox_robot_check.json") is None
 
 
 # --- GeelarkHost leases its phone's proxy port (2026-08-23) -----------------

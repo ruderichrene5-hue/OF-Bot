@@ -37,6 +37,7 @@ from adb_bot.automation.flows import (
 from adb_bot.automation.flows.gmail_code import GMAIL_PACKAGE, PhoneMailbox
 from adb_bot.automation.flows.signup_driver import AdbSignupDriver
 from adb_bot.automation.flows.verification_driver import AdbChallengeDriver
+from adb_bot.automation import mailbox_robot_check
 from adb_bot.automation.signup_identity import make_identity, record_account
 from adb_bot.automation.verification_probe import (
     _find_profile, _profiles, _resolve_token,
@@ -294,6 +295,30 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
         print("  DRY RUN -- nothing launched, no account created")
         return out
 
+    # A retry must stay on the same proxy, not rotate onto a fresh one every
+    # time (2026-08-24): the same mailboxes hit robot_check on every platform
+    # tried that day, one new profile/proxy per round -- Google's own risk
+    # scoring reads a rotating set of IPs on one account as suspicious by
+    # itself. Refusing here costs nothing (no phone touched yet) and stops a
+    # caller from burning a fresh proxy on an address that needs to sit out
+    # its cooldown or come back to the one proxy it is pinned to.
+    if box is not None:
+        address = box["address"]
+        cooldown = mailbox_robot_check.ready_at(address)
+        if cooldown:
+            out["status"] = "mailbox-cooldown"
+            out["cooldown_until"] = cooldown
+            print(f"  {address} is in robot-check cooldown until "
+                  f"{cooldown:.0f} (unix) -- skipping")
+            return out
+        if not mailbox_robot_check.may_use_profile(address, profile_id):
+            pinned = mailbox_robot_check.pinned_profile(address)
+            out["status"] = "mailbox-wrong-profile"
+            out["pinned_profile"] = pinned
+            print(f"  {address} is pinned to {pinned} after its rotation "
+                  f"budget was spent -- retry there, not on {profile_id}")
+            return out
+
     if not locks.acquire(profile_id, owner="signup-phone"):
         out["status"] = "busy"
         return out
@@ -339,8 +364,13 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
             out["steps"]["google_signin"] = verdict
             print(f"  google sign-in: {verdict} "
                   f"({int(time.monotonic() - started)}s)")
-            if verdict not in (google_signin.RESULT_SIGNED_IN,
-                               google_signin.RESULT_ALREADY):
+            if verdict in (google_signin.RESULT_SIGNED_IN,
+                          google_signin.RESULT_ALREADY):
+                # A working sign-in means this proxy is not burned -- wipe
+                # any streak so the next attempt on this address is free to
+                # pick whichever profile suits it, not pinned to this one.
+                mailbox_robot_check.clear(box["address"])
+            else:
                 if verdict == google_signin.RESULT_ROBOT_CHECK:
                     # No automating past this -- the recaptcha lives inside
                     # Google's own account webview with no exposed sitekey
@@ -349,11 +379,17 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
                     # block below from shutting the phone down, so whoever
                     # answers this can pick the run up mid-flow.
                     out["keep_open"] = True
+                    state = mailbox_robot_check.record_robot_check(
+                        box["address"], profile_id)
+                    cooldown_note = (
+                        f"\ncooldown until {state['cooldown_until']:.0f} "
+                        f"(unix)" if state.get("cooldown_until") else "")
                     TelegramNotifier().send(
                         f"\U0001f916 robot check -- {box['address']} on "
                         f"{name} ({profile_id})\nPhone is still open, "
                         f"waiting at the 'Confirm you're not a robot' "
-                        f"screen.", logger=logger)
+                        f"screen. Retry on this same profile, not a fresh "
+                        f"one.{cooldown_note}", logger=logger)
                 out["status"] = f"mailbox-{verdict}"
                 return out
 
