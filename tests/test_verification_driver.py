@@ -9,6 +9,7 @@ rented number with no error anywhere -- so they are pinned here instead.
 
 from __future__ import annotations
 
+import random
 import re
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ from xml.etree import ElementTree
 
 from adb_bot.automation.flows import instagram as ig
 from adb_bot.automation.flows import verification_driver as vd
+from adb_bot.core import human_timing
 
 
 def _root(*nodes: str):
@@ -88,9 +90,10 @@ class Recording:
         return " | ".join(line for _level, line in self.lines)
 
 
-def _driver(root=None, act=True, adb=None, logger=None):
+def _driver(root=None, act=True, adb=None, logger=None, rand=None):
     driver = vd.AdbChallengeDriver("dev:1", adb or FakeAdb(),
-                                   logger=logger, act=act, settle_seconds=0)
+                                   logger=logger, act=act, settle_seconds=0,
+                                   rand=rand)
     driver._root = root
     return driver
 
@@ -829,6 +832,85 @@ class RefreshFeedTest(unittest.TestCase):
                          "no gesture on a screen we have not identified")
 
 
+class CurvedSwipeTest(unittest.TestCase):
+    """`curved_swipe` -- a real multi-point gesture via uiautomator2, with a
+    fall back to the plain straight-line swipe if u2 is unavailable for any
+    reason. Never touches the real u2/adb -- `uiautomator2.connect` is
+    mocked throughout."""
+
+    def test_the_happy_path_drives_u2_and_releases_it(self):
+        adb = FakeAdb()
+        driver = _driver(adb=adb, rand=random.Random(1))
+        fake_device = mock.MagicMock()
+
+        with mock.patch("uiautomator2.connect", return_value=fake_device) as connect:
+            self.assertTrue(driver.curved_swipe(100, 2000, 100, 500, "test"))
+
+        connect.assert_called_once_with("dev:1")
+        fake_device.swipe_points.assert_called_once()
+        points, kwargs = fake_device.swipe_points.call_args
+        self.assertEqual(points[0][0], (100, 2000))
+        self.assertEqual(points[0][-1], (100, 500))
+        self.assertIn("duration", kwargs)
+        fake_device.stop_uiautomator.assert_called_once()
+        # No straight-line fallback command sent on the happy path.
+        self.assertEqual([c for c in adb.commands if "input swipe" in c], [])
+
+    def test_a_broken_u2_connection_falls_back_to_a_straight_swipe(self):
+        """u2 is a materially different mechanism from the raw dump the rest
+        of this driver depends on -- a flow must never be worse off for
+        having tried the curved path."""
+        adb = FakeAdb()
+        driver = _driver(adb=adb)
+
+        with mock.patch("uiautomator2.connect", side_effect=RuntimeError("no agent")):
+            self.assertTrue(driver.curved_swipe(100, 2000, 100, 500, "test"))
+
+        swipes = [c for c in adb.commands if "input swipe" in c]
+        self.assertEqual(len(swipes), 1)
+        x1, y1, x2, y2, _duration = _swipe_fields(swipes[0])
+        self.assertEqual((x1, y1), (100, 2000))
+        self.assertEqual((x2, y2), (100, 500))
+
+    def test_swipe_points_itself_raising_also_falls_back(self):
+        adb = FakeAdb()
+        driver = _driver(adb=adb)
+        fake_device = mock.MagicMock()
+        fake_device.swipe_points.side_effect = RuntimeError("gesture rejected")
+
+        with mock.patch("uiautomator2.connect", return_value=fake_device):
+            self.assertTrue(driver.curved_swipe(100, 2000, 100, 500, "test"))
+
+        self.assertEqual(len([c for c in adb.commands if "input swipe" in c]), 1)
+
+    def test_a_stop_uiautomator_failure_is_not_fatal(self):
+        """The gesture already landed by the time release is attempted --
+        failing to tear down cleanly must not be reported as the swipe
+        itself having failed."""
+        adb = FakeAdb()
+        driver = _driver(adb=adb)
+        fake_device = mock.MagicMock()
+        fake_device.stop_uiautomator.side_effect = RuntimeError("already gone")
+
+        with mock.patch("uiautomator2.connect", return_value=fake_device):
+            self.assertTrue(driver.curved_swipe(100, 2000, 100, 500, "test"))
+
+        fake_device.swipe_points.assert_called_once()
+        # The teardown failure must not also trigger the straight-line
+        # fallback -- the gesture already happened via u2.
+        self.assertEqual([c for c in adb.commands if "input swipe" in c], [])
+
+    def test_observe_mode_touches_nothing(self):
+        adb = FakeAdb()
+        driver = _driver(adb=adb, act=False)
+
+        with mock.patch("uiautomator2.connect") as connect:
+            self.assertFalse(driver.curved_swipe(100, 2000, 100, 500, "test"))
+
+        connect.assert_not_called()
+        self.assertEqual(adb.commands, [])
+
+
 class BlankCaptchaTest(unittest.TestCase):
     """Instagram's captcha image does not always render.
 
@@ -1232,3 +1314,82 @@ class AdvanceIntroTest(unittest.TestCase):
         driver = _driver(_root(_button("Continue")), act=False, adb=adb)
         self.assertFalse(driver.advance_intro())
         self.assertEqual(adb.commands, [])
+
+
+def _swipe_fields(command: str) -> tuple[int, int, int, int, int]:
+    match = re.search(r"input swipe (\d+) (\d+) (\d+) (\d+) (\d+)", command)
+    return tuple(int(g) for g in match.groups())
+
+
+class HumanTapTimingTest(unittest.TestCase):
+    """`_tap` no longer sends a bare, instant `input tap` -- every tap goes
+    down, holds for a jittered span, then lifts, at a point nudged a few
+    pixels off the target's own centre. Real timing/pixel realism is only
+    worth anything if it is actually never the identical number twice, so
+    that is what most of this proves, not just "it still runs"."""
+
+    def test_a_tap_is_never_a_bare_input_tap(self):
+        adb = FakeAdb()
+        driver = _driver(adb=adb)
+        driver._tap((500, 150), "something")
+        self.assertEqual(len(adb.commands), 1)
+        self.assertNotIn("input tap", adb.commands[0])
+        x1, y1, x2, y2, _duration = _swipe_fields(adb.commands[0])
+        self.assertEqual((x1, y1), (x2, y2), "a tap presses and lifts at "
+                                            "the same point")
+
+    def test_the_dwell_duration_is_not_a_single_fixed_number(self):
+        adb = FakeAdb()
+        driver = _driver(adb=adb)
+        for _ in range(20):
+            driver._tap((500, 150), "something")
+        durations = {_swipe_fields(c)[4] for c in adb.commands}
+        self.assertGreater(len(durations), 1,
+                           "20 taps all held for the exact same duration")
+        for d in durations:
+            self.assertGreaterEqual(d, human_timing.DWELL_MIN_MS)
+            self.assertLessEqual(d, human_timing.DWELL_MAX_MS)
+
+    def test_a_held_tap_keeps_the_original_150ms_floor(self):
+        """The RecyclerView ripple-timing fix (2026-08-23) needed *at least*
+        ~150ms -- randomising dwell must never quietly drop back under the
+        floor that fix was for."""
+        adb = FakeAdb()
+        driver = _driver(adb=adb)
+        for _ in range(20):
+            driver._tap((500, 150), "a gallery row", press=True)
+        durations = [_swipe_fields(c)[4] for c in adb.commands]
+        self.assertGreaterEqual(min(durations), 150)
+
+    def test_jitter_never_leaves_the_targets_own_bounds(self):
+        bounds = (400, 500, 600, 560)  # a 200x60 button
+        adb = FakeAdb()
+        driver = _driver(adb=adb)
+        for _ in range(30):
+            driver._tap((500, 530), "a button", bounds=bounds)
+        x1, y1, x2, y2 = bounds
+        for c in adb.commands:
+            x, y, _x2, _y2, _d = _swipe_fields(c)
+            self.assertTrue(x1 <= x <= x2, f"{x} left the button's own box")
+            self.assertTrue(y1 <= y <= y2, f"{y} left the button's own box")
+
+    def test_a_raw_coordinate_with_no_bounds_gets_a_small_fixed_jitter(self):
+        adb = FakeAdb()
+        driver = _driver(adb=adb)
+        for _ in range(30):
+            driver._tap((500, 150), "a reCAPTCHA grid cell")
+        for c in adb.commands:
+            x, y, _x2, _y2, _d = _swipe_fields(c)
+            self.assertLessEqual(abs(x - 500), human_timing.JITTER_NO_BOUNDS_PX)
+            self.assertLessEqual(abs(y - 150), human_timing.JITTER_NO_BOUNDS_PX)
+
+    def test_a_seeded_rand_makes_taps_reproducible(self):
+        """Not for production -- for a test or a debugging session that needs
+        the exact same sequence twice."""
+        adb_a, adb_b = FakeAdb(), FakeAdb()
+        driver_a = _driver(adb=adb_a, rand=random.Random(42))
+        driver_b = _driver(adb=adb_b, rand=random.Random(42))
+        for _ in range(5):
+            driver_a._tap((500, 150), "x")
+            driver_b._tap((500, 150), "x")
+        self.assertEqual(adb_a.commands, adb_b.commands)

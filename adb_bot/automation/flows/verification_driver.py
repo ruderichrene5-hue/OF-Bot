@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import time
 from datetime import datetime, timezone
@@ -41,7 +42,8 @@ from pathlib import Path
 
 from adb_bot.automation.flows import verification
 from adb_bot.automation.flows.interruptions import _dump_text
-from adb_bot.core.adb_commands import back, swipe, tap, write_text
+from adb_bot.core import human_timing
+from adb_bot.core.adb_commands import back, swipe, write_text
 from adb_bot.core.proc import run as run_hidden
 
 # Where a run's screens are kept. One folder per run, never cleaned up
@@ -320,7 +322,8 @@ class AdbChallengeDriver:
                  recorder: VerificationRecorder | None = None,
                  act: bool = True, settle_seconds: float = SETTLE_SECONDS,
                  screenshots: bool = True,
-                 photo_source_path: str = "") -> None:
+                 photo_source_path: str = "",
+                 rand: random.Random | None = None) -> None:
         self.target = target
         self.adb_client = adb_client
         self.logger = logger
@@ -328,6 +331,10 @@ class AdbChallengeDriver:
         self.recorder = recorder
         self.act = act
         self.settle_seconds = settle_seconds
+        # Drives every tap's dwell duration and pixel jitter (`_tap`, via
+        # `human_timing`). Injectable so a test can seed it for a
+        # deterministic, reproducible sequence; real runs get a fresh one.
+        self._rand = rand if rand is not None else random.Random()
         # A local file for `upload_photo` -- the model's own photo, already
         # downloaded from wherever her picture lives (Geelark's Library,
         # resolved by `signup_phone.verify_account`). Empty means "none
@@ -401,23 +408,33 @@ class AdbChallengeDriver:
             pass
         return root, xml
 
-    def _tap(self, center, description: str, press: bool = False) -> bool:
-        """`press=True` sends a zero-distance swipe (a held-down tap) rather
-        than an instant `input tap`. Confirmed live 2026-08-23: the "Choose
-        From Gallery" row -- a RecyclerView item, ripple touch feedback --
-        did not register a plain `input tap` most of the time even though
-        `dumpsys` proved the coordinate was correct and the same window was
-        focused throughout (so it was not a "wrong screen" problem). An
-        instant down+up can land inside a gesture detector's touch-slop
-        window before the ripple/click machinery has armed; holding the
-        touch briefly does not have that race.
+    def _tap(self, center, description: str, press: bool = False,
+             bounds: tuple[int, int, int, int] | None = None) -> bool:
+        """Tap near `center`, at a random offset and for a random dwell.
+
+        Never a bare, instant `input tap` -- that is a single zero-duration
+        event on an exact pixel, a signature no real touch has. Every tap
+        goes down, holds for a jittered span (`human_timing.dwell_ms`), then
+        lifts, at a point nudged a few pixels off dead-centre
+        (`human_timing.jitter_point`) -- clamped inside `bounds`, the tapped
+        element's own on-screen box, when the caller has it.
+
+        `press=True` keeps a longer floor on the dwell for a different,
+        already-proven reason: a RecyclerView row whose ripple/click
+        machinery needs the touch to sit still past its gesture-detector's
+        touch-slop window. Confirmed live 2026-08-23 -- the "Choose From
+        Gallery" row did not register a plain tap most of the time even
+        though the coordinate and focused window were both correct, and only
+        holding around 150ms fixed it. That floor is preserved; it is no
+        longer the exact same 150ms on every single tap everywhere else.
         """
-        x, y = center
+        x, y = human_timing.jitter_point(*center, bounds=bounds, rand=self._rand)
         if not self.act:
             return self._refuse(f"tap {description} at ({x}, {y})")
-        self._log("info", "tapping %s at (%s, %s)%s", description, x, y,
-                  " (held)" if press else "")
-        command = (swipe(x, y, x, y, 150) if press else tap(x, y))
+        duration = human_timing.dwell_ms(rand=self._rand, held=press)
+        self._log("info", "tapping %s at (%s, %s) (%dms)", description, x, y,
+                  duration)
+        command = swipe(x, y, x, y, duration)
         self.adb_client.run_command(f"adb -s {self.target} shell {command}")
         time.sleep(self.settle_seconds)
         return True
@@ -444,6 +461,57 @@ class AdbChallengeDriver:
         """(width, height) in pixels, or None if it could not be read."""
         from adb_bot.automation.flows import instagram as ig
         return ig._adb_get_screen_size(self.target, logger=self.logger)
+
+    def curved_swipe(self, x1: int, y1: int, x2: int, y2: int,
+                     description: str = "",
+                     duration_ms: int | None = None) -> bool:
+        """A real multi-point curved gesture, falling back to the plain
+        straight-line swipe if uiautomator2 is unavailable for any reason.
+
+        `adb shell input swipe` cannot bow or vary its own speed -- it is a
+        single straight line at constant velocity, no waypoint parameter
+        exists at all. uiautomator2's `swipe_points()` can, but it is a
+        materially different mechanism (its own on-device instrumentation
+        server, connected and released per gesture here) from the plain
+        `uiautomator dump` every other flow in this codebase reads screens
+        with. Proven to coexist cleanly -- not merely "didn't crash once":
+        six back-to-back stress rounds on a real phone (2026-08-24), each
+        round interleaving a real driver tap between a fresh u2
+        connect/gesture/release and the next raw dump, no lockup, no
+        degradation, stable timing throughout (connect ~2.5s, release
+        ~1.2s).
+
+        That overhead is real, though -- connect plus release alone cost
+        ~3.5s on top of the gesture itself. This is opt-in per call site, not
+        a blanket replacement for `_tap`'s zero-distance swipe or a plain
+        `swipe()`, which stay cheap for anything called often (a scroll loop
+        during warm-up, say).
+        """
+        if not self.act:
+            return self._refuse(f"curved-swipe {description} from "
+                                f"({x1},{y1}) to ({x2},{y2})")
+        duration = (duration_ms if duration_ms is not None
+                   else human_timing.swipe_duration_ms(400, rand=self._rand))
+        points = human_timing.curved_swipe_points(x1, y1, x2, y2, rand=self._rand)
+        try:
+            import uiautomator2 as u2
+            d = u2.connect(self.target)
+            d.implicitly_wait(4)
+            self._log("info", "curved-swiping %s: %s (%dms)", description,
+                      points, duration)
+            d.swipe_points(points, duration=duration / 1000)
+            try:
+                d.stop_uiautomator()
+            except Exception as exc:
+                self._log("info", "u2 stop_uiautomator raised, non-fatal (%s)",
+                          exc)
+        except Exception as exc:
+            self._log("warning", "curved swipe via u2 failed (%s); falling "
+                                 "back to a straight swipe", exc)
+            command = swipe(x1, y1, x2, y2, duration)
+            self.adb_client.run_command(f"adb -s {self.target} shell {command}")
+        time.sleep(self.settle_seconds)
+        return True
 
     def _ocr_provider(self):
         """Whatever can read a screen that produces no UI dump.
@@ -687,7 +755,8 @@ class AdbChallengeDriver:
 
     def _type(self, field, value: str, what: str) -> bool:
         """Tap a field and type `value` into it, then read it back."""
-        if not self._tap(field["center"], f"the {what} field"):
+        if not self._tap(field["center"], f"the {what} field",
+                         bounds=field.get("bounds")):
             return False
         self._clear_field(field)
         if not self.act:
@@ -886,12 +955,18 @@ class AdbChallengeDriver:
         x = width // 2
         # From a third of the way down to four fifths: comfortably below the
         # status bar and the header, and a long enough travel that Instagram
-        # reads it as a refresh rather than a scroll. 600ms because a fast
-        # flick scrolls the feed instead of triggering the spinner.
-        self._log("info", "pulling the feed down to refresh (%dx%d)", width, height)
+        # reads it as a refresh rather than a scroll. ~600ms (jittered, never
+        # under 500) because a fast flick scrolls the feed instead of
+        # triggering the spinner. Straight down the middle deliberately --
+        # no horizontal jitter here, unlike a tap: a pull that drifts
+        # sideways risks reading as a different gesture entirely.
+        duration = human_timing.swipe_duration_ms(600, spread_frac=0.15,
+                                                  rand=self._rand)
+        self._log("info", "pulling the feed down to refresh (%dx%d, %dms)",
+                  width, height, duration)
         self.adb_client.run_command(
             f"adb -s {self.target} shell "
-            f"{swipe(x, int(height * 0.33), x, int(height * 0.8), 600)}")
+            f"{swipe(x, int(height * 0.33), x, int(height * 0.8), duration)}")
         # Longer than the usual settle: the refresh has to round-trip to
         # Instagram before whatever it returns can be on screen.
         time.sleep(max(self.settle_seconds, 3.0))

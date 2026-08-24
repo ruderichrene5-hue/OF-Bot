@@ -120,7 +120,8 @@ class AdbSignupDriver(AdbChallengeDriver):
                 if center is None:
                     continue
                 self._log("info", "tapping %r at %s", attrs.get(key), center)
-                return self._tap(center, f"{attrs.get(key)!r}")
+                return self._tap(center, f"{attrs.get(key)!r}",
+                                 bounds=self._bounds(target.attrib))
         self._log("warning", "none of %s is on screen; clickable labels were %s",
                   list(labels), self._clickable_labels(root)[:20])
         return False
@@ -162,7 +163,8 @@ class AdbSignupDriver(AdbChallengeDriver):
         if not self.act:
             return self._refuse(f"fill the {what} with {value!r}")
 
-        if not self._tap(field["center"], f"the {what} field"):
+        if not self._tap(field["center"], f"the {what} field",
+                         bounds=field.get("bounds")):
             return False
         time.sleep(0.6)
 

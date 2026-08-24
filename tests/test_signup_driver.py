@@ -6,6 +6,7 @@ screen, and a date picker that vanished because a tap landed outside it.
 
 from __future__ import annotations
 
+import re
 import unittest
 from xml.etree import ElementTree
 
@@ -51,7 +52,19 @@ class FakeAdb:
 
     @property
     def taps(self):
-        return [c for c in self.commands if "input tap" in c]
+        """Plain taps, plus a tap's real shape now -- a zero-distance
+        `input swipe x y x y ms` (down, dwell, up), distinct from a real
+        gesture whose start and end coordinates differ."""
+        out = []
+        for c in self.commands:
+            if "input tap" in c:
+                out.append(c)
+                continue
+            match = re.search(r"input swipe (\d+) (\d+) (\d+) (\d+)", c)
+            if match and match.group(1) == match.group(3) \
+                    and match.group(2) == match.group(4):
+                out.append(c)
+        return out
 
     @property
     def typed(self):
@@ -60,6 +73,17 @@ class FakeAdb:
     @property
     def keyevents(self):
         return [c for c in self.commands if "input keyevent" in c]
+
+
+def _tap_point(command: str) -> tuple[int, int]:
+    """(x, y) out of a tap command -- now always a zero-distance
+    `input swipe x y x y ms`, jittered a few pixels off the target's centre
+    rather than landing on the exact same one every time."""
+    match = re.search(r"input swipe (\d+) (\d+) \d+ \d+", command)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    match = re.search(r"input tap (\d+) (\d+)", command)
+    return int(match.group(1)), int(match.group(2))
 
 
 class ScriptedDriver(AdbSignupDriver):
@@ -132,7 +156,13 @@ class TapLabelTest(unittest.TestCase):
         driver = ScriptedDriver(adb, [root])
         driver._root = root
         self.assertTrue(driver.tap_label(("I agree",)))
-        self.assertEqual(adb.taps, ["adb -s device:1 shell input tap 500 150"])
+        # The clickable parent's own box is [0,100][1000,200] -- centre
+        # (500, 150), jittered a few pixels but nowhere near a different
+        # control (the label's own dead child sits at [50,120][400,180]).
+        self.assertEqual(len(adb.taps), 1)
+        x, y = _tap_point(adb.taps[0])
+        self.assertLess(abs(x - 500), 60)
+        self.assertLess(abs(y - 150), 60)
 
     def test_an_absent_label_is_refused_rather_than_guessed(self):
         adb = FakeAdb()
@@ -199,7 +229,8 @@ class FillFallbackIndexTest(unittest.TestCase):
         self.assertTrue(driver.fill(("username",), "daudkim272", "username",
                                     fallback_index=1))
         # Tapped the hinted field (y~550), not the fallback one (y~750).
-        self.assertIn("550", adb.taps[0])
+        _x, y = _tap_point(adb.taps[0])
+        self.assertLess(abs(y - 550), 60)
 
 
 if __name__ == "__main__":

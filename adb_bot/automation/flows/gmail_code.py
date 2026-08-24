@@ -40,7 +40,7 @@ import re
 import time
 
 from adb_bot.automation.flows import play_install
-from adb_bot.core import adb_commands
+from adb_bot.core import adb_commands, human_timing
 
 GMAIL_PACKAGE = "com.google.android.gm"
 GMAIL_ACTIVITY = f"{GMAIL_PACKAGE}/.ConversationListActivityGmail"
@@ -642,8 +642,9 @@ class PhoneMailbox:
         and the thing being scrolled towards is by definition not on screen to
         measure.
         """
-        self.adb_client.shell_swipe(self.target, 540, 1600, 540, 700,
-                                    duration_ms=350)
+        self.adb_client.shell_swipe(
+            self.target, 540, 1600, 540, 700,
+            duration_ms=human_timing.swipe_duration_ms(350))
         time.sleep(2)
 
     def _tap_row(self, labels) -> bool:
@@ -673,7 +674,8 @@ class PhoneMailbox:
                 return True
             # Down a page, not to the bottom: the switch sits above Meet's own
             # rows, and a swipe to the end scrolls straight past it.
-            self._shell(adb_commands.swipe(610, 1900, 610, 800, 300))
+            self._shell(adb_commands.swipe(
+                610, 1900, 610, 800, human_timing.swipe_duration_ms(300)))
             time.sleep(2)
             self._log("info", "looking for the sync switch (%d/%d)",
                       page + 1, MAX_SYNC_SCROLLS)

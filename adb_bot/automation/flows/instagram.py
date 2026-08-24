@@ -38,6 +38,7 @@ try:
 except ImportError:  # pragma: no cover - optional uiautomator2 backend
     u2 = None
 
+from adb_bot.core import human_timing
 from adb_bot.core.adb_commands import back, home, swipe, tap, write_text
 from adb_bot.core.models import Profile
 from adb_bot.core.proc import adb as _adb_run, run as _run_hidden
@@ -2375,7 +2376,7 @@ class InstagramLikeFeedFlow:
         start_y = random.randint(900, 1200)
         end_x = random.randint(100, 200)
         end_y = random.randint(900, 1200)
-        duration = random.randint(200, 350)
+        duration = human_timing.swipe_duration_ms(275, spread_frac=0.27)
         return f"adb -s {target} shell {swipe(start_x, start_y, end_x, end_y, duration)}"
 
     def _build_like_reel_command(self, target: str) -> str:
@@ -2387,7 +2388,7 @@ class InstagramLikeFeedFlow:
         start_y = random.randint(1000, 1200)
         end_x = random.randint(520, 580)
         end_y = random.randint(300, 500)
-        duration = random.randint(300, 600)
+        duration = human_timing.swipe_duration_ms(450, spread_frac=0.33)
         return f"adb -s {target} shell {swipe(start_x, start_y, end_x, end_y, duration)}"
 
     def _build_return_home_command(self, target: str) -> str:
@@ -2518,7 +2519,8 @@ class InstagramNotificationsFlow:
         end_x = cx + random.randint(-jitter, jitter)
         start_y = int(height * random.uniform(0.64, 0.70))
         end_y = int(height * random.uniform(0.34, 0.40))
-        return f"adb -s {target} shell {swipe(start_x, start_y, end_x, end_y, random.randint(300, 650))}"
+        duration = human_timing.swipe_duration_ms(475, spread_frac=0.37)
+        return f"adb -s {target} shell {swipe(start_x, start_y, end_x, end_y, duration)}"
 
     def _build_scroll_up_command(self, target: str) -> str:
         # Scroll UP (toward the top) within the safe central band -- ends well
@@ -2526,7 +2528,8 @@ class InstagramNotificationsFlow:
         # gesture. Swipes never mis-tap a button.
         x1, y1 = _adb_get_relative_point(target, 0.5, 0.34, logger=None)
         x2, y2 = _adb_get_relative_point(target, 0.5, 0.68, logger=None)
-        return f"adb -s {target} shell {swipe(x1, y1, x2, y2, random.randint(280, 520))}"
+        duration = human_timing.swipe_duration_ms(400, spread_frac=0.3)
+        return f"adb -s {target} shell {swipe(x1, y1, x2, y2, duration)}"
 
     def _ocr_screen_text(self, target: str, logger=None) -> str:
         """Return the lowercased OCR text of the current screen. Works on the
@@ -2960,13 +2963,13 @@ class InstagramScrollFlow:
             if direction == "down":  # scroll down the feed (finger moves up)
                 start_y = int(height * random.uniform(0.66, 0.70))
                 end_y = int(height * random.uniform(0.30, 0.36))
-                duration = random.randint(220, 650)
+                duration = human_timing.swipe_duration_ms(435, spread_frac=0.49)
                 delay = round(random.uniform(2.5, 6.5), 2)
                 down_swipes += 1
             else:  # scroll back up a little (finger moves down)
                 start_y = int(height * random.uniform(0.34, 0.40))
                 end_y = int(height * random.uniform(0.62, 0.68))
-                duration = random.randint(220, 600)
+                duration = human_timing.swipe_duration_ms(410, spread_frac=0.46)
                 delay = round(random.uniform(2.0, 3.8), 2)
                 up_swipes += 1
 
