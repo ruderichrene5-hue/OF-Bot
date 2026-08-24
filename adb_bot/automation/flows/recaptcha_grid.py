@@ -179,23 +179,66 @@ def _crop_png(image_bytes: bytes, box: tuple[int, int, int, int]) -> bytes | Non
     return encoded.tobytes() if ok else None
 
 
+# Per-word horizontal offset (in label-heights) from that word's own left
+# edge back to the checkbox -- calibrated against a real device (2026-08-24,
+# 1268x2756): "I'm" at left=254 -> checkbox at ~169 is 2.4 label-heights;
+# "not" at left=324 -> ~5.0; "robot" at left=437 -> ~7.7. Each word sits
+# further right within "I'm not a robot", so each needs its own multiplier
+# rather than one constant applied to whichever word OCR happened to find.
+_CHECKBOX_LABEL_OFFSETS = {"i'm": 2.4, "not": 5.0, "robot": 7.7}
+
+
+# How close (px) a candidate word must sit to the "reCAPTCHA" wordmark's own
+# row to count as the widget's own label rather than Google's static heading
+# above it -- calibrated against a real device: the real label sits ~56px
+# from the logo's own row, the heading ~290px. Comfortably between the two.
+_LOGO_ROW_TOLERANCE_PX = 150
+
+
 def _locate_checkbox(words, screen_size) -> tuple[int, int] | None:
     """The checkbox square, from the "I'm not a robot" label beside it.
 
-    reCAPTCHA draws the checkbox immediately left of its own label, roughly
-    two label-heights across, vertically centred on it -- consistent with the
-    widget's own fixed CSS layout regardless of device resolution. Anchored on
-    whichever of "robot" / "not" OCR read with the higher confidence, since a
-    noisy capture sometimes drops one word of the four.
+    reCAPTCHA draws the checkbox immediately left of its own label,
+    vertically centred on it -- consistent with the widget's own fixed CSS
+    layout regardless of device resolution.
+
+    Google's outer "Confirm that you're not a robot" heading, which sits
+    *above* the checkbox, carries the same words "not"/"robot" -- sometimes
+    at the same OCR confidence as the checkbox's own label, sometimes as the
+    *only* readable instance at all (the WebView-rendered inner label failed
+    to OCR at all on one real run, 2026-08-24, leaving the heading as the
+    only candidate and mistapping ~240px right of the real widget). The
+    "reCAPTCHA" wordmark is unique to the widget itself and was reliably read
+    on every real capture so far, so it anchors the row the real label sits
+    on; candidates far from that row are the heading and are dropped first.
+    Falls back to the single lowest candidate (the real label is always
+    below the heading) only when the logo itself could not be read either.
     """
-    candidates = [w for w in words if w["text"].strip(".,!?").lower() in ("robot", "not")]
+    candidates = [w for w in words
+                  if w["text"].strip(".,!?'").lower() in _CHECKBOX_LABEL_OFFSETS]
     if not candidates:
         return None
-    best = max(candidates, key=lambda w: w["conf"])
-    label_left = best["left"]
+    logo = _find_word(words, "recaptcha", 0.0, 1.0, screen_size[1])
+    if logo is not None:
+        # The logo is unique and was reliably read on every real capture so
+        # far -- when it is present, trust it completely. A candidate list
+        # with nothing near it means only the heading's "not"/"robot" OCR'd
+        # this time (confirmed live, 2026-08-24: the real label failed to
+        # OCR at all, 3 attempts running, each mistapping the heading the
+        # same ~240px-off way). Reporting "not found" here, rather than
+        # guessing with the heading anyway, is what lets the caller's own
+        # retry take a fresh screenshot instead of repeating a tap already
+        # proven to land nowhere near the widget.
+        logo_cy = logo["top"] + logo["height"] // 2
+        candidates = [w for w in candidates if abs(
+            (w["top"] + w["height"] // 2) - logo_cy) < _LOGO_ROW_TOLERANCE_PX]
+        if not candidates:
+            return None
+    best = max(candidates, key=lambda w: w["top"])
+    multiplier = _CHECKBOX_LABEL_OFFSETS[best["text"].strip(".,!?'").lower()]
     label_height = best["height"] or 20
     label_cy = best["top"] + best["height"] // 2
-    checkbox_cx = max(0, int(label_left - label_height * 2.3))
+    checkbox_cx = max(0, int(best["left"] - label_height * multiplier))
     return checkbox_cx, label_cy
 
 
@@ -313,6 +356,15 @@ def solve_checkbox(driver, solver, logger=None, sleep=time.sleep,
             _emit(logger, "warning", "checkbox not found by OCR (attempt %d/%d)",
                  attempt, MAX_CHECKBOX_ATTEMPTS)
             continue
+        # Kept cheap and always-on rather than debug-only: the one thing
+        # that has actually gone wrong here (mistapping Google's static
+        # heading instead of the checkbox's own label) is invisible from the
+        # tapped coordinate alone, and re-diagnosing it live costs a phone
+        # launch each time.
+        _emit(logger, "info", "checkbox candidates: %s",
+             [(w["text"], w["left"], w["top"], round(w["conf"])) for w in words
+              if w["text"].strip(".,!?'").lower() in
+              set(_CHECKBOX_LABEL_OFFSETS) | {"recaptcha"}])
         driver.tap_xy(checkbox[0], checkbox[1], "reCAPTCHA checkbox")
         sleep(SETTLE_SECONDS)
 

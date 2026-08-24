@@ -284,6 +284,72 @@ class StuckScreenTest(TestCase):
         self.assertFalse(cleared)
 
 
+class LocateCheckboxTest(TestCase):
+    """Reproduces the exact real-device bug found live, 2026-08-24: Google's
+    outer "Confirm that you're not a robot" heading sits *above* the
+    checkbox's own "I'm not a robot" label and OCRs the words "not"/"robot"
+    at identical confidence -- anchoring on whichever instance was read
+    first picked the heading (real device: tapped ~(407, 898), nothing there
+    -- the real checkbox was at ~(169, 1126))."""
+
+    def test_picks_the_checkbox_label_not_the_heading_above_it(self):
+        words = [
+            # The static heading -- higher up (smaller top), same words,
+            # same confidence as the real checkbox label below it.
+            W("Confirm", 81, 875), W("that", 251, 875), W("you're", 342, 875),
+            W("not", 475, 879), W("a", 552, 885), W("robot", 588, 875),
+            # The checkbox's own label -- lower on screen (larger top).
+            W("I'm", 254, 1109), W("not", 324, 1113), W("a", 401, 1119),
+            W("robot", 437, 1109),
+        ]
+        x, y = rg._locate_checkbox(words, SCREEN)
+        # Must land near the real checkbox (~169, 1126), nowhere near the
+        # heading's own "not"/"robot" (~475/588, 875-885).
+        self.assertLess(abs(x - 169), 40)
+        self.assertLess(abs(y - 1126), 20)
+
+    def test_real_device_measurements_land_within_a_few_pixels(self):
+        """The exact OCR output captured live off the failing run --
+        confirms the fix against the real data, not just a hand-built
+        fixture shaped to pass."""
+        words = [
+            W("not", 475, 879, width=61, height=31),
+            W("robot", 588, 875, width=103, height=35),
+            W("I'm", 254, 1109, width=53, height=35),
+            W("not", 324, 1113, width=62, height=31),
+            W("robot", 437, 1109, width=103, height=35),
+            W("reCAPTCHA", 844, 1165, width=172, height=24),
+        ]
+        x, y = rg._locate_checkbox(words, SCREEN)
+        self.assertLess(abs(x - 169), 15)
+        self.assertLess(abs(y - 1126), 15)
+
+    def test_when_only_the_heading_ocrs_and_the_logo_is_present_it_refuses(self):
+        """The second real failure, 2026-08-24: the WebView-rendered "I'm not
+        a robot" label did not OCR at all, three attempts running, each
+        mistapping the heading. Reporting "not found" here is what lets the
+        caller retry with a fresh screenshot instead of repeating a tap
+        already proven to land nowhere near the widget."""
+        words = [
+            W("not", 475, 879, width=61, height=31),
+            W("robot", 588, 875, width=103, height=35),
+            W("reCAPTCHA", 844, 1165, width=172, height=24),
+        ]
+        self.assertIsNone(rg._locate_checkbox(words, SCREEN))
+
+    def test_when_only_the_heading_ocrs_and_the_logo_is_also_missing_it_guesses(self):
+        """No unique anchor available at all -- falls back to the one
+        candidate there is rather than refusing outright."""
+        words = [
+            W("not", 475, 879, width=61, height=31),
+            W("robot", 588, 875, width=103, height=35),
+        ]
+        self.assertIsNotNone(rg._locate_checkbox(words, SCREEN))
+
+    def test_none_when_neither_phrase_is_on_screen(self):
+        self.assertIsNone(rg._locate_checkbox([W("hello", 10, 10)], SCREEN))
+
+
 class GeometryTest(TestCase):
     def test_grid_cells_are_numbered_left_to_right_then_top_to_bottom(self):
         box = (0, 0, 300, 300)
