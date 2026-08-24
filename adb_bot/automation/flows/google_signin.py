@@ -169,9 +169,15 @@ _RETRY_MARKERS = (
     "something went wrong there. please try again",
 )
 
-# Ordered: the specific before the general. `_PASSWORD_MARKERS` carries
-# "welcome", which appears on several Google screens, so anything that can be
-# named more precisely is named first.
+# Ordered: the specific before the general. `_PASSWORD_MARKERS` carries a
+# bare "welcome", which appears on several Google screens -- including, it
+# turns out, Play Store's own signed-in home ("Welcome to Play... Signed in
+# as x@gmail.com"), whose own markers are more specific and so have to be
+# checked first. Confirmed live, 2026-08-24 (zaxko530@gmail.com): a sign-in
+# that had genuinely succeeded -- password accepted, Terms agreed, Play
+# Store home on screen with "for you top charts" right there in the dump --
+# was misclassified as SCREEN_PASSWORD anyway because that was checked
+# first, then reported RESULT_STUCK on a password field that did not exist.
 _ORDERED = (
     (SCREEN_WRONG_PASSWORD, _WRONG_PASSWORD_MARKERS),
     (SCREEN_ROBOT_CHECK, _ROBOT_CHECK_MARKERS),
@@ -185,9 +191,9 @@ _ORDERED = (
     (SCREEN_EASE_FAILED, _EASE_FAILED_MARKERS),
     (SCREEN_EASE, _EASE_MARKERS),
     (SCREEN_EMAIL, _EMAIL_MARKERS),
+    (SCREEN_PLAY_HOME, _PLAY_HOME_MARKERS),
     (SCREEN_PASSWORD, _PASSWORD_MARKERS),
     (SCREEN_PLAY_SIGNIN, _PLAY_SIGNIN_MARKERS),
-    (SCREEN_PLAY_HOME, _PLAY_HOME_MARKERS),
 )
 
 _LOADING_MARKERS = ("just a moment", "loading", "checking info", "please wait",

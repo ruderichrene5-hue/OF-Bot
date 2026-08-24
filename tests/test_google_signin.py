@@ -463,6 +463,58 @@ def test_a_robot_check_stops_the_run_with_its_own_verdict():
 PLAY_HOME = ("google play games apps movies books search for apps & games "
              "top charts for you")
 
+# Read off `test claude ML PROXY (4)` live, 2026-08-24, right after a real
+# sign-in (zaxko530@gmail.com) had genuinely succeeded: password accepted,
+# Terms agreed, this screen on top. Misclassified as SCREEN_PASSWORD anyway
+# -- that screen's own bare "welcome" marker matched "Welcome to Play" and
+# was checked first -- so a completed sign-in was reported RESULT_STUCK on a
+# password field that was never there ("no input field on screen").
+PLAY_HOME_WELCOME_VARIANT = (
+    "welcome to play quickly find new apps to love view view sponsored "
+    "suggested for you more options hinge dating app: match & date dating "
+    "star rating: 3,6 trip.com: flight, hotel, train travel & local flights "
+    "accommodation star rating: 4,6 show notifications and offers. signed "
+    "in as zaxko530@gmail.com account and settings. for you top charts "
+    "children categories games apps search books")
+
+
+def test_a_welcome_to_play_variant_is_not_read_as_the_password_screen():
+    """The exact real regression: this variant's own "welcome" heading must
+    not win over its own, more specific Play Store markers."""
+    assert (g.classify_google_screen(PLAY_HOME_WELCOME_VARIANT)
+           == g.SCREEN_PLAY_HOME)
+
+
+def test_a_completed_sign_in_on_this_variant_is_reported_signed_in():
+    class Adb(_StubAdb):
+        def __init__(self):
+            super().__init__()
+            self.account_checks = 0
+
+        def run_command(self, command):
+            self.commands.append(command)
+            if "dumpsys account" in command:
+                self.account_checks += 1
+                # Empty on the very first check (sign_in()'s own early
+                # "already on the phone?" shortcut, a different, already-
+                # correct code path this test is not about) -- present
+                # from the second check on, matching the real run: the
+                # account had only just finished being added when the flow
+                # first reaches this screen mid-session.
+                if self.account_checks == 1:
+                    return "Accounts: 0"
+                return ("Accounts: 1\n"
+                        "  Account {name=zaxko530@gmail.com, "
+                        "type=com.google}\n")
+            return ""
+
+    driver, adb = _StubDriver(PLAY_HOME_WELCOME_VARIANT), Adb()
+
+    verdict = g.sign_in(driver, adb, "host:1", "zaxko530@gmail.com", "pw",
+                        "SECRET", sleep=lambda _s: None)
+
+    assert verdict == g.RESULT_SIGNED_IN
+
 
 def test_a_second_mailbox_goes_on_through_androids_own_add_account_wizard():
     """The Play Store's `Sign in` button only exists while the phone carries no
