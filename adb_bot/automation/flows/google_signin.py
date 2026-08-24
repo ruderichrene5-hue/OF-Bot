@@ -199,6 +199,18 @@ _ORDERED = (
 _LOADING_MARKERS = ("just a moment", "loading", "checking info", "please wait",
                     "searching for accounts")
 
+# Phrases that are only ever furniture, never real content, regardless of how
+# long the rest of the dump is -- unlike `_LOADING_MARKERS`, not restricted to
+# a short dump. Google's own extra risk-check step after the password screen
+# repeats its whole "verify that it's you" boilerplate around this phrase, so
+# the dump is well past 300 characters; the plain `_LOADING_MARKERS` path
+# never caught it and it read as an unnamed screen. Confirmed live,
+# 2026-08-24 (brendv748@gmail.com), immediately after the password was
+# accepted: "This may take a few moments… To help keep your account safe,
+# Google wants to make sure that it's really you trying to sign in
+# [address] Loading".
+_UNAMBIGUOUS_LOADING_MARKERS = ("this may take a few moments",)
+
 # Words that are never the *content* of a screen, only its furniture. A dump
 # containing nothing but these was taken while the real screen was still
 # drawing -- `skip next` stopped a run on 2026-08-16 that was otherwise fine.
@@ -210,6 +222,8 @@ _CHROME_ONLY_WORDS = frozenset({
 
 
 def _still_drawing(haystack: str) -> bool:
+    if any(marker in haystack for marker in _UNAMBIGUOUS_LOADING_MARKERS):
+        return True
     if any(marker in haystack for marker in _LOADING_MARKERS) and len(haystack) <= 300:
         return True
     words = [word for word in re.split(r"[^a-z]+", haystack) if word]

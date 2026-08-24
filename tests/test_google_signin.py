@@ -132,6 +132,23 @@ def test_a_dump_of_pure_chrome_is_still_drawing():
     assert g.classify_google_screen("next") == g.SCREEN_LOADING
 
 
+# Read off `test claude OWN PROXY (2)` live, 2026-08-24, right after the
+# password screen (brendv748@gmail.com): a risk-check loading step whose
+# dump repeats the "verify that it's you" boilerplate around it and so runs
+# well past 300 characters, which is what the plain `_LOADING_MARKERS` path
+# requires to stay under. Read as an unnamed screen instead of loading.
+RISK_CHECK_LOADING = (
+    "this may take a few moments… to help keep your account safe, "
+    "google wants to make sure that it’s really you trying to sign in "
+    "this may take a few moments… to help keep your account safe, "
+    "google wants to make sure that it’s really you trying to sign in "
+    "brendv748@gmail.com loading this may take a few")
+
+
+def test_a_long_risk_check_loading_screen_is_not_unnamed():
+    assert g.classify_google_screen(RISK_CHECK_LOADING) == g.SCREEN_LOADING
+
+
 def test_a_screen_with_real_content_is_never_dismissed_as_loading():
     assert g.classify_google_screen(
         "a screen nobody here has ever seen before") == g.SCREEN_UNKNOWN
