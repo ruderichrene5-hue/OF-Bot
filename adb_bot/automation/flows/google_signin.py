@@ -48,6 +48,7 @@ import re
 import time
 
 from adb_bot.automation import totp
+from adb_bot.automation.flows import recaptcha_grid
 from adb_bot.automation.flows.verification import looks_like_launcher
 
 PLAY_PACKAGE = "com.android.vending"
@@ -312,6 +313,15 @@ MAX_PASSWORD_WAITS = 8
 PASSWORD_WAIT_SECONDS = 10
 BLANK_READ_WAIT_SECONDS = 6
 
+# How many times *this run* will try clearing a reCAPTCHA challenge before
+# accepting `RESULT_ROBOT_CHECK`. `recaptcha_grid.solve_checkbox` already
+# retries the checkbox itself several times internally (its own budget is a
+# couple of minutes); this is a second, outer layer for the rarer case where
+# Google shows a *second*, independent challenge right after the first one
+# cleared. Kept small -- each attempt is expensive in both time and 2captcha
+# cost, and a mailbox that fails this many is worth a person's look.
+MAX_ROBOT_CHECK_SOLVES = 2
+
 _SKIP = ("Skip", "SKIP", "Not now", "NOT NOW", "Never", "NEVER")
 _NEXT = ("Next", "NEXT", "Continue", "CONTINUE")
 
@@ -513,15 +523,24 @@ def accounts_on_device(adb_client, target: str) -> list[str]:
 
 def sign_in(driver, adb_client, target: str, address: str, password: str,
             totp_secret: str, logger=None, sleep=time.sleep,
-            clock=time.monotonic) -> str:
+            clock=time.monotonic, recaptcha_solver=None) -> str:
     """Sign `address` into the phone through the Play Store.
 
     Returns one of the `RESULT_*` constants. Never force-stops anything: this
     may run on a phone with a signup in flight.
+
+    `recaptcha_solver` is a `CaptchaSolver` (`adb_bot.clients.captcha`) used
+    to answer an image-grid reCAPTCHA challenge if one appears -- built from
+    the configured 2captcha key when not given explicitly. Passed through
+    mainly so tests can inject a double; production callers can leave it out.
     """
     def log(level, message, *args):
         if logger is not None:
             getattr(logger, level)("google_signin: " + message, *args)
+
+    if recaptcha_solver is None:
+        from adb_bot.clients.captcha import build_solver
+        recaptcha_solver = build_solver(logger=logger)
 
     already = accounts_on_device(adb_client, target)
     if any(address.lower() == name.lower() for name in already):
@@ -546,6 +565,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     # not per screen: a phone that cannot be dumped is not going to start on
     # the next screen either.
     dumpless = 0
+    robot_check_solves = 0
     totp_submits = 0
     submitted_code, code_waits = None, 0
     restarts = 0
@@ -801,8 +821,27 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             return RESULT_WRONG_PASSWORD
 
         if screen == SCREEN_ROBOT_CHECK:
-            # A captcha on the address itself. Retrying costs a launch and
-            # lands here again; the mailbox is the thing that has to change.
+            # Solved live for the first time 2026-08-24: the checkbox and its
+            # image grid are answerable (OCR to find them, 2captcha's
+            # `GridTask` to read the pictures) -- not the dead end this
+            # branch used to assume. Try clearing it in place before giving
+            # up; only report `RESULT_ROBOT_CHECK` once that has genuinely
+            # failed.
+            if robot_check_solves < MAX_ROBOT_CHECK_SOLVES:
+                robot_check_solves += 1
+                log("info", "a reCAPTCHA challenge is on screen for %s -- "
+                            "attempting to clear it (%d/%d)", address,
+                    robot_check_solves, MAX_ROBOT_CHECK_SOLVES)
+                if recaptcha_grid.solve_checkbox(driver, recaptcha_solver,
+                                                 logger=logger, sleep=sleep,
+                                                 clock=clock):
+                    log("info", "the reCAPTCHA challenge cleared; continuing "
+                                "the sign-in")
+                    last, repeats = None, 0
+                    continue
+                log("warning", "could not clear the reCAPTCHA challenge "
+                               "(%d/%d)", robot_check_solves,
+                    MAX_ROBOT_CHECK_SOLVES)
             log("warning", "Google put a robot check on %s -- that mailbox "
                            "cannot be signed in from here; use another",
                 address)
@@ -992,7 +1031,8 @@ DEFAULT_SIGNIN_RETRIES = 5
 def sign_in_with_retries(driver, adb_client, target: str, address: str,
                          password: str, totp_secret: str, logger=None,
                          max_attempts: int = DEFAULT_SIGNIN_RETRIES,
-                         sleep=time.sleep, clock=time.monotonic) -> str:
+                         sleep=time.sleep, clock=time.monotonic,
+                         recaptcha_solver=None) -> str:
     """`sign_in`, force-stopping Play Store and Google Play Services and
     starting over on a retryable result, up to `max_attempts` times total.
 
@@ -1006,7 +1046,8 @@ def sign_in_with_retries(driver, adb_client, target: str, address: str,
     verdict = RESULT_STUCK
     for attempt in range(1, max_attempts + 1):
         verdict = sign_in(driver, adb_client, target, address, password,
-                          totp_secret, logger=logger, sleep=sleep, clock=clock)
+                          totp_secret, logger=logger, sleep=sleep, clock=clock,
+                          recaptcha_solver=recaptcha_solver)
         if verdict in (RESULT_SIGNED_IN, RESULT_ALREADY):
             return verdict
         if verdict not in _RETRYABLE_RESULTS:

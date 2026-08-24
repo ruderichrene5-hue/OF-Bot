@@ -128,6 +128,65 @@ class SolveTest(SolverTestCase):
         self.assertIsNone(solver.solve_text("/nonexistent/captcha.png"))
 
 
+class GridTest(SolverTestCase):
+    def test_a_ready_answer_returns_the_clicked_cells(self):
+        solver = self.build({
+            "/createTask": [{"errorId": 0, "taskId": 55}],
+            "/getTaskResult": [{"errorId": 0, "status": "ready",
+                                "solution": {"click": [2, 5, 9]}}],
+        })
+        self.assertEqual(
+            solver.solve_grid(str(self.image), rows=3, columns=3,
+                              comment="bus"), [2, 5, 9])
+
+    def test_an_empty_click_list_is_a_real_answer_not_none(self):
+        """Nothing left to click is what 'solved' looks like on the last
+        round -- it must not be confused with 'the service could not
+        answer', which is what None means."""
+        solver = self.build({
+            "/createTask": [{"errorId": 0, "taskId": 56}],
+            "/getTaskResult": [{"errorId": 0, "status": "ready",
+                                "solution": {"click": []}}],
+        })
+        self.assertEqual(
+            solver.solve_grid(str(self.image), rows=3, columns=3), [])
+
+    def test_the_task_carries_rows_columns_and_comment(self):
+        solver = self.build({
+            "/createTask": [{"errorId": 0, "taskId": 1}],
+            "/getTaskResult": [{"errorId": 0, "status": "ready",
+                                "solution": {"click": [1]}}],
+        })
+        solver.solve_grid(str(self.image), rows=3, columns=3,
+                          comment="a fire hydrant")
+        task = self.session.calls[0][1]["task"]
+        self.assertEqual(task["type"], "GridTask")
+        self.assertEqual(task["rows"], 3)
+        self.assertEqual(task["columns"], 3)
+        self.assertEqual(task["comment"], "a fire hydrant")
+
+    def test_a_missing_click_field_is_not_an_answer(self):
+        solver = self.build({
+            "/createTask": [{"errorId": 0, "taskId": 2}],
+            "/getTaskResult": [{"errorId": 0, "status": "ready",
+                                "solution": {}}],
+        })
+        self.assertIsNone(solver.solve_grid(str(self.image), rows=3, columns=3))
+
+    def test_a_shorter_timeout_can_be_given_for_a_time_limited_challenge(self):
+        """Google expires the on-screen grid itself well under 2captcha's
+        default two-minute poll -- a caller racing that clock passes its own,
+        tighter deadline rather than sitting out the full one."""
+        solver = self.build({
+            "/createTask": [{"errorId": 0, "taskId": 3}],
+            "/getTaskResult": [{"errorId": 0, "status": "processing"}],
+        })
+        started = self.clock.now
+        self.assertIsNone(solver.solve_grid(str(self.image), rows=3, columns=3,
+                                            solve_timeout=15))
+        self.assertLessEqual(self.clock.now - started, 15 + 10)
+
+
 class ReportTest(SolverTestCase):
     def test_a_bad_answer_can_be_reported(self):
         solver = self.build({
@@ -150,6 +209,7 @@ class UnconfiguredTest(TestCase):
         solver = UnconfiguredSolver()
         self.assertIsNone(solver.solve_text("/any/path.png"))
         self.assertFalse(solver.report_incorrect())
+        self.assertIsNone(solver.solve_grid("/any/path.png", rows=3, columns=3))
 
     def test_the_real_solver_is_named(self):
         self.assertEqual(TwoCaptchaSolver("k").name, SOLVER_2CAPTCHA)

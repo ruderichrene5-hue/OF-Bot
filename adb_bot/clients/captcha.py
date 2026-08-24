@@ -1,14 +1,23 @@
 """Read the letters and digits off Instagram's image captcha, via 2captcha.
+Also solves the *other* shape of captcha this codebase runs into -- Google's
+reCAPTCHA v2 image grid ("select all images with a bus") -- via the same
+account and the same create-then-poll pattern.
 
-This is usually the *first* screen a flagged account shows, so a run that cannot
-get past it never reaches the phone/code steps at all -- which is why it is a
-real integration rather than the placeholder it started as.
+The text captcha is usually the *first* screen a flagged account shows, so a
+run that cannot get past it never reaches the phone/code steps at all -- which
+is why it is a real integration rather than the placeholder it started as.
 
 2captcha is a human-in-the-loop service: post the image, then poll for an answer
-a worker types in. Its `ImageToTextTask` takes a base64 PNG and typically comes
+a worker produces. Its `ImageToTextTask` takes a base64 PNG and typically comes
 back within 10-20 seconds, so the polling budget here is generous (two minutes)
 -- much longer than the SMS wait, because unlike a dead number there is nothing
-to fall back to and giving up costs the whole run.
+to fall back to and giving up costs the whole run. `GridTask` (the reCAPTCHA
+grid) answers just as fast -- it is the same worker pool, reading a picture --
+but the caller there (`recaptcha_grid.py`) has its own, much tighter deadline:
+Google expires the on-screen challenge itself if the checkbox tap and the
+image selections take too long (confirmed live, 2026-08-24 -- "Verification
+challenge expired" on the very first attempt, lost purely to how long it took
+to look at the picture and decide).
 
 Two things worth knowing:
 
@@ -71,6 +80,26 @@ class CaptchaSolver(Protocol):
     def report_incorrect(self) -> bool:
         """Tell the service its last answer was rejected, if it supports that."""
 
+    def solve_grid(self, image_path: str, rows: int, columns: int,
+                   comment: str = "",
+                   solve_timeout: int | None = None) -> list[int] | None:
+        """Which cells of an image-grid captcha (e.g. reCAPTCHA) match `comment`.
+
+        `solve_timeout`, if given, overrides the solver's own default poll
+        budget -- for a caller racing a clock the captcha service knows
+        nothing about (reCAPTCHA's own on-screen challenge expiry).
+
+        Cells are numbered 1..rows*columns, left to right then top to bottom --
+        2captcha's own `GridTask` numbering, kept as-is rather than translated,
+        so a caller reading their docs and this code side by side sees the same
+        numbers.
+
+        An **empty list is a real, meaningful answer**: nothing in the current
+        grid matches, which is what "solved" looks like once every matching
+        tile has already been clicked away. That must never be confused with
+        `None`, which means the service could not answer at all.
+        """
+
 
 class UnconfiguredSolver:
     """The fallback when no captcha credential is set: reads nothing, admits it.
@@ -87,6 +116,11 @@ class UnconfiguredSolver:
 
     def report_incorrect(self) -> bool:
         return False
+
+    def solve_grid(self, image_path: str, rows: int, columns: int,
+                   comment: str = "",
+                   solve_timeout: int | None = None) -> list[int] | None:
+        return None
 
 
 class TwoCaptchaSolver:
@@ -168,9 +202,15 @@ class TwoCaptchaSolver:
 
         return self._await_result(task_id)
 
-    def _await_result(self, task_id) -> str | None:
-        deadline = self._clock() + self.solve_timeout
-        self._sleep(min(self.initial_delay, self.solve_timeout))
+    def _wait_for_ready(self, task_id, solve_timeout: int) -> dict | None:
+        """Poll `getTaskResult` until `status == "ready"`, or give up.
+
+        The body behind `solution` differs by task type (`text` vs `click`);
+        callers decode that themselves, this only owns the create-then-poll
+        shape both share.
+        """
+        deadline = self._clock() + solve_timeout
+        self._sleep(min(self.initial_delay, solve_timeout))
 
         while True:
             body = self._post("/getTaskResult",
@@ -180,20 +220,82 @@ class TwoCaptchaSolver:
 
             status = str(body.get("status") or "").lower()
             if status == "ready":
-                text = str((body.get("solution") or {}).get("text") or "").strip()
-                if not text:
-                    self._log("warning", "captcha: task %s came back empty", task_id)
-                    return None
-                self._log("info", "captcha: task %s solved as %r (cost %s)",
-                          task_id, text, body.get("cost"))
-                return text
+                return body
 
             remaining = deadline - self._clock()
             if remaining <= 0:
                 self._log("warning", "captcha: task %s unsolved after %ss",
-                          task_id, self.solve_timeout)
+                          task_id, solve_timeout)
                 return None
             self._sleep(min(self.poll_interval, remaining))
+
+    def _await_result(self, task_id) -> str | None:
+        body = self._wait_for_ready(task_id, self.solve_timeout)
+        if body is None:
+            return None
+        text = str((body.get("solution") or {}).get("text") or "").strip()
+        if not text:
+            self._log("warning", "captcha: task %s came back empty", task_id)
+            return None
+        self._log("info", "captcha: task %s solved as %r (cost %s)",
+                  task_id, text, body.get("cost"))
+        return text
+
+    # --- image-grid captchas (reCAPTCHA's "select all images with...") -------
+    def solve_grid(self, image_path: str, rows: int, columns: int,
+                   comment: str = "", solve_timeout: int | None = None) -> list[int] | None:
+        """2captcha's `GridTask`: which of `rows * columns` tiles match `comment`.
+
+        `solve_timeout` defaults to the same budget as `solve_text` but can be
+        cut short by the caller -- `recaptcha_grid.py` passes a much smaller one,
+        because Google expires the on-screen challenge well before two minutes
+        are up, and a slow answer nobody can use is worth abandoning quickly
+        rather than sitting out the full poll.
+        """
+        try:
+            with open(image_path, "rb") as handle:
+                encoded = base64.b64encode(handle.read()).decode("ascii")
+        except OSError as exc:
+            self._log("warning", "captcha: could not read %s (%s)", image_path, exc)
+            return None
+
+        task = {
+            "type": "GridTask",
+            "body": encoded,
+            "rows": rows,
+            "columns": columns,
+        }
+        if comment:
+            task["comment"] = comment[:200]
+
+        created = self._post("/createTask",
+                             {"clientKey": self.api_key, "task": task})
+        if not created:
+            return None
+        task_id = created.get("taskId")
+        if not task_id:
+            self._log("warning", "captcha: createTask (grid) gave no task id")
+            return None
+        self.last_task_id = task_id
+
+        body = self._wait_for_ready(task_id, solve_timeout or self.solve_timeout)
+        if body is None:
+            return None
+        solution = body.get("solution") or {}
+        clicks = solution.get("click")
+        if clicks is None:
+            self._log("warning", "captcha: grid task %s came back without a "
+                                 "'click' answer (%r)", task_id, solution)
+            return None
+        try:
+            cells = [int(c) for c in clicks]
+        except (TypeError, ValueError):
+            self._log("warning", "captcha: grid task %s returned an "
+                                 "unreadable click list (%r)", task_id, clicks)
+            return None
+        self._log("info", "captcha: grid task %s solved as cells %s (cost %s)",
+                  task_id, cells, body.get("cost"))
+        return cells
 
     def report_incorrect(self) -> bool:
         """Flag the last answer as wrong -- refunds it and scores the worker."""

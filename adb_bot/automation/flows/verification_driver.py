@@ -422,6 +422,29 @@ class AdbChallengeDriver:
         time.sleep(self.settle_seconds)
         return True
 
+    # --- raw pixels, for content no UI dump can ever expose --------------------
+    # A `WebView` (Google's reCAPTCHA, notably) draws entirely inside one opaque
+    # node as far as `uiautomator` is concerned -- no checkbox, no image tiles,
+    # no button, just a canvas. Everything below this line is the seam a flow
+    # uses to work with that, by pixels instead of the dump the rest of this
+    # class is built around.
+    def screenshot_bytes(self) -> bytes | None:
+        """PNG bytes of the current screen, ignoring the `screenshots` toggle.
+
+        `force=True` on `_screencap`: there is no "read the pixels later"
+        option for a flow whose only source of truth *is* the pixels.
+        """
+        return self._screencap(force=True)
+
+    def tap_xy(self, x: int, y: int, description: str = "") -> bool:
+        """Tap a raw coordinate. For a control the UI dump cannot name."""
+        return self._tap((x, y), description or f"({x}, {y})")
+
+    def screen_size(self) -> tuple[int, int] | None:
+        """(width, height) in pixels, or None if it could not be read."""
+        from adb_bot.automation.flows import instagram as ig
+        return ig._adb_get_screen_size(self.target, logger=self.logger)
+
     def _ocr_provider(self):
         """Whatever can read a screen that produces no UI dump.
 
