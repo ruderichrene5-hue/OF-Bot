@@ -43,6 +43,7 @@ from adb_bot.automation.verification_probe import (
 )
 from adb_bot.automation.workflow import connect_with_retries, prepare_profile_for_adb
 from adb_bot.clients.adb import ADBClient
+from adb_bot.clients.telegram import TelegramNotifier
 from adb_bot.core import locks
 from adb_bot.core.logger import get_logger
 
@@ -276,6 +277,9 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
     out = {"profile": name, "id": profile_id,
            "email": box["address"] if box else "",
            "username": identity.username, "steps": {},
+           # Flipped True only for a robot check: the phone stays open for a
+           # human to clear it live, everything else still shuts down as before.
+           "keep_open": False,
            # The object itself, not just its handle: a caller that has to write
            # the account somewhere else afterwards -- the Geelark remark, the
            # mailbox claim -- needs the password and full name too, and
@@ -337,21 +341,40 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
                   f"({int(time.monotonic() - started)}s)")
             if verdict not in (google_signin.RESULT_SIGNED_IN,
                                google_signin.RESULT_ALREADY):
+                if verdict == google_signin.RESULT_ROBOT_CHECK:
+                    # No automating past this -- the recaptcha lives inside
+                    # Google's own account webview with no exposed sitekey
+                    # (checked 2026-08-24), so a human has to tap the "I'm
+                    # not a robot" checkbox. keep_open stops the finally
+                    # block below from shutting the phone down, so whoever
+                    # answers this can pick the run up mid-flow.
+                    out["keep_open"] = True
+                    TelegramNotifier().send(
+                        f"\U0001f916 robot check -- {box['address']} on "
+                        f"{name} ({profile_id})\nPhone is still open, "
+                        f"waiting at the 'Confirm you're not a robot' "
+                        f"screen.", logger=logger)
                 out["status"] = f"mailbox-{verdict}"
                 return out
 
         # --- 2. Instagram, and Gmail to read its code out of -------------------
         # Gmail is *not* preinstalled on these phones -- `Blank caio 2` spent a
         # whole launch on 2026-08-17 waiting for a code from an app that was
-        # not there. Instagram first: it is the one the run cannot proceed
-        # without, and the phone's life is finite. With no mailbox there is
-        # nothing to read a code out of, so Gmail is not worth the minutes.
-        wanted = [(INSTAGRAM_PACKAGE, "instagram")]
+        # not there. With no mailbox there is nothing to read a code out of,
+        # so Gmail is not worth the minutes and Instagram is the one the run
+        # cannot proceed without.
+        #
+        # With a mailbox, Gmail goes first instead (2026-08-23): the code
+        # Instagram emails during signup has to have somewhere to land, so
+        # Gmail needs to already be there by the time Instagram asks for it,
+        # not installed afterward in a race against the email arriving.
         if box is not None:
-            wanted.append((GMAIL_PACKAGE, "gmail"))
+            wanted = [(GMAIL_PACKAGE, "gmail"), (INSTAGRAM_PACKAGE, "instagram")]
+        else:
+            wanted = [(INSTAGRAM_PACKAGE, "instagram")]
         for package, what in wanted:
-            verdict = play_install.install(driver, adb_client, target,
-                                           package, logger=logger)
+            verdict = play_install.install_with_retries(
+                driver, adb_client, target, package, logger=logger)
             out["steps"][f"install-{what}"] = verdict
             print(f"  {what} install: {verdict} "
                   f"({int(time.monotonic() - started)}s)")
@@ -425,8 +448,16 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
         return out
     finally:
         out["elapsed"] = int(time.monotonic() - started)
-        host.shutdown(profile_id, logger)
-        locks.release(profile_id)
+        if out.get("keep_open"):
+            # Lock held too, not just the phone left running: two people work
+            # as root on this box, and a second automated pass grabbing this
+            # profile mid-solve would undo whatever the human is doing on it.
+            # It self-expires (locks.DEFAULT_TTL_SECONDS) if nobody gets to it.
+            logger.info("signup_phone: leaving %s (%s) running and locked "
+                        "for a human to clear the robot check", name, profile_id)
+        else:
+            host.shutdown(profile_id, logger)
+            locks.release(profile_id)
 
 
 def seconds_left_for_verification(elapsed: float) -> float | None:

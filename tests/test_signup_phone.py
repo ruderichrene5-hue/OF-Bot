@@ -11,6 +11,7 @@ real money, and 45 seconds before it is even usable -- on a phone that will die
 before the code can be typed.
 """
 
+import logging
 from types import SimpleNamespace
 from unittest import mock
 
@@ -165,6 +166,58 @@ def test_a_profile_with_no_serial_name_falls_back_to_organic():
         host=None, adb_client=None, args=_args(apply=False), logger=None)
 
     assert not out["username"].startswith("633822713504334096")
+
+
+# --- a robot check leaves the phone open for a human (2026-08-24) ----------
+#
+# There is no automating past Google's recaptcha -- confirmed the same day by
+# reading a live robot-check UI dump: the challenge lives inside Google's own
+# account webview with no sitekey exposed to `uiautomator`, so a solved
+# 2captcha token would have nowhere to be injected even if we built the
+# endpoint. The only real lever left is getting a human onto the phone fast,
+# which needs the phone (and its lock) left alone rather than torn down.
+
+class _FakeHost:
+    def __init__(self):
+        self.shutdowns = []
+
+    def launch(self, profile_id, logger):
+        return "a-profile"
+
+    def shutdown(self, profile_id, logger):
+        self.shutdowns.append(profile_id)
+
+
+def test_a_robot_check_leaves_the_phone_and_lock_alone(monkeypatch):
+    sent = []
+    released = []
+    monkeypatch.setattr(signup_phone.locks, "acquire", lambda *a, **kw: True)
+    monkeypatch.setattr(signup_phone.locks, "release",
+                        lambda name: released.append(name))
+    monkeypatch.setattr(signup_phone, "record_account", lambda *a, **kw: None)
+    monkeypatch.setattr(signup_phone, "connect_with_retries",
+                        lambda *a, **kw: "target:1")
+    monkeypatch.setattr(signup_phone, "AdbSignupDriver",
+                        lambda *a, **kw: object())
+    monkeypatch.setattr(signup_phone.google_signin, "sign_in",
+                        lambda *a, **kw: signup_phone.google_signin.RESULT_ROBOT_CHECK)
+    monkeypatch.setattr(signup_phone, "TelegramNotifier",
+                        lambda *a, **kw: SimpleNamespace(
+                            send=lambda text, **kw: sent.append(text)))
+
+    host = _FakeHost()
+    box = {"address": "a@gmail.com", "password": "pw", "totp_secret": "s"}
+    out = signup_phone.run_phone(
+        {"id": "profile-1", "serial_name": "Cloe new 1"}, box,
+        host=host, adb_client=object(), args=_args(apply=True),
+        logger=logging.getLogger("test-signup-phone"))
+
+    assert out["status"] == f"mailbox-{signup_phone.google_signin.RESULT_ROBOT_CHECK}"
+    assert out["keep_open"] is True
+    assert host.shutdowns == [], "the phone must stay open for a human to clear it"
+    assert released == [], "the lock must stay held so nobody else grabs this phone"
+    assert sent and "robot check" in sent[0].lower()
+    assert "a@gmail.com" in sent[0]
 
 
 # --- GeelarkHost leases its phone's proxy port (2026-08-23) -----------------

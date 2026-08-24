@@ -46,9 +46,15 @@ _OPEN_TEXT_WORDS = ("open",)
 
 # The Play Store asks about backups and email updates on a fresh account. Both
 # are declined; neither blocks the install for long if missed.
+#
+# `Next` is the Play Store's own first-run wizard step that can appear right
+# after a fresh Google account is added to the device -- distinct from the
+# per-app "complete account setup" sheet above. Missing it left the loop
+# looking at a screen with nothing but a `NEXT` button for the full 240s
+# timeout (`lucas18anosff@gmail.com`, 2026-08-23).
 _DISMISS_LABELS = ("No thanks", "NO THANKS", "Skip", "SKIP", "Not now",
                    "NOT NOW", "Accept", "ACCEPT", "Continue", "CONTINUE",
-                   "Got it", "GOT IT")
+                   "Got it", "GOT IT", "Next", "NEXT")
 
 # What the listing says while it is working. Seeing any of these means wait
 # rather than tap again -- a second tap on a downloading listing cancels it.
@@ -64,6 +70,34 @@ _WORKING_MARKERS = ("pending", "downloading", "installing", "verifying",
 # else is written on the page. This is the check that decides, because it looks
 # at what is *actionable* rather than at prose.
 _INSTALL_BUTTON_LABELS = {"install", "get"}
+
+# Google re-challenging the account mid-session, not a per-app consent sheet.
+# Its only button is `Next`, and `Next` is already in `_DISMISS_LABELS` for
+# the first-run wizard case -- so without this check it looked exactly like a
+# dismissable prompt. Tapping Next here lands on a password/2FA form this
+# function cannot fill, and the next `open_listing()` call throws that away
+# and lands back on this same "Verify it's you" screen -- an unproductive
+# loop that burned 13 dismiss-cycles / ~260s on `unnikuttan114121@gmail.com`
+# (2026-08-23) trying to install Gmail as the *second* app that session,
+# before timing out as an uninformative `no_install_button`. Checked before
+# the dismiss-tap fallback so it is never mistaken for one.
+_REAUTH_MARKERS = ("verify it's you", "please sign in again to continue")
+RESULT_REAUTH_REQUIRED = "reauth_required"
+
+# A small modal, not the full-page reauth challenge above: "Error --
+# Authentication is required. You need to sign in to your Google Account."
+# with a single `OK`. Seen mid-download on `oukroaicha@gmail.com`'s Gmail
+# install (2026-08-23) -- Google's session lapsed partway through, not at
+# the start. `OK` only dismisses the dialog, it does not re-authenticate,
+# so tapping it (it would otherwise match `_DISMISS_LABELS` down the line
+# were "OK" ever added there) just reopens the same lapsed session and
+# gets the same dialog back. Closing the Play Store and starting over is
+# what actually clears it -- that's `install_with_retries`' job, not this
+# function's; this only has to recognise it and stop quickly rather than
+# spend the full 240s finding out "OK" leads nowhere.
+_AUTH_ERROR_MARKERS = ("authentication is required",
+                       "you need to sign in to your google account")
+RESULT_AUTH_ERROR = "auth_error"
 
 
 def offers_install(labels) -> bool:
@@ -223,11 +257,34 @@ def install(driver, adb_client, target: str, package: str, logger=None,
             sleep(8)
             continue
 
-        if taps < MAX_TAPS and driver.tap_label(_INSTALL_LABELS):
+        # require_clickable=False: on `oukroaicha@gmail.com`'s Gmail listing
+        # (2026-08-23) the button's label sat in `content-desc` on a node
+        # marked `clickable="false"`, with no clickable ancestor within the
+        # usual 6-level walk -- yet the screenshot showed a completely
+        # normal, tappable blue Install button. The strict rule is right
+        # when tapping the wrong thing is expensive (a phone number field);
+        # here the labeled node's own bounds ARE the button visually, so a
+        # tap Android delivers there is the safe direction to guess, not
+        # the ancestor search coming up empty for six straight polls of a
+        # button that plainly is on screen.
+        if taps < MAX_TAPS and driver.tap_label(_INSTALL_LABELS,
+                                                require_clickable=False):
             taps += 1
             log("info", "tapped install (%d/%d)", taps, MAX_TAPS)
             sleep(12)
             continue
+
+        if says_any(text, _REAUTH_MARKERS):
+            log("warning", "Google wants the account re-verified before "
+                           "this install can continue -- not automated, "
+                           "stopping rather than looping on it")
+            return RESULT_REAUTH_REQUIRED
+
+        if says_any(text, _AUTH_ERROR_MARKERS):
+            log("warning", "Google's session lapsed mid-install ('OK' does "
+                           "not fix this) -- stopping rather than looping "
+                           "on a dialog tapping OK cannot clear")
+            return RESULT_AUTH_ERROR
 
         # Whatever is in front is not the listing -- a consent sheet, a
         # "complete account setup" prompt. Clear it and look again.
@@ -247,3 +304,46 @@ def install(driver, adb_client, target: str, package: str, logger=None,
         sleep(8)
 
     return RESULT_TIMEOUT if taps else RESULT_NO_BUTTON
+
+
+# Results worth a fresh Play Store rather than accepting as final -- a listing
+# that never rendered anything tappable, or a session that lapsed mid-install.
+# `RESULT_OFFLINE` is deliberately absent: `install` already retries that
+# itself (`MAX_OFFLINE`) before giving up, so seeing it out here means the
+# network problem outlasted that retry too, and closing the app again is not
+# going to reach further than the network does.
+_RETRYABLE_RESULTS = (RESULT_NO_BUTTON, RESULT_TIMEOUT, RESULT_AUTH_ERROR)
+
+DEFAULT_INSTALL_RETRIES = 5
+
+
+def install_with_retries(driver, adb_client, target: str, package: str,
+                         logger=None, max_attempts: int = DEFAULT_INSTALL_RETRIES,
+                         timeout: int = 240, sleep=time.sleep) -> str:
+    """`install`, closing the Play Store and starting over on a retryable
+    result, up to `max_attempts` times total.
+
+    Force-stopping and reopening is the fix for exactly one shape of
+    failure: state stuck in the *app*, not in the account or the network.
+    `RESULT_REAUTH_REQUIRED` and `RESULT_ROBOT_CHECK`-shaped account
+    problems are not in `_RETRYABLE_RESULTS` for that reason -- reopening
+    Play Store does not make Google re-verify the account any faster, it
+    just spends another `timeout` seconds finding the same wall again.
+    """
+    verdict = RESULT_NO_BUTTON
+    for attempt in range(1, max_attempts + 1):
+        verdict = install(driver, adb_client, target, package, logger=logger,
+                          timeout=timeout, sleep=sleep)
+        if verdict in (RESULT_INSTALLED, RESULT_ALREADY):
+            return verdict
+        if verdict not in _RETRYABLE_RESULTS:
+            return verdict
+        if logger is not None:
+            logger.info("play_install: attempt %d/%d for %s ended %s -- "
+                        "closing the Play Store and trying again",
+                        attempt, max_attempts, package, verdict)
+        if attempt < max_attempts:
+            adb_client.run_command(f"adb -s {target} shell am force-stop "
+                                   f"{PLAY_PACKAGE}")
+            sleep(6)
+    return verdict

@@ -75,7 +75,7 @@ class _Driver:
     def read_screen(self):
         return self.text
 
-    def tap_label(self, labels):
+    def tap_label(self, labels, require_clickable=True):
         if any(label in ("Not now", "NOT NOW", "No thanks") for label in labels):
             # Clearing the sheet is what lets the download proceed.
             self.dismissed = True
@@ -91,6 +91,194 @@ def test_a_sheet_over_the_listing_is_dismissed_not_waited_out():
     verdict = p.install(driver, adb, "host:1", PACKAGE, sleep=lambda _s: None)
 
     assert driver.dismissed, "sat in front of the promo instead of clearing it"
+    assert verdict == p.RESULT_INSTALLED
+
+
+REAUTH_SCREEN = ("verify it's you unnikuttan114121@gmail.com to help keep "
+                 "your account secure, google needs to verify it's you. "
+                 "please sign in again to continue. next")
+
+
+def test_a_reauth_challenge_stops_instead_of_looping_on_next():
+    """`unnikuttan114121@gmail.com`, 2026-08-23: this screen's only button
+    is also `Next`, which `_DISMISS_LABELS` already taps for the unrelated
+    first-run wizard -- tapping it here lands on a password/2FA form this
+    function cannot fill, and the next `open_listing()` throws that away,
+    landing back on this same screen. 13 such cycles (~260s) before timing
+    out as an uninformative `no_install_button`."""
+    adb = _Adb()
+
+    class ReauthScreen(_Driver):
+        def __init__(self):
+            super().__init__(adb, REAUTH_SCREEN)
+
+        def clickable_labels(self):
+            return ["NEXT"]
+
+        def tap_label(self, labels, require_clickable=True):
+            # If "NEXT" were ever tapped here, the loop would proceed and
+            # this test's whole point (stop, don't tap Next) would be moot.
+            if "NEXT" in labels or "Next" in labels:
+                self.dismissed = True
+                return True
+            return False
+
+    driver = ReauthScreen()
+    verdict = p.install(driver, adb, "host:1", PACKAGE, sleep=lambda _s: None)
+
+    assert verdict == p.RESULT_REAUTH_REQUIRED
+    assert not driver.dismissed, "tapped Next instead of stopping on it"
+
+
+AUTH_ERROR_DIALOG = ("error authentication is required. you need to sign "
+                     "in to your google account. ok")
+
+
+def test_an_auth_error_dialog_stops_instead_of_looping_on_ok():
+    """`oukroaicha@gmail.com`, 2026-08-23: Google's session lapsed mid
+    download (the Install button had already been tapped -- this is not
+    the pre-install reauth wall). `OK` only dismisses the dialog, it does
+    not re-authenticate, so tapping it just reopens the same lapsed
+    session and gets the same dialog back."""
+    adb = _Adb()
+
+    class AuthErrorDialog(_Driver):
+        def __init__(self):
+            super().__init__(adb, AUTH_ERROR_DIALOG)
+
+        def clickable_labels(self):
+            return ["OK"]
+
+        def tap_label(self, labels, require_clickable=True):
+            if "OK" in labels:
+                self.dismissed = True   # tapping OK here would be the bug
+                return True
+            return False
+
+    driver = AuthErrorDialog()
+    verdict = p.install(driver, adb, "host:1", PACKAGE, sleep=lambda _s: None)
+
+    assert verdict == p.RESULT_AUTH_ERROR
+    assert not driver.dismissed, "tapped OK instead of stopping on it"
+
+
+def test_install_with_retries_closes_the_store_and_tries_again():
+    """A retryable result gets the Play Store force-stopped and a fresh
+    attempt, up to the attempt cap -- not accepted as final on the first
+    try. `RESULT_AUTH_ERROR` for the first two attempts (a result that
+    returns immediately, with no timeout/loop-count dependence to make
+    this test's timing flaky), then the third attempt finds the app
+    already on the phone."""
+    adb = _Adb()
+    state = {"install_calls": 0}
+
+    class FlakyThenFine(_Driver):
+        def __init__(self):
+            super().__init__(adb, AUTH_ERROR_DIALOG)
+
+        def clickable_labels(self):
+            return ["OK"]
+
+        def tap_label(self, labels, require_clickable=True):
+            return False
+
+    driver = FlakyThenFine()
+    force_stops = []
+    real_run = adb.run_command
+
+    def spy(cmd):
+        if "force-stop" in cmd:
+            force_stops.append(cmd)
+            state["install_calls"] += 1
+            if state["install_calls"] >= 2:
+                adb.installed = True
+        return real_run(cmd)
+    adb.run_command = spy
+
+    verdict = p.install_with_retries(driver, adb, "host:1", PACKAGE,
+                                     sleep=lambda _s: None, max_attempts=5)
+
+    assert verdict == p.RESULT_ALREADY
+    assert len(force_stops) == 2, "should close the store between the two failed attempts"
+
+
+def test_install_with_retries_does_not_retry_a_robot_check_shaped_result():
+    """Reopening the Play Store does not make Google re-verify an account
+    any faster -- retrying `RESULT_REAUTH_REQUIRED` would just spend
+    another full timeout finding the same wall again."""
+    adb = _Adb()
+    driver = _Driver(adb, REAUTH_SCREEN)
+    driver.clickable_labels = lambda: ["NEXT"]
+
+    calls = []
+    real_run = adb.run_command
+    adb.run_command = lambda cmd: (calls.append(cmd), real_run(cmd))[-1]
+
+    verdict = p.install_with_retries(driver, adb, "host:1", PACKAGE,
+                                     sleep=lambda _s: None, max_attempts=5)
+
+    assert verdict == p.RESULT_REAUTH_REQUIRED
+    assert not any("force-stop" in c for c in calls), "retried an account-shaped result"
+
+
+def test_the_install_button_is_tapped_even_with_no_clickable_ancestor():
+    """`oukroaicha@gmail.com`, 2026-08-23: Gmail's listing carried `Install`
+    only in `content-desc` on a node marked `clickable="false"`, no
+    clickable ancestor within the usual walk -- yet the screenshot showed
+    a completely normal, tappable blue Install button. Strict matching
+    read this as no button at all for the whole 240s, in front of a
+    button that plainly was on screen."""
+    adb = _Adb()
+
+    class UnmarkedInstallButton(_Driver):
+        def __init__(self):
+            super().__init__(adb, LISTING)
+
+        def clickable_labels(self):
+            return ["Install"]
+
+        def tap_label(self, labels, require_clickable=True):
+            if require_clickable:
+                return False   # the real bug: strict mode never finds it
+            if "Install" in labels or "INSTALL" in labels:
+                self.dismissed = True
+                self.adb.installed = True
+                return True
+            return False
+
+    driver = UnmarkedInstallButton()
+    verdict = p.install(driver, adb, "host:1", PACKAGE, sleep=lambda _s: None)
+
+    assert driver.dismissed, "never tapped the button because it wasn't marked clickable"
+    assert verdict == p.RESULT_INSTALLED
+
+
+def test_the_first_run_next_wizard_is_dismissed_not_waited_out():
+    """`lucas18anosff@gmail.com`, 2026-08-23: the Play Store's own first-run
+    wizard (bare "NEXT", nothing else on screen) right after a fresh Google
+    account was added to the device. `Next` was not in `_DISMISS_LABELS`, so
+    the loop read "nothing to tap yet" for the full 240s timeout instead of
+    clearing it."""
+    adb = _Adb()
+
+    class NextWizard(_Driver):
+        def __init__(self):
+            super().__init__(adb, "next")
+
+        def clickable_labels(self):
+            return ["NEXT"]
+
+        def tap_label(self, labels, require_clickable=True):
+            if "Next" in labels or "NEXT" in labels:
+                self.dismissed = True
+                self.adb.installed = True
+                return True
+            return False
+
+    driver = NextWizard()
+    verdict = p.install(driver, adb, "host:1", PACKAGE, sleep=lambda _s: None)
+
+    assert driver.dismissed, "waited out the wizard instead of tapping Next"
     assert verdict == p.RESULT_INSTALLED
 
 
@@ -149,7 +337,7 @@ def test_a_stuck_download_queue_is_cancelled_and_asked_again():
         def clickable_labels(self):
             return ["Cancel"]
 
-        def tap_label(self, labels):
+        def tap_label(self, labels, require_clickable=True):
             if any("Cancel" == label for label in labels):
                 self.cancelled = True
                 # Asking again is what gets the download moving.
@@ -183,7 +371,7 @@ def test_a_download_that_is_actually_moving_is_left_alone():
                 self.adb.installed = True
             return self.text
 
-        def tap_label(self, labels):
+        def tap_label(self, labels, require_clickable=True):
             if any("Cancel" == label for label in labels):
                 self.cancelled = True
             return False
@@ -219,7 +407,7 @@ def test_a_setup_sheet_is_dismissed_not_waited_out():
         def clickable_labels(self):
             return ["Continue"]
 
-        def tap_label(self, labels):
+        def tap_label(self, labels, require_clickable=True):
             if "Continue" in labels or "CONTINUE" in labels:
                 self.dismissed = True
                 self.adb.installed = True

@@ -556,6 +556,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     blank_reads = 0
     add_account_starts = 0
     password_waits = 0
+    email_loading_waits = 0
 
     # What the last adaptive wait already read. Using it saves one dump per
     # step -- 2-3 seconds each, about twenty times a run.
@@ -649,6 +650,38 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
                              sleep=sleep, clock=clock)
             continue
         loading_waits = 0
+
+        # Before the repeat guard, same reasoning as the password/code waits
+        # above: `_still_drawing`'s loading check only fires for a *bare*
+        # "Just a moment" screen (<=300 chars) so it never catches a full
+        # email form with a small loading indicator drawn over it -- the form
+        # text alone is already past that length. That form then classified
+        # as a plain, unfinished `SCREEN_EMAIL` and got re-filled and
+        # re-tapped on every pass, hitting `MAX_REPEATS` (4 tries) in well
+        # under the 160s the dedicated loading wait allows -- while a real
+        # Play Store sign-in can sit here past a minute (confirmed live,
+        # 2026-08-23). Caught here, before that guard, whenever the address
+        # is already correctly in the field: nothing left to fill, so a
+        # repeated read of the same screen is Google still working, not the
+        # flow failing to advance.
+        if screen == SCREEN_EMAIL and email_submits and any(
+                m in text.lower() for m in _LOADING_MARKERS):
+            values = driver.input_values() if hasattr(driver, "input_values") else []
+            if any(address.lower() == str(v).lower() for v in values):
+                email_loading_waits += 1
+                if email_loading_waits <= MAX_LOADING_WAITS:
+                    log("info", "the email screen has not advanced but the "
+                                "address is still correctly in the field and "
+                                "the page says it's loading; giving Google a "
+                                "moment (%d/%d)",
+                        email_loading_waits, MAX_LOADING_WAITS)
+                    pending = settle(driver, text, LOADING_WAIT_SECONDS,
+                                     sleep=sleep, clock=clock)
+                    continue
+                log("warning", "email screen still loading after %d waits",
+                    email_loading_waits)
+                return RESULT_STUCK
+        email_loading_waits = 0
 
         if screen == last:
             repeats += 1
@@ -942,3 +975,50 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
         sleep(2)
 
     return RESULT_STUCK
+
+
+# Results worth a fresh Play Store/Google Play Services rather than accepted
+# as final. `RESULT_ROBOT_CHECK` and `RESULT_WRONG_PASSWORD` are deliberately
+# absent -- both are about the *account* (a captcha tied to the address, a
+# genuinely wrong credential), and closing the app again does not make
+# Google re-verify an account any faster or a wrong password become right;
+# it would just spend another full walk of the chain finding the same wall.
+_RETRYABLE_RESULTS = (RESULT_STUCK, RESULT_UNKNOWN_SCREEN,
+                      RESULT_GOOGLE_UNREACHABLE, RESULT_NO_DUMP)
+
+DEFAULT_SIGNIN_RETRIES = 5
+
+
+def sign_in_with_retries(driver, adb_client, target: str, address: str,
+                         password: str, totp_secret: str, logger=None,
+                         max_attempts: int = DEFAULT_SIGNIN_RETRIES,
+                         sleep=time.sleep, clock=time.monotonic) -> str:
+    """`sign_in`, force-stopping Play Store and Google Play Services and
+    starting over on a retryable result, up to `max_attempts` times total.
+
+    Built for the 2-step-verification chooser specifically (`oukroaicha
+    @gmail.com`, 2026-08-23): tapping "Get a verification code from the
+    Google Authenticator app" highlighted the row blue and went nowhere --
+    an app-state glitch, not a wrong answer, and closing Play Store/GMS and
+    walking the chain again is the same fix already proven for the
+    equivalent install-side stalls in `play_install.install_with_retries`.
+    """
+    verdict = RESULT_STUCK
+    for attempt in range(1, max_attempts + 1):
+        verdict = sign_in(driver, adb_client, target, address, password,
+                          totp_secret, logger=logger, sleep=sleep, clock=clock)
+        if verdict in (RESULT_SIGNED_IN, RESULT_ALREADY):
+            return verdict
+        if verdict not in _RETRYABLE_RESULTS:
+            return verdict
+        if logger is not None:
+            logger.info("google_signin: attempt %d/%d for %s ended %s -- "
+                        "closing Play Store/GMS and trying again",
+                        attempt, max_attempts, address, verdict)
+        if attempt < max_attempts:
+            adb_client.run_command(f"adb -s {target} shell am force-stop "
+                                   f"{PLAY_PACKAGE}")
+            adb_client.run_command(f"adb -s {target} shell am force-stop "
+                                   f"com.google.android.gms")
+            sleep(6)
+    return verdict
