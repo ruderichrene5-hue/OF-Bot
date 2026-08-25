@@ -405,3 +405,120 @@ class GeometryTest(TestCase):
         # actually driving the result, not silently falling back.
         self.assertLess(y2, 1300)
         self.assertGreater(y1, 100)
+
+
+class _TaggedImage:
+    """A fake decoded image: `.shape` for height, and slicing that tags which
+    band it came from so `FakeTesseract` can answer differently per band --
+    without any real numpy array underneath."""
+
+    def __init__(self, label, height):
+        self.label = label
+        self.shape = (height, 1080, 3)
+
+    def __getitem__(self, key):
+        if isinstance(key, tuple):
+            key = key[0]
+        height = self.shape[0]
+        start = key.start or 0
+        stop = key.stop if key.stop is not None else height
+        label = "header" if start == 0 else "footer"
+        return _TaggedImage(label, stop - start)
+
+
+class FakeCv2:
+    IMREAD_COLOR = 1
+    COLOR_BGR2RGB = 1
+
+    @staticmethod
+    def imdecode(_buf, _flags):
+        return _TaggedImage("full", 2000)
+
+    @staticmethod
+    def cvtColor(image, _code):
+        return image
+
+
+class FakeNp:
+    uint8 = "uint8"
+
+    @staticmethod
+    def frombuffer(_data, dtype=None):
+        return _data
+
+
+class FakeImageModule:
+    @staticmethod
+    def fromarray(tagged_image):
+        return tagged_image
+
+
+_TESSERACT_DATA_BY_LABEL = {
+    "full": {"text": ["", "", ""], "conf": [-1, -1, -1],
+            "left": [0, 0, 0], "top": [0, 0, 0],
+            "width": [0, 0, 0], "height": [0, 0, 0]},
+    "header": {"text": ["select", "all", "images"], "conf": [90.0, 91.0, 92.0],
+              "left": [50, 150, 220], "top": [100, 100, 100],
+              "width": [70, 40, 60], "height": [30, 30, 30]},
+    "footer": {"text": ["VERIFY"], "conf": [95.0],
+              "left": [850], "top": [30], "width": [80], "height": [36]},
+}
+
+
+class FakePytesseract:
+    class Output:
+        DICT = "dict"
+
+    @staticmethod
+    def image_to_data(tagged_image, output_type=None):
+        return _TESSERACT_DATA_BY_LABEL[tagged_image.label]
+
+
+class EmptyFullPageOcrFallsBackToBandsTest(TestCase):
+    """`brendv748@gmail.com`, 2026-08-25: a fully-drawn image grid (header +
+    nine real photos + VERIFY) OCR'd as ONE image reported zero real words --
+    not noisy, empty -- and every attempt after that searched for a checkbox
+    that had already been replaced by a grid nothing could see. Cropped to
+    just the header band, the exact same pixels read perfectly. Nothing here
+    ever needs text *inside* the photo tiles, only the header and footer
+    bands, so an empty full-page read must fall back to reading those two
+    bands on their own rather than reporting nothing."""
+
+    def setUp(self):
+        self._orig = (rg.cv2, rg.np, rg.pytesseract, rg.Image)
+        rg.cv2, rg.np, rg.pytesseract, rg.Image = (
+            FakeCv2, FakeNp(), FakePytesseract, FakeImageModule)
+
+    def tearDown(self):
+        rg.cv2, rg.np, rg.pytesseract, rg.Image = self._orig
+
+    def test_the_header_and_footer_bands_are_read_when_the_full_page_is_empty(self):
+        text, words = rg._default_ocr(b"irrelevant-bytes")
+
+        self.assertIn(rg._GRID_HEADER_MARKER, text)
+        self.assertIn("verify", text)
+        verify_word = next(w for w in words if w["text"] == "VERIFY")
+        # The footer crop started at 50% of a 2000px image (y=1000); its own
+        # tesseract data said top=30, so the real image coordinate is 1030 --
+        # proof the offset is actually applied, not just the raw crop value.
+        self.assertEqual(verify_word["top"], 1030)
+
+    def test_a_full_page_read_with_enough_words_is_not_retried(self):
+        """The checkbox screen (no photos) already reads fine in one pass --
+        this must not turn every call into three OCR passes."""
+        _TESSERACT_DATA_BY_LABEL["full"] = {
+            "text": ["confirm", "not", "a", "robot"],
+            "conf": [90.0, 90.0, 90.0, 90.0],
+            "left": [10, 60, 120, 160], "top": [500, 500, 500, 500],
+            "width": [60, 40, 15, 60], "height": [24, 24, 24, 24],
+        }
+        try:
+            text, words = rg._default_ocr(b"irrelevant-bytes")
+        finally:
+            _TESSERACT_DATA_BY_LABEL["full"] = {
+                "text": ["", "", ""], "conf": [-1, -1, -1],
+                "left": [0, 0, 0], "top": [0, 0, 0],
+                "width": [0, 0, 0], "height": [0, 0, 0]}
+
+        self.assertEqual(len(words), 4)
+        self.assertNotIn("verify", text)  # the footer band was never read

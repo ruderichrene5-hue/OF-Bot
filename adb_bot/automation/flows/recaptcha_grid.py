@@ -121,25 +121,17 @@ def _emit(logger, level, message, *args):
         getattr(logger, level)("recaptcha_grid: " + message, *args)
 
 
-def _default_ocr(image_bytes: bytes):
-    """(lowercased full text, [{"text","left","top","width","height","conf"}]).
+# Below this many real words, a full-page read is treated as failed rather
+# than as "genuinely almost no text" -- see `_default_ocr`.
+_MIN_FULL_PAGE_WORDS = 3
 
-    ([], "") -- not an exception -- if OCR is unavailable or the image will
-    not decode. Every caller here already has to handle "read nothing" as a
-    normal outcome, the same as every other captcha path in this codebase.
-    """
-    if cv2 is None or np is None or pytesseract is None or Image is None:
-        return "", []
-    try:
-        image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8),
-                             cv2.IMREAD_COLOR)
-        if image is None:
-            return "", []
-        pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-        data = pytesseract.image_to_data(pil_image, output_type=pytesseract.Output.DICT)
-    except Exception:
-        return "", []
 
+def _ocr_image(image, y_offset: int = 0):
+    """Run tesseract on a decoded (cv2, BGR) image; words' `top` is shifted by
+    `y_offset` so a caller OCR-ing a crop gets coordinates in the ORIGINAL
+    image's frame, not the crop's own."""
+    pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    data = pytesseract.image_to_data(pil_image, output_type=pytesseract.Output.DICT)
     words = []
     texts = []
     for i in range(len(data.get("text", []))):
@@ -154,12 +146,53 @@ def _default_ocr(image_bytes: bytes):
         words.append({
             "text": word,
             "left": int(data["left"][i]),
-            "top": int(data["top"][i]),
+            "top": int(data["top"][i]) + y_offset,
             "width": int(data["width"][i]),
             "height": int(data["height"][i]),
             "conf": conf,
         })
     return " ".join(texts).lower(), words
+
+
+def _default_ocr(image_bytes: bytes):
+    """(lowercased full text, [{"text","left","top","width","height","conf"}]).
+
+    ([], "") -- not an exception -- if OCR is unavailable or the image will
+    not decode. Every caller here already has to handle "read nothing" as a
+    normal outcome, the same as every other captcha path in this codebase.
+
+    A single full-page pass reads the checkbox screen fine (confirmed live,
+    repeatedly), but silently returns nothing at all on a fully-drawn image
+    grid: tesseract's automatic page segmentation, fed nine real photos
+    alongside the header, fails to isolate any text region and reports zero
+    real words for the *whole* image -- not a partial or noisy read, an empty
+    one. Confirmed live 2026-08-25 (brendv748@gmail.com): cropped to just the
+    header band, the exact same pixels read perfectly
+    ("Select all images with crosswalks..."); as the full screenshot, 0 words.
+    Every caller here only ever needs words from the header band (top ~35%)
+    or a footer search band (VERIFY, the recheck prompt) -- never text
+    *inside* the photo tiles -- so on an empty full-page result this retries
+    against those two bands separately, stitching their words back into the
+    original image's coordinates.
+    """
+    if cv2 is None or np is None or pytesseract is None or Image is None:
+        return "", []
+    try:
+        image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8),
+                             cv2.IMREAD_COLOR)
+        if image is None:
+            return "", []
+        text, words = _ocr_image(image)
+        if len(words) >= _MIN_FULL_PAGE_WORDS:
+            return text, words
+
+        height = image.shape[0]
+        header_text, header_words = _ocr_image(image[0:int(0.40 * height)])
+        footer_text, footer_words = _ocr_image(
+            image[int(0.50 * height):height], y_offset=int(0.50 * height))
+        return (header_text + " " + footer_text).strip(), header_words + footer_words
+    except Exception:
+        return "", []
 
 
 def _crop_png(image_bytes: bytes, box: tuple[int, int, int, int]) -> bytes | None:
