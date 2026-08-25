@@ -524,6 +524,12 @@ class SignupDriver(Protocol):
         """Hide the IME. The floating keyboard covers the submit button and
         receives the tap, while the dump still reports the button as visible."""
 
+    def press_enter(self) -> None:
+        """Submit the focused field with the keyboard's own action key --
+        safe where a button tap or `dismiss_keyboard()`'s BACK is not: it
+        only ever acts on a focused text field, never falls through as
+        navigation."""
+
     def set_date(self, day: int, month: str, year: int) -> bool:
         """Drive the Android date-picker spinner and confirm it."""
 
@@ -1166,17 +1172,45 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
 
             elif screen == SCREEN_CODE:
                 if code_submitted:
-                    # The code was typed and it submits itself. Pressing
-                    # anything now is how the run walks backwards: with no
-                    # keyboard up, Back is navigation, and it took a finished
-                    # code screen back to "What's your mobile number?".
+                    # The code was typed and it usually submits itself on the
+                    # sixth digit. Tapping a button here is how the run walks
+                    # backwards -- with no keyboard up, `dismiss_keyboard()`'s
+                    # BACK is not reliably consumed by the IME and falls
+                    # through as real navigation, taking a finished code
+                    # screen back to "What's your mobile number?" (the same
+                    # mechanism as `_submit_after_typing`'s docstring).
+                    #
+                    # But auto-submit does not always fire: confirmed live
+                    # 2026-08-25 (briangonzalezyi121@gmail.com), the same six
+                    # digits sat filled through four full waits with nothing
+                    # ever pressed, and the run gave up as stuck on a code
+                    # that had already arrived correctly. ENTER (keyevent 66)
+                    # is the safe middle ground `google_signin._press_enter`
+                    # already proved for exactly this shape of problem: it
+                    # submits the focused field's own IME action rather than
+                    # sending BACK, so it cannot fall through as navigation.
+                    #
+                    # Keyed off `repeats`, not a separate counter: the generic
+                    # repeat-guard above this dispatch (`MAX_REPEATS = 4`)
+                    # already ends the run once this same screen has come back
+                    # unchanged that many times, well before `loading_waits`
+                    # (reset to 0 every iteration this branch is reached from)
+                    # could ever count that high on its own -- the ENTER
+                    # attempt has to fit inside that same, much smaller
+                    # budget, one try, on the next-to-last chance.
                     loading_waits += 1
                     if loading_waits > MAX_LOADING_WAITS:
                         return finish(RESULT_STUCK,
                                       "the code screen did not advance after the "
                                       "code was entered")
-                    log("info", "code entered; waiting for the screen to move on "
-                                "(%d/%d)", loading_waits, MAX_LOADING_WAITS)
+                    if repeats == MAX_REPEATS - 2:
+                        log("info", "code entered but the screen has not moved "
+                                    "on; submitting with the keyboard's own "
+                                    "action")
+                        driver.press_enter()
+                    else:
+                        log("info", "code entered; waiting for the screen to "
+                                    "move on (%d/%d)", repeats, MAX_REPEATS)
                     steps.pop()
                     sleep(LOADING_WAIT_SECONDS)
                     continue

@@ -217,6 +217,22 @@ class AdbSignupDriver(AdbChallengeDriver):
         self.adb_client.run_command(f"adb -s {self.target} shell input keyevent 4")
         time.sleep(KEYBOARD_SETTLE)
 
+    def press_enter(self) -> None:
+        """Submit the focused field with the keyboard's own action key.
+
+        The safe alternative to tapping a button when nothing is meant to be
+        touched: `dismiss_keyboard()`'s BACK is not reliably consumed by the
+        IME on every device and can fall through as real navigation (see
+        `signup._submit_after_typing`'s docstring) -- ENTER (keyevent 66) only
+        ever acts on a focused text field and has no such fallthrough.
+        Confirmed for exactly this shape of problem on Google's own sign-in
+        form (`google_signin._press_enter`).
+        """
+        if not self.act:
+            self._refuse("press enter")
+            return
+        self.adb_client.run_command(f"adb -s {self.target} shell input keyevent 66")
+
     def showing_package(self, package: str) -> bool:
         """Is `package` the one that drew the screen?
 

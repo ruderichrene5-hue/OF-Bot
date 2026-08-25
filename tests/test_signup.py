@@ -138,6 +138,7 @@ class FakeDriver:
         self.taps = []
         self.dates = []
         self.keyboard_dismissals = 0
+        self.enters_pressed = 0
 
     def read_screen(self):
         return self._screens.pop(0) if self._screens else SCREENS[
@@ -154,6 +155,9 @@ class FakeDriver:
 
     def dismiss_keyboard(self):
         self.keyboard_dismissals += 1
+
+    def press_enter(self):
+        self.enters_pressed += 1
 
     def set_date(self, day, month, year):
         self.dates.append((day, month, year))
@@ -525,6 +529,29 @@ def test_a_code_screen_that_never_advances_gives_up_rather_than_retyping():
                                sleep=lambda _s: None)
     assert result.status == signup.RESULT_STUCK
     assert "did not advance" in result.detail
+    # The generic repeat-guard (MAX_REPEATS = 4) ends the run well before a
+    # separate wait counter ever could -- one safe recovery attempt fits
+    # inside that budget, on the next-to-last try, not more.
+    assert driver.enters_pressed == 1
+
+
+def test_a_code_screen_that_recovers_after_enter_is_pressed():
+    """`briangonzalezyi121@gmail.com`, 2026-08-25: the same six digits sat
+    filled through four full waits with nothing ever pressed, and a code that
+    had already arrived correctly was reported stuck. ENTER on the third read
+    of the same screen is what a real recovery looks like -- the run must
+    actually pick up from there, not just attempt it and give up anyway."""
+    driver = FakeDriver([
+        SCREENS[signup.SCREEN_ENTRY],
+        SCREENS[signup.SCREEN_PHONE],
+    ] + [SCREENS[signup.SCREEN_CODE]] * 3 + [
+        SCREENS[signup.SCREEN_TERMS],
+        DONE,
+    ])
+    result = signup.run_signup(driver, FakeRouter([FakeLease()]), _identity(),
+                               sleep=lambda _s: None)
+    assert result.status == signup.RESULT_CREATED
+    assert driver.enters_pressed == 1
 
 
 # --- what comes after the account exists --------------------------------------

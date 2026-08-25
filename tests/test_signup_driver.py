@@ -143,6 +143,24 @@ class DatePickerTest(unittest.TestCase):
         self.assertIn("adb -s device:1 shell input keyevent 4", adb.commands)
 
 
+class PressEnterTest(unittest.TestCase):
+    def test_it_sends_the_enter_keyevent(self):
+        """Keyevent 66, not BACK (4): ENTER only ever acts on a focused text
+        field and cannot fall through as navigation the way BACK can on some
+        devices -- see `signup._submit_after_typing`'s docstring."""
+        adb = FakeAdb()
+        driver = ScriptedDriver(adb, [])
+        driver.press_enter()
+        self.assertIn("adb -s device:1 shell input keyevent 66", adb.keyevents)
+
+    def test_it_is_refused_in_observe_only_mode(self):
+        adb = FakeAdb()
+        driver = AdbSignupDriver("device:1", adb, logger=None, act=False,
+                                 screenshots=False)
+        driver.press_enter()
+        self.assertEqual(adb.keyevents, [])
+
+
 class TapLabelTest(unittest.TestCase):
     def test_a_label_on_a_child_taps_its_clickable_parent(self):
         """Several controls in this chain carry their text on a dead child."""
