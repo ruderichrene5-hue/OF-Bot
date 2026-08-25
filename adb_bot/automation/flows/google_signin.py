@@ -380,11 +380,14 @@ BLANK_READ_WAIT_SECONDS = 6
 # How many times *this run* will try clearing a reCAPTCHA challenge before
 # accepting `RESULT_ROBOT_CHECK`. `recaptcha_grid.solve_checkbox` already
 # retries the checkbox itself several times internally (its own budget is a
-# couple of minutes); this is a second, outer layer for the rarer case where
-# Google shows a *second*, independent challenge right after the first one
-# cleared. Kept small -- each attempt is expensive in both time and 2captcha
-# cost, and a mailbox that fails this many is worth a person's look.
-MAX_ROBOT_CHECK_SOLVES = 2
+# couple of minutes); this is a second, outer layer for the case where
+# Google keeps escalating to a fresh, independent challenge right after the
+# previous one cleared. Google's own risk model can throw many of these in a
+# row for a given session -- raised from 2 to 6 on 2026-08-25 so the flow
+# keeps solving instead of giving up on an account that is genuinely still
+# winnable; only a real, non-captcha wall (SCREEN_DEVICE_VERIFICATION) should
+# end a run early.
+MAX_ROBOT_CHECK_SOLVES = 6
 
 _SKIP = ("Skip", "SKIP", "Not now", "NOT NOW", "Never", "NEVER")
 _NEXT = ("Next", "NEXT", "Continue", "CONTINUE")
