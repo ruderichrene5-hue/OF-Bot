@@ -1,8 +1,12 @@
 """Headless entrypoint for the MultiLogin -> Airtable profile sync (loop #4).
 
-Runs unattended (e.g. Windows Task Scheduler, once a day). Dry-run by default --
+Runs unattended every 3 hours (`adbbot-mlx-sync.timer`). Dry-run by default --
 it prints exactly what it *would* write and touches nothing until `--apply` is
 passed, matching the "dry-run first" guidance in MLX_SYNC_FINDINGS.md.
+
+It creates a row for a profile Airtable has never seen, and reconciles the ones
+it has: `Profile Name`, `MLX Folder` and `MLX Tags` are made to match
+MultiLogin every run. `Status` is never synced -- see mlx_sync.py's header.
 
 Usage (from the repo root, with the venv active):
     python -m adb_bot.automation.sync_cli            # dry-run, prints the plan
@@ -48,9 +52,14 @@ def _print_plan(plan: mlx_sync.SyncPlan) -> None:
             model = p.model_name or "(no model match)"
             print(f"    + {p.name}  serial={p.serial_no}  model={model}  tz={p.time_zone or '-'}")
     if plan.to_update:
-        print(f"\n  Existing profiles to backfill ({len(plan.to_update)}):")
+        print(f"\n  Existing profiles to reconcile ({len(plan.to_update)}):")
         for item in plan.to_update:
-            print(f"    ~ {item.profile.name}  ({item.reason})")
+            print(f"    ~ {item.profile.serial_no}  {item.reason}")
+    refusals = [i for i in plan.unchanged if i.reason and i.reason != "already in sync"]
+    if refusals:
+        print(f"\n  Differences deliberately not written ({len(refusals)}):")
+        for item in refusals:
+            print(f"    = {item.profile.serial_no}  {item.reason}")
     if plan.skipped:
         print(f"\n  Skipped ({len(plan.skipped)}):")
         for label, reason in plan.skipped:
@@ -58,7 +67,7 @@ def _print_plan(plan: mlx_sync.SyncPlan) -> None:
 
 
 def run_sync(mlx_token: str, airtable_token: str, base_id: str, dry_run: bool = True,
-             skip_staging: bool = False) -> mlx_sync.SyncReport:
+             skip_staging: bool = False, reconcile: bool = True) -> mlx_sync.SyncReport:
     mlx_client = MultiloginMobileListClient(mlx_token)
     airtable = AirtableClient(airtable_token, base_id, at.TABLE_PROFILES)
 
@@ -72,7 +81,8 @@ def run_sync(mlx_token: str, airtable_token: str, base_id: str, dry_run: bool = 
     models = airtable.models_by_name()
     print(f"[sync] Airtable has {len(existing)} profile(s) and {len(models)} model(s)")
 
-    plan = mlx_sync.plan_sync(items, existing, folder_names, skip_staging=skip_staging)
+    plan = mlx_sync.plan_sync(items, existing, folder_names, skip_staging=skip_staging,
+                              reconcile=reconcile)
     _print_plan(plan)
 
     report = mlx_sync.apply_sync(airtable, plan, models, dry_run=dry_run)
@@ -94,6 +104,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-staging", action="store_true",
                         help="Don't create rows for staging profiles that belong to no model "
                              "(MLX's 'Default folder', e.g. the unnamed Blank profiles).")
+    parser.add_argument("--no-reconcile", action="store_true",
+                        help="Only backfill blank fields; leave Profile Name, MLX Folder and "
+                             "MLX Tags as Airtable has them. For a run where MultiLogin itself "
+                             "looks wrong -- the scheduled sync should not use this.")
     parser.add_argument("--mlx-token", default=None, help="MultiLogin bearer/automation token.")
     parser.add_argument("--airtable-token", default=None, help="Airtable Personal Access Token.")
     parser.add_argument("--base-id", default=None, help="Airtable base id (defaults to saved/test base).")
@@ -112,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         report = run_sync(mlx_token, airtable_token, base_id, dry_run=not args.apply,
-                          skip_staging=args.skip_staging)
+                          skip_staging=args.skip_staging, reconcile=not args.no_reconcile)
     except Exception as exc:  # top-level guard: an unattended run should exit non-zero, not traceback silently
         print(f"[fatal] sync failed: {exc}")
         return 1

@@ -19,7 +19,7 @@ safe to test before the phones/media are wired.
 | Posting | `run_loop posting` | every 10 min | Post due `Posting Queue` rows (Spoof Variant + Caption) → write Post Status / Issue Type / Run Log |
 | Warmup | `run_loop warmup` | 3×/day | Run lifecycle-due flows for Warmup accounts |
 | Pipeline | `run_loop pipeline` | every 20 min | Scan raw videos → spoof one variant per active account → `Spoof Variants` rows |
-| MLX sync | `run_loop mlx-sync` | daily | Diff MultiLogin profiles → create Devices/Proxies/Profiles |
+| MLX sync | `run_loop mlx-sync` | every 3 h | Diff MultiLogin against Airtable → create Devices/Proxies/Profiles for new phones, and reconcile an existing row's Profile Name, MLX Folder and MLX Tags (never Status) |
 | Cleanup | `run_loop cleanup` | daily (04:00) | Delete finished media older than 2 days (`--max-age-days`) |
 
 ## Resource limits

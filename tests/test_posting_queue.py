@@ -297,14 +297,37 @@ class ProfileHealthGuardTest(TestCase):
         "Scheduled DateTime": "2026-08-07T10:00:00.000Z",
         "Target Profile": ["recP1"], "Spoof Variant": ["recV1"]}}
 
-    def _plan(self, **profile):
+    def _plan(self, ignore_needs_human=False, **profile):
         info = {"launch_id": "111", "name": "Jil 5", "needs_human": False,
                 "status": "Active"}
         info.update(profile)
         return plan_posting_queue(
             [self.ROW], accounts_by_id={}, profiles_by_recid={"recP1": info},
             variants_by_id={"recV1": {"file_path": "/tmp/a.mp4"}}, captions_by_id={},
-            now=datetime(2026, 8, 7, 12, 0))
+            now=datetime(2026, 8, 7, 12, 0),
+            ignore_needs_human=ignore_needs_human)
+
+    def test_a_supervised_run_may_post_on_a_flagged_profile(self):
+        """`No Recent Success` means "no confirmed post in 24h", so the flag
+        blocks the only event that clears it and the profile parks forever --
+        eleven thousand skips and zero attempts in six days, measured
+        2026-08-14. `posting_probe` opens this gate with a person watching."""
+        plan = self._plan(needs_human=True, ignore_needs_human=True)
+        self.assertEqual(len(plan.to_post), 1)
+        self.assertEqual(plan.skipped, [])
+
+    def test_opening_the_gate_does_not_open_any_of_the_others(self):
+        """It is one gate, not a way to post on anything at all: a parked
+        profile stays parked whoever is watching."""
+        plan = self._plan(needs_human=True, status="Inactive",
+                          ignore_needs_human=True)
+        self.assertEqual(plan.to_post, [])
+        self.assertIn("Inactive", plan.skipped[0].reason)
+
+    def test_the_gate_is_shut_unless_a_caller_asks(self):
+        """The timer-driven loop never passes it, so the default has to be the
+        safe one."""
+        self.assertEqual(self._plan(needs_human=True).to_post, [])
 
     def test_a_healthy_profile_still_posts(self):
         self.assertEqual(len(self._plan().to_post), 1)
@@ -323,6 +346,116 @@ class ProfileHealthGuardTest(TestCase):
         """`status=None` means the column was not read, not that the profile is
         parked. Treating the two the same would stop the whole fleet."""
         self.assertEqual(len(self._plan(status=None).to_post), 1)
+
+
+class PerProfileCapTest(TestCase):
+    """A parked profile has a backlog, and everything due on it runs
+    sequentially on one launch. `Jil 8` had 17 rows waiting on 2026-08-14:
+    uncapped, its first allowed run posts seventeen reels back to back, which
+    is not a catch-up but the behaviour Instagram acts on.
+    """
+
+    def _rows(self, n, profile="recP1", name="Jil 8"):
+        return [{"id": f"q{i}-{profile}", "fields": {
+            "Name": f"{name} / {9 + i}:00", "Post Status": "Pending",
+            "Scheduled DateTime": f"2026-08-07T{9 + i:02d}:00:00.000Z",
+            "Target Profile": [profile], "Spoof Variant": ["recV1"]}}
+            for i in range(n)]
+
+    def _plan(self, rows, cap=None, profiles=None):
+        return plan_posting_queue(
+            rows, accounts_by_id={},
+            profiles_by_recid=profiles or {"recP1": {
+                "launch_id": "111", "name": "Jil 8", "needs_human": False,
+                "status": "Active"}},
+            variants_by_id={"recV1": {"file_path": "/tmp/a.mp4"}},
+            captions_by_id={}, now=datetime(2026, 8, 8, 12, 0),
+            max_posts_per_profile=cap)
+
+    def test_uncapped_by_default_so_the_live_loop_is_unchanged(self):
+        self.assertEqual(len(self._plan(self._rows(5)).to_post), 5)
+
+    def test_a_cap_of_one_leaves_one_post(self):
+        self.assertEqual(len(self._plan(self._rows(17), cap=1).to_post), 1)
+
+    def test_the_cap_keeps_the_earliest_scheduled_row(self):
+        """The backlog is worked oldest-first, not in whatever order the rows
+        came back from Airtable."""
+        kept = self._plan(list(reversed(self._rows(4))), cap=1).to_post
+        self.assertEqual(kept[0].scheduled, "2026-08-07T09:00:00.000Z")
+
+    def test_the_cap_is_per_phone_not_per_run(self):
+        plan = self._plan(
+            self._rows(3) + self._rows(3, profile="recP2", name="Nikki 12"),
+            cap=1,
+            profiles={
+                "recP1": {"launch_id": "111", "name": "Jil 8",
+                          "needs_human": False, "status": "Active"},
+                "recP2": {"launch_id": "222", "name": "Nikki 12",
+                          "needs_human": False, "status": "Active"}})
+        self.assertEqual(sorted(i.launch_id for i in plan.to_post), ["111", "222"])
+
+    def test_capping_does_not_mark_the_dropped_rows_skipped(self):
+        """They are still due and still Pending; the next run takes the next
+        one. Reporting them as skipped would read as a refusal."""
+        self.assertEqual(self._plan(self._rows(5), cap=1).skipped, [])
+
+
+class CapDoesNotStarveTheHealthyAccountTest(TestCase):
+    """A cap must not spend a two-account phone's whole visit on the dead one.
+
+    On a parked phone the oldest rows belong to whichever handle has been
+    failing longest -- which is exactly the handle that cannot succeed. On
+    2026-08-14 `Jil 8` had ten rows for a signed-out handle queued ahead of its
+    first healthy one, so a strictly earliest-first cap would refuse a post and
+    go home while `@jil.lena777` (12 posts, fine) waited behind them.
+    """
+
+    def _rows(self, specs):
+        """specs: (row_id, handle, hour)."""
+        return [{"id": rid, "fields": {
+            "Name": f"Jil 8 / {hour}:00", "Post Status": "Pending",
+            "Scheduled DateTime": f"2026-08-07T{hour:02d}:00:00.000Z",
+            "Target Profile": ["recP1"], "Spoof Variant": ["recV1"],
+            "Target IG Handle": handle}}
+            for rid, handle, hour in specs]
+
+    def _plan(self, rows, cap):
+        return plan_posting_queue(
+            rows, accounts_by_id={},
+            profiles_by_recid={"recP1": {"launch_id": "111", "name": "Jil 8",
+                                         "needs_human": False, "status": "Active"}},
+            variants_by_id={"recV1": {"file_path": "/tmp/a.mp4"}},
+            captions_by_id={}, now=datetime(2026, 8, 8, 12, 0),
+            max_posts_per_profile=cap)
+
+    def test_the_healthy_account_gets_the_turn_it_is_owed(self):
+        rows = self._rows([("q1", "helen_aiscooll", 9), ("q2", "helen_aiscooll", 10),
+                           ("q3", "helen_aiscooll", 11), ("q4", "jil.lena777", 12)])
+        kept = self._plan(rows, cap=2).to_post
+        self.assertEqual({i.target_handle for i in kept},
+                         {"helen_aiscooll", "jil.lena777"})
+
+    def test_a_cap_of_one_still_takes_the_oldest_waiting_account(self):
+        """Round-robin decides who shares, not who goes first."""
+        rows = self._rows([("q1", "helen_aiscooll", 9), ("q2", "jil.lena777", 12)])
+        kept = self._plan(rows, cap=1).to_post
+        self.assertEqual([i.target_handle for i in kept], ["helen_aiscooll"])
+
+    def test_within_one_account_it_is_still_oldest_first(self):
+        rows = self._rows([("q1", "jil.lena777", 14), ("q2", "jil.lena777", 9)])
+        kept = self._plan(rows, cap=1).to_post
+        self.assertEqual(kept[0].scheduled, "2026-08-07T09:00:00.000Z")
+
+    def test_a_single_account_phone_behaves_exactly_as_before(self):
+        rows = self._rows([("q1", "", 9), ("q2", "", 10), ("q3", "", 11)])
+        kept = self._plan(rows, cap=2).to_post
+        self.assertEqual([i.scheduled for i in kept],
+                         ["2026-08-07T09:00:00.000Z", "2026-08-07T10:00:00.000Z"])
+
+    def test_a_cap_larger_than_the_backlog_keeps_everything(self):
+        rows = self._rows([("q1", "a", 9), ("q2", "b", 10)])
+        self.assertEqual(len(self._plan(rows, cap=9).to_post), 2)
 
 
 class HandoffGateTest(TestCase):
