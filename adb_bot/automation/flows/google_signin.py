@@ -71,6 +71,7 @@ SCREEN_ROBOT_CHECK = "google_robot_check"    # a captcha; needs a person
 SCREEN_DEVICE_VERIFICATION = "device_verification"  # wants a phone number; needs a person
 SCREEN_SERVER_ERROR = "google_server_error"  # transient; retryable
 SCREEN_RETRY = "try_again"                   # Google's own retry page
+SCREEN_RECAPTCHA_UNREACHABLE = "recaptcha_unreachable"  # transient; retryable
 SCREEN_SERVICES = "google_services"          # backup/location consents
 SCREEN_PLAY_TIP = "play_install_tip"         # Play Store's one-time install tip
 SCREEN_LOADING = "loading"
@@ -196,6 +197,17 @@ _RETRY_MARKERS = (
     "something went wrong there. please try again",
 )
 
+# The reCAPTCHA widget's own transient network dialog -- a single `OK`, no
+# relation to the account or the challenge itself. `recaptcha_grid.py` already
+# retries this from *inside* one checkbox attempt (`_CANNOT_CONTACT_MARKER`),
+# but it can also land as the very next screen *after* `solve_checkbox()` has
+# already reported the challenge cleared, once control is back in this outer
+# loop -- confirmed live 2026-08-25 (bcboy2970@gmail.com, GeeLark/Android 16),
+# where it previously fell through to `unknown_screen` and threw away a run
+# that had two genuine solves behind it already. Just a glitch dialog: tap OK
+# and let the loop re-read whatever Google shows next.
+_RECAPTCHA_UNREACHABLE_MARKERS = ("cannot contact recaptcha",)
+
 # Ordered: the specific before the general. `_PASSWORD_MARKERS` carries a
 # bare "welcome", which appears on several Google screens -- including, it
 # turns out, Play Store's own signed-in home ("Welcome to Play... Signed in
@@ -220,6 +232,7 @@ _ORDERED = (
     # contains, so this reordering does not risk misreading one as an error.
     (SCREEN_SERVER_ERROR, _SERVER_ERROR_MARKERS),
     (SCREEN_RETRY, _RETRY_MARKERS),
+    (SCREEN_RECAPTCHA_UNREACHABLE, _RECAPTCHA_UNREACHABLE_MARKERS),
     (SCREEN_ROBOT_CHECK, _ROBOT_CHECK_MARKERS),
     (SCREEN_DEVICE_VERIFICATION, _DEVICE_VERIFICATION_MARKERS),
     (SCREEN_SAVE_PASSWORD, _SAVE_PASSWORD_MARKERS),
@@ -327,6 +340,12 @@ MAX_DUMPLESS_READS = 5
 
 MAX_STEPS = 40
 MAX_REPEATS = 4
+
+# How many times the reCAPTCHA widget's own "cannot contact" dialog gets
+# dismissed before giving up -- a real network hiccup could show this
+# repeatedly, and it is not the account's fault, so it should not eat into
+# `MAX_ROBOT_CHECK_SOLVES`'s budget for actually solving challenges.
+MAX_RECAPTCHA_UNREACHABLE_HITS = 3
 
 # Google's sign-in is slow through these proxies -- every request leaves via a
 # German mobile exit. `Blank caio 2` sat on `checking info…` for a full minute
@@ -638,6 +657,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     restarts = 0
     MAX_APP_RESTARTS = 3
     server_errors = 0
+    recaptcha_unreachable_hits = 0
     retry_pages = 0
     services_taps = 0
     blank_reads = 0
@@ -885,6 +905,20 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             sleep(10)
             continue
 
+        if screen == SCREEN_RECAPTCHA_UNREACHABLE:
+            recaptcha_unreachable_hits += 1
+            if recaptcha_unreachable_hits > MAX_RECAPTCHA_UNREACHABLE_HITS:
+                log("warning", "reCAPTCHA's own network dialog would not go "
+                               "away after %d tries", recaptcha_unreachable_hits - 1)
+                return RESULT_STUCK
+            log("info", "reCAPTCHA's own network dialog is on screen; "
+                        "dismissing it (%d/%d)", recaptcha_unreachable_hits,
+                MAX_RECAPTCHA_UNREACHABLE_HITS)
+            driver.tap_label(("OK", "Ok"))
+            last, repeats = None, 0
+            pending = settle(driver, text, 6, sleep=sleep, clock=clock)
+            continue
+
         if screen == SCREEN_WRONG_PASSWORD:
             return RESULT_WRONG_PASSWORD
 
@@ -895,6 +929,15 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             # branch used to assume. Try clearing it in place before giving
             # up; only report `RESULT_ROBOT_CHECK` once that has genuinely
             # failed.
+            #
+            # A failed `solve_checkbox()` used to fall straight through to
+            # `RESULT_ROBOT_CHECK` below, which meant `MAX_ROBOT_CHECK_SOLVES`
+            # only ever fired once no matter its value -- confirmed live
+            # 2026-08-25 (bcboy2970@gmail.com): raising it from 2 to 6 made no
+            # difference because this branch never got a second visit. `continue`
+            # here (with the same repeat-guard reset every other retry path in
+            # this loop uses) lets Google re-show the challenge and this branch
+            # actually try again, up to the real budget.
             if robot_check_solves < MAX_ROBOT_CHECK_SOLVES:
                 robot_check_solves += 1
                 log("info", "a reCAPTCHA challenge is on screen for %s -- "
@@ -910,6 +953,9 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
                 log("warning", "could not clear the reCAPTCHA challenge "
                                "(%d/%d)", robot_check_solves,
                     MAX_ROBOT_CHECK_SOLVES)
+                if robot_check_solves < MAX_ROBOT_CHECK_SOLVES:
+                    last, repeats = None, 0
+                    continue
             log("warning", "Google put a robot check on %s -- that mailbox "
                            "cannot be signed in from here; use another",
                 address)

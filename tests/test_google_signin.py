@@ -1129,3 +1129,38 @@ def test_sign_in_with_retries_does_not_retry_a_robot_check():
     assert verdict == g.RESULT_ROBOT_CHECK
     assert not any("force-stop" in c for c in adb.commands), \
         "retried an account-shaped result"
+
+
+RECAPTCHA_UNREACHABLE = (
+    'the page at "https://accounts.google.com" says: cannot contact '
+    "recaptcha. check your connection and try again. ok")
+
+
+def test_recaptcha_unreachable_dialog_is_named_rather_than_left_unknown():
+    """bcboy2970@gmail.com, 2026-08-25 (GeeLark/Android 16): this landed as
+    the very next screen right after `solve_checkbox()` reported a genuine
+    clear, and used to fall through to `unknown_screen`, throwing away a run
+    that already had two real solves behind it."""
+    assert (g.classify_google_screen(RECAPTCHA_UNREACHABLE)
+           == g.SCREEN_RECAPTCHA_UNREACHABLE)
+
+
+def test_recaptcha_unreachable_dialog_is_not_mistaken_for_a_robot_check():
+    """It carries no "not a robot" text of its own, but the caller must not
+    treat it as a captcha needing a person -- it is a plain network glitch
+    with one `OK` button."""
+    assert (g.classify_google_screen(RECAPTCHA_UNREACHABLE)
+           != g.SCREEN_ROBOT_CHECK)
+
+
+def test_a_persistent_recaptcha_unreachable_dialog_eventually_gives_up():
+    """A real network fault could show this every time; bounded so it does
+    not spin forever, and reported as `stuck` (not blamed on the account)."""
+    driver = _StubDriver(RECAPTCHA_UNREACHABLE)
+    adb = _StubAdb()
+
+    verdict = g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "S",
+                        sleep=lambda _s: None)
+
+    assert verdict == g.RESULT_STUCK
+    assert driver.taps.count(("OK", "Ok")) == g.MAX_RECAPTCHA_UNREACHABLE_HITS
