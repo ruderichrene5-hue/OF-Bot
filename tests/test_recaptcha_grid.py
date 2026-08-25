@@ -522,3 +522,97 @@ class EmptyFullPageOcrFallsBackToBandsTest(TestCase):
 
         self.assertEqual(len(words), 4)
         self.assertNotIn("verify", text)  # the footer band was never read
+
+
+class _CroppableImage:
+    """A fake decoded image: only `.shape` and slice-out-a-region matter to
+    `_crop_jpeg` -- the actual pixels are never inspected in this test."""
+
+    def __init__(self, height=1500, width=1080):
+        self.shape = (height, width, 3)
+
+    def __getitem__(self, _key):
+        return self
+
+
+class _FakeEncodedBytes(bytearray):
+    """`cv2.imencode`'s real return type has `.tobytes()`; a bare bytearray
+    doesn't, so the fake needs this instead of the builtin."""
+
+    def tobytes(self):
+        return bytes(self)
+
+
+class FakeCv2Crop:
+    IMWRITE_JPEG_QUALITY = 1
+    IMREAD_COLOR = 1
+
+    def __init__(self, sizes_by_quality):
+        self.sizes_by_quality = sizes_by_quality
+        self.encode_calls = []
+
+    def imdecode(self, _buf, _flags):
+        return _CroppableImage()
+
+    def imencode(self, ext, _image, params=None):
+        quality = params[1] if params else 95
+        self.encode_calls.append(quality)
+        size = self.sizes_by_quality.get(quality, 1024)
+        return True, _FakeEncodedBytes(size)
+
+
+class FakeNpCrop:
+    uint8 = "uint8"
+
+    @staticmethod
+    def frombuffer(_data, dtype=None):
+        return _data
+
+
+class CropSizeLimitTest(TestCase):
+    """2026-08-25: every single grid solve failed with "2captcha could not
+    answer round 1", logged as an ordinary solver miss. The real cause was
+    `/createTask` refusing the upload outright
+    (`ERROR_TOO_BIG_CAPTCHA_FILESIZE: Image size is more than 100 kB`) -- a
+    lossless PNG crop of nine real photos routinely exceeds it. The crop must
+    stay under 2captcha's own limit, stepping down JPEG quality only as far
+    as it takes."""
+
+    def setUp(self):
+        self._orig = (rg.cv2, rg.np)
+
+    def tearDown(self):
+        rg.cv2, rg.np = self._orig
+
+    def test_the_first_quality_that_fits_is_used_without_trying_lower_ones(self):
+        rg.cv2 = FakeCv2Crop({85: 60 * 1024})  # fits on the very first try
+        rg.np = FakeNpCrop()
+
+        result = rg._crop_jpeg(b"irrelevant", (0, 0, 100, 100))
+
+        self.assertEqual(len(result), 60 * 1024)
+        self.assertEqual(rg.cv2.encode_calls, [85])
+
+    def test_a_crop_too_big_at_full_quality_steps_down_until_it_fits(self):
+        fake = FakeCv2Crop({85: 200 * 1024, 70: 150 * 1024, 55: 80 * 1024})
+        rg.cv2 = fake
+        rg.np = FakeNpCrop()
+
+        result = rg._crop_jpeg(b"irrelevant", (0, 0, 100, 100))
+
+        self.assertEqual(len(result), 80 * 1024)
+        self.assertEqual(fake.encode_calls, [85, 70, 55])
+
+    def test_still_too_big_at_the_lowest_quality_returns_it_anyway(self):
+        """A best-effort answer, not a refusal: `_solve_grid` finding out from
+        2captcha's own response is still better than never uploading anything
+        because this returned `None` on principle."""
+        fake = FakeCv2Crop({85: 500 * 1024, 70: 400 * 1024, 55: 300 * 1024,
+                            40: 200 * 1024, 25: 150 * 1024})
+        rg.cv2 = fake
+        rg.np = FakeNpCrop()
+
+        result = rg._crop_jpeg(b"irrelevant", (0, 0, 100, 100))
+
+        self.assertEqual(len(result), 150 * 1024)
+        self.assertEqual(fake.encode_calls, [85, 70, 55, 40, 25])

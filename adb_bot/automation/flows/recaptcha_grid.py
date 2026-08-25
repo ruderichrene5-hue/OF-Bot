@@ -78,6 +78,11 @@ MAX_CHECKBOX_ATTEMPTS = 3
 # behaviour tonight needed 2; this leaves room without chasing it forever.
 MAX_GRID_ROUNDS = 4
 
+# 2captcha's own /createTask limit ("ERROR_TOO_BIG_CAPTCHA_FILESIZE") -- a
+# margin under 100KB, not the literal ceiling, so a crop that lands right on
+# the edge doesn't get refused anyway.
+_MAX_CAPTCHA_IMAGE_BYTES = 95 * 1024
+
 # Paced to move fast without outrunning the phone -- the expired-challenge
 # failure was about total elapsed time, not any one wait here.
 SETTLE_SECONDS = 2.0
@@ -195,8 +200,20 @@ def _default_ocr(image_bytes: bytes):
         return "", []
 
 
-def _crop_png(image_bytes: bytes, box: tuple[int, int, int, int]) -> bytes | None:
-    """PNG bytes of `box` (x1, y1, x2, y2) cropped out of `image_bytes`."""
+def _crop_jpeg(image_bytes: bytes, box: tuple[int, int, int, int]) -> bytes | None:
+    """JPEG bytes of `box` (x1, y1, x2, y2) cropped out of `image_bytes`, kept
+    under 2captcha's own size limit.
+
+    PNG, not JPEG, until 2026-08-25: every single grid solve failed with
+    "2captcha could not answer round 1", logged as if the service just had
+    no answer -- the real reason was `/createTask` refusing the upload
+    outright (`ERROR_TOO_BIG_CAPTCHA_FILESIZE: Image size is more than 100
+    kB`), a response `_solve_grid` never inspected, so a lossless PNG of nine
+    real photos silently never reached the solver at all. JPEG compresses
+    photographic content far below the limit at a quality 2captcha's own
+    solvers read easily; the quality ladder is a safety margin for a crop
+    larger than usual, not the expected case.
+    """
     if cv2 is None or np is None:
         return None
     image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -208,8 +225,16 @@ def _crop_png(image_bytes: bytes, box: tuple[int, int, int, int]) -> bytes | Non
     y1, y2 = max(0, min(height, y1)), max(0, min(height, y2))
     if x2 <= x1 or y2 <= y1:
         return None
-    ok, encoded = cv2.imencode(".png", image[y1:y2, x1:x2])
-    return encoded.tobytes() if ok else None
+    cropped = image[y1:y2, x1:x2]
+    encoded = None
+    for quality in (85, 70, 55, 40, 25):
+        ok, candidate = cv2.imencode(".jpg", cropped, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if not ok:
+            continue
+        encoded = candidate
+        if len(candidate) <= _MAX_CAPTCHA_IMAGE_BYTES:
+            break
+    return encoded.tobytes() if encoded is not None else None
 
 
 # Per-word horizontal offset (in label-heights) from that word's own left
@@ -339,7 +364,7 @@ def solve_checkbox(driver, solver, logger=None, sleep=time.sleep,
     `screen_size()` (see `AdbChallengeDriver`) -- everything here works by
     pixels, never the UI dump. `solver` is a `CaptchaSolver`
     (`adb_bot.clients.captcha`); image grids are answered by its `solve_grid`.
-    `ocr` and `crop` default to real OCR/cv2 (`_default_ocr`, `_crop_png`) and
+    `ocr` and `crop` default to real OCR/cv2 (`_default_ocr`, `_crop_jpeg`) and
     exist as seams so tests can exercise the tap/round-trip logic without
     either dependency installed.
 
@@ -349,7 +374,7 @@ def solve_checkbox(driver, solver, logger=None, sleep=time.sleep,
     falls back to reporting.
     """
     read = ocr or _default_ocr
-    crop_fn = crop or _crop_png
+    crop_fn = crop or _crop_jpeg
     if not (hasattr(driver, "screenshot_bytes") and hasattr(driver, "tap_xy")
             and hasattr(driver, "screen_size")):
         _emit(logger, "info", "driver has no raw-pixel access; cannot attempt "
@@ -514,7 +539,7 @@ def _solve_grid(driver, solver, read, crop_fn, size, header_text, deadline,
 
         header = _header_text(words, size) or comment
         comment = header
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as handle:
             handle.write(crop)
             tmp_path = handle.name
         try:
