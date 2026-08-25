@@ -5,6 +5,7 @@ from .folders import MultiloginFolderClient
 from .mobile_list import MultiloginMobileListClient
 from .launch_stats import CountingLauncherClient, LaunchStats
 from .tags import MultiloginTagClient
+from .proxy import MultiloginProxyClient
 
 __all__ = [
     "CountingLauncherClient",
@@ -15,4 +16,5 @@ __all__ = [
     "MultiloginShutdownClient",
     "MultiloginFolderClient",
     "MultiloginMobileListClient",
+    "MultiloginProxyClient",
 ]
