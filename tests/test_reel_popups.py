@@ -630,3 +630,85 @@ class ProbeLaunchesInstagramTest(TestCase):
         self.assertIn("build_launch_commands", source)
         self.assertLess(source.index("build_launch_commands"),
                         source.index("Instagram UI loaded"))
+
+
+class _Selector:
+    """Stands in for uiautomator2's `d(**kwargs)` -- just `.exists`."""
+
+    def __init__(self, exists: bool):
+        self.exists = exists
+
+
+class FakeU2Device(FakeDevice):
+    """`FakeDevice` (dump_hierarchy/click) plus the callable-selector API
+    `waits.any_exists` needs. `feed_selectors_exist` is checked live on every
+    call, so a test can flip it mid-run to simulate the feed appearing."""
+
+    def __init__(self, xml="<?xml version=\"1.0\"?><hierarchy/>", feed_exists=False):
+        super().__init__(xml)
+        self.feed_exists = feed_exists
+        self.calls = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        resource_id = kwargs.get("resourceId", "")
+        is_feed_selector = "feed_tab" in resource_id or "profile_tab" in resource_id
+        return _Selector(self.feed_exists if is_feed_selector else False)
+
+
+class EnsureFeedUsableTest(TestCase):
+    """`Kathi 2`, live posting account, 2026-08-25: Meta's ads-consent chain
+    re-surfaced out of nowhere, days into normal posting. `_dismiss_popups_u2`
+    only taps safe no-commitment labels (Skip, Not now...) and cannot clear a
+    chain whose own Continue stays disabled until an option is actively
+    selected -- so posting just failed to find the feed and gave up, needing
+    a manual clear. `_ensure_feed_usable_u2` is the fix: fall through to the
+    same ads-consent-aware handler warm-up already uses."""
+
+    def setUp(self):
+        self.flow = InstagramReelUploadU2Flow()
+
+    def test_an_already_usable_feed_never_touches_the_heavier_handler(self):
+        d = FakeU2Device(feed_exists=True)
+        adb_client = mock.Mock()
+
+        with mock.patch("adb_bot.automation.flows.instagram_reel.interruptions."
+                        "handle_blocking_prompts") as handler:
+            usable = self.flow._ensure_feed_usable_u2(d, "host:1", adb_client)
+
+        self.assertTrue(usable)
+        handler.assert_not_called()
+        self.assertEqual(d.dumps, 0, "the popup sweep should have skipped entirely")
+
+    def test_the_ads_consent_handler_is_reached_when_the_feed_is_covered(self):
+        """The cheap sweep alone (no popup in the dump, feed still not up)
+        must fall through to `interruptions.handle_blocking_prompts` -- the
+        one thing here that can walk a multi-step consent chain."""
+        d = FakeU2Device(feed_exists=False)
+        adb_client = mock.Mock()
+
+        def clear_it(target, client, logger=None, flow=None):
+            self.assertEqual(target, "host:1")
+            self.assertIs(client, adb_client)
+            d.feed_exists = True
+            return True
+
+        with mock.patch("adb_bot.automation.flows.instagram_reel.interruptions."
+                        "handle_blocking_prompts", side_effect=clear_it) as handler:
+            usable = self.flow._ensure_feed_usable_u2(d, "host:1", adb_client)
+
+        self.assertTrue(usable)
+        handler.assert_called_once()
+
+    def test_nothing_left_to_clear_is_reported_honestly(self):
+        """`handle_blocking_prompts` finding nothing recognisable must not be
+        papered over as success -- the caller needs to know the feed is
+        still not there."""
+        d = FakeU2Device(feed_exists=False)
+        adb_client = mock.Mock()
+
+        with mock.patch("adb_bot.automation.flows.instagram_reel.interruptions."
+                        "handle_blocking_prompts", return_value=False):
+            usable = self.flow._ensure_feed_usable_u2(d, "host:1", adb_client)
+
+        self.assertFalse(usable)

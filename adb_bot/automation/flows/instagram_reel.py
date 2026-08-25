@@ -8,6 +8,7 @@ from adb_bot.core.models import Profile
 from adb_bot.automation import post_ledger
 
 from . import instagram as instagram_module
+from . import interruptions
 from . import reel_verify
 from . import waits
 
@@ -836,19 +837,7 @@ class InstagramReelUploadU2Flow:
             logger=log, what="Instagram UI loaded",
         )
 
-        # Only sweep for pop-ups if the create control isn't already reachable --
-        # on a clean feed that check is one cheap RPC instead of a full sweep.
-        # "Screen is usable" = the bottom nav is up. The create control itself is
-        # unlabeled on this build, so we can't ask for it by name; the nav tabs
-        # are the reliable proof that the feed rendered and nothing is covering it.
-        self._dismiss_popups_u2(
-            d, logger=log,
-            skip_if=lambda: waits.any_exists(
-                d,
-                {"resourceId": "com.instagram.android:id/feed_tab"},
-                {"resourceId": "com.instagram.android:id/profile_tab"},
-            ),
-        )
+        self._ensure_feed_usable_u2(d, target, adb_client, logger=log)
         if check_abort():
             return {"profile_id": profile.id, "target": target, "aborted": True}
 
@@ -1195,6 +1184,39 @@ class InstagramReelUploadU2Flow:
                 fallback = (label, center, bounds)
 
         return fallback
+
+    def _ensure_feed_usable_u2(self, d, target, adb_client, logger=None) -> bool:
+        """Clear whatever's covering the feed before posting. True if the
+        feed's nav tabs are reachable by the end of this, whether or not
+        anything needed clearing.
+
+        Two layers, cheapest first. `_dismiss_popups_u2` only ever taps safe,
+        no-commitment labels (Skip, Not now, Cancel...) -- it cannot clear
+        Meta's ads-consent chain, whose own Continue stays disabled until "Use
+        free of charge with ads" is actively selected first. Warm-up already
+        carries a handler for that exact chain
+        (`interruptions.handle_blocking_prompts`), but posting never called
+        it: an established, already-posting account re-hit the chain out of
+        nowhere ("Kathi 2", live account, 2026-08-25, days into posting) and
+        every run just failed to find the feed and gave up, requiring a
+        manual clear. The second layer is only reached when the cheap sweep
+        didn't already make the feed usable.
+        """
+        def feed_usable() -> bool:
+            return waits.any_exists(
+                d,
+                {"resourceId": "com.instagram.android:id/feed_tab"},
+                {"resourceId": "com.instagram.android:id/profile_tab"},
+            )
+
+        self._dismiss_popups_u2(d, logger=logger, skip_if=feed_usable)
+        if feed_usable():
+            return True
+
+        if interruptions.handle_blocking_prompts(target, adb_client, logger=logger, flow=self):
+            _emit(logger, "info", "Cleared an onboarding/ads-consent prompt for %s before posting", target)
+            waits.settle(2, ready=feed_usable, logger=logger, what="feed after clearing prompt")
+        return feed_usable()
 
     def _dismiss_popups_u2(self, d, logger=None, max_rounds: int = 3, skip_if=None) -> None:
         """Tap only safe dismiss controls to clear interstitial pop-ups.
