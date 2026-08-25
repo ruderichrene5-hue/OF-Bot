@@ -158,7 +158,16 @@ def open_listing(adb_client, target: str, package: str) -> None:
 # talking to its own servers happily either side of this on 2026-08-17, so it
 # is the Play Store's connection, not the phone's.
 _OFFLINE_MARKERS = ("no internet connection", "check your connection",
-                    "you're offline")
+                    "you're offline",
+                    # A queued/paused download, not a missing button.
+                    # Confirmed live 2026-08-25 (jgjfjfcjjvjfjcncncg@gmail.com,
+                    # GeeLark/Android 16): the listing read "Gmail Waiting for
+                    # connection... Download will begin once restored" on
+                    # every one of 5 attempts (~21 minutes) with no Install/Get
+                    # button ever on screen -- correctly a connectivity
+                    # problem, but read as `no_install_button` since this
+                    # specific Play Store phrasing wasn't in the marker list.
+                    "waiting for connection")
 
 RESULT_OFFLINE = "no_network"
 RESULT_INSTALLED = "installed"

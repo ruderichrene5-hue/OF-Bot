@@ -320,6 +320,24 @@ def test_a_play_store_with_no_network_reopens_the_listing():
     assert len(opened) == p.MAX_OFFLINE + 1, "did not reopen the listing"
 
 
+WAITING_FOR_CONNECTION = (
+    "close sheet gmail waiting for connection… download will begin once "
+    "restored verified by play protect cancel cancel")
+
+
+def test_a_queued_download_waiting_on_connection_is_offline_not_no_button():
+    """jgjfjfcjjvjfjcncncg@gmail.com, 2026-08-25 (GeeLark/Android 16): this
+    exact phrasing sat on screen for all 5 attempts (~21 minutes) with no
+    Install/Get button ever present -- a real connectivity problem, not a
+    missing button, but not caught by the other offline markers either."""
+    adb = _Adb()
+    driver = _Driver(adb, WAITING_FOR_CONNECTION)
+
+    verdict = p.install(driver, adb, "host:1", PACKAGE, sleep=lambda _s: None)
+
+    assert verdict == p.RESULT_OFFLINE
+
+
 PENDING = ("pending… cancel cancel auto-open when ready jump into the app "
            "after it installs installed on all devices")
 
