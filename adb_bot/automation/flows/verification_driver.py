@@ -589,6 +589,29 @@ class AdbChallengeDriver:
             except Exception as exc:
                 self._log("warning", "OCR fallback raised (%s)", exc)
         if not text:
+            # `instagram.py`'s OCR screenshot path (above) has no glogin-reauth
+            # of its own -- confirmed live 2026-08-25 (emanuelnewbyp601@gmail.com):
+            # glogin dropped mid-install-retry-loop, the dump AND the OCR
+            # fallback both silently returned nothing for the full 22-minute
+            # loop, and it read as "no Install button anywhere" rather than the
+            # dead ADB session it actually was. `_screencap()` already knows how
+            # to detect and fix this (`_screencap_once`); use it here as a
+            # cheap probe -- a live session harmlessly re-confirms itself, a
+            # dead one gets reauthenticated -- and give the dump one more try
+            # rather than accepting "empty" from a session that just recovered.
+            # `force=True`: this check has to run even with routine screenshots
+            # switched off (every round script tonight ran that way), since it
+            # is a connectivity probe, not a "take a picture" call.
+            probe = self._screencap(force=True)
+            if probe:
+                root, xml = self._dump()
+                text = _dump_text(root)
+                if text:
+                    source = "ui-dump"
+                    self._log("info", "the screen read empty but a screenshot "
+                                      "probe got real data; the dump now "
+                                      "reads fine too")
+        if not text:
             source = "none"
 
         self._root, self._text, self._source = root, text, source

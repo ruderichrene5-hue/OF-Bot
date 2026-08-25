@@ -553,7 +553,7 @@ class ReadScreenTest(unittest.TestCase):
                                        flow=flow, recorder=recorder,
                                        settle_seconds=0)
         driver._dump = lambda: (root, b"<hierarchy/>")
-        driver._screencap = lambda: screencap
+        driver._screencap = lambda force=False: screencap
         return driver
 
     def test_text_comes_from_the_dump(self):
@@ -1138,6 +1138,51 @@ class GloginDroppedMidRunTest(unittest.TestCase):
         self.assertEqual(len(result), 5004)
         self.assertEqual(self.adb.reauth_calls, [])
         self.assertEqual(len(calls), 1)
+
+    def test_read_screen_recovers_once_the_dropped_session_is_fixed(self):
+        """emanuelnewbyp601@gmail.com, 2026-08-25: glogin dropped mid-run, the
+        UI dump and the OCR fallback both went silently empty on every single
+        poll, and a 22-minute Gmail-install retry loop read that as "no
+        Install button anywhere" -- neither path had any reauth of its own.
+        `read_screen()` must notice an all-empty read, use `_screencap()`
+        (which already knows how to reauthenticate) as a probe, and retry the
+        dump once the session is actually back."""
+        dump_calls = []
+
+        def fake_dump():
+            dump_calls.append(1)
+            if len(dump_calls) == 1:
+                return None, None
+            return _root(_button("Install")), b"<xml/>"
+
+        self.driver._dump = fake_dump
+        self.driver.screenshots = False  # matches every round script tonight
+
+        fake, _ = self._run_hidden([
+            b"error: you should run glogin to login first",
+            b"\x89PNG-real-bytes-here",
+        ])
+        with mock.patch.object(vd, "run_hidden", fake):
+            text = self.driver.read_screen()
+
+        self.assertIn("install", text)
+        self.assertEqual(self.driver._source, "ui-dump")
+        self.assertEqual(len(dump_calls), 2, "the dump must be retried once "
+                                             "the session recovers")
+
+    def test_read_screen_does_not_retry_the_dump_when_the_probe_stays_dead(self):
+        """A genuinely offline phone must not get an extra dump call it has
+        no chance of answering -- the probe failing is itself the answer."""
+        dump_calls = []
+        self.driver._dump = lambda: (dump_calls.append(1), (None, None))[1]
+        self.driver.screenshots = False
+
+        fake, _ = self._run_hidden([b""])
+        with mock.patch.object(vd, "run_hidden", fake):
+            text = self.driver.read_screen()
+
+        self.assertEqual(text, "")
+        self.assertEqual(len(dump_calls), 1)
 
 
 class DismissConfirmationTest(unittest.TestCase):
