@@ -87,6 +87,30 @@ def test_the_retry_page_is_not_confused_with_the_unreachable_servers_page():
     assert g.classify_google_screen(RETRY_PAGE) != g.SCREEN_SERVER_ERROR
 
 
+RETRY_PAGE_WITH_STALE_ROBOT_CHECK_TEXT = (
+    "verify that it’s you to help keep your account safe, google wants to "
+    "make sure that it’s really you trying to sign in loading indeterminate, "
+    "loading verify that it’s you to help keep your account safe, google "
+    "wants to make sure that it’s really you trying to sign in "
+    "lucas18anosff@gmail.com confirm that you're not a robot something went "
+    "wrong something went wrong sorry, something went wrong there. please "
+    "try again."
+)
+
+
+def test_a_retry_page_after_a_genuine_solve_is_not_read_as_a_fresh_robot_check():
+    """`lucas18anosff@gmail.com`, 2026-08-25 (GeeLark/Android 16): the grid was
+    genuinely solved -- "the reCAPTCHA challenge cleared" logged correctly --
+    but the very next screen was Google's own "Sorry, something went wrong
+    there" / Restart error page, with the reCAPTCHA widget's stale "confirm
+    that you're not a robot" text still sitting in the same dump above it.
+    Reading that as ROBOT_CHECK sent the flow searching for a checkbox that no
+    longer existed and threw away a real solve; RETRY is the specific,
+    handle-able page that is actually on screen."""
+    assert (g.classify_google_screen(RETRY_PAGE_WITH_STALE_ROBOT_CHECK_TEXT)
+           == g.SCREEN_RETRY)
+
+
 SERVICES = ("google services cicirahmaputrimu@gmail.com tap to learn more "
             "about each service, such as how to turn it on or off later. data "
             "will be used according to google's privacy policy. backup back up "
@@ -340,6 +364,19 @@ def test_the_retry_page_still_falls_back_to_tapping_when_nothing_landed():
              sleep=lambda _s: None)
 
     assert driver.taps, "never fell back to the on-screen retry button"
+
+
+def test_the_retry_pages_own_button_can_be_restart_not_just_retry():
+    """`lucas18anosff@gmail.com`, 2026-08-25: the button on this variant of
+    the page reads "Restart", not "Try again"/"Retry" -- the only labels the
+    fallback used to know."""
+    driver = _StubDriver(RETRY_PAGE)
+    adb = _RetryPageAdb(shows_up_after_restart=False)
+
+    g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "S",
+             sleep=lambda _s: None)
+
+    assert any("Restart" in labels for labels in driver.taps)
 
 
 def test_the_code_screen_falls_back_to_the_keyboards_own_action(monkeypatch):

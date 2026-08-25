@@ -193,9 +193,20 @@ _RETRY_MARKERS = (
 # first, then reported RESULT_STUCK on a password field that did not exist.
 _ORDERED = (
     (SCREEN_WRONG_PASSWORD, _WRONG_PASSWORD_MARKERS),
-    (SCREEN_ROBOT_CHECK, _ROBOT_CHECK_MARKERS),
+    # Both checked before ROBOT_CHECK: solving a grid can land on Google's own
+    # "Sorry, something went wrong there" / "Restart" error page while the
+    # reCAPTCHA widget's own stale "confirm that you're not a robot" text is
+    # still sitting in the same dump above it. Confirmed live 2026-08-25
+    # (lucas18anosff@gmail.com, GeeLark/Android 16): the grid was genuinely
+    # solved -- "the reCAPTCHA challenge cleared" was logged correctly -- but
+    # the very next screen read matched ROBOT_CHECK anyway on that leftover
+    # text, so the flow searched for a checkbox on a page that no longer had
+    # one and gave up, throwing away a real solve. Both marker sets are
+    # narrow, specific sentences a genuine fresh robot-check screen never
+    # contains, so this reordering does not risk misreading one as an error.
     (SCREEN_SERVER_ERROR, _SERVER_ERROR_MARKERS),
     (SCREEN_RETRY, _RETRY_MARKERS),
+    (SCREEN_ROBOT_CHECK, _ROBOT_CHECK_MARKERS),
     (SCREEN_SAVE_PASSWORD, _SAVE_PASSWORD_MARKERS),
     (SCREEN_TOTP, _TOTP_MARKERS),
     (SCREEN_2FA_CHOOSER, _2FA_MARKERS),
@@ -845,7 +856,8 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             log("info", "taking Google's retry page (%d/%d)", retry_pages,
                 MAX_RETRY_PAGES)
             if not driver.tap_label(_NEXT + ("Try again", "TRY AGAIN",
-                                             "Retry", "RETRY")):
+                                             "Retry", "RETRY",
+                                             "Restart", "RESTART")):
                 log("warning", "nothing to tap on the retry page")
                 return RESULT_STUCK
             sleep(10)
