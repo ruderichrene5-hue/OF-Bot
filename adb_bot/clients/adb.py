@@ -38,7 +38,39 @@ def argv_from_command(command: str) -> list[str]:
     return argv
 
 
+# Every ADB command a session with a dropped glogin auth returns this,
+# whether it went to a shell command, an `exec-out` screencap, or a `pull`.
+# Confirmed live 2026-08-25: a 22-minute Gmail-install retry loop burned its
+# entire budget on this -- glogin's session expired partway through a long
+# run, nothing detected it, and every screenshot/dump after that came back
+# empty (this text decodes as no valid PNG or XML), which every caller
+# upstream can only read as "still nothing to tap".
+GLOGIN_REQUIRED_MARKER = "you should run glogin to login first"
+
+
 class ADBClient:
+    def __init__(self) -> None:
+        # target -> pwd, populated by `authenticate()` on success. Lets a
+        # caller that notices its session has silently dropped
+        # (`GLOGIN_REQUIRED_MARKER`) re-authenticate and retry, rather than
+        # burning its whole budget reading empty screens forever.
+        self._pwds: dict[str, str] = {}
+
+    def reauthenticate(self, target: str, logger=None) -> bool:
+        """Re-run glogin for `target` using the password seen at its last
+        successful `authenticate()`. False if no password was ever recorded
+        for it -- there is nothing to retry with."""
+        pwd = self._pwds.get(target)
+        if not pwd:
+            _emit(logger, "warning", "no remembered password for %s; cannot "
+                                     "re-authenticate", target)
+            return False
+        rc, out, err = self._run_capture(f"adb -s {target} shell glogin {pwd}")
+        combined = " ".join(part for part in (out, err) if part)
+        _emit(logger, "info", "re-glogin for %s -> rc=%s output=%s", target,
+             rc, combined or "<no output>")
+        return rc == 0
+
     def run_command(self, command: str) -> str | None:
         try:
             result = run_hidden(
@@ -118,12 +150,14 @@ class ADBClient:
 
         lowered = combined.lower()
         if any(token in lowered for token in ("success", "authenticated", "ok", "logged in")):
+            self._pwds[profile.target] = profile.pwd
             return True
         # Some glogin builds print nothing on success. Treat a clean exit with
         # no error markers as authenticated rather than failing the whole
         # connection over a missing success string.
         if rc == 0 and not any(token in lowered for token in ("error", "fail", "denied", "invalid", "unauthor")):
             _emit(logger, "info", "glogin gave no explicit success text for %s; treating rc=0 as authenticated", profile.target)
+            self._pwds[profile.target] = profile.pwd
             return True
 
         _emit(logger, "warning", "glogin did not confirm authentication for %s: %s", profile.target, combined or "<no output>")

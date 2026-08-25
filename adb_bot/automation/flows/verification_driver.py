@@ -42,6 +42,7 @@ from pathlib import Path
 
 from adb_bot.automation.flows import verification
 from adb_bot.automation.flows.interruptions import _dump_text
+from adb_bot.clients.adb import GLOGIN_REQUIRED_MARKER
 from adb_bot.core import human_timing
 from adb_bot.core.adb_commands import back, swipe, write_text
 from adb_bot.core.proc import run as run_hidden
@@ -374,6 +375,9 @@ class AdbChallengeDriver:
         """
         if not self.screenshots and not force:
             return None
+        return self._screencap_once(force, allow_reauth=True)
+
+    def _screencap_once(self, force: bool, allow_reauth: bool) -> bytes | None:
         started = time.monotonic()
         try:
             result = run_hidden(["adb", "-s", self.target, "exec-out", "screencap", "-p"],
@@ -384,10 +388,29 @@ class AdbChallengeDriver:
         data = result.stdout or b""
         if not data:
             self._log("warning", "screencap returned nothing")
-        else:
-            self._log("info", "screenshot: %d KB in %.1fs",
-                      len(data) // 1024, time.monotonic() - started)
-        return data or None
+            return None
+        # A dropped glogin session answers every command with this instead of
+        # real data -- short enough that decoding an actual PNG's opening
+        # bytes as UTF-8 never accidentally matches it. Confirmed live
+        # 2026-08-25: a 22-minute retry loop read this as "screen is empty"
+        # on every single poll, because nothing was watching for it.
+        if allow_reauth and len(data) < 200:
+            try:
+                text = data.decode("utf-8", errors="ignore").lower()
+            except Exception:
+                text = ""
+            if GLOGIN_REQUIRED_MARKER in text:
+                self._log("warning", "glogin session dropped for %s; "
+                                     "re-authenticating and retrying",
+                          self.target)
+                if self.adb_client.reauthenticate(self.target, logger=self.logger):
+                    return self._screencap_once(force, allow_reauth=False)
+                self._log("warning", "re-authentication failed for %s",
+                          self.target)
+                return None
+        self._log("info", "screenshot: %d KB in %.1fs",
+                  len(data) // 1024, time.monotonic() - started)
+        return data
 
     def _dump(self):
         """(root, xml_bytes) for the current screen, or (None, None)."""

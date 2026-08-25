@@ -44,10 +44,16 @@ class FakeAdb:
 
     def __init__(self):
         self.commands = []
+        self.reauth_calls = []
+        self.reauth_result = True
 
     def run_command(self, command):
         self.commands.append(command)
         return ""
+
+    def reauthenticate(self, target, logger=None):
+        self.reauth_calls.append(target)
+        return self.reauth_result
 
     @property
     def taps(self):
@@ -1075,6 +1081,62 @@ class LateRenderingCaptchaTest(unittest.TestCase):
         calls = []
         driver._capture_captcha_once = lambda: (calls.append(1), (None, False))[1]
         self.assertIsNone(driver.capture_captcha_image())
+        self.assertEqual(len(calls), 1)
+
+
+class GloginDroppedMidRunTest(unittest.TestCase):
+    """A dropped glogin session answers every adb command with the same short
+    text instead of real data. Confirmed live 2026-08-25: a 22-minute
+    Gmail-install retry loop read this as "screen is empty" on every single
+    poll, because nothing was watching for it -- the marker never reaches the
+    classified screen text, only the raw bytes underneath it."""
+
+    def setUp(self):
+        self.adb = FakeAdb()
+        self.driver = _driver(_root(), act=True, adb=self.adb)
+
+    def _run_hidden(self, replies):
+        calls = []
+
+        def fake(*args, **kwargs):
+            calls.append(args)
+            data = replies[min(len(calls) - 1, len(replies) - 1)]
+            return mock.MagicMock(stdout=data)
+
+        return fake, calls
+
+    def test_the_dropped_session_is_reauthenticated_and_the_shot_retried(self):
+        fake, calls = self._run_hidden([
+            b"error: you should run glogin to login first",
+            b"\x89PNG-real-bytes-here",
+        ])
+        with mock.patch.object(vd, "run_hidden", fake):
+            result = self.driver._screencap(force=True)
+
+        self.assertEqual(result, b"\x89PNG-real-bytes-here")
+        self.assertEqual(self.adb.reauth_calls, ["dev:1"])
+        self.assertEqual(len(calls), 2, "the screenshot must actually be retried")
+
+    def test_a_failed_reauth_gives_up_rather_than_looping(self):
+        fake, calls = self._run_hidden([
+            b"error: you should run glogin to login first",
+        ])
+        self.adb.reauth_result = False
+        with mock.patch.object(vd, "run_hidden", fake):
+            result = self.driver._screencap(force=True)
+
+        self.assertIsNone(result)
+        self.assertEqual(len(calls), 1, "no data to retry with after a failed reauth")
+
+    def test_a_real_screenshot_never_triggers_reauth(self):
+        """The marker check only applies to short replies -- a real PNG's
+        opening bytes must never accidentally be read as the error text."""
+        fake, calls = self._run_hidden([b"\x89PNG" + b"\x00" * 5000])
+        with mock.patch.object(vd, "run_hidden", fake):
+            result = self.driver._screencap(force=True)
+
+        self.assertEqual(len(result), 5004)
+        self.assertEqual(self.adb.reauth_calls, [])
         self.assertEqual(len(calls), 1)
 
 
