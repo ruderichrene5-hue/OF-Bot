@@ -351,6 +351,30 @@ def solve_checkbox(driver, solver, logger=None, sleep=time.sleep,
                                   "the checkbox (%d/%d)", attempt,
                   MAX_CHECKBOX_ATTEMPTS)
 
+        # A grid can already be up when this attempt starts: the checkbox tap
+        # on a PRIOR attempt escalated to it, but the post-tap check below
+        # missed it (the grid had not finished drawing within `SETTLE_SECONDS`)
+        # and `_wait_for_transition` false-positived on "the checkbox's own
+        # text is gone" -- true, but only because the screen had moved to a
+        # *harder* challenge, not a cleared one. Confirmed live 2026-08-25
+        # (brendv748@gmail.com, lucas18anosff@gmail.com): "the reCAPTCHA
+        # challenge cleared" was logged, the very next screen read was the
+        # same robot check, and every retry after that searched for a
+        # checkbox that the image grid had already replaced -- "checkbox not
+        # found by OCR" three times, then gave up, never once calling
+        # `_solve_grid`. Checking for the grid here, before assuming a
+        # checkbox is what's on screen, is what the post-tap check further
+        # down was already supposed to guarantee.
+        if _GRID_HEADER_MARKER in text:
+            cleared = _solve_grid(driver, solver, read, crop_fn, size, text,
+                                  deadline, logger=logger, sleep=sleep, clock=clock)
+            if cleared:
+                return True
+            _emit(logger, "info", "grid attempt %d/%d did not clear; trying "
+                                  "the checkbox again", attempt,
+                 MAX_CHECKBOX_ATTEMPTS)
+            continue
+
         checkbox = _locate_checkbox(words, size)
         if checkbox is None:
             _emit(logger, "warning", "checkbox not found by OCR (attempt %d/%d)",
@@ -407,11 +431,24 @@ def _wait_for_transition(driver, read, size, logger=None, sleep=time.sleep) -> b
     a stuck screen, not a slow success, and must not be reported as one -- a
     caller that believed a no-op tap had worked would tell the rest of the
     sign-in flow to carry on past a challenge that never actually cleared.
+
+    Also False the moment an image grid appears: the checkbox's own text IS
+    gone by then, which used to read as cleared, but the screen has moved to
+    a *harder* challenge, not a solved one. Confirmed live 2026-08-25
+    (brendv748@gmail.com, lucas18anosff@gmail.com) -- the single check right
+    after the tap missed a grid that had not finished drawing yet within
+    `SETTLE_SECONDS`, this poll then saw the checkbox gone and declared
+    victory, and the sign-in carried on straight past an unsolved captcha
+    until the very same robot check reappeared. False here instead sends the
+    caller back around to its next attempt, where the grid -- now fully
+    drawn -- is checked for before anything else.
     """
     for _ in range(TRANSITION_POLL_ATTEMPTS):
         png = driver.screenshot_bytes()
         if png:
             text, _words = read(png)
+            if _GRID_HEADER_MARKER in text:
+                return False
             if _CHECKBOX_MARKER not in text:
                 return True
         sleep(TRANSITION_POLL_SECONDS)

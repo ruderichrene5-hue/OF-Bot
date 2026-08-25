@@ -268,6 +268,40 @@ class GridSolveTest(TestCase):
         self.assertEqual(len(driver.taps), 2, "checkbox + VERIFY, no cells")
 
 
+class DelayedGridTest(TestCase):
+    def test_a_grid_that_draws_too_late_for_the_post_tap_check_is_still_solved(self):
+        """`brendv748@gmail.com` / `lucas18anosff@gmail.com`, 2026-08-25: the
+        grid had not finished drawing within `SETTLE_SECONDS`, so the
+        immediate post-tap check still saw the checkbox's own text and fell
+        to `_wait_for_transition` -- which used to declare victory the moment
+        that text was gone, never noticing the grid had taken its place. Every
+        attempt after that searched for a checkbox that no longer existed
+        ("checkbox not found by OCR") and gave up, while `_solve_grid` (the
+        2captcha round-trip) was never once called. The grid must still get
+        solved once it is fully on screen, whichever check catches it."""
+        ocr = ScriptedOcr([
+            ("confirm that you're not a robot", CHECKBOX_WORDS),  # attempt 1: pre-tap
+            ("confirm that you're not a robot", CHECKBOX_WORDS),  # attempt 1: post-tap, grid not drawn yet
+            ("select all images with a bus", GRID_WORDS),          # _wait_for_transition poll: grid now up
+            ("select all images with a bus", GRID_WORDS),          # attempt 2: pre-tap check sees the grid
+            ("select all images with a bus", GRID_WORDS),          # round 1 read
+            ("", []),                                              # recheck shot: solved
+            ("welcome enter your password", []),                   # final transition
+        ])
+        solver = FakeGridSolver([[2, 5, 9]])
+        driver = FakeDriver()
+
+        cleared = rg.solve_checkbox(driver, solver, ocr=ocr, crop=fake_crop,
+                                    sleep=no_sleep)
+
+        self.assertTrue(cleared)
+        self.assertEqual(len(solver.calls), 1,
+                         "the grid solver was never actually called")
+        # checkbox + 3 cells + VERIFY
+        self.assertEqual(len(driver.taps), 5)
+        self.assertEqual(driver.taps[-1][2], "VERIFY")
+
+
 class StuckScreenTest(TestCase):
     def test_a_screen_that_never_advances_is_reported_unsolved_not_success(self):
         """A checkbox tap that silently does nothing must not be reported as
