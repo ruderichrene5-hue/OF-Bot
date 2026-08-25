@@ -373,7 +373,17 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
         # deliberate fallback for when the mailbox pool cannot deliver, never
         # the default.
         if box is not None:
-            verdict = google_signin.sign_in(
+            # `sign_in_with_retries`, not the single-shot `sign_in`: an
+            # unnamed screen or a stuck app-state glitch is retried (force-
+            # stopping Play Store/GMS first) up to
+            # `google_signin.DEFAULT_SIGNIN_RETRIES` times before this run
+            # gives up on the mailbox -- the retry path already existed and
+            # was proven live (`oukroaicha@gmail.com`, 2026-08-23) but this
+            # call site never used it, so every run here only ever got the
+            # single un-retried attempt. Confirmed live 2026-08-25
+            # (elizabethclarkncv773@gmail.com): a genuinely retryable
+            # `unknown_screen` ended the whole run instead.
+            verdict = google_signin.sign_in_with_retries(
                 driver, adb_client, target, box["address"], box["password"],
                 box["totp_secret"], logger=logger)
             out["steps"]["google_signin"] = verdict

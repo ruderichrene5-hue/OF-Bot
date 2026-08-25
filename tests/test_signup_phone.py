@@ -205,12 +205,55 @@ def _wire_robot_check_run(monkeypatch, tmp_path, verdict, sent=None,
                         lambda *a, **kw: "target:1")
     monkeypatch.setattr(signup_phone, "AdbSignupDriver",
                         lambda *a, **kw: object())
-    monkeypatch.setattr(signup_phone.google_signin, "sign_in",
+    monkeypatch.setattr(signup_phone.google_signin, "sign_in_with_retries",
                         lambda *a, **kw: verdict)
     monkeypatch.setattr(signup_phone, "TelegramNotifier",
                         lambda *a, **kw: SimpleNamespace(
                             send=lambda text, **kw: sent.append(text)))
     return sent, released
+
+
+def test_run_phone_uses_the_retrying_signin_not_the_single_shot_one(
+        monkeypatch, tmp_path):
+    """`elizabethclarkncv773@gmail.com`, 2026-08-25 (GeeLark/Android 16): a
+    genuinely retryable `unknown_screen` ended the whole run, because this
+    call site used `google_signin.sign_in` -- one attempt, no retries --
+    instead of `sign_in_with_retries`, which force-stops Play Store/GMS and
+    tries again up to `DEFAULT_SIGNIN_RETRIES` times and already existed,
+    proven live for this exact shape of problem (`oukroaicha@gmail.com`,
+    2026-08-23). The retry logic was real; this call site just never used
+    it."""
+    calls = []
+    monkeypatch.setattr(signup_phone.mailbox_robot_check, "STATE_PATH",
+                        tmp_path / "mailbox_robot_check.json")
+    monkeypatch.setattr(signup_phone.locks, "acquire", lambda *a, **kw: True)
+    monkeypatch.setattr(signup_phone.locks, "release", lambda name: None)
+    monkeypatch.setattr(signup_phone, "record_account", lambda *a, **kw: None)
+    monkeypatch.setattr(signup_phone, "connect_with_retries",
+                        lambda *a, **kw: "target:1")
+    monkeypatch.setattr(signup_phone, "AdbSignupDriver", lambda *a, **kw: object())
+    monkeypatch.setattr(signup_phone.google_signin, "sign_in",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("the single-shot sign_in must not "
+                                          "be called directly")))
+    monkeypatch.setattr(
+        signup_phone.google_signin, "sign_in_with_retries",
+        lambda *a, **kw: calls.append((a, kw))
+        or signup_phone.google_signin.RESULT_SIGNED_IN)
+    monkeypatch.setattr(signup_phone, "TelegramNotifier",
+                        lambda *a, **kw: SimpleNamespace(send=lambda *a, **kw: None))
+
+    host = _FakeHost()
+    box = {"address": "a@gmail.com", "password": "pw", "totp_secret": "s"}
+    signup_phone.run_phone(
+        {"id": "profile-1", "serial_name": "Cloe new 1"}, box,
+        host=host, adb_client=object(), args=_args(apply=True),
+        logger=logging.getLogger("test-signup-phone"))
+
+    assert len(calls) == 1
+    args, _kwargs = calls[0]
+    assert "a@gmail.com" in args
+    assert "pw" in args
 
 
 def test_a_robot_check_leaves_the_phone_and_lock_alone(monkeypatch, tmp_path):

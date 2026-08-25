@@ -1030,7 +1030,28 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
             if screen == SCREEN_UNKNOWN:
                 # The whole safety property of this flow. Today's run proved a
                 # misread screen produces a confident wrong action, so an
-                # unnamed screen ends the run and keeps its text for a person.
+                # unnamed screen is never tapped on or typed into.
+                #
+                # Restarting Instagram is different from that: it never reads
+                # or acts on the unknown screen's own content, so it keeps
+                # the safety property intact while still attempting the
+                # recovery that usually works. Most unnamed screens here are
+                # exactly the same app-state glitch `restart_app` already
+                # fixes for SCREEN_LAUNCHER/SCREEN_NOT_INSTAGRAM -- "just
+                # retry" (explicit instruction, 2026-08-25), not a screen
+                # this flow needs to understand. Bounded by the same
+                # `app_restarts` budget as those, and the unnamed text is
+                # still kept for a person if the restart does not help
+                # either.
+                starter = getattr(driver, "restart_app", None)
+                if app_restarts < MAX_APP_RESTARTS and callable(starter) and starter():
+                    app_restarts += 1
+                    log("warning", "unnamed screen (%s); restarting Instagram "
+                                   "and trying again (%d/%d): %s",
+                        screen, app_restarts, MAX_APP_RESTARTS, (text or "")[:200])
+                    steps.pop()
+                    sleep(6)
+                    continue
                 return finish(RESULT_UNKNOWN_SCREEN, (text or "")[:400])
 
             if screen == SCREEN_ENTRY:

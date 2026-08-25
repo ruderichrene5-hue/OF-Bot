@@ -214,6 +214,41 @@ def test_an_unknown_screen_stops_the_run_with_its_text():
     assert "nobody has seen" in result.detail
 
 
+def test_an_unknown_screen_is_recovered_by_restarting_instagram():
+    """`edwardshaffermem792@gmail.com`, 2026-08-25 (GeeLark/Android 16): got
+    all the way to Instagram's own signup, hit a screen this flow had never
+    seen, and stopped -- most of the time this is exactly the same app-state
+    glitch `restart_app` already fixes for a backgrounded Instagram, not a
+    screen the flow needs to understand. Restarting never reads or acts on
+    the unknown screen's own content, so the safety property (never tap or
+    type based on a misread screen) stays intact."""
+    driver = RestartingDriver([
+        SCREENS[signup.SCREEN_ENTRY],
+        "a screen nobody has seen",
+        SCREENS[signup.SCREEN_PHONE],
+        SCREENS[signup.SCREEN_CODE],
+        SCREENS[signup.SCREEN_TERMS],
+        DONE,
+    ])
+    result = signup.run_signup(driver, FakeRouter([FakeLease()]), _identity(),
+                               sleep=lambda _s: None)
+    assert driver.restarts == 1
+    assert result.status == signup.RESULT_CREATED
+
+
+def test_an_unknown_screen_that_does_not_recover_still_gives_up():
+    """The restart is one bounded attempt, not a new way to loop forever --
+    and a screen that survives a restart still has to be reported, not
+    silently retried away."""
+    driver = RestartingDriver(
+        [SCREENS[signup.SCREEN_ENTRY]] + ["a screen nobody has seen"] * 6)
+    result = signup.run_signup(driver, FakeRouter([]), _identity(),
+                               sleep=lambda _s: None)
+    assert result.status == signup.RESULT_UNKNOWN_SCREEN
+    assert "nobody has seen" in result.detail
+    assert driver.restarts == signup.MAX_APP_RESTARTS
+
+
 def test_a_number_that_never_delivers_is_swapped_and_released():
     dead, good = FakeLease(code=None), FakeLease()
     driver = FakeDriver([
