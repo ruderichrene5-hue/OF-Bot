@@ -162,6 +162,45 @@ def test_an_auth_error_dialog_stops_instead_of_looping_on_ok():
     assert not driver.dismissed, "tapped OK instead of stopping on it"
 
 
+ACCOUNT_SETUP = ("complete account setup review your account to continue "
+                 "installing apps on google play continue")
+
+
+def test_account_setup_review_is_given_to_render_not_reopened_over():
+    """akukayagh299@gmail.com, 2026-08-25: this screen's one button is also
+    `Continue`, which `_DISMISS_LABELS` already taps for ordinary one-time
+    tips -- and that branch force-reopens the listing right after, which is
+    right for a tip but wrong here: tapping Continue starts a real,
+    multi-step account-review flow that force-reopening the listing yanks
+    the phone away from before it can render anything. 4 taps per attempt,
+    5 attempts, ~20 minutes, always straight back to the same listing."""
+    adb = _Adb()
+
+    class AccountSetupScreen(_Driver):
+        def __init__(self):
+            super().__init__(adb, ACCOUNT_SETUP)
+            self.continues = 0
+
+        def clickable_labels(self):
+            return ["Continue"]
+
+        def tap_label(self, labels, require_clickable=True):
+            if "Continue" in labels or "CONTINUE" in labels:
+                self.continues += 1
+                return True
+            return False
+
+    driver = AccountSetupScreen()
+    verdict = p.install(driver, adb, "host:1", PACKAGE, sleep=lambda _s: None)
+
+    assert verdict == p.RESULT_NO_BUTTON
+    assert driver.continues == p.MAX_ACCOUNT_SETUP_CONTINUES
+    reopens = [c for c in adb.commands if "market://details" in c]
+    assert len(reopens) == 1, (
+        "reopened the listing after Continue instead of letting the "
+        "account-review flow render")
+
+
 def test_install_with_retries_closes_the_store_and_tries_again():
     """A retryable result gets the Play Store force-stopped and a fresh
     attempt, up to the attempt cap -- not accepted as final on the first

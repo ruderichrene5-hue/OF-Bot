@@ -56,6 +56,21 @@ _DISMISS_LABELS = ("No thanks", "NO THANKS", "Skip", "SKIP", "Not now",
                    "NOT NOW", "Accept", "ACCEPT", "Continue", "CONTINUE",
                    "Got it", "GOT IT", "Next", "NEXT")
 
+# Google Play's own account-verification gate on a mailbox new to this
+# device -- "Complete account setup / Review your account to continue
+# installing apps on Google Play". Its one button is also "Continue", so it
+# was being caught by the generic `_DISMISS_LABELS` branch below, which
+# force-navigates straight back to the app listing after tapping through any
+# prompt. That is right for a one-time tip, but wrong here: tapping Continue
+# opens a real, multi-step account-review flow, and yanking back to the
+# listing before it can render anything just re-triggers the same gate on
+# the next Install tap. Confirmed live 2026-08-25 (akukayagh299@gmail.com,
+# GeeLark/Android 16): 4 taps per attempt, 5 attempts, ~20 minutes, always
+# back on the same listing -- never once let the review flow actually show
+# up on screen.
+_ACCOUNT_SETUP_MARKERS = ("complete account setup",)
+MAX_ACCOUNT_SETUP_CONTINUES = 4
+
 # What the listing says while it is working. Seeing any of these means wait
 # rather than tap again -- a second tap on a downloading listing cancels it.
 #
@@ -205,6 +220,7 @@ def install(driver, adb_client, target: str, package: str, logger=None,
     taps = 0
     offline = 0
     pending = 0
+    account_setup_continues = 0
     while time.monotonic() < deadline:
         if is_installed(adb_client, target, package):
             log("info", "%s installed", package)
@@ -295,8 +311,24 @@ def install(driver, adb_client, target: str, package: str, logger=None,
                            "on a dialog tapping OK cannot clear")
             return RESULT_AUTH_ERROR
 
-        # Whatever is in front is not the listing -- a consent sheet, a
-        # "complete account setup" prompt. Clear it and look again.
+        if says_any(text, _ACCOUNT_SETUP_MARKERS):
+            account_setup_continues += 1
+            if account_setup_continues > MAX_ACCOUNT_SETUP_CONTINUES:
+                log("warning", "the account-setup review would not finish "
+                               "after %d tries", account_setup_continues - 1)
+                return RESULT_NO_BUTTON
+            log("info", "Google wants this account reviewed before it can "
+                        "install anything; tapping Continue and letting the "
+                        "review flow render (%d/%d) -- NOT reopening the "
+                        "listing, which would abandon it before it can show "
+                        "anything", account_setup_continues,
+                MAX_ACCOUNT_SETUP_CONTINUES)
+            driver.tap_label(("Continue", "CONTINUE"))
+            sleep(6)
+            continue
+
+        # Whatever is in front is not the listing -- a consent sheet. Clear
+        # it and look again.
         if driver.tap_label(_DISMISS_LABELS):
             log("info", "dismissed a prompt on the way to the listing")
             sleep(6)
