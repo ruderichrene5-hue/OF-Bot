@@ -25,7 +25,14 @@ PERIOD = 30
 DIGITS = 6
 
 # Below this, the code will very likely expire between typing and submitting.
-SAFE_SECONDS = 8
+# Was 8 -- far under the ~20s round trip this module's own docstring
+# documents. Confirmed live 2026-08-25 (frankmartaz518@gmail.com, GeeLark):
+# a code generated with 12s left was rejected as "wrong code" by Google after
+# a 14s fill()+read-back round trip, and a second one generated with 20s left
+# was rejected too once the actual submit landed a few seconds later still.
+# Raised so a code is only ever handed to `driver.fill()` with close to a
+# full window ahead of it.
+SAFE_SECONDS = 22
 
 
 def normalise_secret(secret: str) -> str:
