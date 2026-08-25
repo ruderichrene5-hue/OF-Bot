@@ -122,43 +122,58 @@ class GeelarkHost:
     starts a phone without going through this.
     """
 
-    def __init__(self, transport=None, args=None, proxy_port=None) -> None:
+    def __init__(self, transport=None, args=None, proxy_port=None,
+                proxy_identity=None) -> None:
         from adb_bot.clients.geelark import GeelarkTransport
 
         self.transport = transport or GeelarkTransport()
         self.args = args
         self.proxy_port = proxy_port
+        self.proxy_identity = proxy_identity
         self._lease = None
 
-    def _resolve_proxy_port(self, profile_id: str, logger):
-        """The port already bound to `profile_id`, or None if it truly has
-        none. One `list_phones()` call -- the fleet fits in a few pages, and
-        this only runs when the caller has not already handed the port in."""
+    def _resolve_proxy(self, profile_id: str, logger):
+        """(port, identity) already bound to `profile_id`, or (None, "") if it
+        truly has none. One `list_phones()` call -- the fleet fits in a few
+        pages, and this only runs when the caller has not already handed the
+        port in.
+
+        `identity` is the proxy's own username, e.g. Multilogin's mobile
+        relay carries a distinct `sid-` per phone in it even though every
+        phone reports the identical `gate.multilogin.com:1080` -- see
+        `proxy_pool._lease_path`. Geelark's own rotating pool has no per-port
+        username to speak of, so this is blank there and leasing falls back
+        to the port alone, unchanged.
+        """
         from adb_bot.clients.geelark.phones import GeelarkPhoneClient
 
         try:
             for row in GeelarkPhoneClient(self.transport).list_phones():
                 if str(row.get("id")) == str(profile_id):
-                    port = (row.get("proxy") or {}).get("port")
-                    return int(port) if port else None
+                    proxy = row.get("proxy") or {}
+                    port = proxy.get("port")
+                    identity = str(proxy.get("username") or "")
+                    return (int(port) if port else None), identity
         except Exception as exc:
             if logger:
                 logger.warning(
                     "signup_phone: could not look up %s's proxy port (%s); "
                     "launching without a lease", profile_id, exc)
-        return None
+        return None, ""
 
     def launch(self, profile_id: str, logger):
         from adb_bot.clients.geelark import prepare_geelark_profile_for_adb
         from adb_bot.clients.geelark import proxy_pool
 
         port = self.proxy_port
+        identity = self.proxy_identity or ""
         if port is None:
-            port = self._resolve_proxy_port(profile_id, logger)
+            port, identity = self._resolve_proxy(profile_id, logger)
 
         if port is not None:
             self._lease = proxy_pool.acquire_proxy(
-                [port], owner=str(profile_id), wait_seconds=60.0)
+                [port], owner=str(profile_id), wait_seconds=60.0,
+                identity=identity)
             if self._lease is None:
                 logger.warning(
                     "signup_phone: proxy port %s is already leased by "

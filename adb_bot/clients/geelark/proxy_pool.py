@@ -31,6 +31,7 @@ migration branch that has not posted anything yet.
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import threading
@@ -69,6 +70,7 @@ class ProxyLease:
     path: Path
     token: str
     owner: str = ""
+    identity: str = ""
 
 
 def _pool_dir() -> Path:
@@ -77,7 +79,27 @@ def _pool_dir() -> Path:
     return path
 
 
-def _lease_path(directory: Path, port: int) -> Path:
+def _lease_path(directory: Path, port: int, identity: str = "") -> Path:
+    """The lease file for `port`, or for `(port, identity)` when `identity` is
+    given.
+
+    Bare `port` is right for Geelark's own 4-modem pool: the port itself IS
+    the physical resource, one IP per number, genuinely exclusive. It is
+    wrong for a proxy fronted by a relay on one fixed port shared by many
+    independent sessions, told apart only by which credential connects
+    (Multilogin's mobile relay, `gate.multilogin.com:1080`, a distinct `sid-`
+    per phone in the username) -- there, every phone reports the identical
+    literal port, and leasing by port alone serialised phones that were never
+    actually sharing anything. Confirmed live 2026-08-25: 4 freshly created
+    Geelark phones, each its own relay session, 3 of 4 refused to launch with
+    "proxy port 1080 is already leased by another running phone" -- true only
+    of the port number, not of any resource actually in contention.
+    `identity` (session.py's rotating pool never passes one) narrows the key
+    back down to the resource that is actually exclusive.
+    """
+    if identity:
+        suffix = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:12]
+        return directory / f"port_{port}_{suffix}{_LEASE_SUFFIX}"
     return directory / f"port_{port}{_LEASE_SUFFIX}"
 
 
@@ -122,8 +144,9 @@ def _reclaimable(path: Path, ttl_seconds: int) -> bool:
     return _is_stale(path, ttl_seconds)
 
 
-def _claim(directory: Path, port: int, token: str, owner: str, ttl_seconds: int):
-    path = _lease_path(directory, port)
+def _claim(directory: Path, port: int, token: str, owner: str, ttl_seconds: int,
+           identity: str = ""):
+    path = _lease_path(directory, port, identity)
     payload = (f"pid={os.getpid()} token={token} owner={owner} "
                f"at={time.strftime('%Y-%m-%d %H:%M:%S')}\n")
     try:
@@ -150,7 +173,8 @@ def _claim(directory: Path, port: int, token: str, owner: str, ttl_seconds: int)
         except OSError:
             pass
         return None
-    lease = ProxyLease(port=port, path=path, token=token, owner=owner)
+    lease = ProxyLease(port=port, path=path, token=token, owner=owner,
+                       identity=identity)
     with _registry_lock:
         _registry[str(path)] = lease
     return lease
@@ -158,7 +182,8 @@ def _claim(directory: Path, port: int, token: str, owner: str, ttl_seconds: int)
 
 def acquire_proxy(ports: list[int], owner: str = "",
                    ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
-                   wait_seconds: float = 0.0, poll_seconds: float = 1.0):
+                   wait_seconds: float = 0.0, poll_seconds: float = 1.0,
+                   identity: str = ""):
     """Lease one free port from `ports`, or return None.
 
     None means every configured proxy is in use right now -- the caller must
@@ -166,6 +191,15 @@ def acquire_proxy(ports: list[int], owner: str = "",
     `locks.acquire_slot` returning None for the MLX fleet. `wait_seconds`
     polls for up to that long first; it is always bounded, so no caller can
     wait forever.
+
+    `identity` narrows what "in use" means when the port number alone isn't
+    the whole story -- see `_lease_path`. Leave it blank (the default) for a
+    pool where the port really is the exclusive resource, e.g. Geelark's own
+    rotating 4-modem pool. A bare lease and an identified one on the SAME
+    port number do not exclude each other -- they are different files -- so
+    callers sharing a port must pick one scheme and use it consistently.
+    True in practice: the real 4-modem pool and the relay's fixed 1080 never
+    share a port number to begin with.
 
     Fail-safe: if the lease directory cannot be used at all, this returns
     None (deny) rather than assuming a port is free.
@@ -180,7 +214,7 @@ def acquire_proxy(ports: list[int], owner: str = "",
     deadline = time.monotonic() + max(0.0, float(wait_seconds or 0.0))
     while True:
         for port in ports:
-            lease = _claim(directory, port, token, owner, ttl_seconds)
+            lease = _claim(directory, port, token, owner, ttl_seconds, identity)
             if lease is not None:
                 return lease
         if time.monotonic() >= deadline:

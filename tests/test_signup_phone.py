@@ -361,6 +361,33 @@ def test_no_proxy_port_given_falls_back_to_an_auto_lookup(monkeypatch):
     assert leased == [[54018]]
 
 
+def test_the_proxys_own_username_is_leased_as_the_identity(monkeypatch):
+    """Multilogin's mobile relay: every phone reports the identical
+    `gate.multilogin.com:1080`, told apart only by which credential (a
+    distinct `sid-` in the username) connects. Leasing by port alone
+    serialised phones that were never sharing anything -- confirmed live
+    2026-08-25, 4 freshly created phones, 3 of 4 refused to launch on a port
+    none of them actually contended for. The auto-lookup must carry the
+    username through so the lease is keyed on the resource that is actually
+    exclusive."""
+    leased_kwargs = []
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.phones.GeelarkPhoneClient",
+        _FakePhoneClient([{"id": "profile-1",
+                          "proxy": {"port": 1080, "username": "sid-aaa"}}]))
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.proxy_pool.acquire_proxy",
+        lambda ports, **kw: leased_kwargs.append(kw) or _FakeLease(ports[0]))
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.prepare_geelark_profile_for_adb",
+        lambda *a, **kw: "a-profile")
+
+    host = signup_phone.GeelarkHost(transport=object(), args=None)
+    host.launch("profile-1", logger=None)
+
+    assert leased_kwargs[0]["identity"] == "sid-aaa"
+
+
 def test_a_phone_the_lookup_cannot_find_launches_without_a_lease(monkeypatch):
     """No proxy on record means no port to collide on -- this must not block
     the launch, just skip leasing."""

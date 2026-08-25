@@ -43,6 +43,44 @@ class LeasingTest(PoolTestCase):
         fifth = proxy_pool.acquire_proxy(ports, owner="phone-4")
         self.assertIsNone(fifth)
 
+    def test_the_same_port_with_different_identities_leases_independently(self):
+        """Multilogin's mobile relay: every phone reports the identical
+        `gate.multilogin.com:1080`, told apart only by which credential
+        (`sid-`) connects. Leasing by port alone serialised phones that were
+        never sharing anything -- confirmed live 2026-08-25, 4 freshly
+        created phones, 3 of 4 refused to launch on a port none of them
+        actually contended for."""
+        first = proxy_pool.acquire_proxy([1080], owner="phone-a", identity="sid-aaa")
+        second = proxy_pool.acquire_proxy([1080], owner="phone-b", identity="sid-bbb")
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first.path, second.path)
+
+    def test_the_same_port_and_identity_still_denies_a_second_lease(self):
+        """Narrowing the key must not turn off exclusivity for the resource
+        that actually is shared -- two phones on the identical session would
+        be the very collision this whole module exists to prevent."""
+        first = proxy_pool.acquire_proxy([1080], owner="phone-a", identity="sid-aaa")
+        self.assertIsNotNone(first)
+        second = proxy_pool.acquire_proxy([1080], owner="phone-b", identity="sid-aaa")
+        self.assertIsNone(second)
+
+    def test_a_bare_lease_is_a_wholly_separate_resource_from_an_identified_one(self):
+        """Geelark's own rotating pool (session.py) never passes an identity;
+        `GeelarkHost`'s auto-lookup always will once a phone's proxy carries a
+        username. The two are only ever used against genuinely different
+        port numbers in practice (the real 4-modem pool vs. the relay's fixed
+        1080) -- documenting that split here rather than leaving it a silent
+        assumption. Callers sharing one port number must pick one scheme and
+        use it consistently; mixing bare and identified leases on the same
+        port is not mutually exclusive."""
+        bare = proxy_pool.acquire_proxy([1080], owner="phone-a")
+        self.assertIsNotNone(bare)
+        identified = proxy_pool.acquire_proxy([1080], owner="phone-b",
+                                              identity="sid-aaa")
+        self.assertIsNotNone(identified)
+        self.assertNotEqual(bare.path, identified.path)
+
     def test_releasing_frees_the_port_for_the_next_caller(self):
         ports = [54015]
         first = proxy_pool.acquire_proxy(ports, owner="a")
