@@ -1164,3 +1164,57 @@ def test_a_persistent_recaptcha_unreachable_dialog_eventually_gives_up():
 
     assert verdict == g.RESULT_STUCK
     assert driver.taps.count(("OK", "Ok")) == g.MAX_RECAPTCHA_UNREACHABLE_HITS
+
+
+ACCOUNT_NOT_FOUND = (
+    "sign in use your google account. the account will be added to this "
+    "device and available to other google apps.learn more about using your "
+    "account sign in use your google account. the account will be added to "
+    "this device and available to other google apps. learn more about "
+    "using your account gsdgsafsdfdfd@gmail.com couldn't find this account "
+    "forgot email? create account next")
+
+
+def test_account_not_found_is_named_rather_than_left_as_stuck():
+    """gsdgsafsdfdfd@gmail.com, 2026-08-25 (GeeLark/Android 16): a junk row
+    in the mailbox pool. Before this screen existed, the flow read this as
+    the plain `google_email` screen, retyped the same dead address and
+    tapped NEXT another 3 times, then reported generic `stuck` -- which is
+    retryable, so 5 full restart cycles (~17 minutes) chased an address that
+    can never exist no matter how many times it is retyped."""
+    assert (g.classify_google_screen(ACCOUNT_NOT_FOUND)
+           == g.SCREEN_ACCOUNT_NOT_FOUND)
+
+
+def test_account_not_found_is_not_mistaken_for_the_plain_email_screen():
+    """Both carry the same "sign in use your google account" boilerplate and
+    an email field -- only the specific "couldn't find this account" text
+    tells them apart, and the ordering in `_ORDERED` must check it first."""
+    assert g.classify_google_screen(ACCOUNT_NOT_FOUND) != g.SCREEN_EMAIL
+
+
+def test_account_not_found_stops_the_run_immediately():
+    driver = _StubDriver(ACCOUNT_NOT_FOUND)
+    adb = _StubAdb()
+
+    verdict = g.sign_in(driver, adb, "host:1", "gsdgsafsdfdfd@gmail.com",
+                        "pw", "S", sleep=lambda _s: None)
+
+    assert verdict == g.RESULT_ACCOUNT_NOT_FOUND
+    assert not driver.taps, "nothing on this screen is worth tapping"
+
+
+def test_sign_in_with_retries_does_not_retry_a_dead_address():
+    """The same non-retry guarantee as the robot check: closing Play Store
+    and reopening it does not make a nonexistent address start existing."""
+    driver = _StubDriver(ACCOUNT_NOT_FOUND)
+    adb = _StubAdb()
+
+    verdict = g.sign_in_with_retries(driver, adb, "host:1",
+                                     "gsdgsafsdfdfd@gmail.com", "pw",
+                                     "SECRET", sleep=lambda _s: None,
+                                     max_attempts=5)
+
+    assert verdict == g.RESULT_ACCOUNT_NOT_FOUND
+    assert not any("force-stop" in c for c in adb.commands), \
+        "retried an account-shaped result"

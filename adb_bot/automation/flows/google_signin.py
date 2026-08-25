@@ -67,6 +67,7 @@ SCREEN_SAVE_PASSWORD = "save_password"
 SCREEN_PLAY_HOME = "play_home"            # signed in -- done
 SCREEN_LAUNCHER = "launcher"              # the phone's home screen
 SCREEN_WRONG_PASSWORD = "wrong_password"
+SCREEN_ACCOUNT_NOT_FOUND = "account_not_found"  # the address does not exist
 SCREEN_ROBOT_CHECK = "google_robot_check"    # a captcha; needs a person
 SCREEN_DEVICE_VERIFICATION = "device_verification"  # wants a phone number; needs a person
 SCREEN_SERVER_ERROR = "google_server_error"  # transient; retryable
@@ -146,6 +147,16 @@ _PLAY_HOME_MARKERS = ("search apps & games", "search for apps & games",
 _WRONG_PASSWORD_MARKERS = ("wrong password", "couldn't sign you in",
                            "try again or click forgot password")
 
+# Google's own verdict that the address itself does not exist -- not a
+# typing or timing problem, so retyping the same address and tapping NEXT
+# again can never advance it. Confirmed live 2026-08-25
+# (gsdgsafsdfdfd@gmail.com, GeeLark/Android 16): a junk row in the mailbox
+# pool burned ~17 minutes -- 5 full restart-and-retry cycles, 4 identical
+# NEXT taps each -- before giving up as plain `stuck`, which reads as a flow
+# bug rather than the dead mailbox it actually is.
+_ACCOUNT_NOT_FOUND_MARKERS = ("couldn't find this account", "couldn't find "
+                              "your google account")
+
 # Google challenging the *address*, before it has asked for a password at all.
 # Read off `Blank caio 2` on 2026-08-18 for `hasan428483@gmail.com`, an unused
 # pool mailbox: "verify that it's you ... confirm that you're not a robot".
@@ -219,6 +230,7 @@ _RECAPTCHA_UNREACHABLE_MARKERS = ("cannot contact recaptcha",)
 # first, then reported RESULT_STUCK on a password field that did not exist.
 _ORDERED = (
     (SCREEN_WRONG_PASSWORD, _WRONG_PASSWORD_MARKERS),
+    (SCREEN_ACCOUNT_NOT_FOUND, _ACCOUNT_NOT_FOUND_MARKERS),
     # Both checked before ROBOT_CHECK: solving a grid can land on Google's own
     # "Sorry, something went wrong there" / "Restart" error page while the
     # reCAPTCHA widget's own stale "confirm that you're not a robot" text is
@@ -321,6 +333,7 @@ def classify_google_screen(text: str | None, field_hints=()) -> str:
 RESULT_SIGNED_IN = "signed_in"
 RESULT_ALREADY = "already_signed_in"
 RESULT_WRONG_PASSWORD = "wrong_password"
+RESULT_ACCOUNT_NOT_FOUND = "account_not_found"
 RESULT_STUCK = "stuck"
 RESULT_UNKNOWN_SCREEN = "unknown_screen"
 RESULT_GOOGLE_UNREACHABLE = "google_unreachable"
@@ -922,6 +935,11 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
         if screen == SCREEN_WRONG_PASSWORD:
             return RESULT_WRONG_PASSWORD
 
+        if screen == SCREEN_ACCOUNT_NOT_FOUND:
+            log("warning", "Google says %s does not exist -- retyping it "
+                           "cannot fix a dead mailbox", address)
+            return RESULT_ACCOUNT_NOT_FOUND
+
         if screen == SCREEN_ROBOT_CHECK:
             # Solved live for the first time 2026-08-24: the checkbox and its
             # image grid are answerable (OCR to find them, 2captcha's
@@ -1149,11 +1167,16 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
 
 
 # Results worth a fresh Play Store/Google Play Services rather than accepted
-# as final. `RESULT_ROBOT_CHECK` and `RESULT_WRONG_PASSWORD` are deliberately
-# absent -- both are about the *account* (a captcha tied to the address, a
-# genuinely wrong credential), and closing the app again does not make
-# Google re-verify an account any faster or a wrong password become right;
-# it would just spend another full walk of the chain finding the same wall.
+# as final. `RESULT_ROBOT_CHECK`, `RESULT_WRONG_PASSWORD`, and
+# `RESULT_ACCOUNT_NOT_FOUND` are deliberately absent -- all three are about
+# the *account* (a captcha tied to the address, a wrong credential, an
+# address that does not exist), and closing the app again does not make
+# Google re-verify an account any faster, a wrong password become right, or
+# a dead mailbox start existing; it would just spend another full walk of
+# the chain finding the same wall. Confirmed live 2026-08-25
+# (gsdgsafsdfdfd@gmail.com): before this result existed, the generic `stuck`
+# it fell into WAS in this list, so a permanently-nonexistent address burned
+# 5 full restart cycles instead of failing once.
 _RETRYABLE_RESULTS = (RESULT_STUCK, RESULT_UNKNOWN_SCREEN,
                       RESULT_GOOGLE_UNREACHABLE, RESULT_NO_DUMP)
 
