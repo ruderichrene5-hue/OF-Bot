@@ -821,3 +821,128 @@ def test_submit_after_typing_falls_back_to_dismissing_if_the_first_tap_misses():
     assert g._submit_after_typing(driver, g._NEXT) is True
     assert driver.dismissals == 1
     assert driver.taps == [g._NEXT, g._NEXT]
+
+
+EMAIL_LOADING = EMAIL + " loading indeterminate, loading"
+
+
+def test_an_email_screen_still_loading_is_waited_out_not_refilled():
+    """`unnikuttan114121@gmail.com`, 2026-08-23: `_still_drawing`'s loading
+    check only fires for a *bare* "just a moment"-style screen (<=300
+    chars), so it never caught this -- a full email form, correctly filled,
+    with a small loading indicator drawn over a disabled Next. Classified as
+    plain `SCREEN_EMAIL`, that got re-filled and re-tapped on every pass and
+    hit `MAX_REPEATS` (4 tries) in well under a minute, while the real Play
+    Store sign-in can sit here past a minute."""
+    class StillLoadingDriver(_StubDriver):
+        def __init__(self):
+            super().__init__(EMAIL_LOADING)
+            self.fills = 0
+
+        def input_hints(self):
+            return ["email or phone"]
+
+        def input_values(self):
+            return ["a@gmail.com"] if self.fills else []
+
+        def fill(self, hints, value, what, **kw):
+            self.fills += 1
+            return True
+
+        def dismiss_keyboard(self):
+            pass
+
+    driver, adb = StillLoadingDriver(), _StubAdb()
+    slept = []
+
+    verdict = g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "SECRET",
+                        sleep=slept.append)
+
+    # Bounded (the stub shows the same loading screen forever), but only
+    # after the loading budget, not the much stingier repeat guard: at
+    # MAX_REPEATS=4 with no wait at all this would have given up in a
+    # handful of reads, well under LOADING_WAIT_SECONDS of sleep.
+    assert verdict == g.RESULT_STUCK
+    assert driver.fills == 1, (
+        f"typed the email {driver.fills} times; a form that is still "
+        f"loading has to be waited out, not filled again")
+    assert sum(slept) >= (g.MAX_LOADING_WAITS - 1) * g.LOADING_WAIT_SECONDS
+    assert sum(slept) < 15 * 60, "a wait must not outlive the phone"
+
+
+def test_an_email_screen_that_actually_stops_advancing_still_gives_up_fast():
+    """The fix must not turn every stalled email screen into a two-minute
+    wait -- only one that both still shows the address AND still says it is
+    loading. No loading text here, so the ordinary repeat guard still
+    applies."""
+    class PlainEmailDriver(_StubDriver):
+        def __init__(self):
+            super().__init__(EMAIL)
+
+        def fill(self, hints, value, what, **kw):
+            return True
+
+        def dismiss_keyboard(self):
+            pass
+
+    driver, adb = PlainEmailDriver(), _StubAdb()
+
+    verdict = g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "SECRET",
+                        sleep=lambda _s: None)
+
+    assert verdict == g.RESULT_STUCK
+
+
+def test_sign_in_with_retries_closes_the_app_and_tries_again():
+    """`oukroaicha@gmail.com`, 2026-08-23: tapping "Get a verification code
+    from the Google Authenticator app" on the 2-step chooser highlighted the
+    row blue and went nowhere -- an app-state glitch closing Play
+    Store/GMS and starting over is the same fix already proven for the
+    equivalent install-side stalls."""
+    class BlankDriver(_StubDriver):
+        def __init__(self):
+            super().__init__("")
+
+    class FlakyThenSignedIn(_StubAdb):
+        def __init__(self):
+            super().__init__()
+            self.force_stops = 0
+
+        def run_command(self, command):
+            self.commands.append(command)
+            if "force-stop" in command:
+                self.force_stops += 1
+                return ""
+            if "dumpsys account" in command:
+                if self.force_stops >= 4:
+                    return "Account {name=a@gmail.com, type=com.google}"
+                return "Accounts: 0"
+            return ""
+
+    driver, adb = BlankDriver(), FlakyThenSignedIn()
+
+    verdict = g.sign_in_with_retries(driver, adb, "host:1", "a@gmail.com",
+                                     "pw", "SECRET", sleep=lambda _s: None,
+                                     max_attempts=5)
+
+    assert verdict == g.RESULT_ALREADY
+    assert adb.force_stops == 4, (
+        "should close Play Store AND GMS between each of the two failed "
+        "attempts (2 apps x 2 retries = 4)")
+
+
+def test_sign_in_with_retries_does_not_retry_a_robot_check():
+    """Reopening Play Store does not make Google re-verify an account any
+    faster -- retrying a robot check would just spend another full walk of
+    the chain finding the same wall again."""
+    driver = _StubDriver(("verify it's you unnikuttan114121@gmail.com "
+                         "confirm you're not a robot next try another way"))
+    adb = _StubAdb()
+
+    verdict = g.sign_in_with_retries(driver, adb, "host:1", "a@gmail.com",
+                                     "pw", "SECRET", sleep=lambda _s: None,
+                                     max_attempts=5)
+
+    assert verdict == g.RESULT_ROBOT_CHECK
+    assert not any("force-stop" in c for c in adb.commands), \
+        "retried an account-shaped result"
