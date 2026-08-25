@@ -68,6 +68,7 @@ SCREEN_PLAY_HOME = "play_home"            # signed in -- done
 SCREEN_LAUNCHER = "launcher"              # the phone's home screen
 SCREEN_WRONG_PASSWORD = "wrong_password"
 SCREEN_ROBOT_CHECK = "google_robot_check"    # a captcha; needs a person
+SCREEN_DEVICE_VERIFICATION = "device_verification"  # wants a phone number; needs a person
 SCREEN_SERVER_ERROR = "google_server_error"  # transient; retryable
 SCREEN_RETRY = "try_again"                   # Google's own retry page
 SCREEN_SERVICES = "google_services"          # backup/location consents
@@ -156,6 +157,19 @@ _ROBOT_CHECK_MARKERS = (
     "confirm that you're not a robot",
 )
 
+# A different security gate from the robot check -- Google wants a phone
+# number to verify the device, not a captcha solved. Equally unautomatable
+# (needs a real number that can receive an SMS/call), so it must be told
+# apart from an unnamed screen the same way the robot check already is.
+# Seen live 2026-08-25 (mdr147391@gmail.com, GeeLark/Android 16): "Verifying
+# your phone number ... Google needs to verify your device and phone number
+# for security reasons" -- previously fell through to SCREEN_UNKNOWN and read
+# as a mystery bug rather than the named dead end it actually is.
+_DEVICE_VERIFICATION_MARKERS = (
+    "verifying your phone number",
+    "needs to verify your device",
+)
+
 # Google could not be reached at all. Seen on `Blank caio 1`, 2026-08-17,
 # straight after `checking info…`: a bare page carrying **no buttons** -- not
 # even "Try again" -- so there is nothing to tap and the only way out is to
@@ -207,6 +221,7 @@ _ORDERED = (
     (SCREEN_SERVER_ERROR, _SERVER_ERROR_MARKERS),
     (SCREEN_RETRY, _RETRY_MARKERS),
     (SCREEN_ROBOT_CHECK, _ROBOT_CHECK_MARKERS),
+    (SCREEN_DEVICE_VERIFICATION, _DEVICE_VERIFICATION_MARKERS),
     (SCREEN_SAVE_PASSWORD, _SAVE_PASSWORD_MARKERS),
     (SCREEN_TOTP, _TOTP_MARKERS),
     (SCREEN_2FA_CHOOSER, _2FA_MARKERS),
@@ -297,6 +312,10 @@ RESULT_STUCK = "stuck"
 RESULT_UNKNOWN_SCREEN = "unknown_screen"
 RESULT_GOOGLE_UNREACHABLE = "google_unreachable"
 RESULT_ROBOT_CHECK = "google_robot_check"
+# Google asking for a phone number to verify the device before signing in --
+# a different security gate from the reCAPTCHA robot check, equally
+# unautomatable (it wants a real phone number that can receive an SMS/call).
+RESULT_DEVICE_VERIFICATION = "device_verification"
 # The phone never rendered a readable hierarchy. Deliberately not `stuck`: this
 # says nothing about the address, so the mailbox stays in the pool and the run
 # is worth repeating, which is the opposite of what `stuck` should trigger.
@@ -892,6 +911,16 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
                            "cannot be signed in from here; use another",
                 address)
             return RESULT_ROBOT_CHECK
+
+        if screen == SCREEN_DEVICE_VERIFICATION:
+            # No captcha to solve here -- Google wants an actual phone number
+            # to send an SMS/call to. Nothing to try in place, unlike the
+            # robot check; this mailbox needs a person with a number, or
+            # another mailbox.
+            log("warning", "Google wants to verify %s's device with a phone "
+                           "number -- that mailbox cannot be signed in from "
+                           "here; use another", address)
+            return RESULT_DEVICE_VERIFICATION
 
         if screen == SCREEN_UNKNOWN:
             # Ask the phone before calling this a failure. `Blank caio 2` ended

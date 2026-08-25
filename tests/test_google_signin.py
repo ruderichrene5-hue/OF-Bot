@@ -552,6 +552,42 @@ def test_a_robot_check_stops_the_run_with_its_own_verdict():
     assert not driver.taps, "there is nothing on a captcha worth tapping"
 
 
+DEVICE_VERIFICATION = (
+    "verifying your phone number to help keep your account safe, google "
+    "wants to make sure that it’s really you trying to sign in verifying "
+    "your phone number to help keep your account safe, google wants to "
+    "make sure that it’s really you trying to sign in mdr147391@gmail.com "
+    "google needs to verify your device and phone number for security "
+    "reasons. this number will be stored and used only for security "
+    "purposes. try another way")
+
+
+def test_a_device_verification_gate_is_named_rather_than_left_unknown():
+    """`mdr147391@gmail.com`, 2026-08-25 (GeeLark/Android 16): Google asking
+    for a phone number is a different gate from the robot check -- no
+    captcha, nothing to solve -- but just as unautomatable, and it used to
+    fall through to `unknown_screen` and read as a mystery bug."""
+    assert (g.classify_google_screen(DEVICE_VERIFICATION)
+           == g.SCREEN_DEVICE_VERIFICATION)
+
+
+def test_a_device_verification_gate_is_not_mistaken_for_a_robot_check():
+    """Different gates, both dead ends, but conflating them would hide which
+    one an account actually hit."""
+    assert (g.classify_google_screen(DEVICE_VERIFICATION)
+           != g.SCREEN_ROBOT_CHECK)
+
+
+def test_a_device_verification_gate_stops_the_run_with_its_own_verdict():
+    driver, adb = _StubDriver(DEVICE_VERIFICATION), _StubAdb()
+
+    verdict = g.sign_in(driver, adb, "host:1", "mdr147391@gmail.com", "pw",
+                        "SECRET", sleep=lambda _s: None)
+
+    assert verdict == g.RESULT_DEVICE_VERIFICATION
+    assert not driver.taps, "there is no button here that leads anywhere"
+
+
 # The Play Store home -- the screen a phone that already carries a Google
 # account opens on. Assembled from the module's own markers rather than read off
 # a phone, so it proves the branch, not the wording.
