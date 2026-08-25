@@ -106,6 +106,21 @@ _PERMISSION_MARKERS = (
     "set up on new device",
 )
 
+# The notifications prompt specifically is always DENIED, never granted --
+# these accounts never need push notifications, and it's one less thing that
+# distinguishes an automated profile from a hand-used one.
+_NOTIFICATIONS_MARKERS = (
+    "allow instagram to send you",
+    "to send you notifications",
+)
+
+_DENY_BUTTON_LABELS = (
+    "don't allow",
+    "don’t allow",
+    "dont allow",
+    "deny",
+)
+
 # Buttons that GRANT / advance a permission dialog, in the order we prefer them.
 # Matched EXACTLY, so "allow" can never match "Don't allow".
 _GRANT_BUTTON_LABELS = (
@@ -236,14 +251,26 @@ def detect_interruption(target, logger=None, flow=None, expect=None) -> tuple[st
     return INTERRUPTION_NONE, root
 
 
-def _advance_permission_screen(target, adb_client, root, logger=None) -> bool:
+def _advance_permission_screen(target, adb_client, root, logger=None, text: str = "") -> bool:
     """Tap the grant/continue button on a permission dialog via an EXACT label
     match from the UI dump. Returns True if a button was tapped.
 
     The exact match guarantees we hit "Allow" / "While using the app" and never
-    "Don't allow". Callers must pass a non-None `root`.
+    "Don't allow" -- except the notifications prompt, which is always denied
+    (see `_NOTIFICATIONS_MARKERS`). Callers must pass a non-None `root`.
     """
     ig = _ig()
+
+    if any(marker in text for marker in _NOTIFICATIONS_MARKERS):
+        for label in _DENY_BUTTON_LABELS:
+            center = ig._find_center_by_exact_label(root, (label,))
+            if center is not None:
+                ig._emit(logger, "info", "Fallback (permission): denying notifications, clicking '%s' at %s for %s", label, center, target)
+                ig._adb_tap(target, center[0], center[1], adb_client, logger=logger, description=f"Clicking '{label}'")
+                return True
+        ig._emit(logger, "warning", "Fallback (permission): notifications prompt seen for %s but no deny button found", target)
+        return False
+
     for label in _GRANT_BUTTON_LABELS:
         center = ig._find_center_by_exact_label(root, (label,))
         if center is not None:
@@ -317,7 +344,7 @@ def handle_permission_prompts(target, adb_client, logger=None, flow=None, max_ro
             ig._emit(logger, "warning", "Permission prompt for %s could not be read; leaving it alone", target)
             break
 
-        if not _advance_permission_screen(target, adb_client, root, logger=logger):
+        if not _advance_permission_screen(target, adb_client, root, logger=logger, text=text):
             break
         handled_any = True
         time.sleep(2.5)
@@ -391,7 +418,7 @@ def handle_blocking_prompts(target, adb_client, logger=None, flow=None, max_roun
         if is_onboarding:
             advanced = _advance_onboarding_screen(target, adb_client, root, text, logger=logger)
         if not advanced and is_permission:
-            advanced = _advance_permission_screen(target, adb_client, root, logger=logger)
+            advanced = _advance_permission_screen(target, adb_client, root, logger=logger, text=text)
         if not advanced:
             ig._emit(logger, "warning", "Fallback (blocking prompts): recognised the screen for %s (markers=%s) but found no known button to click; leaving it", target, markers)
             break
