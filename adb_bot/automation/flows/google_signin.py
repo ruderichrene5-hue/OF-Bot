@@ -71,6 +71,7 @@ SCREEN_ROBOT_CHECK = "google_robot_check"    # a captcha; needs a person
 SCREEN_SERVER_ERROR = "google_server_error"  # transient; retryable
 SCREEN_RETRY = "try_again"                   # Google's own retry page
 SCREEN_SERVICES = "google_services"          # backup/location consents
+SCREEN_PLAY_TIP = "play_install_tip"         # Play Store's one-time install tip
 SCREEN_LOADING = "loading"
 SCREEN_UNKNOWN = "unknown"
 
@@ -126,6 +127,18 @@ _SERVICES_MARKERS = (
     "tap to learn more about each service",
 )
 _SAVE_PASSWORD_MARKERS = ("save password", "google password manager")
+
+# The Play Store's own one-time "how installs work" tip -- unrelated to
+# sign-in, but it can be the very first thing on screen after `glogin` and
+# has nothing to do with the account. Seen live 2026-08-25
+# (unnikuttan114121@gmail.com): a single `OK` button, no address anywhere in
+# the dump, so `accounts_on_device` found nothing and it read as
+# `unknown_screen` before the flow ever got a chance to start signing in.
+_PLAY_TIP_MARKERS = (
+    "optimising app installs",
+    "optimizing app installs",
+    "google play makes apps faster to install",
+)
 _PLAY_HOME_MARKERS = ("search apps & games", "search for apps & games",
                       "games apps", "for you top charts")
 _WRONG_PASSWORD_MARKERS = ("wrong password", "couldn't sign you in",
@@ -187,6 +200,7 @@ _ORDERED = (
     (SCREEN_TOTP, _TOTP_MARKERS),
     (SCREEN_2FA_CHOOSER, _2FA_MARKERS),
     (SCREEN_SERVICES, _SERVICES_MARKERS),
+    (SCREEN_PLAY_TIP, _PLAY_TIP_MARKERS),
     (SCREEN_TERMS, _TERMS_MARKERS),
     (SCREEN_EASE_FAILED, _EASE_FAILED_MARKERS),
     (SCREEN_EASE, _EASE_MARKERS),
@@ -1020,6 +1034,14 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
             # advance, so this is bounded by its own counter instead.
             last, repeats = None, 0
             pending = settle(driver, text, 8, sleep=sleep, clock=clock)
+
+        elif screen == SCREEN_PLAY_TIP:
+            # Nothing to do with the account -- just get it out of the way.
+            if not driver.tap_label(("OK", "Ok", "GOT IT", "Got it")):
+                log("warning", "nothing to tap on the Play Store install tip")
+                return RESULT_STUCK
+            last, repeats = None, 0
+            pending = settle(driver, text, 6, sleep=sleep, clock=clock)
 
         elif screen == SCREEN_TERMS:
             driver.tap_label(("I agree", "I AGREE", "Accept", "ACCEPT"))

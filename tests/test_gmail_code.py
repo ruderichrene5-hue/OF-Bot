@@ -753,6 +753,53 @@ def test_the_scrolling_is_bounded():
     assert adb.swipes == gmail_code.MAX_SETTINGS_SCROLLS
 
 
+class _DeepAccountPageDriver(FakeDriver):
+    """An account page with extra Chat/Meet rows ahead of `Data usage`, the way
+    `hgemranoo@gmail.com`'s did (2026-08-25): still not visible after 4 scrolls,
+    the budget that used to be `MAX_SETTINGS_SCROLLS`."""
+
+    NEEDED_SCROLLS = 5
+
+    def __init__(self, wanted):
+        super().__init__([])
+        self.wanted = wanted
+        self.scrolls = 0
+        self.taps = []
+
+    def read_screen(self):
+        if self.scrolls >= self.NEEDED_SCROLLS:
+            return ACCOUNT_PAGE_LOWER
+        return ACCOUNT_PAGE_TOP + " chat general smart features package tracking"
+
+    def tap_label(self, labels, require_clickable=True):
+        if self.scrolls >= self.NEEDED_SCROLLS and any(str(l) == self.wanted for l in labels):
+            self.taps.append(labels)
+            return True
+        return False
+
+
+def test_a_row_five_screens_down_is_still_found():
+    """`hgemranoo@gmail.com`'s account page (2026-08-25) did not show `Data
+    usage` until the 5th scroll -- past the old budget of 4, so `enable_sync()`
+    gave up right before reaching it and the account's Instagram code, already
+    sitting in the inbox, could never be read."""
+    class Adb(_SyncAdb):
+        def __init__(self, driver):
+            super().__init__()
+            self.driver = driver
+
+        def shell_swipe(self, target, x1, y1, x2, y2, duration_ms=300):
+            self.driver.scrolls += 1
+            return ""
+
+    driver = _DeepAccountPageDriver("Data usage")
+    adb = Adb(driver)
+    box = gmail_code.PhoneMailbox("host:1", adb, "a@gmail.com", driver=driver)
+
+    assert box._find_and_tap(("Data usage",)) is True
+    assert driver.scrolls == _DeepAccountPageDriver.NEEDED_SCROLLS
+
+
 def test_a_row_already_on_screen_is_not_scrolled_past():
     """Scrolling first would push a visible row off the top."""
     class Adb(_SyncAdb):

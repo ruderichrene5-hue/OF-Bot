@@ -122,6 +122,47 @@ def test_the_services_page_taps_are_bounded():
         f"tapped the consent page {len(taps)} times"
 
 
+PLAY_TIP = ("google is optimising app installs with your help google play "
+           "makes apps faster to install, open and run based on what people "
+           "are using most. the first time that you open an app after "
+           "installing, google notes which parts of the app you use.")
+
+
+def test_the_play_store_install_tip_is_named():
+    """No address anywhere in this dump -- it is Play Store's own one-time
+    tip, not part of the account's sign-in chain. Seen live 2026-08-25
+    (unnikuttan114121@gmail.com) as the very first screen after `glogin`,
+    where it used to read as `unknown_screen` before sign-in ever started."""
+    assert g.classify_google_screen(PLAY_TIP) == g.SCREEN_PLAY_TIP
+
+
+def test_the_install_tip_is_dismissed_and_sign_in_continues():
+    """Tapping its `OK` clears it out of the way so the real sign-in chain
+    (here: the email screen) gets a chance to run, instead of the flow
+    giving up on the first screen it sees."""
+    class TipThenEmailDriver(_StubDriver):
+        def __init__(self):
+            super().__init__(PLAY_TIP)
+
+        def tap_label(self, labels):
+            self.taps.append(labels)
+            self.text = EMAIL
+            return True
+
+        def fill(self, hints, value, what, **kw):
+            return True
+
+        def dismiss_keyboard(self):
+            pass
+
+    driver, adb = TipThenEmailDriver(), _StubAdb()
+    g.sign_in(driver, adb, "host:1", "a@gmail.com", "pw", "SECRET",
+             sleep=lambda _s: None)
+
+    assert any("OK" in t or "Ok" in t for t in driver.taps), \
+        f"never tapped past the install tip: {driver.taps}"
+
+
 def test_searching_for_accounts_is_loading_not_a_screen_to_act_on():
     assert g.classify_google_screen(SEARCHING) == g.SCREEN_LOADING
 

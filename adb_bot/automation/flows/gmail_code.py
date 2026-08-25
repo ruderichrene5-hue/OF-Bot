@@ -290,7 +290,15 @@ _DATA_USAGE_LABELS = ("Data usage", "DATA USAGE")
 # inbox and notification settings and `Data usage` is well below the fold --
 # three swipes covered it on `Blank caio 2`, and a page that has not shown the
 # row by then is not the page we think it is.
-MAX_SETTINGS_SCROLLS = 4
+#
+# Four was not enough: `hgemranoo@gmail.com`'s account page (2026-08-25) carries
+# extra Chat/Meet/"smart features" rows -- inbox settings, notifications,
+# general, chat, default reply, signature, conversation view, smart features,
+# package tracking, smart compose/reply, out-of-office, Meet's own "limit data
+# usage" toggle -- and still had not reached the `Data usage` *section* by
+# scroll 4, so `enable_sync()` gave up right before it, twice. Matched to
+# `MAX_SYNC_SCROLLS` below, already calibrated for this same page.
+MAX_SETTINGS_SCROLLS = 8
 
 # Two goes at turning sync on. If the switch cannot be found twice, the run is
 # better off saying so than tapping around Android's settings.
