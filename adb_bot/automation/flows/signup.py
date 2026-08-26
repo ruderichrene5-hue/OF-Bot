@@ -416,8 +416,17 @@ _LOADING_MARKERS = ("loading", "checking info", "just a moment",
 
 # Words that are never the *content* of a screen, only its chrome. A screen
 # made of nothing but these has not finished drawing.
+#
+# "g" is here for one reason: ruhu56898@gmail.com, 2026-08-26 (Blank 10) --
+# the screen right after the confirmation code was accepted read via OCR as
+# nothing but the status bar, "05:44 3 & 5g 4". Splitting on non-letters
+# strips the digits out of "5g" and leaves the bare letter, which this set
+# did not recognise, so a screen that simply had not finished rendering yet
+# was classified SCREEN_UNKNOWN and burned both restart_app attempts on the
+# identical status-bar read.
 _CHROME_ONLY_WORDS = frozenset({
     "next", "back", "loading", "ok", "continue", "skip", "done", "cancel",
+    "g",
 })
 
 

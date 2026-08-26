@@ -386,6 +386,17 @@ def test_a_real_screen_is_never_dismissed_as_loading():
     assert signup.classify_signup_screen(submitting) == signup.SCREEN_PASSWORD
 
 
+def test_a_status_bar_only_ocr_read_is_loading_not_unknown():
+    """ruhu56898@gmail.com, 2026-08-26 (Blank 10): the screen right after the
+    confirmation code was accepted read via OCR as nothing but the status
+    bar. Splitting on non-letters strips the digits out of "5g" and leaves
+    the bare letter "g", which was not recognised, so a screen that simply
+    had not finished rendering yet was classified SCREEN_UNKNOWN and burned
+    both restart_app attempts on the identical status-bar read."""
+    assert (signup.classify_signup_screen("05:44 3 & 5g 4")
+           == signup.SCREEN_LOADING)
+
+
 def test_the_run_waits_through_loading_then_carries_on():
     driver = FakeDriver([
         SCREENS[signup.SCREEN_ENTRY],
