@@ -408,6 +408,27 @@ def test_a_play_store_with_no_network_reopens_the_listing():
     assert len(opened) == p.MAX_OFFLINE + 1, "did not reopen the listing"
 
 
+HOME_SCREEN = ("snapchat snapchat youtube youtube instagram instagram "
+               "tiktok tiktok home telephone telephone messaging messaging "
+               "music music chrome chrome camera camera")
+
+
+def test_the_play_store_closing_to_the_home_screen_reopens_the_listing():
+    """akukayagh299@gmail.com, 2026-08-26 (Blank 5, GeeLark/Android 16): the
+    Play Store closed out entirely mid-install, landing on the phone's own
+    home screen -- nothing here recognised that, so it polled an empty
+    launcher for the rest of its budget instead of reopening the listing."""
+    adb = _Adb()
+    driver = _Driver(adb, HOME_SCREEN)
+
+    verdict = p.install(driver, adb, "host:1", PACKAGE, sleep=lambda _s: None)
+
+    assert verdict == p.RESULT_NO_BUTTON
+    opened = [c for c in adb.commands if "market://details" in c]
+    assert len(opened) == p.MAX_LAUNCHER_REOPENS + 1, (
+        "did not reopen the listing after the home screen appeared")
+
+
 WAITING_FOR_CONNECTION = (
     "close sheet gmail waiting for connection… download will begin once "
     "restored verified by play protect cancel cancel")

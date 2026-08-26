@@ -172,6 +172,21 @@ def open_listing(adb_client, target: str, package: str) -> None:
 # nothing to tap, and the way back is to open the listing again. Instagram was
 # talking to its own servers happily either side of this on 2026-08-17, so it
 # is the Play Store's connection, not the phone's.
+# The Play Store closed out to the phone's own home screen instead of
+# staying on the listing -- confirmed live 2026-08-26 (akukayagh299@gmail.com,
+# Blank 5): after tapping through the account-setup review flow, the very
+# next read was app icons (Snapchat, YouTube, Instagram, TikTok, Telephone,
+# Messaging...), and the loop had nothing here to recognise it, so it just
+# kept polling an empty home screen for the rest of its budget. Not the same
+# check `verification.looks_like_launcher` uses (that one requires "play
+# store" itself to be visible, which this exact home screen did not show,
+# no Play Store icon in the row that rendered) -- a handful of these ordinary
+# app names is enough on its own here, since nothing else this loop reads
+# would ever mention several of them together.
+_LAUNCHER_MARKERS = ("telephone", "messaging", "gallery", "camera", "chrome",
+                     "music")
+MAX_LAUNCHER_REOPENS = 3
+
 _OFFLINE_MARKERS = ("no internet connection", "check your connection",
                     "you're offline",
                     # A queued/paused download, not a missing button.
@@ -221,12 +236,26 @@ def install(driver, adb_client, target: str, package: str, logger=None,
     offline = 0
     pending = 0
     account_setup_continues = 0
+    launcher_reopens = 0
     while time.monotonic() < deadline:
         if is_installed(adb_client, target, package):
             log("info", "%s installed", package)
             return RESULT_INSTALLED
 
         text = (driver.read_screen() or "").lower()
+
+        if sum(marker in text for marker in _LAUNCHER_MARKERS) >= 3:
+            launcher_reopens += 1
+            if launcher_reopens > MAX_LAUNCHER_REOPENS:
+                log("warning", "the Play Store closed to the home screen "
+                               "%d times", launcher_reopens - 1)
+                return RESULT_NO_BUTTON
+            log("info", "the Play Store closed to the home screen; "
+                        "reopening the listing (%d/%d)", launcher_reopens,
+                MAX_LAUNCHER_REOPENS)
+            open_listing(adb_client, target, package)
+            sleep(8)
+            continue
 
         if any(marker in text for marker in _OFFLINE_MARKERS):
             offline += 1
