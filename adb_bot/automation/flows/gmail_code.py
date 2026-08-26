@@ -91,6 +91,9 @@ _EMPTY_MARKERS = (
 # is the only honest answer to "will mail arrive on this phone?".
 GMAIL_SYNC_AUTHORITY = "gmail-ls"
 
+# How many shade reads to make before disturbing Instagram by opening Gmail.
+SHADE_FIRST_PASSES = 4
+
 
 class MailboxNotReady(Exception):
     """The phone has the account but is not showing its mail."""
@@ -541,7 +544,25 @@ class PhoneMailbox:
             waited += FRONT_POLL_SECONDS
 
     def back_to_instagram(self) -> None:
+        """Resume Instagram's existing task, without restarting it.
+
+        `am start -n .../MainTabActivity` names an activity, which brings up a
+        fresh main tab and **discards a signup in progress**. Measured
+        2026-08-26 on Rene 41: the emailed code was typed and accepted, the
+        switch back landed on "Join Instagram / Get started", and the flow then
+        looped -- re-entering the email, drawing a new code, submitting it, and
+        being reset again, burning a code each time.
+
+        The LAUNCHER intent resumes whatever task the app already has, which is
+        what "switch apps, never force-stop" is actually asking for: the
+        force-stop was already avoided, but naming the activity undid the
+        signup just as thoroughly.
+        """
         self._log("info", "switching back to Instagram")
+        # `-n <component>`, because `am start` wants a component and treats a
+        # bare package as data -- passing one switches nothing at all, which
+        # leaves Gmail in front and the next screen read reports an unknown
+        # screen (measured 2026-08-26).
         self._shell(f"am start -n {INSTAGRAM_ACTIVITY}")
 
     def _read(self) -> str:
@@ -807,10 +828,28 @@ class PhoneMailbox:
                     f"Gmail > Settings > {self.address} > Data usage > "
                     f"'Sync Gmail'")
 
-        # Gmail not coming to the front is no longer fatal: the notification
-        # shade carries the same code and needs nothing in front at all. Four
-        # launches on 2026-08-17 ended here with the mail very likely already
-        # delivered.
+        # The shade FIRST, before Gmail is opened at all. Opening Gmail takes
+        # Instagram off the screen, and coming back is what actually breaks a
+        # signup: `MainTabActivity` is Instagram's launcher activity, so
+        # bringing it forward resets the task and the half-finished signup is
+        # gone -- measured 2026-08-26 on Rene 41, where the code was accepted
+        # and the app returned to "Join Instagram", then looped drawing a fresh
+        # code each lap. On a phone whose Gmail is already prepared (signed in,
+        # sync on, tours dismissed) the mail lands in the shade and Instagram
+        # never loses the foreground.
+        for _ in range(SHADE_FIRST_PASSES):
+            code = self.notification_code()
+            if code:
+                self._log("info", "code found in the notification shade "
+                                  "without leaving Instagram")
+                return code
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(poll_seconds)
+
+        # Nothing in the shade -- Gmail may need its sync turned on or its
+        # tours cleared, which can only be done with it in front.
+        self._log("info", "no code in the shade yet; opening Gmail")
         on_screen = self.open_gmail()
         if not on_screen:
             self._log("warning", "Gmail would not come to the front; reading "
