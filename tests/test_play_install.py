@@ -201,6 +201,55 @@ def test_account_setup_review_is_given_to_render_not_reopened_over():
         "account-review flow render")
 
 
+PAYMENT_SUBSCREEN = (
+    "google play close complete account setup akukayagh299@gmail.com add a "
+    "payment option to complete your account. you won't be charged unless "
+    "you make a purchase. add card + more add telefonica billing add paypal "
+    "add klarna add paysafecard redeem code skip")
+
+
+def test_the_payment_sub_screen_gets_skip_not_a_repeated_continue():
+    """akukayagh299@gmail.com, 2026-08-26 (Blank 2): Google's "Complete
+    account setup" header stays on screen through the whole review flow, not
+    just its first page -- the very next screen after tapping Continue was
+    this payment-method page, still carrying the same header text, whose
+    only real action is `Skip`. Tapping only `("Continue", "CONTINUE")`
+    matched nothing here and burned the whole retry budget re-reading an
+    identical screen 4 times. `_DISMISS_LABELS` covers `Skip` too, so the
+    real fix is using that full set rather than a `Continue`-only tap."""
+    adb = _Adb()
+
+    class TwoStageAccountSetup(_Driver):
+        def __init__(self):
+            super().__init__(adb, ACCOUNT_SETUP)
+            self.stage = "gate"
+            self.skip_tapped = False
+
+        def clickable_labels(self):
+            return ["Continue"] if self.stage == "gate" else ["Skip"]
+
+        def read_screen(self):
+            return ACCOUNT_SETUP if self.stage == "gate" else PAYMENT_SUBSCREEN
+
+        def tap_label(self, labels, require_clickable=True):
+            if self.stage == "gate" and any(
+                    l in ("Continue", "CONTINUE") for l in labels):
+                self.stage = "payment"
+                return True
+            if self.stage == "payment" and any(
+                    l in ("Skip", "SKIP") for l in labels):
+                self.skip_tapped = True
+                self.adb.installed = True   # past the gate; install can proceed
+                return True
+            return False
+
+    driver = TwoStageAccountSetup()
+    verdict = p.install(driver, adb, "host:1", PACKAGE, sleep=lambda _s: None)
+
+    assert driver.skip_tapped, "never tapped Skip on the payment sub-screen"
+    assert verdict == p.RESULT_INSTALLED
+
+
 def test_install_with_retries_closes_the_store_and_tries_again():
     """A retryable result gets the Play Store force-stopped and a fresh
     attempt, up to the attempt cap -- not accepted as final on the first

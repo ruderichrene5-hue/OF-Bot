@@ -63,6 +63,31 @@ def test_the_floor_is_the_boundary_it_says_it_is():
     assert signup_phone.seconds_left_for_verification(just_enough + 1) is None
 
 
+def test_a_geelark_phone_gets_the_geelark_budget_not_the_mlx_one():
+    """blank_4059 (ruhu56898@gmail.com), 2026-08-25: `created_unverified` at
+    729s -- 51s short of MIN_VERIFY_SECONDS under the MLX-calibrated 780s
+    budget -- and the phone was shut down without attempting verification.
+    Instagram cannot resume a created-but-unverified account after a
+    restart, so that account is gone. Confirmed live the same night that
+    GeeLark phones run 20-50 minutes with no sign of dying on their own, so
+    the MLX figure was never the right ceiling for this host."""
+    host = signup_phone.GeelarkHost(transport=object(), args=None)
+
+    elapsed = 729
+    assert signup_phone.seconds_left_for_verification(elapsed) is None, (
+        "sanity: the MLX budget really would have skipped this run")
+    left = signup_phone.seconds_left_for_verification(elapsed, host=host)
+    assert left == signup_phone.PHONE_LIFE_SECONDS_GEELARK - elapsed
+    assert left >= signup_phone.MIN_VERIFY_SECONDS
+
+
+def test_an_mlx_host_keeps_the_original_budget():
+    host = signup_phone.MlxHost(clients=object(), args=None)
+    elapsed = 300
+    assert (signup_phone.seconds_left_for_verification(elapsed, host=host)
+           == signup_phone.PHONE_LIFE_SECONDS - elapsed)
+
+
 # --- the hand-off ----------------------------------------------------------
 
 def _run_verify(monkeypatch, verdict, recorded=None):

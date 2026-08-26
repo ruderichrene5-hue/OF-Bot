@@ -50,10 +50,23 @@ from adb_bot.core.logger import get_logger
 
 INSTAGRAM_PACKAGE = "com.instagram.android"
 
-# How long one of these phones is worth planning around. They die by themselves
-# at about fifteen minutes with no exit line anywhere, and there is no resuming
-# a half-made account, so everything a run intends to do has to fit inside this.
+# How long one of these phones is worth planning around. MultiLogin phones die
+# by themselves at about fifteen minutes with no exit line anywhere, and there
+# is no resuming a half-made account, so everything a run intends to do has to
+# fit inside this.
 PHONE_LIFE_SECONDS = 13 * 60
+
+# Geelark phones do not die on their own the way MLX ones do -- confirmed
+# live across tonight's 2026-08-25 GeeLark rounds, several ran 20-50 minutes
+# with no sign of an imposed ceiling. Using the MLX-calibrated 13-minute
+# budget here abandoned a genuinely finished signup right before its last
+# step: `blank_4059` (ruhu56898@gmail.com) reached `created_unverified` at
+# 729s, 51s short of the 150s verification needs, and the phone was shut
+# down -- Instagram cannot resume a created-but-unverified account after a
+# restart, so that account is gone. Still a real bound, not unlimited (a
+# GeeLark phone bills per minute), just one grounded in what these phones
+# actually do instead of an assumption inherited from a different host.
+PHONE_LIFE_SECONDS_GEELARK = 25 * 60
 
 # The least time worth starting a verification chain in. Below this the run
 # would rent a number -- real money, and 45 seconds before it is even usable --
@@ -490,7 +503,8 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
         # Instagram comes back to "Join Instagram" and the account cannot be
         # picked up again from a later run.
         if result.status == signup.RESULT_CREATED_UNVERIFIED and args.verify:
-            left = seconds_left_for_verification(time.monotonic() - started)
+            left = seconds_left_for_verification(time.monotonic() - started,
+                                                 host=host)
             if left is None:
                 spent = int(time.monotonic() - started)
                 out["steps"]["verification"] = "skipped-no-time"
@@ -521,12 +535,17 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
             locks.release(profile_id)
 
 
-def seconds_left_for_verification(elapsed: float) -> float | None:
+def seconds_left_for_verification(elapsed: float, host=None) -> float | None:
     """How long verification may run, or None if it must not start.
 
     Not a fixed budget: what is left of the phone. `run_verification` defaults
-    to fifteen minutes, which is longer than these phones live, so left alone it
-    would still be renting numbers after the device had gone.
+    to fifteen minutes, which is longer than an MLX phone lives, so left alone
+    it would still be renting numbers after the device had gone.
+
+    `host` picks which budget applies -- a `GeelarkHost` gets
+    `PHONE_LIFE_SECONDS_GEELARK`, everything else (including no host passed,
+    so existing MLX call sites keep their exact prior behaviour) gets the
+    original MLX-calibrated `PHONE_LIFE_SECONDS`.
 
     None rather than a small number, because "start and die" is the expensive
     outcome -- a rented number costs money and 45 seconds before it is even
@@ -534,7 +553,9 @@ def seconds_left_for_verification(elapsed: float) -> float | None:
     left at its checkpoint can still be verified later; a burned number cannot
     be got back.
     """
-    left = PHONE_LIFE_SECONDS - elapsed
+    budget = (PHONE_LIFE_SECONDS_GEELARK if isinstance(host, GeelarkHost)
+             else PHONE_LIFE_SECONDS)
+    left = budget - elapsed
     return left if left >= MIN_VERIFY_SECONDS else None
 
 

@@ -317,13 +317,23 @@ def install(driver, adb_client, target: str, package: str, logger=None,
                 log("warning", "the account-setup review would not finish "
                                "after %d tries", account_setup_continues - 1)
                 return RESULT_NO_BUTTON
+            # Google's own header ("Complete account setup...") stays on
+            # screen through the *whole* review flow, not just its first
+            # page -- confirmed live 2026-08-26 (akukayagh299@gmail.com):
+            # the very next screen after tapping Continue was a payment-method
+            # page carrying the same header text, whose only real action is
+            # `Skip`, not `Continue`. Tapping only `("Continue", "CONTINUE")`
+            # matched nothing there and burned the whole budget re-reading an
+            # identical screen. `_DISMISS_LABELS` already covers `Skip`
+            # alongside `Continue`, so use the full set here too.
+            tapped = driver.tap_label(_DISMISS_LABELS)
             log("info", "Google wants this account reviewed before it can "
-                        "install anything; tapping Continue and letting the "
-                        "review flow render (%d/%d) -- NOT reopening the "
-                        "listing, which would abandon it before it can show "
-                        "anything", account_setup_continues,
-                MAX_ACCOUNT_SETUP_CONTINUES)
-            driver.tap_label(("Continue", "CONTINUE"))
+                        "install anything; %s (%d/%d) -- NOT reopening the "
+                        "listing, which would abandon the review flow before "
+                        "it can show anything",
+                "tapped through a step of the review flow" if tapped
+                else "nothing recognisable to tap yet; waiting",
+                account_setup_continues, MAX_ACCOUNT_SETUP_CONTINUES)
             sleep(6)
             continue
 
