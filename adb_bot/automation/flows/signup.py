@@ -42,6 +42,7 @@ SCREEN_PHONE = "phone"                  # "What's your mobile number?"
 SCREEN_EMAIL = "email"                  # "What's your email address?" (we avoid it)
 SCREEN_CODE = "code"                    # "Enter the confirmation code"
 SCREEN_CODE_OPTIONS = "code_options"    # bottom sheet the code screen can fall into
+SCREEN_LANGUAGE_PICKER = "language_picker"  # "other languages available" sheet
 SCREEN_CALL_CONFIRM = "call_confirm"    # "Confirm ... automatically with a phone call"
 SCREEN_SEND_SMS = "send_sms"            # "Send SMS to confirm your account" (outbound!)
 SCREEN_METHOD_CHOOSER = "method_chooser"  # "Change mobile number / Confirm by email"
@@ -226,6 +227,19 @@ _CODE_MARKERS = (
 # attempts, landing on the identical sheet each time.
 _CODE_OPTIONS_MARKERS = ("resend confirmation code",)
 
+# A language-suggestion sheet Instagram can show right after the
+# confirmation code is accepted -- confirmed live 2026-08-26 (Blank (16),
+# MultiLogin): "Dismiss" plus a list of other-language names (Marathi,
+# Tamil, Telugu, Thai, Chinese, Japanese, Korean), no marker of its own, so
+# it fell to SCREEN_UNKNOWN and triggered a full app restart -- which walks
+# the whole chain from "Join Instagram" again, re-leasing a number and
+# re-typing everything, on an account whose code had already been accepted.
+# Three restarts in a row on the same run, ~7 minutes, before this was
+# found. The language names themselves are the marker: nothing else this
+# flow reads is ever going to contain them.
+_LANGUAGE_PICKER_MARKERS = ("मराठी", "தமிழ்", "తెలుగు", "ภาษาไทย", "日本語",
+                            "한국어")
+
 _PASSWORD_MARKERS = (
     "create a password",
     "create a password with at least six",
@@ -379,6 +393,7 @@ _ORDERED_MARKERS = (
     (SCREEN_SAVE_PASSWORD, _SAVE_PASSWORD_MARKERS),
     (SCREEN_DATE_PICKER, _DATE_PICKER_MARKERS),
     (SCREEN_CODE_OPTIONS, _CODE_OPTIONS_MARKERS),
+    (SCREEN_LANGUAGE_PICKER, _LANGUAGE_PICKER_MARKERS),
     (SCREEN_CODE, _CODE_MARKERS),
     (SCREEN_TERMS, _TERMS_MARKERS),
     (SCREEN_PASSWORD, _PASSWORD_MARKERS),
@@ -711,6 +726,10 @@ MAX_APP_RESTARTS = 2
 # app restart, so this is bounded separately from MAX_APP_RESTARTS.
 MAX_CODE_OPTIONS_DISMISSALS = 3
 
+# Same reasoning: the language-suggestion sheet's own Dismiss/Close button
+# clears it without an app restart.
+MAX_LANGUAGE_PICKER_DISMISSALS = 3
+
 # Reads that come back empty before the phone is written off. A cloud phone
 # that dies mid-run -- they last about fifteen minutes -- returns nothing at
 # all, and calling that an unrecognised screen sends somebody looking for a
@@ -885,6 +904,7 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
     empty_reads = 0
     code_submitted = False
     code_options_dismissed = 0
+    language_picker_dismissed = 0
     done_flags = set()
     # Whether this run has actually put anything into the signup: a number, a
     # code, a password, a name. Until it has, a finished-looking screen is
@@ -1282,6 +1302,25 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 # appeared -- give the real code screen behind it a genuine
                 # fresh look, not the stale "already submitted" branch.
                 code_submitted = False
+                last_screen, repeats = None, 0
+                sleep(4)
+                continue
+
+            elif screen == SCREEN_LANGUAGE_PICKER:
+                language_picker_dismissed += 1
+                if language_picker_dismissed > MAX_LANGUAGE_PICKER_DISMISSALS:
+                    return finish(
+                        RESULT_STUCK,
+                        "the language-suggestion sheet would not clear "
+                        "after %d tries" % (language_picker_dismissed - 1))
+                log("info", "a language-suggestion sheet is on screen; "
+                            "dismissing it (%d/%d)", language_picker_dismissed,
+                    MAX_LANGUAGE_PICKER_DISMISSALS)
+                if not driver.tap_label(("Dismiss", "DISMISS", "Close",
+                                         "CLOSE")):
+                    log("warning", "nothing to tap on the language sheet")
+                    return finish(RESULT_STUCK,
+                                 "no button on the language-suggestion sheet")
                 last_screen, repeats = None, 0
                 sleep(4)
                 continue
