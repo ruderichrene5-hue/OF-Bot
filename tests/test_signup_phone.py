@@ -560,3 +560,104 @@ def test_shutdown_without_a_held_lease_does_not_crash(monkeypatch):
 
     host = signup_phone.GeelarkHost(transport=object(), args=None)
     host.shutdown("profile-1", logger=None)  # must not raise
+
+
+# --- status tags -------------------------------------------------------------
+
+def test_gmail_connected_needs_both_a_real_signin_and_a_real_install():
+    signed_in_only = {"steps": {"google_signin": "signed_in"}}
+    assert "Gmail connected" not in signup_phone._tags_for_outcome(signed_in_only)
+
+    both = {"steps": {"google_signin": "signed_in",
+                      "install-gmail": "installed"}}
+    assert "Gmail connected" in signup_phone._tags_for_outcome(both)
+
+
+def test_ig_connected_covers_both_created_and_created_unverified():
+    for status in ("created", "created_unverified"):
+        out = {"steps": {"signup": status}}
+        assert "IG connected" in signup_phone._tags_for_outcome(out)
+
+
+def test_a_dead_end_gets_its_own_specific_tag_not_just_gmail_missing():
+    out = {"steps": {"google_signin": "device_verification"}}
+    tags = signup_phone._tags_for_outcome(out)
+    assert "google: device verification" in tags
+    assert "Gmail connected" not in tags
+
+
+def test_skipped_verification_is_not_tagged_as_a_verdict():
+    """"skipped-no-time" is a budget decision, not Instagram's own answer --
+    tagging it as a verification result would read as Instagram having said
+    something it never got asked."""
+    out = {"steps": {"verification": "skipped-no-time"}}
+    tags = signup_phone._tags_for_outcome(out)
+    assert not any(t.startswith("verification:") for t in tags)
+
+
+def test_an_unrecognised_outcome_still_gets_some_tag():
+    out = {"status": "some_new_result_nobody_has_seen"}
+    assert signup_phone._tags_for_outcome(out) == ["some_new_result_nobody_has_seen"]
+
+
+class _FakeTagClient:
+    def __init__(self, existing: dict[str, str]):
+        self._by_name = dict(existing)
+        self.created = []
+
+    def tag_ids_by_name(self, refresh=False):
+        return dict(self._by_name)
+
+    def ensure_tag(self, name, color="blue"):
+        if name not in self._by_name:
+            self.created.append(name)
+            self._by_name[name] = f"id-{name}"
+        return self._by_name[name]
+
+
+class _FakeTagPhoneClient:
+    def __init__(self, phones):
+        self._phones = phones
+        self.updates = []
+
+    def list_phones(self):
+        return self._phones
+
+    def update_phone(self, profile_id, *, tag_ids):
+        self.updates.append((profile_id, list(tag_ids)))
+
+
+def test_tagging_merges_with_the_phones_existing_tags(monkeypatch):
+    """`tagIDs` on the update call *replaces* a phone's tags -- an existing
+    tag left out of the merge would silently vanish."""
+    tag_client = _FakeTagClient({"Old Tag": "id-old", "IG connected": "id-ig"})
+    phone_client = _FakeTagPhoneClient(
+        [{"id": "p1", "tags": ["Old Tag"]}])
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.tags.GeelarkTagClient",
+        lambda transport=None: tag_client)
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.phones.GeelarkPhoneClient",
+        lambda transport=None: phone_client)
+
+    host = signup_phone.GeelarkHost(transport=object(), args=None)
+    out = {"steps": {"signup": "created"}}
+    signup_phone._apply_status_tags("p1", host, out, logging.getLogger("t"))
+
+    assert len(phone_client.updates) == 1
+    profile_id, tag_ids = phone_client.updates[0]
+    assert profile_id == "p1"
+    assert set(tag_ids) == {"id-old", "id-ig"}
+
+
+def test_tagging_is_a_no_op_for_a_non_geelark_host(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "adb_bot.clients.geelark.tags.GeelarkTagClient",
+        lambda transport=None: calls.append("tags") or _FakeTagClient({}))
+
+    host = signup_phone.MlxHost(clients=object(), args=None)
+    signup_phone._apply_status_tags("p1", host, {"steps": {}},
+                                    logging.getLogger("t"))
+
+    assert calls == [], "should never touch the tag API for an MLX host"

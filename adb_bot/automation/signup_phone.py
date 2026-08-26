@@ -287,6 +287,91 @@ def load_assignment(profile_name: str, path: Path | None = None) -> dict:
     return data[profile_name]
 
 
+def _tags_for_outcome(out: dict) -> list[str]:
+    """Human-readable tag names describing where a run landed.
+
+    So a person looking at the Geelark dashboard can tell a phone's state
+    at a glance -- "Gmail connected", "IG connected", which dead end it hit
+    -- without opening a log. Requested live 2026-08-26 after a night of
+    round-cycling where nobody but this session could tell which of the
+    many "Blank N" phones were actually worth a manual look.
+    """
+    steps = out.get("steps", {})
+    tags: list[str] = []
+
+    if (steps.get("google_signin") in ("signed_in", "already_signed_in")
+            and steps.get("install-gmail") in ("installed", "already_installed")):
+        tags.append("Gmail connected")
+
+    signup_result = steps.get("signup")
+    if signup_result in ("created", "created_unverified"):
+        tags.append("IG connected")
+
+    verification = steps.get("verification")
+    if verification and verification != "skipped-no-time":
+        tags.append(f"verification: {verification}")
+
+    google_signin = steps.get("google_signin")
+    if google_signin in ("google_robot_check", "device_verification",
+                         "account_not_found", "wrong_password", "stuck"):
+        tags.append(f"google: {google_signin.replace('_', ' ')}")
+
+    install_gmail = steps.get("install-gmail")
+    if install_gmail in ("no_install_button", "reauth_required", "no_network"):
+        tags.append(f"gmail install: {install_gmail.replace('_', ' ')}")
+
+    if signup_result in ("stuck", "unknown_screen"):
+        tags.append(f"signup: {signup_result}")
+
+    if not tags:
+        tags.append(str(out.get("status", "unclassified")))
+    return tags
+
+
+def _apply_status_tags(profile_id: str, host, out: dict, logger) -> None:
+    """Tag a Geelark phone with `_tags_for_outcome(out)`, merged with
+    whatever tags it already carries -- `tagIDs` on `/phone/detail/update`
+    *replaces* a phone's tags rather than adding to them, and a phone's own
+    record only ever carries tag *names*, never ids (`clients/geelark/
+    tags.py`), so the merge has to go through a name->id lookup.
+
+    Geelark only (a no-op for MlxHost), and only ever called after the phone
+    has stopped -- `/phone/detail/update` refuses writes while a phone is
+    starting.
+    """
+    if not isinstance(host, GeelarkHost):
+        return
+    try:
+        from adb_bot.clients.geelark.phones import GeelarkPhoneClient
+        from adb_bot.clients.geelark.tags import GeelarkTagClient
+
+        phone_client = GeelarkPhoneClient(host.transport)
+        tag_client = GeelarkTagClient(host.transport)
+
+        names = _tags_for_outcome(out)
+        by_name = tag_client.tag_ids_by_name()
+        for name in names:
+            if name not in by_name:
+                tag_client.ensure_tag(name)
+        by_name = tag_client.tag_ids_by_name(refresh=True)
+        new_ids = [by_name[n] for n in names if n in by_name]
+        if not new_ids:
+            return
+
+        existing_names: list[str] = []
+        for row in phone_client.list_phones():
+            if str(row.get("id")) == str(profile_id):
+                existing_names = list(row.get("tags") or [])
+                break
+        existing_ids = [by_name[n] for n in existing_names if n in by_name]
+
+        merged = list(dict.fromkeys(existing_ids + new_ids))
+        phone_client.update_phone(profile_id, tag_ids=merged)
+        logger.info("signup_phone: tagged %s with %s", profile_id, names)
+    except Exception as exc:
+        logger.warning("signup_phone: tagging %s failed (%s)", profile_id, exc)
+
+
 def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
     profile_id = str(profile_item.get("id"))
     name = str(profile_item.get("serial_name") or profile_id)
@@ -533,6 +618,7 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
         else:
             host.shutdown(profile_id, logger)
             locks.release(profile_id)
+            _apply_status_tags(profile_id, host, out, logger)
 
 
 def seconds_left_for_verification(elapsed: float, host=None) -> float | None:
