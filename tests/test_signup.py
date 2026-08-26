@@ -475,6 +475,41 @@ def test_email_is_refilled_after_a_restart_wipes_the_app():
     assert result.status == signup.RESULT_CREATED
 
 
+def test_email_is_refilled_when_entry_reappears_with_no_restart_at_all():
+    """akukayagh299@gmail.com, 2026-08-26 (Blank 8): the confirmation code
+    was read from the mailbox and genuinely accepted -- "the confirmation
+    code submitted itself and the screen moved on" -- and the very next
+    screen was "Join Instagram" anyway, with no restart_app() call anywhere
+    in between. The state-reset fix for the restart_app() sites did not
+    cover this: SCREEN_ENTRY itself has to reset the same state, since
+    reaching it always means everything typed is gone regardless of why."""
+    identity = signup.Identity(full_name="Mia Berg", username="mia.berg",
+                               password="hunter2hunter", birth_day=12,
+                               birth_month="April", birth_year=1999,
+                               email="mia.berg@gmail.com")
+    driver = EmailFillCountingDriver([
+        SCREENS[signup.SCREEN_ENTRY],
+        SCREENS[signup.SCREEN_PHONE],
+        SCREENS[signup.SCREEN_EMAIL],
+        SCREENS[signup.SCREEN_CODE],
+        SCREENS[signup.SCREEN_ENTRY],   # no restart_app() call, no "unknown"
+        SCREENS[signup.SCREEN_PHONE],
+        SCREENS[signup.SCREEN_EMAIL],
+        SCREENS[signup.SCREEN_CODE],
+        SCREENS[signup.SCREEN_TERMS],
+        DONE,
+    ])
+    result = signup.run_signup(driver, FakeRouter([]), identity,
+                               sleep=lambda _s: None, mailbox=FakeMailbox())
+
+    assert driver.restarts == 0, "this scenario has no app restart at all"
+    assert driver.email_fills == 2, (
+        "the second pass through the email screen must fill it again, not "
+        "assume Instagram's own bounce back to Join Instagram left a prior "
+        "pass's typing in place")
+    assert result.status == signup.RESULT_CREATED
+
+
 def test_a_backgrounded_instagram_is_restarted_mid_signup():
     driver = RestartingDriver([
         SCREENS[signup.SCREEN_ENTRY],

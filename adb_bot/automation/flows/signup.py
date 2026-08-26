@@ -1103,6 +1103,23 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
             if screen == SCREEN_ENTRY:
                 # Two entry screens exist: "Join Instagram" with `Get started`,
                 # and the login form with `Create new account`.
+                #
+                # Landing here is not always our own restart_app() -- confirmed
+                # live 2026-08-26 (akukayagh299@gmail.com, Blank 8): the code
+                # was read from the mailbox and genuinely accepted ("the
+                # confirmation code submitted itself and the screen moved
+                # on"), and the very next read was "Join Instagram" anyway,
+                # no restart involved at all. Whatever the cause, reaching
+                # this screen always means everything typed is gone, so the
+                # same reset the two restart_app() sites already do belongs
+                # here too -- otherwise the next SCREEN_EMAIL sees "email"
+                # still in done_flags from the pass that just got wiped and
+                # submits an empty field forever, the exact loop already
+                # fixed once for the restart_app() case. Harmless to call on
+                # a fresh run's very first visit too: there is nothing to
+                # reset yet.
+                release(False)
+                reset_after_restart()
                 driver.tap_label(("Get started", "Create new account"))
 
             elif screen == SCREEN_EMAIL:
