@@ -1516,6 +1516,35 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                         return finish(RESULT_STUCK,
                                       f"{rejections} usernames rejected in a "
                                       f"row, last {rejected}")
+                if (username_filled and not ours_on_screen
+                        and not any(marker in text
+                                    for marker in _USERNAME_TAKEN_MARKERS)
+                        and any(marker in text
+                                for marker in _USERNAME_VALID_MARKERS)):
+                    # Instagram is holding a handle of its own AND saying it is
+                    # valid. Take it. Retyping ours over it is how this step
+                    # loops: on Rene 41 (2026-08-26) three generated handles in
+                    # a row came back "not available" while Instagram's own
+                    # `rene6_409` sat in the box marked valid, and the run died
+                    # "username did not advance in 4 tries" one screen from a
+                    # finished account.
+                    #
+                    # `identity.username` is updated to what is actually
+                    # submitted, so the credentials written afterwards name the
+                    # real handle -- adopting the value while logging ours is
+                    # the misfire `field_holds` was added to stop.
+                    getter = getattr(driver, "field_value", None)
+                    suggested = getter(("username",)) if callable(getter) else ""
+                    if suggested and suggested.lower() != identity.username.lower():
+                        log("info", "instagram offers %s and calls it valid; "
+                                    "taking it instead of %s",
+                            suggested, identity.username)
+                        identity.username = suggested
+                        username_submits += 1
+                        _submit_after_typing(driver, _SUBMIT_LABELS)
+                        sleep(8)
+                        continue
+
                 if username_filled and not ours_on_screen:
                     # Retyping after Instagram put its suggestion back. The
                     # submit counter resets with it: the next submit is a first

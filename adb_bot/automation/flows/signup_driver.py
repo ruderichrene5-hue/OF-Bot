@@ -292,6 +292,32 @@ class AdbSignupDriver(AdbChallengeDriver):
                 return True
         return False
 
+    def field_value(self, hints=()) -> str:
+        """What an input field currently holds, or "" if it cannot be read.
+
+        `field_holds` answers a yes/no about a value we already have; this is
+        for the case where Instagram has put its **own** handle in the box and
+        accepted it -- the value is the thing worth having, and retyping ours
+        over a suggestion Instagram just called valid is how the username step
+        loops until it is declared stuck.
+        """
+        root = self._root
+        if root is None:
+            root, _xml = self._dump()
+            if root is None:
+                return ""
+            self._root = root
+        hints = tuple(str(h).lower() for h in (hints or ()))
+        for candidate in self._edit_fields(root):
+            if hints:
+                hint = str(candidate.get("hint", "") or "").lower()
+                if not any(h in hint for h in hints):
+                    continue
+            value = str(candidate.get("value", "") or "").strip()
+            if value:
+                return value
+        return ""
+
     def submit_with_keyboard(self) -> None:
         """Submit the focused field using the IME's own action key.
 

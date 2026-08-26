@@ -92,7 +92,11 @@ _EMPTY_MARKERS = (
 GMAIL_SYNC_AUTHORITY = "gmail-ls"
 
 # How many shade reads to make before disturbing Instagram by opening Gmail.
-SHADE_FIRST_PASSES = 4
+# Four (60s at the default poll) was measured too short on 2026-08-26: the mail
+# landed at ~70-110s, so the shade was still empty when the fallback fired and
+# opened Gmail for nothing. Eight covers the observed delivery window and still
+# leaves the rest of the budget for the Gmail path.
+SHADE_FIRST_PASSES = 8
 
 
 class MailboxNotReady(Exception):
