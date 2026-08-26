@@ -41,6 +41,7 @@ SCREEN_ENTRY = "entry"                  # "Join Instagram" -- the start
 SCREEN_PHONE = "phone"                  # "What's your mobile number?"
 SCREEN_EMAIL = "email"                  # "What's your email address?" (we avoid it)
 SCREEN_CODE = "code"                    # "Enter the confirmation code"
+SCREEN_CODE_OPTIONS = "code_options"    # bottom sheet the code screen can fall into
 SCREEN_CALL_CONFIRM = "call_confirm"    # "Confirm ... automatically with a phone call"
 SCREEN_SEND_SMS = "send_sms"            # "Send SMS to confirm your account" (outbound!)
 SCREEN_METHOD_CHOOSER = "method_chooser"  # "Change mobile number / Confirm by email"
@@ -215,6 +216,16 @@ _CODE_MARKERS = (
     "i didn't receive the code",
 )
 
+# A bottom sheet the code screen can fall into instead of advancing --
+# confirmed live 2026-08-26 (jgjfjfcjjvjfjcncncg@gmail.com, Blank 1): typing
+# the code and submitting it with the keyboard's own action (the code
+# screen's usual recovery when auto-submit doesn't fire) landed here instead
+# of on a real result. Its own buttons are the safe way out (`Dismiss` gets
+# back to the code screen without restarting the app), but with no marker of
+# its own it fell to `SCREEN_UNKNOWN` and burned both `restart_app`
+# attempts, landing on the identical sheet each time.
+_CODE_OPTIONS_MARKERS = ("resend confirmation code",)
+
 _PASSWORD_MARKERS = (
     "create a password",
     "create a password with at least six",
@@ -367,6 +378,7 @@ _ORDERED_MARKERS = (
     # step in the chain.
     (SCREEN_SAVE_PASSWORD, _SAVE_PASSWORD_MARKERS),
     (SCREEN_DATE_PICKER, _DATE_PICKER_MARKERS),
+    (SCREEN_CODE_OPTIONS, _CODE_OPTIONS_MARKERS),
     (SCREEN_CODE, _CODE_MARKERS),
     (SCREEN_TERMS, _TERMS_MARKERS),
     (SCREEN_PASSWORD, _PASSWORD_MARKERS),
@@ -685,6 +697,11 @@ LOADING_WAIT_SECONDS = 6
 # starting again, a phone that will not run Instagram at all is not.
 MAX_APP_RESTARTS = 2
 
+# How many times the code screen's own options sheet gets dismissed before
+# giving up -- its `Dismiss` button returns to the code screen without an
+# app restart, so this is bounded separately from MAX_APP_RESTARTS.
+MAX_CODE_OPTIONS_DISMISSALS = 3
+
 # Reads that come back empty before the phone is written off. A cloud phone
 # that dies mid-run -- they last about fifteen minutes -- returns nothing at
 # all, and calling that an unrecognised screen sends somebody looking for a
@@ -858,6 +875,7 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
     username_submits = 0
     empty_reads = 0
     code_submitted = False
+    code_options_dismissed = 0
     done_flags = set()
     # Whether this run has actually put anything into the signup: a number, a
     # code, a password, a name. Until it has, a finished-looking screen is
@@ -1190,6 +1208,29 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     RESULT_NUMBER_REFUSED,
                     "Instagram offered no SMS-code option for this number; "
                     "it offered: " + ", ".join(labels[:8]))
+
+            elif screen == SCREEN_CODE_OPTIONS:
+                code_options_dismissed += 1
+                if code_options_dismissed > MAX_CODE_OPTIONS_DISMISSALS:
+                    return finish(
+                        RESULT_STUCK,
+                        "the code screen's options sheet would not clear "
+                        "after %d tries" % (code_options_dismissed - 1))
+                log("info", "the code screen fell into its options sheet "
+                            "instead of advancing; dismissing it (%d/%d)",
+                    code_options_dismissed, MAX_CODE_OPTIONS_DISMISSALS)
+                if not driver.tap_label(("Dismiss", "DISMISS", "Close",
+                                         "CLOSE")):
+                    log("warning", "nothing to tap on the code options sheet")
+                    return finish(RESULT_STUCK,
+                                 "no button on the code options sheet")
+                # The code was already typed and submitted before this sheet
+                # appeared -- give the real code screen behind it a genuine
+                # fresh look, not the stale "already submitted" branch.
+                code_submitted = False
+                last_screen, repeats = None, 0
+                sleep(4)
+                continue
 
             elif screen == SCREEN_CODE:
                 if code_submitted:

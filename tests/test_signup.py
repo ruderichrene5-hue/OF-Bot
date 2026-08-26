@@ -30,6 +30,11 @@ SCREENS = {
         "enter the confirmation code to confirm your profile, enter the 6-digit "
         "code that we sent via sms to +4915905609843. code input entry field "
         "next i didn't receive the code back"),
+    signup.SCREEN_CODE_OPTIONS: (
+        "dismiss resend confirmation code resend confirmation code resend "
+        "confirmation code change email address change email address change "
+        "email address confirm with mobile number confirm with mobile "
+        "number confirm with mobile number close"),
     signup.SCREEN_PASSWORD: (
         "create a password create a password with at least six letters or "
         "numbers. it should be something that others can't guess. password "
@@ -204,6 +209,37 @@ def test_a_whole_signup_walks_to_created():
     assert driver.dates == [(12, "April", 1999)]
     assert ("I agree",) in driver.taps
     assert driver.keyboard_dismissals >= 3
+
+
+def test_the_code_options_sheet_is_dismissed_not_restarted():
+    """jgjfjfcjjvjfjcncncg@gmail.com, 2026-08-26 (Blank 1): submitting the
+    code with the keyboard's own action landed on this sheet instead of a
+    real result. It has no marker of its own, so it read as SCREEN_UNKNOWN
+    and burned both restart_app attempts on the identical sheet each time.
+    `Dismiss` is the safe way back to the real code screen -- no app
+    restart, and the whole rest of the chain can still finish."""
+    driver = FakeDriver([
+        SCREENS[signup.SCREEN_ENTRY],
+        SCREENS[signup.SCREEN_PHONE],
+        SCREENS[signup.SCREEN_CODE],
+        SCREENS[signup.SCREEN_CODE_OPTIONS],
+        SCREENS[signup.SCREEN_CODE],
+        SCREENS[signup.SCREEN_PASSWORD],
+        SCREENS[signup.SCREEN_BIRTHDAY],
+        SCREENS[signup.SCREEN_DATE_PICKER],
+        SCREENS[signup.SCREEN_NAME],
+        SCREENS[signup.SCREEN_USERNAME],
+        SCREENS[signup.SCREEN_TERMS],
+        SCREENS[signup.SCREEN_PERMISSIONS],
+        SCREENS[signup.SCREEN_PHOTO_PROMPT],
+        DONE,
+    ])
+    lease = FakeLease()
+    result = signup.run_signup(driver, FakeRouter([lease]), _identity(),
+                               sleep=lambda _s: None)
+
+    assert result.status == signup.RESULT_CREATED
+    assert ("Dismiss", "DISMISS", "Close", "CLOSE") in driver.taps
 
 
 def test_an_unknown_screen_stops_the_run_with_its_text():
