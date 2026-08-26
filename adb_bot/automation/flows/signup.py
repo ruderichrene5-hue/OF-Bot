@@ -891,6 +891,25 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 log("warning", "releasing the number failed (%s)", exc)
             lease = None
 
+    def reset_after_restart():
+        """Forget what this run typed, to match what a restart actually does.
+
+        A restart puts Instagram back at "Join Instagram" -- every field is
+        blank again -- but `done_flags`/`username_filled`/`username_submits`/
+        `code_submitted` are this run's own memory of what it already typed,
+        and a restart does not touch them. Left alone, the email screen
+        would see `"email" in done_flags`, skip filling it, and submit an
+        empty field forever. Confirmed live 2026-08-26 (ruhu56898@gmail.com,
+        Blank 6): exactly that, phone <-> email alternating 13 times, 30
+        steps, `stuck` -- the escape hatch kept firing (no number leased) but
+        the email it landed on was never actually typed into.
+        """
+        nonlocal done_flags, username_filled, username_submits, code_submitted
+        done_flags = set()
+        username_filled = False
+        username_submits = 0
+        code_submitted = False
+
     def finish(status, detail=""):
         release(status != RESULT_CREATED)
         return SignupResult(status=status, detail=detail,
@@ -932,6 +951,7 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     # will ever type. Not counted as a failure: the number was
                     # fine, the app went away.
                     release(False)
+                    reset_after_restart()
                     app_restarts += 1
                     log("info", "%s; starting Instagram again (%d/%d)",
                         "on the home screen" if screen == SCREEN_LAUNCHER
@@ -1063,6 +1083,14 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 # either.
                 starter = getattr(driver, "restart_app", None)
                 if app_restarts < MAX_APP_RESTARTS and callable(starter) and starter():
+                    # Same reasoning as the SCREEN_LAUNCHER/SCREEN_NOT_INSTAGRAM
+                    # restart: a number already leased is now unreachable once
+                    # Instagram is back at "Join Instagram", and this run's own
+                    # memory of what it already typed has to be forgotten too,
+                    # or the next pass skips fields Instagram no longer has
+                    # anything in.
+                    release(False)
+                    reset_after_restart()
                     app_restarts += 1
                     log("warning", "unnamed screen (%s); restarting Instagram "
                                    "and trying again (%d/%d): %s",

@@ -431,6 +431,50 @@ class RestartingDriver(FakeDriver):
         return self._can_restart
 
 
+class EmailFillCountingDriver(RestartingDriver):
+    def __init__(self, screens):
+        super().__init__(screens)
+        self.email_fills = 0
+
+    def fill(self, hints, value, what, submits_itself=False):
+        if what == "email address":
+            self.email_fills += 1
+        return super().fill(hints, value, what, submits_itself)
+
+
+def test_email_is_refilled_after_a_restart_wipes_the_app():
+    """ruhu56898@gmail.com, 2026-08-26 (Blank 6): a restart puts Instagram
+    back at "Join Instagram" -- every field blank again -- but this run's
+    own memory of "already filled the email" survived the restart. The next
+    pass through SCREEN_EMAIL saw "email" already in `done_flags`, skipped
+    filling it, and submitted the field empty; Instagram bounced that back
+    to the phone screen, whose escape hatch led straight back to the same
+    empty email screen. 13 phone<->email cycles, 30 steps, `stuck`."""
+    identity = signup.Identity(full_name="Mia Berg", username="mia.berg",
+                               password="hunter2hunter", birth_day=12,
+                               birth_month="April", birth_year=1999,
+                               email="mia.berg@gmail.com")
+    driver = EmailFillCountingDriver([
+        SCREENS[signup.SCREEN_ENTRY],
+        SCREENS[signup.SCREEN_PHONE],
+        SCREENS[signup.SCREEN_EMAIL],
+        "something nobody has ever seen before",   # triggers a restart
+        SCREENS[signup.SCREEN_ENTRY],
+        SCREENS[signup.SCREEN_PHONE],
+        SCREENS[signup.SCREEN_EMAIL],
+        SCREENS[signup.SCREEN_CODE],
+        SCREENS[signup.SCREEN_TERMS],
+        DONE,
+    ])
+    result = signup.run_signup(driver, FakeRouter([]), identity,
+                               sleep=lambda _s: None, mailbox=FakeMailbox())
+
+    assert driver.email_fills == 2, (
+        "the second pass through the email screen must fill it again, not "
+        "assume a restart-wiped app still has what a prior pass typed")
+    assert result.status == signup.RESULT_CREATED
+
+
 def test_a_backgrounded_instagram_is_restarted_mid_signup():
     driver = RestartingDriver([
         SCREENS[signup.SCREEN_ENTRY],
