@@ -140,6 +140,28 @@ def test_an_unsolved_checkpoint_keeps_the_account_and_names_the_reason(monkeypat
     assert out["verification"] == verification.RESULT_NEEDS_HUMAN
 
 
+def test_an_unsolved_checkpoint_keeps_the_phone_open_for_a_person(monkeypatch):
+    """blank_4059 and blank.6258, 2026-08-26: both were real, freshly
+    created accounts that `verify_account` reported `needs_human` for --
+    and both were unrecoverable seconds later, because nothing here kept
+    the phone open and a restarted Instagram cannot resume a
+    created-but-unverified account. Same reasoning as the Google robot
+    check already gets in `run_phone`: whoever can answer the challenge
+    has to be able to do it on this same live phone."""
+    out, _, _ = _run_verify(monkeypatch, verification.VerificationResult(
+        status=verification.RESULT_NEEDS_HUMAN, detail="photo challenge"))
+
+    assert out.get("keep_open") is True
+
+
+def test_a_solved_checkpoint_does_not_hold_the_phone_open(monkeypatch):
+    out, _, _ = _run_verify(monkeypatch, verification.VerificationResult(
+        status=verification.RESULT_SOLVED))
+
+    assert not out.get("keep_open"), (
+        "a usable account has no reason to keep the phone running")
+
+
 def test_a_banned_account_is_not_reported_as_created(monkeypatch):
     """Instagram disabling the account seconds after making it is a real
     outcome, and calling it created would put it into the posting rotation."""

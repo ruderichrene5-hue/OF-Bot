@@ -731,6 +731,20 @@ def verify_account(profile_id: str, name: str, identity, target: str,
         record_account(profile_id, name, identity,
                        status=f"created_unverified-{verdict.status}")
         out["status"] = signup.RESULT_CREATED_UNVERIFIED
+        # Same reasoning as the Google robot-check case above: this account
+        # cannot be picked up on a later launch -- a restarted Instagram
+        # comes back to "Join Instagram" -- so shutting the phone down here
+        # is what actually loses it, not the challenge itself. Confirmed
+        # live 2026-08-26: blank_4059 (verification skipped for lack of
+        # time) and blank.6258 (a photo challenge with no picture source
+        # configured) were both real, freshly created accounts that the
+        # `finally` block's shutdown made unrecoverable a few seconds later.
+        out["keep_open"] = True
+        TelegramNotifier().send(
+            f"\U0001f4f8 verification needs a person -- @{identity.username} "
+            f"on {name} ({profile_id})\n{verdict.status}: {verdict.detail[:200]}"
+            f"\nPhone is still open, waiting -- this account cannot be "
+            f"resumed once it closes.", logger=logger)
     return out
 
 
