@@ -93,6 +93,60 @@ class StalenessTest(unittest.TestCase):
         self.assertEqual(len(_find(rows=rows, ledger=ledger, stale_after=2 * HOUR)), 1)
 
 
+class AttemptsMustPostdateTheLastSuccessTest(unittest.TestCase):
+    """The rule that keeps a cleared flag cleared.
+
+    A parked profile makes no new attempts. So if attempts from *before* the
+    last confirmed post still counted, the evidence that raised the flag would
+    sit in the 3-day window unchanged, and every tick after a person cleared the
+    flag would raise it again on exactly that evidence -- which is what was
+    happening to 38 of 79 flag-clears on 2026-08-25.
+    """
+
+    # Both stamps sit inside ATTEMPT_WINDOW_SECONDS (3 days) so the window is
+    # never what decides these tests, and the success is older than
+    # STALE_AFTER_SECONDS (24h) so staleness is never what decides them either.
+    # What is left is the ordering of attempt against success -- the rule here.
+    OLD_ATTEMPT = 48 * HOUR
+    LAST_SUCCESS = 26 * HOUR
+
+    def test_a_failure_older_than_the_last_success_is_not_evidence(self):
+        """`Nikki 17`: unresolved shares from 08-18, a confirmed post on 08-21.
+        The success answered them; they are not a reason to flag on 08-23."""
+        self.assertEqual(
+            _find(rows=[_row(ago=self.OLD_ATTEMPT)],
+                  ledger=[_share(ago=self.LAST_SUCCESS)]), [])
+
+    def test_an_unresolved_share_older_than_the_last_success_is_not_evidence(self):
+        self.assertEqual(
+            _find(ledger=[_share(status=post_ledger.STATUS_SHARED, ago=self.OLD_ATTEMPT),
+                          _share(ago=self.LAST_SUCCESS)]), [])
+
+    def test_a_failure_after_the_last_success_still_flags(self):
+        """The rule must not blind the check: this is its whole purpose."""
+        stale = _find(rows=[_row(ago=2 * HOUR)],
+                      ledger=[_share(ago=self.LAST_SUCCESS)])
+        self.assertEqual([s.name for s in stale], ["Jil 1"])
+        self.assertEqual(stale[0].failed, 1)
+
+    def test_only_the_attempts_since_the_success_are_counted_in_the_note(self):
+        """The note says "attempt(s) since" -- so the number has to be the
+        attempts since, not every attempt in the window."""
+        stale = _find(rows=[_row(ago=self.OLD_ATTEMPT), _row(ago=2 * HOUR)],
+                      ledger=[_share(ago=self.LAST_SUCCESS)])
+        self.assertEqual(len(stale), 1)
+        self.assertEqual(stale[0].failed, 1)
+
+    def test_a_profile_that_never_landed_anything_counts_every_attempt(self):
+        """With no success to postdate, every attempt in the window is
+        evidence -- otherwise a phone that has never posted would go unflagged
+        for ever."""
+        stale = _find(rows=[_row(ago=self.OLD_ATTEMPT), _row(ago=2 * HOUR)])
+        self.assertEqual(len(stale), 1)
+        self.assertEqual(stale[0].last_success, 0.0)
+        self.assertEqual(stale[0].failed, 2)
+
+
 class GateOrderTest(unittest.TestCase):
     """Same gates the planners apply, and for the same reasons."""
 

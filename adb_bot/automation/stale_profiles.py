@@ -32,6 +32,13 @@ What it deliberately does not do:
 * **It does not re-flag or un-flag.** A profile already carrying the checkbox
   is left exactly as it is, so a person's notes are never overwritten, and
   clearing it stays the human's signal alone.
+
+* **It does not count an attempt that predates the last confirmed post.** Only
+  what happened *after* the profile last landed something is evidence that it
+  is failing now. This is what stops a cleared flag coming straight back: a
+  parked profile makes no new attempts, so without it the same stale failures
+  re-flag it within the minute, forever, and the profile can never earn the
+  confirmed post that would clear it honestly.
 """
 
 from __future__ import annotations
@@ -120,6 +127,11 @@ def ledger_activity(records, now: float) -> tuple:
     the difference between confirmed, still-unproven and disproved -- which is
     the distinction this whole module turns on. Airtable's queue row only ever
     learns the summary.
+
+    `uncertain` maps a profile id to the **timestamps** of its unresolved
+    shares, not a count. `find_stale_profiles` has to know *when* each attempt
+    happened to tell an attempt that came after the last success from one that
+    came before it; a bare tally cannot answer that.
     """
     last_success: dict = {}
     uncertain: dict = {}
@@ -134,7 +146,7 @@ def ledger_activity(records, now: float) -> tuple:
             last_success[pid] = max(last_success.get(pid, 0.0), when)
         elif status in (post_ledger.STATUS_SHARED, post_ledger.STATUS_DISPROVED):
             if now - when <= ATTEMPT_WINDOW_SECONDS:
-                uncertain[pid] = uncertain.get(pid, 0) + 1
+                uncertain.setdefault(pid, []).append(when)
     return last_success, uncertain
 
 
@@ -150,6 +162,10 @@ def queue_activity(rows, profiles_by_recid, now: float) -> tuple:
     That is a lower bound and it is used as one: it can only ever make a
     profile look more recently successful than it was, so the failure mode is a
     flag not raised rather than a profile parked on bad evidence.
+
+    `failed` maps a launch id to the **timestamps** of its failed attempts, for
+    the same reason `ledger_activity` returns timestamps: the caller has to
+    order attempts against the last success.
     """
     last_success: dict = {}
     failed: dict = {}
@@ -165,7 +181,7 @@ def queue_activity(rows, profiles_by_recid, now: float) -> tuple:
         if status == at.POST_STATUS_POSTED:
             last_success[launch_id] = max(last_success.get(launch_id, 0.0), when)
         elif status in FAILED_STATUSES and now - when <= ATTEMPT_WINDOW_SECONDS:
-            failed[launch_id] = failed.get(launch_id, 0) + 1
+            failed.setdefault(launch_id, []).append(when)
     return last_success, failed
 
 
@@ -192,14 +208,34 @@ def find_stale_profiles(profiles, queue_rows, ledger_records, now: float,
         if profile.get("needs_human"):
             continue
 
+        last_success = max(ledger_success.get(launch_id, 0.0),
+                           queue_success.get(launch_id, 0.0))
+
+        # Only attempts made *after* the last confirmed post are evidence that
+        # this profile is failing now. An attempt that predates a success was
+        # answered by that success -- the note has always said "attempt(s)
+        # since", and this is what makes that true.
+        #
+        # Without this the check flags on evidence the profile has already
+        # outlived, and worse, it cannot be cleared: parking a profile stops it
+        # attempting, so the stale attempts never age out of the 3-day window
+        # and never gain a success to be measured against. On 2026-08-25 that
+        # loop had undone 38 of 79 flag-clears across the fleet, 20 of them
+        # inside a minute -- `Nikki 17` was re-flagged on two unresolved shares
+        # from 08-18 that its own confirmed post on 08-21 had already answered.
+        # A person clears the flag, the next tick puts it straight back, and the
+        # profile can never earn the confirmed post that would clear it for
+        # real.
+        def since_success(stamps) -> int:
+            return sum(1 for when in stamps if when > last_success)
+
         entry = StaleProfile(
             record_id=profile["record_id"],
             name=profile.get("name") or launch_id,
             launch_id=launch_id,
-            last_success=max(ledger_success.get(launch_id, 0.0),
-                             queue_success.get(launch_id, 0.0)),
-            failed=failed.get(launch_id, 0),
-            uncertain=uncertain.get(launch_id, 0),
+            last_success=last_success,
+            failed=since_success(failed.get(launch_id, ())),
+            uncertain=since_success(uncertain.get(launch_id, ())),
         )
         if not entry.attempts:
             continue                      # quiet, not broken
