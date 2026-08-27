@@ -134,6 +134,10 @@ def _run_posting(args, logger) -> int:
         plan = plan_posting_queue(
             rows, airtable.accounts_by_id(), airtable.profile_launch_map(),
             airtable.variants_by_id(), airtable.captions_by_id(), now=datetime.now(),
+            # Same cap as the --apply path below: a dry run that showed an
+            # uncapped plan would misreport what the loop is about to do,
+            # which is the one thing this path exists to get right.
+            max_posts_per_profile=settings.get_saved_max_posts_per_profile(),
         )
         logger.info("[DRY-RUN] posting plan: %s", plan.summary())
         for item in plan.to_post:
@@ -154,6 +158,10 @@ def _run_posting(args, logger) -> int:
         readiness_wait_seconds=settings.get_saved_readiness_wait(),
         readiness_max_attempts=settings.get_saved_readiness_attempts(),
         batch_launch_delay_seconds=settings.get_saved_batch_launch_delay(),
+        # Bound what one phone posts per visit, so a profile whose flag has just
+        # been cleared drains its backlog over days instead of emptying it onto
+        # one account in a single launch. See DEFAULT_MAX_POSTS_PER_PROFILE.
+        max_posts_per_profile=settings.get_saved_max_posts_per_profile(),
     )
     logger.info("posting result: %s", result)
     # Did this tick actually produce anything, given what was owed? A dead MLX

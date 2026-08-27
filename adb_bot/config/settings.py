@@ -224,6 +224,40 @@ def get_saved_max_live_profiles() -> int:
         return DEFAULT_MAX_LIVE_PROFILES
 
 
+# How many posts one phone may make in a single posting run. A profile that has
+# been parked keeps accumulating queue rows, and every one of them is past its
+# scheduled time the moment the flag comes off -- `run_profile` then works
+# through the whole backlog sequentially on one launch. Clearing 21 profiles on
+# 2026-08-27 would have made 257 rows due at once, 26 of them on `Kathi 9`: a
+# burst of back-to-back reels on a single account, which is the shape of the
+# 08-14 `Katja 3` incident (28-row backlog, 14 launches, 1 confirmed post).
+#
+# So the loop caps per phone per run and lets a backlog drain over days instead
+# of in one visit. Deliberately a setting rather than a constant: the honest
+# value depends on how deep the fleet's backlog is, and 0/empty restores the
+# old uncapped behaviour without a code change.
+DEFAULT_MAX_POSTS_PER_PROFILE = 3
+
+
+def get_saved_max_posts_per_profile():
+    """Posts one phone may make per posting run: saved setting, else
+    ADBBOT_MAX_POSTS_PER_PROFILE, else the default. 0 (or a bad value) means
+    uncapped, which is what `plan_posting_queue` treats a falsey cap as.
+
+    Not routed through `_get_saved_or_env` for the same reason as
+    `get_saved_max_live_profiles`: this is naturally written as a JSON number.
+    """
+    raw = load_settings().get("max_posts_per_profile", None)
+    if raw is None or str(raw).strip() == "":
+        raw = os.environ.get("ADBBOT_MAX_POSTS_PER_PROFILE", "")
+    if str(raw).strip() == "":
+        return DEFAULT_MAX_POSTS_PER_PROFILE
+    try:
+        return max(0, int(str(raw).strip()))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_POSTS_PER_PROFILE
+
+
 def get_saved_flow_speed() -> str:
     """Speed profile for on-device flows: 'fast' (0.5x waits), 'normal', or
     'slow' (1.5x). Only scales fallback sleeps -- a step that confirms the next
