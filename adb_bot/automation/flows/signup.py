@@ -817,7 +817,15 @@ def next_username(rejected: str, attempt: int) -> str:
     """
     import random as _random
 
-    tail = str(_random.randint(10, 9999))
+    # Widen the tail as rejections mount. `jasmin.4821` has only ten thousand
+    # shapes and Instagram already holds most of them for a common stem: four
+    # candidates in a row came back "not available" on 2026-08-27 and the run
+    # was declared stuck one screen from a finished account, having never been
+    # offered a suggestion to adopt either. Each further attempt adds a digit,
+    # so the space grows tenfold per retry instead of re-drawing from the same
+    # crowded pool. The first attempt is unchanged.
+    width = min(4 + max(0, int(attempt)), 9)
+    tail = str(_random.randint(10 ** (width - 1), 10 ** width - 1))
     stem = "".join(ch for ch in rejected if ch.isalnum() or ch in "._")
     stem = stem.rstrip("0123456789").rstrip("._") or "user"
     budget = 30 - len(tail) - 1  # 1 for the separator

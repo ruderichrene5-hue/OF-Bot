@@ -94,6 +94,59 @@ class MlxHost:
         self.clients = clients
         self.args = args
 
+    def install_package(self, profile_id: str, package: str, target: str,
+                        adb_client, logger=None) -> str:
+        """Install one app through Geelark's own API instead of the Play Store.
+
+        The Play Store path fails in ways that have nothing to do with the app:
+        on 2026-08-27 one phone answered `no network` four times running and
+        another threw `auth_error` mid-install, losing both runs before the
+        signup had started. Geelark installs the same APK server-side with no
+        UI to drive, no Google session to be valid, and no network state on the
+        phone to be wrong -- measured at ~21s against the Play Store's minutes.
+
+        Returns play_install's own verdicts so callers need no new vocabulary.
+        """
+        from adb_bot.clients.geelark.apps import GeelarkAppClient
+
+        def present() -> bool:
+            # `pm path`, never `pm list packages <pkg>`: that does a SUBSTRING
+            # match, and `com.google.android.gm` is a prefix of
+            # `com.google.android.gms`, which every phone has -- so the list
+            # form reports Gmail installed on a phone that has never had it.
+            out = adb_client.run_command(
+                f"adb -s {target} shell pm path {package}") or ""
+            return package in out
+
+        if present():
+            return play_install.RESULT_ALREADY
+
+        apps = GeelarkAppClient(self.transport)
+        versions = [v for v in apps.installable_versions(profile_id, package)
+                    if v.get("app_version_id")]
+        if not versions:
+            if logger:
+                logger.warning("signup_phone: %s is not in Geelark's catalogue "
+                               "for %s", package, profile_id)
+            return play_install.RESULT_NO_BUTTON
+        # Newest first. The rows are snake_case (`app_version_id`); the
+        # camelCase name sends an empty id and Geelark answers
+        # `42006 app not found`, which reads as "no such app".
+        versions.sort(key=lambda v: int(v["version_code"])
+                      if str(v.get("version_code", "")).isdigit() else 0,
+                      reverse=True)
+        apps.request_install(profile_id, versions[0]["app_version_id"])
+        if logger:
+            logger.info("signup_phone: asked Geelark to install %s (%s)",
+                        package, versions[0].get("version_name"))
+
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            time.sleep(8)
+            if present():
+                return play_install.RESULT_INSTALLED
+        return play_install.RESULT_NO_NETWORK
+
     def launch(self, profile_id: str, logger):
         self.clients.launcher.start_profiles([profile_id])
         return prepare_profile_for_adb(
@@ -532,8 +585,15 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
         else:
             wanted = [(INSTAGRAM_PACKAGE, "instagram")]
         for package, what in wanted:
-            verdict = play_install.install_with_retries(
-                driver, adb_client, target, package, logger=logger)
+            # Geelark installs server-side when the host can; the Play Store is
+            # only a fallback for hosts that cannot.
+            installer = getattr(host, "install_package", None)
+            if callable(installer):
+                verdict = installer(profile_id, package, target, adb_client,
+                                    logger=logger)
+            else:
+                verdict = play_install.install_with_retries(
+                    driver, adb_client, target, package, logger=logger)
             out["steps"][f"install-{what}"] = verdict
             print(f"  {what} install: {verdict} "
                   f"({int(time.monotonic() - started)}s)")

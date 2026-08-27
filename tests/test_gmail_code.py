@@ -343,7 +343,7 @@ SYNC_OFF_INBOX = ("open navigation drawer search in emails signed in as cici "
                   "settings. dismiss")
 
 
-def test_gmails_sync_banner_is_followed_to_the_switch(monkeypatch):
+def test_gmails_sync_banner_is_dismissed_not_followed(monkeypatch):
     """The account was on the phone and the inbox was open, and Gmail simply
     was not fetching mail. The banner saying so is itself the way to fix it."""
     monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
@@ -365,10 +365,15 @@ def test_gmails_sync_banner_is_followed_to_the_switch(monkeypatch):
                                   driver=driver)
 
     assert box.wait_for_code(timeout=60) == "418902"
-    assert any(gmail_code._SYNC_BANNER_LABELS == t for t in driver.tapped), \
-        "never followed the sync banner"
-    assert any(gmail_code._SYNC_SWITCH_LABELS == t for t in driver.tapped), \
-        "never reached the sync switch"
+    # The banner is DISMISSED, not followed. Walking into Account settings to
+    # flip the switch cost the rest of the code budget on five phones on
+    # 2026-08-27 -- every one a fresh Gmail install whose inbox was correct and
+    # signed in behind the tip. A manual pull fetches mail regardless of the
+    # automatic setting, so the switch buys nothing this run needs.
+    assert not any(gmail_code._SYNC_SWITCH_LABELS == t for t in driver.tapped), \
+        "walked into the sync switch instead of dismissing the tip"
+    assert any("Dismiss" in t for t in driver.tapped), \
+        "never dismissed the sync tip"
 
 
 def test_the_inbox_tip_over_the_message_list_is_dismissed():
@@ -537,16 +542,31 @@ class SyncAdb(FakeAdb):
         return super().run_command(command)
 
 
-def test_a_mailbox_that_cannot_sync_is_refused_before_any_waiting(monkeypatch):
-    """`Blank caio 2` spent its whole 210-second budget on 2026-08-18 polling an
-    inbox that could never fill, then reported "no code arrived" -- which reads
-    as Instagram's fault. The sync manager knew all along."""
+def test_sync_being_off_no_longer_refuses_the_mailbox(monkeypatch):
+    """Sync off is not fatal any more: the inbox is pulled by hand instead.
+
+    This replaces an older contract that raised `MailboxNotReady` the moment
+    `gmail-ls` read `enabled=false`. Walking Gmail's settings to switch it on
+    cost about seventy seconds of a 180-second budget and changed nothing that
+    mattered -- `syncable` stays -1 either way, so Gmail still never fetches on
+    its own -- and two runs on 2026-08-27 (Corina 3, Kathi 11) spent the whole
+    budget on sync-then-poll and timed out before the inbox was read once.
+    A manual pull fetches the mail regardless of the automatic setting.
+    """
     monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
-    box, _ = _mailbox([INSTAGRAM_CODE_SCREEN] * 20,
-                      adb=SyncAdb(SYNC_DUMP_OFF))
-    with pytest.raises(gmail_code.MailboxNotReady) as caught:
-        box.wait_for_code(timeout=180, poll_seconds=0)
-    assert "Sync Gmail" in str(caught.value)
+    # A real inbox, not Instagram's confirmation page: the point is that the
+    # mail is READ with sync off, not that waiting eventually gives up.
+    box, _ = _mailbox([INBOX] * 4, adb=SyncAdb(SYNC_DUMP_OFF))
+    assert box.wait_for_code(timeout=30, poll_seconds=0) == "418902"
+
+
+def test_the_inbox_is_pulled_rather_than_waited_on(monkeypatch):
+    """With sync off nothing arrives unprompted, so a read without a refresh
+    only ever re-reads the same stale list."""
+    monkeypatch.setattr(gmail_code.time, "sleep", lambda _s: None)
+    box, adb = _mailbox([INBOX] * 4, adb=SyncAdb(SYNC_DUMP_OFF))
+    box.wait_for_code(timeout=30, poll_seconds=0)
+    assert any("input swipe" in c for c in adb.commands), adb.commands[-6:]
 
 
 def test_a_syncing_mailbox_is_not_refused(monkeypatch):

@@ -207,6 +207,29 @@ def sync_enabled_in_dump(dump: str | None) -> bool | None:
     return None
 
 
+def syncable_in_dump(dump: str | None) -> int | None:
+    """The `syncable` column of the `gmail-ls` row, or None if unreadable.
+
+    `-1` means Android never enumerated the sync adapters for this account, so
+    Gmail does **not** sync in the background: no mail arrives on its own and no
+    notification is ever posted. That is the normal state on these cloud phones
+    even after `Sync Gmail` is switched on -- `enabled=true, syncable=-1` -- and
+    it is what makes waiting on the notification shade a guaranteed waste.
+    Measured 2026-08-27: 120s of shade polling found nothing, while opening
+    Gmail produced the code in about eight seconds.
+    """
+    if not dump:
+        return None
+    for line in dump.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[0] == GMAIL_SYNC_AUTHORITY:
+            try:
+                return int(fields[1])
+            except ValueError:
+                return None
+    return None
+
+
 def sync_is_off(text: str | None) -> bool:
     """Whether Gmail is telling us the account is not syncing.
 
@@ -408,6 +431,28 @@ def _components(text: str, limit: int = 3) -> list:
 # nothing that merely looks for the address can tell it from an inbox.
 _COMPOSE_MARKERS = ("compose email", "attach files", "add cc/bcc",
                     "to add cc")
+
+
+# Screens that are Gmail but are not a message list: settings, Data usage,
+# help. Gmail resumes wherever it was last left, so a run that ended in
+# settings -- which every sync walk does -- reopens there, and the ownership
+# check then reports "the inbox on screen is not <address>" and abandons a
+# mailbox that is perfectly fine. Seen on Corina 3, 2026-08-27.
+_NOT_A_LIST_MARKERS = (
+    "return to gmail", "data usage", "days of emails to sync",
+    "help and feedback", "general settings", "notification settings",
+)
+
+MAX_BACKOUTS = 3
+
+
+def looks_like_settings(text: str | None) -> bool:
+    if not text:
+        return False
+    haystack = text.lower()
+    if "primary" in haystack or "search in emails" in haystack:
+        return False
+    return any(marker in haystack for marker in _NOT_A_LIST_MARKERS)
 
 
 def looks_like_compose(text: str) -> bool:
@@ -785,6 +830,23 @@ class PhoneMailbox:
             self.back_to_instagram()
             time.sleep(4)
 
+    def refresh_inbox(self) -> None:
+        """Pull-to-refresh: fetch mail now, without automatic sync.
+
+        Gmail fetches on a manual pull even with sync off, which is the whole
+        reason the settings walk is skipped. The swipe is sized from the screen
+        rather than hard-coded -- these phones report 1080x2373 and 1264x2780,
+        and a fixed pull tuned for one lands mid-list on the other.
+        """
+        size = self._shell("wm size") or ""
+        width, height = 1080, 2373
+        found = re.search(r"(\d+)x(\d+)", size)
+        if found:
+            width, height = int(found.group(1)), int(found.group(2))
+        x = width // 2
+        self._shell(f"input swipe {x} {int(height * 0.30)} "
+                    f"{x} {int(height * 0.72)} 400")
+
     def notification_code(self) -> str:
         """Instagram's code from the notification shade, or ""."""
         return code_from_notifications(
@@ -820,17 +882,17 @@ class PhoneMailbox:
         # and the run reported "no code arrived" -- which reads as Instagram's
         # fault and is not. Turning the switch on made six Instagram codes
         # appear at once, the oldest six days old.
+        # Automatic sync is NOT turned on here. Walking Gmail's settings to
+        # flip `Sync Gmail` costs about seventy seconds of a 180s budget, and
+        # it buys nothing this run needs: `syncable` stays -1 either way, so
+        # Gmail still never fetches on its own, and the mail that matters is
+        # pulled by the refresh below. Two runs on 2026-08-27 (Corina 3,
+        # Kathi 11) spent the whole budget on sync-then-poll and timed out
+        # before the inbox was ever read.
         if self.sync_enabled() is False:
-            # Not fatal on its own: this is the state *every* freshly added
-            # account is in, so refusing here would mean a new mailbox could
-            # never be used inside the one launch a phone lives for.
-            if self.enable_sync() is False:
-                raise MailboxNotReady(
-                    f"Gmail sync is off for {self.address} (dumpsys content: "
-                    f"{GMAIL_SYNC_AUTHORITY} enabled=false) and the switch "
-                    f"would not go on, so no mail can reach this phone -- "
-                    f"Gmail > Settings > {self.address} > Data usage > "
-                    f"'Sync Gmail'")
+            self._log("info", "Gmail's automatic sync is off for %s; pulling "
+                              "the inbox by hand instead of switching it on",
+                      self.address)
 
         # The shade FIRST, before Gmail is opened at all. Opening Gmail takes
         # Instagram off the screen, and coming back is what actually breaks a
@@ -841,7 +903,19 @@ class PhoneMailbox:
         # code each lap. On a phone whose Gmail is already prepared (signed in,
         # sync on, tours dismissed) the mail lands in the shade and Instagram
         # never loses the foreground.
-        for _ in range(SHADE_FIRST_PASSES):
+        # Only worth waiting on the shade if background sync can actually run.
+        # With `syncable` at -1 nothing will ever be delivered unprompted, so
+        # these passes would burn two minutes to learn what the dump already
+        # says.
+        passes = SHADE_FIRST_PASSES
+        syncable = syncable_in_dump(self._shell("dumpsys content"))
+        if syncable is not None and syncable < 1:
+            self._log("info", "background sync is not enumerated "
+                              "(gmail-ls syncable=%s); going straight to Gmail "
+                              "rather than polling a shade that cannot fill",
+                      syncable)
+            passes = 0
+        for _ in range(passes):
             code = self.notification_code()
             if code:
                 self._log("info", "code found in the notification shade "
@@ -861,6 +935,7 @@ class PhoneMailbox:
 
         try:
             checked_owner, tours, escapes, syncs = False, 0, 0, 0
+            backouts = 0
             while time.monotonic() < deadline:
                 # The shade first, every pass. It is the one place that cannot
                 # be a welcome tour, a compose window or somebody else's inbox.
@@ -884,6 +959,13 @@ class PhoneMailbox:
                     continue
 
                 text = self._read()
+
+                # Pull the inbox every pass. With sync off nothing arrives on
+                # its own, so a read without a refresh only ever re-reads the
+                # same stale list. Skipped on a compose window, which is not a
+                # list and would swallow the swipe.
+                if not looks_like_compose(text):
+                    self.refresh_inbox()
 
                 # A compose window is Gmail, is in front, and carries the
                 # address in its `From` field -- everything the ownership check
@@ -912,16 +994,28 @@ class PhoneMailbox:
                 # a pass later; the switch is the one thing on that screen the
                 # rest of the run depends on.
                 if sync_is_off(text):
-                    if syncs < MAX_SYNC_ATTEMPTS and self._turn_sync_on():
-                        syncs += 1
-                        self._log("info", "turned Gmail's sync on (%d/%d)",
+                    # A freshly installed Gmail shows "Account sync is off.
+                    # Turn it on in Account settings." as a dismissible tip ON
+                    # the inbox. Tapping it walks into settings and spends the
+                    # rest of the budget there -- five phones died that way on
+                    # 2026-08-27, every one of them a fresh install, while the
+                    # inbox behind the tip was correct and signed in.
+                    #
+                    # The tip is not an obstacle to reading mail: a manual pull
+                    # fetches regardless of the automatic setting. Dismiss it
+                    # and refresh instead of chasing the switch.
+                    syncs += 1
+                    if syncs <= MAX_SYNC_ATTEMPTS:
+                        self._log("info", "Gmail says automatic sync is off; "
+                                          "dismissing the tip and pulling the "
+                                          "inbox instead (%d/%d)",
                                   syncs, MAX_SYNC_ATTEMPTS)
+                        if self.driver is not None:
+                            self.driver.tap_label(["Dismiss", "Dismiss tip"])
+                        time.sleep(2)
+                        self.refresh_inbox()
                         time.sleep(poll_seconds)
                         continue
-                    raise MailboxNotReady(
-                        f"{self.address} is on the phone but Gmail is not "
-                        f"syncing it -- account settings, Data usage, "
-                        f"'Sync Gmail'")
 
                 # A freshly installed Gmail opens on its own welcome tour, not
                 # on an inbox. Click through it before judging whose mail this
@@ -952,6 +1046,26 @@ class PhoneMailbox:
                             f"{self.address} is on the phone but Gmail is not "
                             f"syncing it -- account settings, Data usage, "
                             f"'Sync Gmail'")
+                    elif looks_like_settings(text):
+                        # Not somebody else's inbox -- not an inbox at all.
+                        # Gmail reopened on the screen it was last left on.
+                        # Walk back to the list instead of abandoning the run.
+                        backouts += 1
+                        if backouts > MAX_BACKOUTS:
+                            raise MailboxNotReady(
+                                f"Gmail keeps reopening on its settings screen "
+                                f"instead of the inbox: {text[:160]}")
+                        self._log("info", "Gmail is parked off the message "
+                                          "list; returning to the inbox "
+                                          "(%d/%d)", backouts, MAX_BACKOUTS)
+                        went = False
+                        if self.driver is not None:
+                            went = self.driver.tap_label(
+                                ["Return to Gmail", "Navigate up"])
+                        if not went:
+                            self.adb_client.shell_back(self.target)
+                        time.sleep(4)
+                        continue
                     elif text.strip():
                         # Somebody's inbox, but we cannot prove it is ours.
                         # These phones carry a resident Google account whose
