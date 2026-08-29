@@ -14,6 +14,7 @@ from adb_bot.automation.flows.verification import (
     CHALLENGE_CODE,
     CHALLENGE_CONSENT,
     CHALLENGE_IMAGE_CAPTCHA,
+    CHALLENGE_IN_REVIEW,
     CHALLENGE_NONE,
     CHALLENGE_PHONE,
     CHALLENGE_PHOTO,
@@ -24,8 +25,13 @@ from adb_bot.automation.flows.verification import (
     RESULT_SIGNED_OUT,
     RESULT_SOLVED,
     RESULT_STUCK,
+    TAG_BANNED,
+    TAG_HUMAN_VERIFICATION,
+    TAG_IN_REVIEW,
+    TAG_LOGGED_OUT,
     classify_challenge,
     run_verification,
+    simplified_status_tag,
 )
 from adb_bot.automation.flows import verification as verification_module
 from adb_bot.clients.sms.base import NumberOrder
@@ -51,6 +57,8 @@ SCREEN_BANNED = "your account has been suspended"
 SCREEN_SIGNED_OUT = ("english (us) join instagram share what you're into with "
                      "the people who get you. get started i already have a "
                      "profile meta logo")
+SCREEN_IN_REVIEW = ("thanks for confirming your info we will review your "
+                    "info and get back to you within 24 hours")
 
 
 class ClassifyTest(TestCase):
@@ -63,6 +71,7 @@ class ClassifyTest(TestCase):
             (SCREEN_CAPTCHA, CHALLENGE_IMAGE_CAPTCHA),
             (SCREEN_FEED, CHALLENGE_NONE),
             (SCREEN_BANNED, CHALLENGE_BANNED),
+            (SCREEN_IN_REVIEW, CHALLENGE_IN_REVIEW),
         ]
         for text, expected in cases:
             self.assertEqual(classify_challenge(text), expected, text)
@@ -82,6 +91,42 @@ class ClassifyTest(TestCase):
         self.assertEqual(classify_challenge(""), CHALLENGE_NONE)
         self.assertEqual(classify_challenge(None), CHALLENGE_NONE)
         self.assertEqual(classify_challenge("settings and privacy"), CHALLENGE_NONE)
+
+
+class SimplifiedStatusTagTest(TestCase):
+    """The 4-tag dashboard matrix, confirmed 2026-08-30: replaces the vague
+    "verification failed" status with only what a screen can unambiguously
+    show. Every sub-kind of "asks for something" collapses to one tag --
+    the automation still needs classify_challenge's finer distinctions to
+    know *what* to type, but a person glancing at Geelark's tag list only
+    needs to know it's stuck on a human-verification step, not which one."""
+
+    def test_every_ask_for_something_screen_collapses_to_human_verification(self):
+        for text in (SCREEN_CHOOSE, SCREEN_PHONE, SCREEN_CODE, SCREEN_PHOTO,
+                    SCREEN_CAPTCHA):
+            self.assertEqual(simplified_status_tag(text), TAG_HUMAN_VERIFICATION, text)
+
+    def test_in_review_screen_gets_its_own_tag(self):
+        self.assertEqual(simplified_status_tag(SCREEN_IN_REVIEW), TAG_IN_REVIEW)
+
+    def test_signed_out_or_login_screen_is_logged_out(self):
+        self.assertEqual(simplified_status_tag(SCREEN_SIGNED_OUT), TAG_LOGGED_OUT)
+
+    def test_banned_screen_is_banned(self):
+        self.assertEqual(simplified_status_tag(SCREEN_BANNED), TAG_BANNED)
+
+    def test_a_healthy_feed_gets_no_tag(self):
+        self.assertIsNone(simplified_status_tag(SCREEN_FEED))
+
+    def test_empty_screen_gets_no_tag(self):
+        self.assertIsNone(simplified_status_tag(""))
+        self.assertIsNone(simplified_status_tag(None))
+
+    def test_a_consent_gate_gets_no_tag(self):
+        """Not one of the 4 states -- nothing wrong with the account, just an
+        onboarding interstitial to click through."""
+        text = "we care about your privacy. choose if we process your data for ads."
+        self.assertIsNone(simplified_status_tag(text))
 
 
 # --- fakes --------------------------------------------------------------------

@@ -70,6 +70,7 @@ CHALLENGE_CONSENT = "consent"               # Meta consent / onboarding gate
 CHALLENGE_VERIFY_INTRO = "verify_intro"     # "confirm you're human" -- press Continue
 CHALLENGE_BANNED = "banned"                 # not a challenge; the account is gone
 CHALLENGE_SIGNED_OUT = "signed_out"         # not a challenge; nobody is logged in
+CHALLENGE_IN_REVIEW = "in_review"           # submitted an appeal/ID; Instagram is checking
 
 # --- how the run ended --------------------------------------------------------
 RESULT_SOLVED = "solved"            # the chain is cleared
@@ -294,6 +295,14 @@ _VERIFY_INTRO_MARKERS = (
     "takes about 30 seconds",
 )
 
+_IN_REVIEW_MARKERS = (
+    "we will review your info",
+    "we'll review your information",
+    "thanks for confirming your info",
+    "thanks for confirming your account information",
+    "your account has been reviewed",   # completed-review wording still means "wait"
+)
+
 _CONSENT_GATE_MARKERS = (
     "choose if we process your data for ads",
     "consent to us processing your personal data",
@@ -344,6 +353,10 @@ def looks_like_consent_gate(text: str | None) -> bool:
 # phone nobody is logged into. The weak ones trail everything.
 _ORDERED_MARKERS = (
     (CHALLENGE_SIGNED_OUT, _SIGNED_OUT_STRONG_MARKERS),
+    # Unambiguous wording ("we will review your info") -- nothing else on
+    # this screen to answer, so it leads alongside the other unambiguous
+    # terminal-ish screens rather than falling through to a weak marker.
+    (CHALLENGE_IN_REVIEW, _IN_REVIEW_MARKERS),
     # Ahead of the captcha: this screen says "confirm you're human" too, and
     # the difference is that it has nothing on it to answer.
     (CHALLENGE_VERIFY_INTRO, _VERIFY_INTRO_MARKERS),
@@ -394,6 +407,38 @@ def classify_challenge(text: str | None) -> str:
             return CHALLENGE_NONE
         return kind
     return CHALLENGE_NONE
+
+
+# The simplified 4-tag dashboard matrix, confirmed 2026-08-30: collapses
+# classify_challenge's fine-grained kinds (which the automation still needs,
+# to know whether to type a phone number, a code, or a captcha) down to only
+# what a person glancing at the Geelark tag list can act on. Deliberately
+# drops the vague "verification failed" status this replaces -- every kind
+# either maps to one of these four or isn't shown at all (CHALLENGE_NONE,
+# CHALLENGE_CONSENT: nothing wrong, no tag needed).
+TAG_HUMAN_VERIFICATION = "human verification"
+TAG_IN_REVIEW = "in review"
+TAG_LOGGED_OUT = "logged out"
+TAG_BANNED = "banned"
+
+_SIMPLIFIED_TAGS = {
+    CHALLENGE_CHOOSE_METHOD: TAG_HUMAN_VERIFICATION,
+    CHALLENGE_PHONE: TAG_HUMAN_VERIFICATION,
+    CHALLENGE_CODE: TAG_HUMAN_VERIFICATION,
+    CHALLENGE_PHOTO: TAG_HUMAN_VERIFICATION,
+    CHALLENGE_IMAGE_CAPTCHA: TAG_HUMAN_VERIFICATION,
+    CHALLENGE_VERIFY_INTRO: TAG_HUMAN_VERIFICATION,
+    CHALLENGE_IN_REVIEW: TAG_IN_REVIEW,
+    CHALLENGE_SIGNED_OUT: TAG_LOGGED_OUT,
+    CHALLENGE_BANNED: TAG_BANNED,
+}
+
+
+def simplified_status_tag(text: str | None) -> str | None:
+    """One of the 4 dashboard tags for `text` (screen text), or None when
+    nothing in the simplified matrix applies (a healthy feed, or a consent
+    gate -- neither is a status worth a tag)."""
+    return _SIMPLIFIED_TAGS.get(classify_challenge(text))
 
 
 # --- the device seam ----------------------------------------------------------
