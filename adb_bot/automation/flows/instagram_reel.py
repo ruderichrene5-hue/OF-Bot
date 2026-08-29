@@ -192,7 +192,13 @@ class InstagramReelUploadFlow:
             emit("warning", "Unable to reliably open the Instagram reel composer for %s (leaving Instagram open)", target)
             return {"profile_id": profile.id, "target": target, "aborted": False, "success": False, "failed": True}
 
-        if not _adb_wait_for_instagram_story_composer(target, logger=log):
+        # Default wait (4 attempts x 2s = 8s) was too tight on Geelark:
+        # reproduced twice in a row 2026-08-29 with the composer's media
+        # grid still rendering past that window. Doubled here rather than in
+        # the shared helper, which other callers (story upload) still use
+        # unchanged.
+        if not _adb_wait_for_instagram_story_composer(target, logger=log,
+                                                       max_attempts=10, delay_seconds=2):
             emit("warning", "Reel composer did not appear after opening attempt for %s (leaving Instagram open)", target)
             return {"profile_id": profile.id, "target": target, "aborted": False, "success": False, "failed": True}
 
@@ -1197,6 +1203,15 @@ class InstagramReelUploadU2Flow:
 
         return fallback
 
+    # The text on Meta's ads-consent gate. Kept short and specific: this is
+    # checked on every post, and each entry costs one `.exists` RPC. The wider
+    # marker list that `interruptions` matches against a full UI dump is free
+    # to be broad; this one is not.
+    _CONSENT_GATE_MARKERS = (
+        "process your data for ads",
+        "Choose if we process",
+    )
+
     def _ensure_feed_usable_u2(self, d, target, adb_client, logger=None) -> bool:
         """Clear whatever's covering the feed before posting. True if the
         feed's nav tabs are reachable by the end of this, whether or not
@@ -1214,21 +1229,55 @@ class InstagramReelUploadU2Flow:
         manual clear. The second layer is only reached when the cheap sweep
         didn't already make the feed usable.
         """
-        def feed_usable() -> bool:
+        def nav_tabs_present() -> bool:
             return waits.any_exists(
                 d,
                 {"resourceId": "com.instagram.android:id/feed_tab"},
                 {"resourceId": "com.instagram.android:id/profile_tab"},
             )
 
+        def consent_gate_on_top() -> bool:
+            """Meta's ads-consent interstitial, which draws OVER the feed."""
+            return waits.any_exists(
+                d, *({"textContains": marker} for marker in self._CONSENT_GATE_MARKERS))
+
+        def feed_usable() -> bool:
+            # The nav tabs being present is NOT proof the feed is reachable:
+            # the consent gate covers the feed and the nav bar behind it keeps
+            # answering the `feed_tab` lookup. `Nikki 28` on 2026-08-28 read
+            # "screen already usable" here and then, 13 seconds later, could
+            # not find `feed_tab` by any selector -- so the flow tapped the
+            # gate's own "Get started" as if it were Create (+) and gave up on
+            # a composer that was never going to open, every run for four days,
+            # until the row reached `Retries Exhausted`. Two extra `.exists`
+            # RPCs on the happy path buy the difference.
+            return nav_tabs_present() and not consent_gate_on_top()
+
         self._dismiss_popups_u2(d, logger=logger, skip_if=feed_usable)
         if feed_usable():
             return True
 
-        if interruptions.handle_blocking_prompts(target, adb_client, logger=logger, flow=self):
+        if interruptions.handle_blocking_prompts(
+                target, adb_client, logger=logger, flow=self,
+                dump=lambda: self._u2_dump(d, logger=logger)):
             _emit(logger, "info", "Cleared an onboarding/ads-consent prompt for %s before posting", target)
             waits.settle(2, ready=feed_usable, logger=logger, what="feed after clearing prompt")
         return feed_usable()
+
+    def _u2_dump(self, d, logger=None):
+        """The current UI hierarchy, read through uiautomator2.
+
+        Not `adb shell uiautomator dump`: Android hands its single
+        UiAutomation connection to one process, and while u2 is connected that
+        process is u2 -- the shell dump is SIGKILLed (exit 137) and the screen
+        comes back empty. Reading it through the connection we already hold is
+        both correct and one round trip cheaper.
+        """
+        try:
+            return ET.fromstring(d.dump_hierarchy())
+        except Exception as exc:
+            _emit(logger, "warning", "u2: could not read the UI hierarchy: %s", exc)
+            return None
 
     def _dismiss_popups_u2(self, d, logger=None, max_rounds: int = 3, skip_if=None) -> None:
         """Tap only safe dismiss controls to clear interstitial pop-ups.

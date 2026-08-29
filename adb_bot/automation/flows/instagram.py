@@ -2874,9 +2874,17 @@ class InstagramNotificationsFlow:
 class InstagramScrollFlow:
     name = "instagram_scroll"
 
+    def __init__(self, scroll_seconds: float | None = None) -> None:
+        # None keeps _build_sequence's own default (600s / 10 min) -- the
+        # right length for warm-up. Callers that want the Active_Posting
+        # protocol's short pre-post scroll (30-45s, confirmed 2026-08-29)
+        # pass a smaller value instead of subclassing.
+        self.scroll_seconds = scroll_seconds
+
     def get_progress_total_steps(self, target: str) -> int:
         launch_commands = self.build_launch_commands(target)
-        sequence = self._build_sequence(target)
+        sequence = (self._build_sequence(target, target_total_delay=self.scroll_seconds)
+                   if self.scroll_seconds is not None else self._build_sequence(target))
         return len(launch_commands) + len(sequence) + 1
 
     def run(
@@ -2955,7 +2963,8 @@ class InstagramScrollFlow:
             else:
                 return {"profile_id": profile.id, "target": target, "aborted": False}
 
-        sequence = self._build_sequence(target)
+        sequence = (self._build_sequence(target, target_total_delay=self.scroll_seconds)
+                   if self.scroll_seconds is not None else self._build_sequence(target))
         for step in sequence:
             if check_abort():
                 return {"profile_id": profile.id, "target": target, "aborted": True}
