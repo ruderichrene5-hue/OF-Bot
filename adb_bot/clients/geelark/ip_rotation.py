@@ -309,3 +309,31 @@ class ProxyRotator:
             "accepted": True,
             "detail": fired["detail"],
         }
+
+    def rotate_until_changed(self, port: int, max_retries: int = 2,
+                             retry_pause_seconds: float = 30.0,
+                             timeout_seconds: int = ROTATE_TIMEOUT_SECONDS) -> dict:
+        """`rotate_and_verify`, but retries when the address comes back the same.
+
+        `rotate_and_verify` treats an unchanged address as a normal outcome on
+        purpose (a mobile proxy can hand back the one it just released) -- this
+        wraps it for callers that instead want best-effort insistence on a
+        genuinely different address before handing the port to the next
+        profile, matching the fleet's operating protocol confirmed 2026-08-29:
+        an unchanged IP gets one more rotate call after a pause, not a silent
+        pass-through.
+
+        Returns the same shape as `rotate_and_verify`, plus `retries` (how many
+        extra rotate calls this took). Gives up and returns the last result,
+        `changed` included, after `max_retries` extra attempts -- never raises,
+        so a proxy that genuinely cannot produce a new address does not wedge
+        the caller forever.
+        """
+        result = self.rotate_and_verify(port, timeout_seconds=timeout_seconds)
+        retries = 0
+        while not result.get("changed") and retries < max_retries:
+            retries += 1
+            time.sleep(retry_pause_seconds)
+            result = self.rotate_and_verify(port, timeout_seconds=timeout_seconds)
+        result["retries"] = retries
+        return result

@@ -124,7 +124,7 @@ def start_session(phone_id: str, transport: GeelarkTransport | None = None,
 
     try:
         proxy_pool.wait_for_cooldown(port, cooldown_seconds)
-        rotation = rotator.rotate_and_verify(port)
+        rotation = rotator.rotate_until_changed(port)
         proxy_pool.record_rotation(port)
 
         if not rotation.get("accepted", True):

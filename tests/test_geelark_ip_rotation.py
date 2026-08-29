@@ -169,6 +169,38 @@ class RotateTest(unittest.TestCase):
         self.assertEqual(result["before"], "1.1.1.1")
         self.assertEqual(result["after"], "2.2.2.2")
 
+    def test_rotate_until_changed_retries_on_an_unchanged_ip(self):
+        """Confirmed protocol 2026-08-29: an unchanged IP gets one more rotate
+        call after a pause, not a silent pass-through to the next profile."""
+        rotator = self._rotator()
+        seen = iter(["1.1.1.1", "1.1.1.1", "1.1.1.1", "2.2.2.2"])
+        sleeps = []
+        with patch.object(ProxyRotator, "exit_ip", side_effect=lambda *_a: next(seen)), \
+             patch("adb_bot.clients.geelark.ip_rotation.requests.get",
+                   return_value=FakeResponse("OK", 200)), \
+             patch("adb_bot.clients.geelark.ip_rotation.time.sleep",
+                   side_effect=lambda s: sleeps.append(s)):
+            result = rotator.rotate_until_changed(
+                54015, max_retries=2, retry_pause_seconds=30.0, timeout_seconds=0)
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["after"], "2.2.2.2")
+        self.assertEqual(result["retries"], 1)
+        self.assertIn(30.0, sleeps)
+
+    def test_rotate_until_changed_gives_up_after_max_retries(self):
+        """A proxy that genuinely cannot produce a new address must not wedge
+        the caller forever -- report the unchanged result, don't raise."""
+        rotator = self._rotator()
+        with patch.object(ProxyRotator, "exit_ip", return_value="1.1.1.1"), \
+             patch("adb_bot.clients.geelark.ip_rotation.requests.get",
+                   return_value=FakeResponse("OK", 200)), \
+             patch("adb_bot.clients.geelark.ip_rotation.time.sleep",
+                   lambda *_: None):
+            result = rotator.rotate_until_changed(
+                54015, max_retries=2, retry_pause_seconds=30.0, timeout_seconds=0)
+        self.assertFalse(result["changed"])
+        self.assertEqual(result["retries"], 2)
+
     def test_rotatable_ports_needs_both_a_proxy_and_a_url(self):
         """A URL for a port we do not own, or a port with no URL, is not
         rotatable -- and saying otherwise invites a call that cannot work."""

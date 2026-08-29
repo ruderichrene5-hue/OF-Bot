@@ -52,9 +52,9 @@ class FakeRotator:
     def rotatable_ports(self):
         return list(self._rotatable)
 
-    def rotate_and_verify(self, port):
+    def rotate_until_changed(self, port):
         self.rotate_calls.append(port)
-        return dict(self._result, port=port)
+        return dict(self._result, port=port, retries=0)
 
 
 FAKE_PROFILE = Profile(id="p1", status="ready", ip="1.2.3.4", port="5555", pwd="pw")
