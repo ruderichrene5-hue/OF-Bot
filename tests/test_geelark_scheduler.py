@@ -138,5 +138,24 @@ class InReviewRecheckPassTest(unittest.TestCase):
         posting_cycle.assert_not_called()
 
 
+class NightSequenceTest(unittest.TestCase):
+    """Confirmed order 2026-08-30: in-review recheck first, then the regular
+    window pass -- one service, guaranteed order, not two independently
+    scheduled timers that might race."""
+
+    def test_recheck_runs_before_warmup(self):
+        order = []
+        with patch.object(scheduler, "run_in_review_recheck_pass",
+                         side_effect=lambda *a, **k: order.append("recheck") or []) as recheck, \
+             patch.object(scheduler, "run_scheduled_pass",
+                         side_effect=lambda *a, **k: order.append("warmup") or []) as warmup:
+            result = scheduler.run_night_sequence(adb_client=object())
+        self.assertEqual(order, ["recheck", "warmup"])
+        recheck.assert_called_once()
+        warmup.assert_called_once()
+        self.assertIn("in_review_recheck", result)
+        self.assertIn("warmup", result)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -140,6 +140,15 @@ def _fake_session():
 
 
 class WarmupCycleTest(unittest.TestCase):
+    def setUp(self):
+        # Screen-health pre-check is exercised separately in
+        # ChallengeAbortTest; a healthy screen (None) here so these tests
+        # keep exercising just the flow-outcome branches.
+        patcher = patch.object(lifecycle, "_check_for_challenge_and_abort",
+                               return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_success_retags_and_reports_warmed_up(self):
         with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
              patch.object(lifecycle, "stop_session"), \
@@ -183,6 +192,12 @@ class WarmupCycleTest(unittest.TestCase):
 
 
 class ActivePostingCycleTest(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(lifecycle, "_check_for_challenge_and_abort",
+                               return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_no_media_path_only_scrolls_no_retag_available(self):
         """Active_Posting is permanent -- this cycle has no retag call at
         all, unlike warmup."""
@@ -203,6 +218,64 @@ class ActivePostingCycleTest(unittest.TestCase):
                   return_value={"aborted": False}):
             lifecycle.run_active_posting_cycle("ph1", "Test 1", adb_client=object())
         init.assert_called_once_with(scroll_seconds=lifecycle.ACTIVE_POSTING_SCROLL_SECONDS)
+
+
+class ChallengeAbortTest(unittest.TestCase):
+    """A challenge screen showing up before a cycle even starts must abort
+    it and retag, not let it scroll/post through the screen. Confirmed
+    launch-readiness gap 2026-08-30 -- this previously did nothing."""
+
+    def _run_warmup(self, screen_tag):
+        adb_client = unittest.mock.MagicMock()
+        with patch.object(lifecycle, "_launch",
+                         return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch.object(lifecycle, "_retag") as retag, \
+             patch("adb_bot.automation.flows.verification_driver.AdbChallengeDriver.read_screen",
+                  return_value="whatever"), \
+             patch.object(lifecycle, "simplified_status_tag", return_value=screen_tag), \
+             patch("adb_bot.automation.flows.instagram.InstagramWarmUpDay1Flow.run") as flow_run:
+            out = lifecycle.run_warmup_cycle("ph1", "Test 1", adb_client)
+        return out, retag, flow_run
+
+    def test_human_verification_screen_aborts_warmup_before_it_starts(self):
+        out, retag, flow_run = self._run_warmup("human verification")
+        self.assertEqual(out["result"], "aborted_human_verification")
+        flow_run.assert_not_called()
+        retag.assert_called_once_with("ph1", unittest.mock.ANY,
+                                      remove=lifecycle.TAG_WARMUP,
+                                      add="human verification", logger=None)
+
+    def test_banned_screen_aborts_warmup_and_retags(self):
+        out, retag, flow_run = self._run_warmup(lifecycle.TAG_BANNED)
+        self.assertEqual(out["result"], "aborted_banned")
+        flow_run.assert_not_called()
+        retag.assert_called_once_with("ph1", unittest.mock.ANY,
+                                      remove=lifecycle.TAG_WARMUP,
+                                      add=lifecycle.TAG_BANNED, logger=None)
+
+    def test_healthy_screen_lets_warmup_proceed(self):
+        out, retag, flow_run = self._run_warmup(None)
+        flow_run.assert_called_once()
+        retag.assert_not_called()
+
+    def test_human_verification_screen_aborts_active_posting_before_it_starts(self):
+        adb_client = unittest.mock.MagicMock()
+        with patch.object(lifecycle, "_launch",
+                         return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch.object(lifecycle, "_retag") as retag, \
+             patch("adb_bot.automation.flows.verification_driver.AdbChallengeDriver.read_screen",
+                  return_value="whatever"), \
+             patch.object(lifecycle, "simplified_status_tag",
+                         return_value="human verification"), \
+             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run") as scroll_run:
+            out = lifecycle.run_active_posting_cycle("ph1", "Test 1", adb_client)
+        self.assertEqual(out["result"], "aborted_human_verification")
+        scroll_run.assert_not_called()
+        retag.assert_called_once_with("ph1", unittest.mock.ANY,
+                                      remove=lifecycle.TAG_ACTIVE_POSTING,
+                                      add="human verification", logger=None)
 
 
 class InReviewRecheckCycleTest(unittest.TestCase):
@@ -275,6 +348,12 @@ class InReviewRecheckCycleTest(unittest.TestCase):
 
 
 class ActivePostingCycleMediaTest(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(lifecycle, "_check_for_challenge_and_abort",
+                               return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_media_path_posts_after_scrolling(self):
         with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
              patch.object(lifecycle, "stop_session"), \

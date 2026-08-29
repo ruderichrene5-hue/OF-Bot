@@ -105,6 +105,26 @@ def run_in_review_recheck_pass(adb_client, transport: GeelarkTransport | None = 
     return run_queue(worklist, work_fn, concurrency=concurrency)
 
 
+def run_night_sequence(adb_client, transport: GeelarkTransport | None = None,
+                       logger=None, concurrency: int = CONCURRENCY,
+                       now: datetime | None = None) -> dict:
+    """The confirmed nightly order, 2026-08-30: in-review recheck first (any
+    profile it clears joins the Warmup/Active_Posting worklist the very same
+    run), then the regular window pass -- which resolves to Warmup on its
+    own via `active_tag_for_now`, since this only runs at night.
+
+    One service, run sequentially rather than two independently-scheduled
+    timers, so "recheck, then warmup" is guaranteed order rather than two
+    units racing close together.
+    """
+    transport = transport or GeelarkTransport()
+    review_results = run_in_review_recheck_pass(adb_client, transport=transport,
+                                                logger=logger, concurrency=concurrency)
+    warmup_results = run_scheduled_pass(adb_client, transport=transport, logger=logger,
+                                        concurrency=concurrency, now=now)
+    return {"in_review_recheck": review_results, "warmup": warmup_results}
+
+
 def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
                        logger=None, media_path: str | None = None,
                        caption: str | None = None, concurrency: int = CONCURRENCY,
@@ -134,15 +154,36 @@ def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
 
 
 if __name__ == "__main__":
+    import argparse
     import sys
 
     from adb_bot.clients.adb import ADBClient
     from adb_bot.core.logger import get_logger
 
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--in-review-recheck", action="store_true",
+                       help="run only the once-daily in-review screen check")
+    parser.add_argument("--night-sequence", action="store_true",
+                       help="run the in-review recheck, then the regular "
+                            "window pass (Warmup, at night) -- the confirmed "
+                            "once-nightly order")
+    args = parser.parse_args()
+
     logger = get_logger("adb_bot")
-    tag = active_tag_for_now()
-    print(f"window: {tag} ({datetime.now(BERLIN).strftime('%H:%M %Z')})")
-    results = run_scheduled_pass(ADBClient(), logger=logger)
+    adb_client = ADBClient()
+
+    if args.night_sequence:
+        print(f"night sequence: recheck -> warmup ({datetime.now(BERLIN).strftime('%H:%M %Z')})")
+        combined = run_night_sequence(adb_client, logger=logger)
+        results = combined["in_review_recheck"] + combined["warmup"]
+    elif args.in_review_recheck:
+        print(f"in-review recheck ({datetime.now(BERLIN).strftime('%H:%M %Z')})")
+        results = run_in_review_recheck_pass(adb_client, logger=logger)
+    else:
+        tag = active_tag_for_now()
+        print(f"window: {tag} ({datetime.now(BERLIN).strftime('%H:%M %Z')})")
+        results = run_scheduled_pass(adb_client, logger=logger)
+
     print(f"{len(results)} profile(s) processed")
     for r in results:
         print(f"  {r.get('name')}: {r.get('result')}")

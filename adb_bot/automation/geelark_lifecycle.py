@@ -36,6 +36,7 @@ from adb_bot.automation.flows.instagram import InstagramScrollFlow, InstagramWar
 from adb_bot.automation.flows.instagram_reel import InstagramReelUploadFlow
 from adb_bot.automation.flows.verification import (
     TAG_BANNED,
+    TAG_HUMAN_VERIFICATION,
     TAG_IN_REVIEW,
     TAG_LOGGED_OUT,
     simplified_status_tag,
@@ -157,10 +158,35 @@ def _launch(phone_id: str, transport: GeelarkTransport, logger, adb_client
     return session, target
 
 
+def _check_for_challenge_and_abort(target: str, adb_client, phone_id: str, transport,
+                                   name: str, current_tag: str, logger=None) -> str | None:
+    """Read the current screen before doing any real work; if it's one of the
+    3 non-healthy simplified states (human verification / in review / logged
+    out / banned), retag away from `current_tag` and return the new tag --
+    the caller must abort rather than scroll or post through a challenge
+    screen. Returns None (safe to proceed) for a healthy feed or anything
+    `simplified_status_tag` doesn't recognise.
+
+    Confirmed launch-readiness gap 2026-08-30: a captcha/SMS screen mid-cycle
+    previously did nothing but let the flow run anyway.
+    """
+    driver = AdbChallengeDriver(target, adb_client, logger=logger, act=False)
+    text = driver.read_screen()
+    tag = simplified_status_tag(text)
+    if tag is None:
+        return None
+    _retag(phone_id, transport, remove=current_tag, add=tag, logger=logger)
+    if logger:
+        logger.warning("geelark_lifecycle: %s hit %r mid-cycle; aborting and retagging",
+                       name, tag)
+    return tag
+
+
 def run_warmup_cycle(phone_id: str, name: str, adb_client, transport=None,
                      logger=None) -> dict:
     """One Warmup pass. On a clean run, retags Warmup -> Active_Posting so
-    this never fires again for the same profile."""
+    this never fires again for the same profile. Aborts and retags instead
+    if a challenge screen is already showing before warm-up even starts."""
     transport = transport or GeelarkTransport()
     out = {"id": phone_id, "name": name, "at": time.time(), "cycle": "warmup"}
     session = None
@@ -169,6 +195,13 @@ def run_warmup_cycle(phone_id: str, name: str, adb_client, transport=None,
         if not target:
             out["result"] = "could_not_reach_over_adb"
             return out
+
+        blocked = _check_for_challenge_and_abort(target, adb_client, phone_id,
+                                                 transport, name, TAG_WARMUP, logger)
+        if blocked:
+            out["result"] = f"aborted_{blocked.replace(' ', '_')}"
+            return out
+
         result = InstagramWarmUpDay1Flow().run(session.profile, adb_client=adb_client,
                                                logger=logger)
         out["flow_result"] = result
@@ -196,7 +229,10 @@ def run_active_posting_cycle(phone_id: str, name: str, adb_client, transport=Non
                              logger=None, media_path: str | None = None,
                              caption: str | None = None) -> dict:
     """One Active_Posting pass: short scroll, then a post if `media_path` is
-    given. No tag change -- this tag is permanent once a profile reaches it."""
+    given. The tag is otherwise permanent once a profile reaches it -- the
+    one exception is a challenge screen showing up before this cycle even
+    starts, which pulls the profile straight out of Active_Posting instead
+    of scrolling/posting through it."""
     transport = transport or GeelarkTransport()
     out = {"id": phone_id, "name": name, "at": time.time(), "cycle": "active_posting"}
     session = None
@@ -204,6 +240,12 @@ def run_active_posting_cycle(phone_id: str, name: str, adb_client, transport=Non
         session, target = _launch(phone_id, transport, logger, adb_client)
         if not target:
             out["result"] = "could_not_reach_over_adb"
+            return out
+
+        blocked = _check_for_challenge_and_abort(target, adb_client, phone_id,
+                                                 transport, name, TAG_ACTIVE_POSTING, logger)
+        if blocked:
+            out["result"] = f"aborted_{blocked.replace(' ', '_')}"
             return out
 
         scroll_result = InstagramScrollFlow(scroll_seconds=ACTIVE_POSTING_SCROLL_SECONDS).run(
