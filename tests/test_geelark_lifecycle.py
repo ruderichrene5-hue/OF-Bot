@@ -204,6 +204,77 @@ class ActivePostingCycleTest(unittest.TestCase):
             lifecycle.run_active_posting_cycle("ph1", "Test 1", adb_client=object())
         init.assert_called_once_with(scroll_seconds=lifecycle.ACTIVE_POSTING_SCROLL_SECONDS)
 
+
+class InReviewRecheckCycleTest(unittest.TestCase):
+    """Daily look at an `in review` profile: read-only, no challenge-solving,
+    then retag by what the screen actually shows. Confirmed protocol
+    2026-08-30."""
+
+    def _run(self, screen_tag, resolved_tag=lifecycle.TAG_ACTIVE_POSTING):
+        adb_client = unittest.mock.MagicMock()
+        with patch.object(lifecycle, "_launch",
+                         return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch.object(lifecycle, "_open_instagram"), \
+             patch.object(lifecycle, "_retag") as retag, \
+             patch("adb_bot.automation.flows.verification_driver.AdbChallengeDriver.read_screen",
+                  return_value="whatever is on screen"), \
+             patch.object(lifecycle, "simplified_status_tag", return_value=screen_tag):
+            out = lifecycle.run_in_review_recheck_cycle(
+                "ph1", "Test 1", adb_client, resolved_tag=resolved_tag)
+        return out, retag, adb_client
+
+    def test_healthy_feed_clears_to_the_resolved_tag(self):
+        out, retag, _ = self._run(screen_tag=None)
+        self.assertEqual(out["result"], "cleared")
+        retag.assert_called_once_with("ph1", unittest.mock.ANY,
+                                      remove=lifecycle.TAG_IN_REVIEW,
+                                      add=lifecycle.TAG_ACTIVE_POSTING, logger=None)
+
+    def test_healthy_feed_can_clear_to_warmup_instead(self):
+        out, retag, _ = self._run(screen_tag=None, resolved_tag=lifecycle.TAG_WARMUP)
+        self.assertEqual(retag.call_args.kwargs["add"], lifecycle.TAG_WARMUP)
+
+    def test_still_in_review_leaves_the_tag_untouched(self):
+        out, retag, _ = self._run(screen_tag=lifecycle.TAG_IN_REVIEW)
+        self.assertEqual(out["result"], "still_in_review")
+        retag.assert_not_called()
+
+    def test_logged_out_screen_retags_to_logged_out(self):
+        out, retag, _ = self._run(screen_tag=lifecycle.TAG_LOGGED_OUT)
+        self.assertEqual(out["result"], "logged_out")
+        retag.assert_called_once_with("ph1", unittest.mock.ANY,
+                                      remove=lifecycle.TAG_IN_REVIEW,
+                                      add=lifecycle.TAG_LOGGED_OUT, logger=None)
+
+    def test_banned_screen_retags_to_banned(self):
+        out, retag, _ = self._run(screen_tag=lifecycle.TAG_BANNED)
+        self.assertEqual(out["result"], "banned")
+        retag.assert_called_once()
+
+    def test_unrecognised_screen_leaves_the_tag_untouched(self):
+        """Only the 3 specified outcomes act -- a captcha or code screen
+        showing up here is not one of them."""
+        out, retag, _ = self._run(screen_tag="human verification")
+        self.assertEqual(out["result"], "unchanged")
+        retag.assert_not_called()
+
+    def test_always_force_stops_instagram_before_closing(self):
+        _, _, adb_client = self._run(screen_tag=None)
+        calls = [str(c) for c in adb_client.run_command.call_args_list]
+        self.assertTrue(any("force-stop com.instagram.android" in c for c in calls))
+
+    def test_unreachable_over_adb_never_retags(self):
+        adb_client = unittest.mock.MagicMock()
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), None)), \
+             patch.object(lifecycle, "stop_session"), \
+             patch.object(lifecycle, "_retag") as retag:
+            out = lifecycle.run_in_review_recheck_cycle("ph1", "Test 1", adb_client)
+        self.assertEqual(out["result"], "could_not_reach_over_adb")
+        retag.assert_not_called()
+
+
+class ActivePostingCycleMediaTest(unittest.TestCase):
     def test_media_path_posts_after_scrolling(self):
         with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
              patch.object(lifecycle, "stop_session"), \

@@ -117,5 +117,26 @@ class RunScheduledPassTest(unittest.TestCase):
         warmup_cycle.assert_not_called()
 
 
+class InReviewRecheckPassTest(unittest.TestCase):
+    def test_lists_only_in_review_tagged_profiles_and_runs_the_recheck_cycle(self):
+        with patch.object(lifecycle, "phones_by_tag") as phones_by_tag, \
+             patch.object(lifecycle, "run_in_review_recheck_cycle") as recheck_cycle:
+            phones_by_tag.return_value = [{"id": "1", "serialName": "P1"}]
+            scheduler.run_in_review_recheck_pass(adb_client=object())
+        self.assertEqual(phones_by_tag.call_args.args[0], "in review")
+        recheck_cycle.assert_called_once()
+
+    def test_never_calls_the_other_cycles(self):
+        """This pass is only for in-review profiles -- confirming it never
+        touches warmup or active-posting even if the fakes would let it."""
+        with patch.object(lifecycle, "phones_by_tag", return_value=[{"id": "1", "serialName": "P1"}]), \
+             patch.object(lifecycle, "run_in_review_recheck_cycle"), \
+             patch.object(lifecycle, "run_warmup_cycle") as warmup_cycle, \
+             patch.object(lifecycle, "run_active_posting_cycle") as posting_cycle:
+            scheduler.run_in_review_recheck_pass(adb_client=object())
+        warmup_cycle.assert_not_called()
+        posting_cycle.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

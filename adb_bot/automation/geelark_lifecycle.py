@@ -34,6 +34,14 @@ from pathlib import Path
 
 from adb_bot.automation.flows.instagram import InstagramScrollFlow, InstagramWarmUpDay1Flow
 from adb_bot.automation.flows.instagram_reel import InstagramReelUploadFlow
+from adb_bot.automation.flows.verification import (
+    TAG_BANNED,
+    TAG_IN_REVIEW,
+    TAG_LOGGED_OUT,
+    simplified_status_tag,
+)
+from adb_bot.automation.flows.verification_driver import AdbChallengeDriver
+from adb_bot.automation.verification_probe import _open_instagram
 from adb_bot.automation.workflow import connect_with_retries
 from adb_bot.clients.geelark.ip_rotation import load_reboot_config
 from adb_bot.clients.geelark.phones import GeelarkPhoneClient
@@ -212,6 +220,69 @@ def run_active_posting_cycle(phone_id: str, name: str, adb_client, transport=Non
             out["result"] = "posted" if post_result.get("success") else "post_failed"
         else:
             out["result"] = "scrolled_only"
+    except Exception as exc:
+        out["result"] = "error"
+        out["error"] = str(exc)
+    finally:
+        if session is not None:
+            try:
+                stop_session(session, logger=logger)
+            except Exception as exc:
+                if logger:
+                    logger.warning("geelark_lifecycle: stop_session failed for %s (%s)",
+                                   name, exc)
+    return out
+
+
+def run_in_review_recheck_cycle(phone_id: str, name: str, adb_client, transport=None,
+                                logger=None, resolved_tag: str = TAG_ACTIVE_POSTING
+                                ) -> dict:
+    """One daily look at an `in review`-tagged profile: read the screen,
+    nothing else -- no challenge-solving, no scroll, no post -- then close
+    the app and retag by what's actually showing. Confirmed protocol
+    2026-08-30:
+
+    * a healthy feed -> Instagram cleared the review -> retag to
+      `resolved_tag` (defaults to Active_Posting: a profile that reached
+      `in review` already got through Warmup once, so it resumes posting
+      rather than warming up again)
+    * still a review screen -> tag stays exactly where it is
+    * logged out or banned -> retag to match, same as any other cycle would
+
+    Anything else `simplified_status_tag` doesn't recognise (a captcha, a
+    code screen, ...) also leaves the tag untouched: this cycle only acts on
+    the 3 outcomes the user specified, not a good moment to invent a fourth.
+    """
+    transport = transport or GeelarkTransport()
+    out = {"id": phone_id, "name": name, "at": time.time(), "cycle": "in_review_recheck"}
+    session = None
+    try:
+        session, target = _launch(phone_id, transport, logger, adb_client)
+        if not target:
+            out["result"] = "could_not_reach_over_adb"
+            return out
+
+        _open_instagram(target, adb_client, logger)
+        driver = AdbChallengeDriver(target, adb_client, logger=logger, act=False)
+        text = driver.read_screen()
+        tag = simplified_status_tag(text)
+        out["screen_tag"] = tag
+
+        if tag is None:
+            _retag(phone_id, transport, remove=TAG_IN_REVIEW, add=resolved_tag,
+                  logger=logger)
+            out["result"] = "cleared"
+        elif tag == TAG_IN_REVIEW:
+            out["result"] = "still_in_review"
+        elif tag in (TAG_LOGGED_OUT, TAG_BANNED):
+            _retag(phone_id, transport, remove=TAG_IN_REVIEW, add=tag, logger=logger)
+            out["result"] = tag.replace(" ", "_")
+        else:
+            # human_verification or anything else unrecognised: leave it be,
+            # not one of the 3 outcomes this cycle is meant to act on.
+            out["result"] = "unchanged"
+
+        adb_client.run_command(f"adb -s {target} shell am force-stop com.instagram.android")
     except Exception as exc:
         out["result"] = "error"
         out["error"] = str(exc)

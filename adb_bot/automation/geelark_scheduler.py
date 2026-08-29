@@ -80,6 +80,31 @@ def run_queue(worklist: list[dict], work_fn, concurrency: int = CONCURRENCY) -> 
     return results
 
 
+def run_in_review_recheck_pass(adb_client, transport: GeelarkTransport | None = None,
+                               logger=None, concurrency: int = CONCURRENCY
+                               ) -> list[dict]:
+    """Once-a-day sweep of every `in review`-tagged profile (confirmed
+    protocol 2026-08-30): read-only screen check, retags itself back into
+    Active_Posting once Instagram clears the review, no manual look needed.
+
+    Meant to run once, e.g. right before the night's Warmup pass or before
+    the first Active_Posting wave -- call this from wherever that trigger
+    lives (a systemd timer alongside the other adbbot-* ones, or a manual
+    invocation), not from inside `run_scheduled_pass` itself: that one fires
+    every cycle, this one is once a day.
+    """
+    from adb_bot.automation.flows.verification import TAG_IN_REVIEW
+
+    transport = transport or GeelarkTransport()
+    worklist = lifecycle.phones_by_tag(TAG_IN_REVIEW, transport=transport)
+
+    def work_fn(phone_id, name):
+        return lifecycle.run_in_review_recheck_cycle(
+            phone_id, name, adb_client, transport=transport, logger=logger)
+
+    return run_queue(worklist, work_fn, concurrency=concurrency)
+
+
 def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
                        logger=None, media_path: str | None = None,
                        caption: str | None = None, concurrency: int = CONCURRENCY,
