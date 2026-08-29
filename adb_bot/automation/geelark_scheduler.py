@@ -21,6 +21,7 @@ from __future__ import annotations
 import queue
 import threading
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from adb_bot.automation import geelark_lifecycle as lifecycle
@@ -126,15 +127,19 @@ def run_night_sequence(adb_client, transport: GeelarkTransport | None = None,
 
 
 def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
-                       logger=None, media_path: str | None = None,
-                       caption: str | None = None, concurrency: int = CONCURRENCY,
+                       logger=None, concurrency: int = CONCURRENCY,
                        now: datetime | None = None) -> list[dict]:
     """One pass: pick the tag for the current time, list its profiles, run
     them 4-at-a-time through the matching lifecycle cycle.
 
-    `media_path`/`caption` only matter during the day window -- Active_Posting
-    posts if given one, otherwise just runs the pre-post scroll (see
-    `geelark_lifecycle.run_active_posting_cycle`). Warmup never posts.
+    Active_Posting resolves its own content per phone (today's Drive date
+    folder for that phone's model -- geelark_content.get_post_media, no
+    caption per the confirmed 2026-08-30 decision) rather than taking a
+    single media_path for the whole pass, since different phones belong to
+    different models. No content today for a phone's model means that phone
+    just gets the pre-post scroll with no post -- not an error, not a
+    fallback to older content. The spoofed variant is deleted after the
+    cycle either way; nothing else tracks or cleans these up.
     """
     transport = transport or GeelarkTransport()
     tag = active_tag_for_now(now)
@@ -145,10 +150,28 @@ def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
             return lifecycle.run_warmup_cycle(phone_id, name, adb_client,
                                               transport=transport, logger=logger)
     else:
+        model_by_id = {str(row.get("id")): (row.get("group") or {}).get("name")
+                      for row in worklist}
+
         def work_fn(phone_id, name):
-            return lifecycle.run_active_posting_cycle(
-                phone_id, name, adb_client, transport=transport, logger=logger,
-                media_path=media_path, caption=caption)
+            from adb_bot.automation import geelark_content
+
+            model = model_by_id.get(phone_id)
+            media_path = None
+            spoofed = None
+            if model:
+                spoofed = geelark_content.get_post_media(model, phone_id, logger=logger)
+                media_path = spoofed.path if spoofed else None
+            try:
+                return lifecycle.run_active_posting_cycle(
+                    phone_id, name, adb_client, transport=transport, logger=logger,
+                    media_path=media_path)
+            finally:
+                if spoofed:
+                    try:
+                        Path(spoofed.path).unlink()
+                    except OSError:
+                        pass
 
     return run_queue(worklist, work_fn, concurrency=concurrency)
 

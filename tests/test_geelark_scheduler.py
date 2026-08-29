@@ -138,6 +138,72 @@ class InReviewRecheckPassTest(unittest.TestCase):
         posting_cycle.assert_not_called()
 
 
+class ActivePostingContentTest(unittest.TestCase):
+    """Confirmed 2026-08-30: Active_Posting resolves its own content per
+    phone (model from the phone's Geelark group, today's date folder), not
+    one media_path for the whole pass."""
+
+    def test_resolves_content_by_the_phones_group_and_posts_it(self):
+        from adb_bot.automation import geelark_content
+
+        row = {"id": "1", "serialName": "P1", "group": {"name": "Luisa"}}
+        fake_content = geelark_content.SpoofedContent(
+            path="/tmp/spoofed_x.mp4",
+            raw_video=geelark_content.RawVideo(model="Luisa", name="c.mp4", path=""),
+            handle="1")
+        with patch.object(lifecycle, "phones_by_tag", return_value=[row]), \
+             patch.object(geelark_content, "get_post_media",
+                         return_value=fake_content) as get_media, \
+             patch.object(lifecycle, "run_active_posting_cycle",
+                         return_value={"result": "posted"}) as posting_cycle, \
+             patch("pathlib.Path.unlink"):
+            scheduler.run_scheduled_pass(adb_client=object(), now=_at(12, 0))
+        get_media.assert_called_once()
+        self.assertEqual(get_media.call_args.args[0], "Luisa")
+        self.assertEqual(get_media.call_args.args[1], "1")
+        self.assertEqual(posting_cycle.call_args.kwargs["media_path"],
+                         "/tmp/spoofed_x.mp4")
+
+    def test_no_content_today_still_scrolls_with_no_media_path(self):
+        from adb_bot.automation import geelark_content
+
+        row = {"id": "1", "serialName": "P1", "group": {"name": "Luisa"}}
+        with patch.object(lifecycle, "phones_by_tag", return_value=[row]), \
+             patch.object(geelark_content, "get_post_media", return_value=None), \
+             patch.object(lifecycle, "run_active_posting_cycle",
+                         return_value={"result": "scrolled_only"}) as posting_cycle:
+            scheduler.run_scheduled_pass(adb_client=object(), now=_at(12, 0))
+        self.assertIsNone(posting_cycle.call_args.kwargs["media_path"])
+
+    def test_a_phone_with_no_group_never_calls_get_post_media(self):
+        from adb_bot.automation import geelark_content
+
+        row = {"id": "1", "serialName": "P1"}   # no "group" key at all
+        with patch.object(lifecycle, "phones_by_tag", return_value=[row]), \
+             patch.object(geelark_content, "get_post_media") as get_media, \
+             patch.object(lifecycle, "run_active_posting_cycle",
+                         return_value={"result": "scrolled_only"}):
+            scheduler.run_scheduled_pass(adb_client=object(), now=_at(12, 0))
+        get_media.assert_not_called()
+
+    def test_spoofed_file_is_deleted_after_the_cycle(self):
+        from adb_bot.automation import geelark_content
+
+        row = {"id": "1", "serialName": "P1", "group": {"name": "Luisa"}}
+        fake_content = geelark_content.SpoofedContent(
+            path="/tmp/spoofed_y.mp4",
+            raw_video=geelark_content.RawVideo(model="Luisa", name="c.mp4", path=""),
+            handle="1")
+        with patch.object(lifecycle, "phones_by_tag", return_value=[row]), \
+             patch.object(geelark_content, "get_post_media",
+                         return_value=fake_content), \
+             patch.object(lifecycle, "run_active_posting_cycle",
+                         return_value={"result": "posted"}), \
+             patch("pathlib.Path.unlink") as unlink:
+            scheduler.run_scheduled_pass(adb_client=object(), now=_at(12, 0))
+        unlink.assert_called_once()
+
+
 class NightSequenceTest(unittest.TestCase):
     """Confirmed order 2026-08-30: in-review recheck first, then the regular
     window pass -- one service, guaranteed order, not two independently
