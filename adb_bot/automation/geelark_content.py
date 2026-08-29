@@ -50,10 +50,31 @@ def _env(name: str) -> str:
     return value
 
 
+# Suffixes Geelark group names carry that the Drive folder tree never does --
+# confirmed live 2026-08-30: the group is "Nikki Geelark NEW" (35 phones) and
+# "Laura Geelark NEW" (28 phones), but the raw-content folders are just
+# "Nikki" and "Laura" like every other model's. Stripped before matching so
+# content resolution survives this without renaming either side.
+_GROUP_NAME_NOISE_SUFFIXES = (" geelark new", " geelark", " new")
+
+
+def _normalize_group_name(name: str) -> str:
+    normalized = str(name or "").strip().lower()
+    changed = True
+    while changed:
+        changed = False
+        for suffix in _GROUP_NAME_NOISE_SUFFIXES:
+            if normalized.endswith(suffix):
+                normalized = normalized[: -len(suffix)].strip()
+                changed = True
+    return normalized
+
+
 def _find_model_folder_id(client: DriveClient, root_folder_id: str, model: str
                           ) -> str | None:
+    wanted = _normalize_group_name(model)
     for folder in client.list_subfolders(root_folder_id):
-        if str(folder.get("name", "")).strip().lower() == model.strip().lower():
+        if _normalize_group_name(folder.get("name", "")) == wanted:
             return folder.get("id")
     return None
 

@@ -99,6 +99,29 @@ class TodayRawVideosTest(unittest.TestCase):
                                           today=date(2026, 8, 30))
         self.assertEqual(len(result), 1)
 
+    def test_geelark_new_suffix_matches_the_plain_drive_folder(self):
+        """Confirmed live 2026-08-30: the Geelark group is 'Nikki Geelark
+        NEW' (35 phones) but the raw-content folder is just 'Nikki' like
+        every other model -- must match without renaming either side."""
+        tree, files = _tree_for("Nikki", "2026-08-30",
+                                [{"id": "v1", "name": "clip.mp4", "link": None}])
+        client = FakeDriveClient(tree, files)
+        result = content.today_raw_videos("Nikki Geelark NEW", client=client,
+                                          root_folder_id=ROOT,
+                                          today=date(2026, 8, 30))
+        self.assertEqual(len(result), 1)
+
+    def test_a_genuinely_different_model_still_does_not_match(self):
+        """The suffix-stripping must not turn into a fuzzy match that
+        confuses two different models' content."""
+        tree, files = _tree_for("Nikki", "2026-08-30",
+                                [{"id": "v1", "name": "clip.mp4", "link": None}])
+        client = FakeDriveClient(tree, files)
+        result = content.today_raw_videos("Nicole Geelark NEW", client=client,
+                                          root_folder_id=ROOT,
+                                          today=date(2026, 8, 30))
+        self.assertEqual(result, [])
+
 
 class SpoofForHandleTest(unittest.TestCase):
     def _video(self):
