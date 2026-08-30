@@ -205,13 +205,75 @@ class WarmupCycleTest(unittest.TestCase):
         retag.assert_not_called()
 
     def test_session_is_always_stopped_even_on_exception(self):
+        """An exception is retryable, so this now relaunches -- one
+        stop_session per attempt, not one total."""
         with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
              patch.object(lifecycle, "stop_session") as stop, \
              patch("adb_bot.automation.flows.instagram.InstagramWarmUpDay1Flow.run",
                   side_effect=RuntimeError("boom")):
-            out = lifecycle.run_warmup_cycle("ph1", "Test 1", adb_client=object())
+            out = lifecycle.run_warmup_cycle("ph1", "Test 1", adb_client=object(),
+                                             max_attempts=1)
         self.assertEqual(out["result"], "error")
         stop.assert_called_once()
+
+
+class WarmupCycleRetryTest(unittest.TestCase):
+    """A launch that hits an infrastructure hiccup (error / could not reach
+    over ADB) relaunches the same profile instead of being left for someone
+    to notice and rerun by hand -- confirmed gap 2026-08-30, after 47/155
+    profiles sat on a lease-timeout error in one unattended run."""
+
+    def setUp(self):
+        patcher = patch.object(lifecycle, "_check_for_challenge_and_abort",
+                               return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_retries_up_to_max_attempts_then_gives_up(self):
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), None)), \
+             patch.object(lifecycle, "stop_session") as stop:
+            out = lifecycle.run_warmup_cycle("ph1", "Test 1", adb_client=object(),
+                                             max_attempts=3)
+        self.assertEqual(out["result"], "could_not_reach_over_adb")
+        self.assertEqual(out["attempt"], 3)
+        self.assertEqual(stop.call_count, 3)
+
+    def test_a_later_success_stops_the_retries(self):
+        attempts = {"n": 0}
+
+        def launch(*_a, **_kw):
+            attempts["n"] += 1
+            target = None if attempts["n"] < 2 else "1.2.3.4:5555"
+            return _fake_session(), target
+
+        with patch.object(lifecycle, "_launch", side_effect=launch), \
+             patch.object(lifecycle, "stop_session"), \
+             patch.object(lifecycle, "_retag") as retag, \
+             patch("adb_bot.automation.flows.instagram.InstagramWarmUpDay1Flow.run",
+                  return_value={"aborted": False}):
+            out = lifecycle.run_warmup_cycle("ph1", "Test 1", adb_client=object(),
+                                             max_attempts=3)
+        self.assertEqual(out["result"], "warmed_up")
+        self.assertEqual(out["attempt"], 2)
+        retag.assert_called_once()
+
+    def test_a_challenge_abort_is_never_retried(self):
+        """Not in _RETRYABLE_RESULTS -- relaunching won't clear a captcha."""
+        calls = {"n": 0}
+
+        def launch(*_a, **_kw):
+            calls["n"] += 1
+            return _fake_session(), "1.2.3.4:5555"
+
+        with patch.object(lifecycle, "_launch", side_effect=launch), \
+             patch.object(lifecycle, "stop_session"), \
+             patch.object(lifecycle, "_check_for_challenge_and_abort",
+                          return_value="human verification"), \
+             patch.object(lifecycle, "_retag"):
+            out = lifecycle.run_warmup_cycle("ph1", "Test 1", adb_client=object(),
+                                             max_attempts=3)
+        self.assertEqual(out["result"], "aborted_human_verification")
+        self.assertEqual(calls["n"], 1)
 
 
 class ActivePostingCycleTest(unittest.TestCase):
@@ -382,11 +444,42 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
              patch.object(lifecycle, "stop_session"), \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
                   return_value={"aborted": False}), \
-             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadFlow.run",
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.run",
                   return_value={"success": True}) as post:
             out = lifecycle.run_active_posting_cycle(
                 "ph1", "Test 1", adb_client=object(), media_path="/tmp/x.mp4")
         self.assertEqual(out["result"], "posted")
+        post.assert_called_once()
+
+    def test_a_conclusive_post_failure_is_retried(self):
+        """error dialog / draft prompt / stuck composer -- post_ledger has
+        nothing recorded yet, so a fresh attempt can't double-post."""
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
+                  return_value={"aborted": False}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.run",
+                  return_value={"success": False, "uncertain": False}) as post:
+            out = lifecycle.run_active_posting_cycle(
+                "ph1", "Test 1", adb_client=object(), media_path="/tmp/x.mp4",
+                max_attempts=3)
+        self.assertEqual(out["result"], "post_failed")
+        self.assertEqual(post.call_count, 3)
+
+    def test_an_uncertain_post_is_never_retried(self):
+        """Share was tapped but nothing proved it landed or failed -- a
+        retry risks a duplicate post, so this must attempt only once
+        regardless of max_attempts."""
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
+                  return_value={"aborted": False}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.run",
+                  return_value={"success": False, "uncertain": True}) as post:
+            out = lifecycle.run_active_posting_cycle(
+                "ph1", "Test 1", adb_client=object(), media_path="/tmp/x.mp4",
+                max_attempts=3)
+        self.assertEqual(out["result"], "post_uncertain")
         post.assert_called_once()
 
 

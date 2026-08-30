@@ -446,17 +446,23 @@ class RealScreenTest(FlowTestCase):
 
 
 class GermanNumbersTest(FlowTestCase):
-    """Germany is the default, because the phones and the form are German.
+    """Both countries stay supported; only the default has moved.
 
-    Approved 2026-08-11 after the real challenge screen turned out to have its
-    country picker fixed at `DE +49`. The US pool is cheaper and more reliable
-    ($0.42/71% vs $0.60/56% at SMSPool), but a US number under a +49 prefix is
-    a different number and can never receive its code.
+    2026-08-11: DE became the default after the real challenge screen turned
+    out to have its country picker fixed at `DE +49` -- a US number under a
+    +49 prefix looked like a different, unreachable number.
+
+    2026-08-30: switched back to US on explicit instruction -- confirmed a US
+    number is received regardless of the picker, and it is also the better
+    pool on 5sim (72.7% success vs DE's 0-7%, same $0.30/number).
     """
 
-    def test_the_default_country_is_germany(self):
+    def test_the_default_country_is_us(self):
+        """Switched back to US 2026-08-30 on explicit instruction: a US
+        number is received regardless of the picker, and 5sim's US pool
+        reads 72.7% success vs DE's 0-7%, at the same $0.30/number."""
         from adb_bot.clients.sms import base
-        self.assertEqual(base.DEFAULT_COUNTRY, base.COUNTRY_DE)
+        self.assertEqual(base.DEFAULT_COUNTRY, base.COUNTRY_US)
 
     def test_both_providers_can_sell_a_german_number(self):
         from adb_bot.clients.sms import fivesim, smspool

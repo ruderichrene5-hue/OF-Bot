@@ -33,7 +33,14 @@ import time
 from pathlib import Path
 
 from adb_bot.automation.flows.instagram import InstagramScrollFlow, InstagramWarmUpDay1Flow
-from adb_bot.automation.flows.instagram_reel import InstagramReelUploadFlow
+# The u2 flow, not the legacy dump/OCR one: only this one carries the
+# post_ledger duplicate-post guard and reports "uncertain" (share tapped,
+# outcome unproven) as distinct from a conclusive failure. Switched 2026-08-30
+# after finding the legacy flow has neither -- every non-success it returns
+# would have looked like a safely-retryable "post_failed", including the one
+# case a retry can actually double-post. u2 is already what the warm-up and
+# scroll flows use on this fleet, so the dependency is already proven here.
+from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
 from adb_bot.automation.flows.verification import (
     TAG_BANNED,
     TAG_HUMAN_VERIFICATION,
@@ -52,6 +59,23 @@ from adb_bot.clients.geelark.transport import GeelarkTransport
 
 TAG_WARMUP = "Warmup"
 TAG_ACTIVE_POSTING = "Active_Posting"
+
+# Outcomes worth relaunching the same profile for within one call: these say
+# nothing about the account itself, unlike an "aborted_*" challenge result --
+# retrying past a captcha screen would just waste another launch.
+# Confirmed real-world mix 2026-08-30: 47/155 lease-timeout errors (since
+# fixed at the source) plus 16 could_not_reach_over_adb in one manual run,
+# both of which previously just sat until someone noticed and reran by hand.
+#
+# "post_failed" (a conclusive negative -- error dialog, discard-draft prompt,
+# stuck on the composer) is safe to retry: InstagramReelUploadU2Flow's own
+# post_ledger blocks a second Share tap on the same clip once one attempt is
+# unresolved, so a retry can never turn into a duplicate post. "post_uncertain"
+# (Share was tapped, upload was still going per the notification "progress
+# bar" when the wait ran out) is deliberately NOT in this set -- see the
+# comment at its call site.
+_RETRYABLE_RESULTS = {"error", "could_not_reach_over_adb", "post_failed"}
+_DEFAULT_MAX_CYCLE_ATTEMPTS = 3
 
 # Active_Posting's pre-post scroll, per the confirmed protocol. Warm-up stays
 # on InstagramWarmUpDay1Flow's own 600s default, untouched.
@@ -163,8 +187,12 @@ def _launch(phone_id: str, transport: GeelarkTransport, logger, adb_client
     phone itself booted; only the ADB handshake failed)."""
     proxy = _next_real_proxy(transport)
     GeelarkPhoneClient(transport).update_phone(phone_id, proxy_id=proxy["id"])
+    # A full warm-up/posting cycle runs 12-15 min; 120s was too short under
+    # the 4-worker queue and caused 47/155 spurious "already leased" errors
+    # in the 2026-08-30 manual run even though every port was legitimately
+    # busy, not stuck. 1200s comfortably covers one sibling cycle finishing.
     session = start_session(phone_id, transport=transport, logger=logger,
-                            owner=phone_id, wait_for_lease_seconds=120.0)
+                            owner=phone_id, wait_for_lease_seconds=1200.0)
     target = connect_with_retries(adb_client, session.profile, logger,
                                   phone_id, max_attempts=5, retry_delay_seconds=5)
     return session, target
@@ -195,11 +223,30 @@ def _check_for_challenge_and_abort(target: str, adb_client, phone_id: str, trans
 
 
 def run_warmup_cycle(phone_id: str, name: str, adb_client, transport=None,
-                     logger=None) -> dict:
-    """One Warmup pass. On a clean run, retags Warmup -> Active_Posting so
+                     logger=None, max_attempts: int = _DEFAULT_MAX_CYCLE_ATTEMPTS
+                     ) -> dict:
+    """One Warmup pass, relaunched up to `max_attempts` times if it hits an
+    infrastructure hiccup (`_RETRYABLE_RESULTS`) rather than a real challenge
+    or a clean success. On a clean run, retags Warmup -> Active_Posting so
     this never fires again for the same profile. Aborts and retags instead
-    if a challenge screen is already showing before warm-up even starts."""
+    if a challenge screen is already showing before warm-up even starts --
+    that outcome is never retried; another launch won't clear a captcha."""
     transport = transport or GeelarkTransport()
+    out = {}
+    for attempt in range(1, max_attempts + 1):
+        out = _run_warmup_cycle_once(phone_id, name, adb_client, transport, logger)
+        out["attempt"] = attempt
+        if out["result"] not in _RETRYABLE_RESULTS or attempt == max_attempts:
+            return out
+        if logger:
+            logger.warning(
+                "geelark_lifecycle: warmup cycle for %s got %r (attempt %s/%s); retrying",
+                name, out["result"], attempt, max_attempts)
+    return out
+
+
+def _run_warmup_cycle_once(phone_id: str, name: str, adb_client, transport,
+                           logger) -> dict:
     out = {"id": phone_id, "name": name, "at": time.time(), "cycle": "warmup"}
     session = None
     try:
@@ -242,13 +289,39 @@ def run_warmup_cycle(phone_id: str, name: str, adb_client, transport=None,
 
 def run_active_posting_cycle(phone_id: str, name: str, adb_client, transport=None,
                              logger=None, media_path: str | None = None,
-                             caption: str | None = None) -> dict:
-    """One Active_Posting pass: short scroll, then a post if `media_path` is
-    given. The tag is otherwise permanent once a profile reaches it -- the
-    one exception is a challenge screen showing up before this cycle even
-    starts, which pulls the profile straight out of Active_Posting instead
-    of scrolling/posting through it."""
+                             caption: str | None = None,
+                             max_attempts: int = _DEFAULT_MAX_CYCLE_ATTEMPTS) -> dict:
+    """One Active_Posting pass, relaunched up to `max_attempts` times on an
+    infrastructure hiccup or a conclusive posting failure (`_RETRYABLE_RESULTS`)
+    -- same reasoning as `run_warmup_cycle`. `post_uncertain` (Share was
+    tapped but the outcome couldn't be proven either way -- e.g. the upload
+    was still showing its in-progress notification when the wait gave up) is
+    deliberately NOT retried: the post_ledger blocks another Share attempt on
+    that clip regardless, and retrying can't resolve the uncertainty any
+    faster than just waiting could.
+
+    Short scroll, then a post if `media_path` is given. The tag is otherwise
+    permanent once a profile reaches it -- the one exception is a challenge
+    screen showing up before this cycle even starts, which pulls the profile
+    straight out of Active_Posting instead of scrolling/posting through it."""
     transport = transport or GeelarkTransport()
+    out = {}
+    for attempt in range(1, max_attempts + 1):
+        out = _run_active_posting_cycle_once(phone_id, name, adb_client, transport,
+                                             logger, media_path, caption)
+        out["attempt"] = attempt
+        if out["result"] not in _RETRYABLE_RESULTS or attempt == max_attempts:
+            return out
+        if logger:
+            logger.warning(
+                "geelark_lifecycle: active_posting cycle for %s got %r (attempt %s/%s); retrying",
+                name, out["result"], attempt, max_attempts)
+    return out
+
+
+def _run_active_posting_cycle_once(phone_id: str, name: str, adb_client, transport,
+                                   logger, media_path: str | None,
+                                   caption: str | None) -> dict:
     out = {"id": phone_id, "name": name, "at": time.time(), "cycle": "active_posting"}
     session = None
     try:
@@ -271,10 +344,20 @@ def run_active_posting_cycle(phone_id: str, name: str, adb_client, transport=Non
             session.profile.media_path = media_path
             if caption is not None:
                 session.profile.caption = caption
-            post_result = InstagramReelUploadFlow().run(
+            post_result = InstagramReelUploadU2Flow().run(
                 session.profile, adb_client=adb_client, logger=logger)
             out["post_result"] = post_result
-            out["result"] = "posted" if post_result.get("success") else "post_failed"
+            if post_result.get("success"):
+                out["result"] = "posted"
+            elif post_result.get("uncertain"):
+                # Share was tapped but nothing proved it landed (or failed) --
+                # a real duplicate-post risk. The flow's own post_ledger
+                # already blocks a second Share tap for this exact clip, but
+                # a retry still can't resolve the uncertainty any faster than
+                # waiting can, so this is deliberately not retried.
+                out["result"] = "post_uncertain"
+            else:
+                out["result"] = "post_failed"
         else:
             out["result"] = "scrolled_only"
     except Exception as exc:

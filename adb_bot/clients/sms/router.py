@@ -328,7 +328,12 @@ class NumberLease:
 
 # --- construction -------------------------------------------------------------
 def build_router(logger=None, **kwargs) -> SmsRouter:
-    """The configured router: SMSPool primary, 5sim fallback.
+    """The configured router: 5sim primary, SMSPool fallback.
+
+    Swapped 2026-08-30 (was SMSPool primary) -- SMSPool's wallet is empty and
+    5sim's has just been topped up; 5sim's own historical delivery rate (289
+    orders, 91.7 rating) is also the better of the two, see
+    [[adbbot-sms-verification-providers]].
 
     A provider with no credential is left out rather than constructed and left
     to fail on every call, so running with only one key configured degrades to
@@ -342,12 +347,12 @@ def build_router(logger=None, **kwargs) -> SmsRouter:
     )
 
     providers = []
-    smspool_key = get_saved_smspool_key()
-    if smspool_key:
-        providers.append(SmsPoolProvider(smspool_key))
     fivesim_token = get_saved_fivesim_token()
     if fivesim_token:
         providers.append(FiveSimProvider(fivesim_token))
+    smspool_key = get_saved_smspool_key()
+    if smspool_key:
+        providers.append(SmsPoolProvider(smspool_key))
 
     if not providers:
         raise RuntimeError(

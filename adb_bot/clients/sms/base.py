@@ -52,16 +52,13 @@ DIALLING_CODES = {
 
 # Where numbers are rented from unless a caller says otherwise.
 #
-# Germany, not the US. The MLX profiles are German throughout -- device numbers
-# are +49, the timezone is Europe/Berlin -- and the real challenge screen's
-# country picker was already set to `DE +49`. Instagram's box takes only the
-# national part, so a US number typed under a +49 prefix is simply a different,
-# invalid number: no code can arrive, the lease times out, and the circuit
-# breaker blames the provider for a problem no provider has.
+# Switched to US 2026-08-30 (was DE) on explicit instruction -- confirmed a US
+# number is received regardless of the challenge screen's country picker. The
+# switch is also a real efficacy win on 5sim: DE Instagram pools were reading
+# ~0-7% success, vs 72.7% on the US `virtual28` pool, at the same $0.30/number.
 #
-# Overridable with SMS_COUNTRY for a one-off, but the default is the one that
-# matches the phones.
-DEFAULT_COUNTRY = os.environ.get("SMS_COUNTRY", "").strip().upper() or COUNTRY_DE
+# Overridable with SMS_COUNTRY for a one-off.
+DEFAULT_COUNTRY = os.environ.get("SMS_COUNTRY", "").strip().upper() or COUNTRY_US
 
 
 class SmsProviderError(RuntimeError):
