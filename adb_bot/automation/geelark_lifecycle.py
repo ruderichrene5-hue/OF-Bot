@@ -65,10 +65,16 @@ def _real_proxies(transport: GeelarkTransport) -> list[dict]:
     """The account's saved proxies that sit on one of our real, rotatable
     ports (from GEELARK_PROXY_REBOOT_URLS) -- not MultiLogin's relay.
 
-    One entry per real port, first match wins if duplicates exist (the
-    account has had a couple of accidental re-adds of the same port; that
-    is account-book clutter to clean up separately, not something this
-    function needs to care about).
+    One entry per real port -- the account has had a couple of accidental
+    re-adds of the same port (serialNo 11/12 duplicating 6/5, confirmed
+    2026-08-30). Picks the LOWEST serialNo per port deterministically,
+    rather than whichever the API happens to list first: `list_proxies()`'s
+    order isn't documented as stable, and without pinning this, different
+    calls silently split real usage across both the original and the
+    duplicate row for the same physical modem -- confirmed live 2026-08-30
+    (serialNo 11/12 alone showed 20-21 profiles' worth of use next to 37-57
+    on 5-8), which is also what makes the duplicates look "still in use"
+    and blocks deleting them.
     """
     from adb_bot.clients.geelark.proxies import GeelarkProxyClient
 
@@ -77,14 +83,15 @@ def _real_proxies(transport: GeelarkTransport) -> list[dict]:
         raise RuntimeError(
             "GEELARK_PROXY_REBOOT_URLS is not set; cannot resolve which "
             "proxies are our own real ports")
-    seen_ports: set[int] = set()
-    out: list[dict] = []
+    by_port: dict[int, dict] = {}
     for proxy in GeelarkProxyClient(transport).list_proxies():
         port = proxy.get("port")
-        if port in real_ports and port not in seen_ports:
-            seen_ports.add(port)
-            out.append(proxy)
-    return sorted(out, key=lambda p: p.get("port", 0))
+        if port not in real_ports:
+            continue
+        current = by_port.get(port)
+        if current is None or (proxy.get("serialNo") or 0) < (current.get("serialNo") or 0):
+            by_port[port] = proxy
+    return sorted(by_port.values(), key=lambda p: p.get("port", 0))
 
 
 def _next_real_proxy(transport: GeelarkTransport) -> dict:
@@ -131,7 +138,12 @@ def _retag(phone_id: str, transport: GeelarkTransport, *, remove: str, add: str,
     existing_names: list[str] = []
     for row in phone_client.list_phones():
         if str(row.get("id")) == str(phone_id):
-            existing_names = list(row.get("tags") or [])
+            # A phone's own tags are {"name": ...} dicts, never bare
+            # strings (confirmed live 2026-08-30 -- 51 of 53 profiles in
+            # the first real night run crashed here with "unhashable type:
+            # 'dict'" from treating them as strings further down).
+            existing_names = [str(t.get("name")) for t in (row.get("tags") or [])
+                             if t.get("name")]
             break
 
     keep = [n for n in existing_names if n != remove]
@@ -214,6 +226,9 @@ def run_warmup_cycle(phone_id: str, name: str, adb_client, transport=None,
     except Exception as exc:
         out["result"] = "error"
         out["error"] = str(exc)
+        if logger:
+            logger.exception("geelark_lifecycle: %s cycle raised for %s (%s)",
+                            out.get("cycle"), name, exc)
     finally:
         if session is not None:
             try:
@@ -265,6 +280,9 @@ def run_active_posting_cycle(phone_id: str, name: str, adb_client, transport=Non
     except Exception as exc:
         out["result"] = "error"
         out["error"] = str(exc)
+        if logger:
+            logger.exception("geelark_lifecycle: %s cycle raised for %s (%s)",
+                            out.get("cycle"), name, exc)
     finally:
         if session is not None:
             try:
@@ -328,6 +346,9 @@ def run_in_review_recheck_cycle(phone_id: str, name: str, adb_client, transport=
     except Exception as exc:
         out["result"] = "error"
         out["error"] = str(exc)
+        if logger:
+            logger.exception("geelark_lifecycle: %s cycle raised for %s (%s)",
+                            out.get("cycle"), name, exc)
     finally:
         if session is not None:
             try:

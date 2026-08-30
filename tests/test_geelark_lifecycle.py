@@ -74,6 +74,25 @@ class RealProxiesTest(unittest.TestCase):
             result = lifecycle._real_proxies(transport=None)
         self.assertEqual(len(result), 2)
 
+    def test_a_duplicate_port_deterministically_picks_the_lowest_serial_no(self):
+        """Confirmed live 2026-08-30: serialNo 11/12 duplicate 6/5 on the
+        same ports. Without pinning this, whichever the API lists first
+        silently gets used, splitting real usage across both rows for the
+        same physical modem and making the duplicate look "still in use"
+        -- blocking its deletion. Order-independent: the duplicate can
+        appear before or after the original in list_proxies()'s response."""
+        original = {"id": "p54015-original", "server": "162.55.84.35",
+                   "port": 54015, "serialNo": 6}
+        duplicate = {"id": "p54015-duplicate", "server": "162.55.84.35",
+                    "port": 54015, "serialNo": 11}
+        for ordering in ([duplicate, original], [original, duplicate]):
+            with patch("adb_bot.clients.geelark.proxies.GeelarkProxyClient",
+                      lambda transport: FakeProxyClient(ordering)), \
+                 patch.object(lifecycle, "load_reboot_config", lambda: REBOOT_CONFIG):
+                result = lifecycle._real_proxies(transport=None)
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["id"], "p54015-original")
+
     def test_raises_with_no_reboot_config(self):
         """A missing GEELARK_PROXY_REBOOT_URLS must fail loudly, not silently
         fall back to treating every saved proxy (including MLX's relay) as
@@ -119,7 +138,11 @@ class PhonesByTagTest(unittest.TestCase):
 
 class RetagTest(unittest.TestCase):
     def test_swaps_warmup_for_active_posting_keeping_other_tags(self):
-        phones = [{"id": "ph1", "tags": ["Warmup", "gmail connected"]}]
+        # A phone's own tags are {"name": ...} dicts on the real API, never
+        # bare strings -- confirmed live 2026-08-30 when a fixture shaped
+        # like this masked a crash that hit 51 of 53 real profiles.
+        phones = [{"id": "ph1", "tags": [{"name": "Warmup"},
+                                        {"name": "gmail connected"}]}]
         phone_client = FakePhoneClient(phones)
         tag_client = FakeTagClient({"gmail connected": "id-gmail"})
         with patch.object(lifecycle, "GeelarkPhoneClient", lambda transport: phone_client), \
