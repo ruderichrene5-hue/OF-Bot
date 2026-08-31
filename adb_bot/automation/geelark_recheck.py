@@ -26,6 +26,7 @@ from adb_bot.automation import post_ledger
 from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
 from adb_bot.automation.geelark_lifecycle import _launch, stop_session
 from adb_bot.automation.recheck_runner import (
+    MAX_UNRESOLVED_AGE_SECONDS,
     OUTCOME_FAILED,
     OUTCOME_POSTED,
     decide_recheck,
@@ -55,28 +56,51 @@ def run_geelark_recheck(adb_client, transport=None, logger=None) -> list[dict]:
     if not pending:
         return []
 
+    results: list[dict] = []
+    now = time.time()
+
+    # decide_recheck's own age check short-circuits to ABANDONED before it
+    # ever looks at `current` -- so a record already past
+    # MAX_UNRESOLVED_AGE_SECONDS gets the same verdict whether or not we
+    # spend a phone launch reading its post count. Settle those without
+    # launching anything; only the rest are worth reaching a phone for.
+    worklist = []
+    for record in pending:
+        age_seconds = max(0.0, now - (record.shared_at or 0.0))
+        if age_seconds >= MAX_UNRESOLVED_AGE_SECONDS:
+            outcome, detail = decide_recheck(record.baseline_count, record.baseline_exact,
+                                             None, age_seconds)
+            if logger:
+                logger.info("geelark_recheck: %s (%s): %s -- %s (no launch, already too old)",
+                           record.profile_id, record.media_hash[:12], outcome, detail)
+            results.append({"phone_id": record.profile_id, "media_hash": record.media_hash,
+                            "outcome": outcome, "detail": detail})
+        else:
+            worklist.append(record)
+    if not worklist:
+        return results
+
     try:
         geelark_ids = {str(row.get("id"))
                        for row in GeelarkPhoneClient(transport).list_phones()}
     except Exception as exc:
         if logger:
             logger.warning("geelark_recheck: could not list Geelark phones (%s)", exc)
-        return []
+        return results
 
     by_phone: dict[str, list] = {}
-    for record in pending:
+    for record in worklist:
         if record.profile_id in geelark_ids:
             by_phone.setdefault(record.profile_id, []).append(record)
     if not by_phone:
-        return []
+        return results
 
     if u2 is None:
         if logger:
             logger.warning("geelark_recheck: uiautomator2 is not importable; skipping")
-        return []
+        return results
 
     flow = InstagramReelUploadU2Flow()
-    results: list[dict] = []
     for phone_id, records in by_phone.items():
         session = None
         try:
