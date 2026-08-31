@@ -352,6 +352,23 @@ def run_day_pass(adb_client, transport: GeelarkTransport | None = None,
     tag = active_tag_for_now(now)
     scheduled_results = run_scheduled_pass(adb_client, transport=transport, logger=logger,
                                            concurrency=concurrency, now=now)
+
+    # Resolve whatever post_ledger shares are old enough to check -- added
+    # 2026-08-31, found live: GeeLark shares had no deferred-recheck path at
+    # all (recheck_runner.py is Airtable-bound), so "uncertain" just sat
+    # there forever. Runs every hourly fire; a share younger than
+    # geelark_recheck.RECHECK_AFTER_SECONDS is simply not in this pass's
+    # worklist yet, so this costs nothing on an hour with nothing due.
+    #
+    # Deliberately placed right after the posting pass, ahead of human
+    # verification -- moved 2026-08-31 after human verification (SMS-bound,
+    # can run 30+ min on a bad provider day) starved recheck of a turn for
+    # a full hourly cycle even though recheck itself is bounded and fast.
+    # The video-posting backlog this exists for matters more than verification
+    # throughput, and unlike verification it never waits on external SMS state.
+    from adb_bot.automation.geelark_recheck import run_geelark_recheck
+    recheck_results = run_geelark_recheck(adb_client, transport=transport, logger=logger)
+
     human_verification_results: list[dict] = []
     warmup_results: list[dict] = []
     if tag == lifecycle.TAG_ACTIVE_POSTING:
@@ -368,14 +385,6 @@ def run_day_pass(adb_client, transport: GeelarkTransport | None = None,
             warmup_results = run_scheduled_pass(adb_client, transport=transport, logger=logger,
                                                 concurrency=concurrency, now=now,
                                                 tag=lifecycle.TAG_WARMUP)
-    # Resolve whatever post_ledger shares are old enough to check -- added
-    # 2026-08-31, found live: GeeLark shares had no deferred-recheck path at
-    # all (recheck_runner.py is Airtable-bound), so "uncertain" just sat
-    # there forever. Runs every hourly fire; a share younger than
-    # geelark_recheck.RECHECK_AFTER_SECONDS is simply not in this pass's
-    # worklist yet, so this costs nothing on an hour with nothing due.
-    from adb_bot.automation.geelark_recheck import run_geelark_recheck
-    recheck_results = run_geelark_recheck(adb_client, transport=transport, logger=logger)
     return {"scheduled": scheduled_results, "human_verification": human_verification_results,
            "warmup": warmup_results, "recheck": recheck_results}
 
