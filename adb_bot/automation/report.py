@@ -3759,11 +3759,23 @@ def geelark_status() -> dict:
     except Exception as exc:
         out["error"] = f"Phones listed, but the ADB state could not be read: {exc}"
 
+    # Handle/follower/post-count per account, read live 2026-08-31 by
+    # InstagramReelUploadU2Flow.read_account_stats() and stored via
+    # account_stats.py -- piggybacked on the profile-tab visit each post
+    # already makes, so a value here is only as fresh as that phone's last
+    # post. A store read failing must not blank the phone table below it.
+    try:
+        from adb_bot.automation.account_stats import AccountStatsStore
+        account_stats_by_id = AccountStatsStore().load()
+    except Exception:
+        account_stats_by_id = {}
+
     for row in rows:
         equipment = row.get("equipmentInfo") or {}
         proxy = row.get("proxy") or {}
         phone_id = str(row.get("id"))
         adb_state = adb_by_id.get(phone_id, "unknown")
+        stats = account_stats_by_id.get(phone_id)
         out["phones"].append({
             "id": phone_id,
             "name": str(row.get("serialName") or ""),
@@ -3786,6 +3798,15 @@ def geelark_status() -> dict:
             # rather than two. It holds passwords, so it is consumed into
             # counts and never rendered.
             "remark": str(row.get("remark") or ""),
+            # Only as fresh as this phone's last post -- see the comment
+            # above the account_stats_by_id read. followers/posts are -1
+            # (never a real 0) when unread or unreadable that time.
+            "ig_handle": stats.handle if stats else "",
+            "ig_followers": stats.followers if stats else -1,
+            "ig_followers_exact": stats.followers_exact if stats else False,
+            "ig_posts": stats.posts if stats else -1,
+            "ig_posts_exact": stats.posts_exact if stats else False,
+            "ig_stats_at": stats.at if stats else None,
         })
 
     out["phones"].sort(key=lambda p: p["name"].lower())

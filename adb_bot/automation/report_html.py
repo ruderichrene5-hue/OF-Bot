@@ -13,6 +13,7 @@ listed by name, and everything that is merely interesting is below the fold.
 from __future__ import annotations
 
 import html
+import time
 from collections import Counter
 from datetime import datetime
 
@@ -1838,8 +1839,23 @@ def _section_geelark(geelark: dict) -> str:
             return '<span class="pill">stopped</span>'
         return f'<span class="pill warn">{_e(status)}</span>'
 
+    def _ig_count_cell(value, exact) -> str:
+        if value is None or value < 0:
+            return '<span class="empty">—</span>'
+        text = f"{value:,}"
+        if not exact:
+            text = f"~{text}"
+        return f'<span class="mono">{text}</span>'
+
+    def _ig_updated_cell(at) -> str:
+        if not at:
+            return '<span class="empty">—</span>'
+        age = max(0.0, time.time() - at)
+        return f'<span class="mono">vor {_fmt_seconds(age)}</span>'
+
     head = ("<tr><th>Phone</th><th>Status</th><th>ADB</th><th>Device</th>"
-            "<th>Android</th><th>Country</th><th>Proxy</th><th>Tags</th></tr>")
+            "<th>Android</th><th>Country</th><th>Proxy</th><th>Tags</th>"
+            "<th>IG Handle</th><th>Follower</th><th>Posts</th><th>Stats</th></tr>")
     body = "".join(
         f"<tr><td class='mono'>{_e(phone['name'])}</td>"
         f"<td>{_status_cell(phone['status'])}</td>"
@@ -1848,7 +1864,11 @@ def _section_geelark(geelark: dict) -> str:
         f"<td>{_e(phone['os'])}</td>"
         f"<td>{_e(phone['country'])}</td>"
         f"<td class='mono'>{_e(phone['proxy']) or '<span class=\"empty\">—</span>'}</td>"
-        f"<td>{_e(', '.join(phone['tags'])) or '<span class=\"empty\">—</span>'}</td></tr>"
+        f"<td>{_e(', '.join(phone['tags'])) or '<span class=\"empty\">—</span>'}</td>"
+        f"<td class='mono'>{_e(phone.get('ig_handle')) or '<span class=\"empty\">—</span>'}</td>"
+        f"<td>{_ig_count_cell(phone.get('ig_followers'), phone.get('ig_followers_exact'))}</td>"
+        f"<td>{_ig_count_cell(phone.get('ig_posts'), phone.get('ig_posts_exact'))}</td>"
+        f"<td>{_ig_updated_cell(phone.get('ig_stats_at'))}</td></tr>"
         for phone in rows
     )
 
@@ -1858,7 +1878,10 @@ def _section_geelark(geelark: dict) -> str:
                f'A started phone bills by the minute whether or not anything is '
                f'driving it, and a phone with ADB off cannot be driven by the bot '
                f'at all — ADB is off per phone until switched on, and switching it '
-               f'on needs the phone already started.</p>')
+               f'on needs the phone already started. IG Handle/Follower/Posts '
+               f'are read off the profile header the moment each account '
+               f'posts — no dedicated scan — so they are only as fresh as '
+               f'that account\'s last post, not live.</p>')
 
     proxies = geelark.get("proxies") or []
     proxy_block = ""
