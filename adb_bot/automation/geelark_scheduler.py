@@ -368,8 +368,16 @@ def run_day_pass(adb_client, transport: GeelarkTransport | None = None,
             warmup_results = run_scheduled_pass(adb_client, transport=transport, logger=logger,
                                                 concurrency=concurrency, now=now,
                                                 tag=lifecycle.TAG_WARMUP)
+    # Resolve whatever post_ledger shares are old enough to check -- added
+    # 2026-08-31, found live: GeeLark shares had no deferred-recheck path at
+    # all (recheck_runner.py is Airtable-bound), so "uncertain" just sat
+    # there forever. Runs every hourly fire; a share younger than
+    # geelark_recheck.RECHECK_AFTER_SECONDS is simply not in this pass's
+    # worklist yet, so this costs nothing on an hour with nothing due.
+    from adb_bot.automation.geelark_recheck import run_geelark_recheck
+    recheck_results = run_geelark_recheck(adb_client, transport=transport, logger=logger)
     return {"scheduled": scheduled_results, "human_verification": human_verification_results,
-           "warmup": warmup_results}
+           "warmup": warmup_results, "recheck": recheck_results}
 
 
 def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
@@ -480,6 +488,7 @@ if __name__ == "__main__":
 
     logger = get_logger("adb_bot")
     adb_client = ADBClient()
+    recheck_results: list[dict] = []
 
     if args.night_sequence:
         print(f"night sequence: recheck -> warmup ({datetime.now(BERLIN).strftime('%H:%M %Z')})")
@@ -502,10 +511,15 @@ if __name__ == "__main__":
         combined = run_day_pass(adb_client, logger=logger, **kwargs)
         results = (combined["scheduled"] + combined["human_verification"]
                   + combined["warmup"])
+        recheck_results = combined["recheck"]
 
     print(f"{len(results)} profile(s) processed")
     for r in results:
         suffix = f" ({r['error']})" if r.get("error") else ""
         print(f"  {r.get('name')}: {r.get('result')}{suffix}")
+    if recheck_results:
+        print(f"{len(recheck_results)} geelark_recheck entrie(s) processed")
+        for r in recheck_results:
+            print(f"  {r.get('phone_id')}: {r.get('outcome')}")
     if not results:
         sys.exit(0)

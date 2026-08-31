@@ -365,6 +365,17 @@ class DayPassTest(unittest.TestCase):
     to Warmup instead when there's no SMS balance for human verification,
     so idle capacity always has *something* to do."""
 
+    def setUp(self):
+        # Without this, every test here calls the REAL run_geelark_recheck,
+        # which reaches for real Geelark credentials/network -- harmless
+        # when they're absent (it bails out and returns []), but a live
+        # launch risk on a box where they happen to be set. Same lesson as
+        # the run_log pollution bug found the same day.
+        patcher = patch("adb_bot.automation.geelark_recheck.run_geelark_recheck",
+                        return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_daytime_runs_human_verification_after_the_scheduled_pass(self):
         order = []
         with patch.object(scheduler, "run_scheduled_pass",
@@ -427,6 +438,20 @@ class DayPassTest(unittest.TestCase):
              patch.object(scheduler, "run_human_verification_pass", return_value=[]) as human:
             scheduler.run_day_pass(adb_client=object(), now=_at(12, 0))
         human.assert_called_once()
+
+    def test_recheck_runs_every_time_and_its_results_come_back(self):
+        """Explicit finding 2026-08-31: Geelark shares had no deferred-recheck
+        path at all (recheck_runner.py is Airtable-bound), so this must run
+        unconditionally -- not gated on the Active_Posting/Warmup tag the
+        way human verification is."""
+        with patch.object(scheduler, "run_scheduled_pass", return_value=[]), \
+             patch.object(scheduler, "_best_sms_balance", return_value=5.0), \
+             patch.object(scheduler, "run_human_verification_pass", return_value=[]), \
+             patch("adb_bot.automation.geelark_recheck.run_geelark_recheck",
+                  return_value=[{"phone_id": "ph1", "outcome": "posted"}]) as recheck:
+            result = scheduler.run_day_pass(adb_client=object(), now=_at(12, 0))
+        recheck.assert_called_once()
+        self.assertEqual(result["recheck"], [{"phone_id": "ph1", "outcome": "posted"}])
 
 
 class BestSmsBalanceTest(unittest.TestCase):
