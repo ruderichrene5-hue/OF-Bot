@@ -3021,14 +3021,14 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
   {banner}
 
   <div class="tabnav">
-    <input type="radio" name="adbbot-tab" id="tab-server" checked>
+    <input type="radio" name="adbbot-tab" id="tab-server">
     <input type="radio" name="adbbot-tab" id="tab-human">
     <input type="radio" name="adbbot-tab" id="tab-posts">
     <input type="radio" name="adbbot-tab" id="tab-schedules">
     <input type="radio" name="adbbot-tab" id="tab-warmup">
     <input type="radio" name="adbbot-tab" id="tab-profiles">
     <input type="radio" name="adbbot-tab" id="tab-geelark">
-    <input type="radio" name="adbbot-tab" id="tab-geelark-accounts">
+    <input type="radio" name="adbbot-tab" id="tab-geelark-accounts" checked>
     <input type="radio" name="adbbot-tab" id="tab-technical">
     <div class="tabs">
       <label for="tab-server">Server</label>
