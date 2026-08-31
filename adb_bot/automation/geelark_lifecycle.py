@@ -331,8 +331,15 @@ def run_active_posting_cycle(phone_id: str, name: str, adb_client, transport=Non
     out = {}
     for attempt in range(1, max_attempts + 1):
         attempt_started = time.time()
+        # Explicit instruction 2026-08-31: a retry (the first attempt already
+        # didn't go through) skips scrolling entirely -- get the post done
+        # rather than spend more time on the step most often implicated in
+        # today's post_failed cases (the composer failing to open after a
+        # long scroll left Instagram mid-transition). The first attempt is
+        # unaffected; only attempt 2+ of the SAME cycle skips it.
         out = _run_active_posting_cycle_once(phone_id, name, adb_client, transport,
-                                             logger, media_paths, caption)
+                                             logger, media_paths, caption,
+                                             skip_scroll=(attempt > 1))
         out["attempt"] = attempt
         try:
             run_log.RunLogStore().record(out, started_at=attempt_started)
@@ -350,7 +357,7 @@ def run_active_posting_cycle(phone_id: str, name: str, adb_client, transport=Non
 
 def _run_active_posting_cycle_once(phone_id: str, name: str, adb_client, transport,
                                    logger, media_paths: list[str] | None,
-                                   caption: str | None) -> dict:
+                                   caption: str | None, skip_scroll: bool = False) -> dict:
     media_paths = list(media_paths or [])
     out = {"id": phone_id, "name": name, "at": time.time(), "cycle": "active_posting",
           "posts": []}
@@ -406,11 +413,13 @@ def _run_active_posting_cycle_once(phone_id: str, name: str, adb_client, transpo
         for index, media_path in enumerate(media_paths):
             # Only posts after the first have a previous post's confirmation
             # wait to fold in -- post 1 has nothing preceding it to cover.
-            scroll_seconds = ACTIVE_POSTING_SCROLL_SECONDS
-            if index > 0:
-                scroll_seconds += reel_verify.FAST_TIMEOUT_SECONDS
-            scroll_result = InstagramScrollFlow(scroll_seconds=scroll_seconds).run(
-                session.profile, adb_client=adb_client, logger=logger)
+            scroll_result = None
+            if not skip_scroll:
+                scroll_seconds = ACTIVE_POSTING_SCROLL_SECONDS
+                if index > 0:
+                    scroll_seconds += reel_verify.FAST_TIMEOUT_SECONDS
+                scroll_result = InstagramScrollFlow(scroll_seconds=scroll_seconds).run(
+                    session.profile, adb_client=adb_client, logger=logger)
 
             session.profile.media_path = media_path
             if caption is not None:
@@ -421,7 +430,7 @@ def _run_active_posting_cycle_once(phone_id: str, name: str, adb_client, transpo
         # The last post in the batch has no following post's scroll to fold its
         # confirmation wait into, so it gets one of its own here -- same reasoning
         # as above, applied to the one post the loop otherwise leaves out.
-        if submissions:
+        if submissions and not skip_scroll:
             InstagramScrollFlow(scroll_seconds=reel_verify.FAST_TIMEOUT_SECONDS).run(
                 session.profile, adb_client=adb_client, logger=logger)
 

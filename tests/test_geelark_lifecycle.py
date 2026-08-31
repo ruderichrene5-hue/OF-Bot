@@ -565,6 +565,27 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
         self.assertEqual(out["result"], "post_failed")
         self.assertEqual(post.call_count, 3)
 
+    def test_only_the_first_attempt_scrolls_retries_skip_it(self):
+        """Explicit instruction 2026-08-31: a retry means the first attempt
+        already didn't go through -- skip scrolling and just try to get the
+        post done, rather than spend more time on the step most often
+        implicated in a failed post (the composer not opening after a long
+        scroll)."""
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
+                  return_value={"aborted": False}) as scroll, \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.submit",
+                  return_value={"submitted": True, "state": {}}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.verify_submitted",
+                  return_value={"success": False, "uncertain": False}):
+            lifecycle.run_active_posting_cycle(
+                "ph1", "Test 1", adb_client=object(), media_paths=["/tmp/x.mp4"],
+                max_attempts=3)
+        # Attempt 1: one pre-post scroll + one trailing scroll = 2 calls.
+        # Attempts 2 and 3: skip_scroll -- zero calls each.
+        self.assertEqual(scroll.call_count, 2)
+
     def test_an_uncertain_post_is_never_retried(self):
         """Share was tapped but nothing proved it landed or failed -- a
         retry risks a duplicate post, so this must attempt only once
