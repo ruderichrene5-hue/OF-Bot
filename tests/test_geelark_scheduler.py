@@ -330,5 +330,42 @@ class NightSequenceTest(unittest.TestCase):
         self.assertIn("warmup", result)
 
 
+class DayPassTest(unittest.TestCase):
+    """Added 2026-08-31: Active_Posting's pass, then human verification with
+    whatever proxy capacity it leaves free, instead of that capacity sitting
+    idle until the once-nightly slot. Only during the daytime window --
+    outside it, run_night_sequence already owns human verification, and a
+    second run here would double-spend the real money it costs."""
+
+    def test_daytime_runs_human_verification_after_the_scheduled_pass(self):
+        order = []
+        with patch.object(scheduler, "run_scheduled_pass",
+                         side_effect=lambda *a, **k: order.append("scheduled") or []) as scheduled, \
+             patch.object(scheduler, "run_human_verification_pass",
+                         side_effect=lambda *a, **k: order.append("human_verification") or []) as human:
+            result = scheduler.run_day_pass(adb_client=object(), now=_at(12, 0))
+        self.assertEqual(order, ["scheduled", "human_verification"])
+        scheduled.assert_called_once()
+        human.assert_called_once()
+        self.assertIn("scheduled", result)
+        self.assertIn("human_verification", result)
+
+    def test_nighttime_skips_human_verification_to_avoid_double_spending(self):
+        """If this ever runs during the Warmup window, run_night_sequence
+        already covers human verification for that slot."""
+        with patch.object(scheduler, "run_scheduled_pass", return_value=[]), \
+             patch.object(scheduler, "run_human_verification_pass") as human:
+            result = scheduler.run_day_pass(adb_client=object(), now=_at(23, 30))
+        human.assert_not_called()
+        self.assertEqual(result["human_verification"], [])
+
+    def test_nothing_tagged_costs_nothing_extra(self):
+        with patch.object(scheduler, "run_scheduled_pass", return_value=[]), \
+             patch.object(scheduler, "run_human_verification_pass", return_value=[]) as human:
+            result = scheduler.run_day_pass(adb_client=object(), now=_at(9, 0))
+        human.assert_called_once()
+        self.assertEqual(result["human_verification"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

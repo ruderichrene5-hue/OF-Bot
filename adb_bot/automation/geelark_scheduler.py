@@ -250,6 +250,37 @@ def run_night_sequence(adb_client, transport: GeelarkTransport | None = None,
            "warmup": warmup_results}
 
 
+def run_day_pass(adb_client, transport: GeelarkTransport | None = None,
+                 logger=None, concurrency: int = CONCURRENCY,
+                 now: datetime | None = None) -> dict:
+    """Active_Posting's own pass, then human verification with whatever
+    proxy capacity it leaves free. Instruction 2026-08-31: if Active_Posting
+    finishes ahead of the next scheduled fire (nothing due, fewer profiles
+    than usual, whatever the reason), that freed-up capacity should not sit
+    idle until the once-nightly slot -- it should work whatever is currently
+    tagged `human verification` instead.
+
+    Only runs the trailing step when the tag this pass actually resolved to
+    was Active_Posting (daytime). If it resolved to Warmup instead -- this
+    function called outside its normal daytime slot -- run_night_sequence
+    already owns human verification for that window, and a second,
+    unscheduled run here would double-spend the real money it costs (SMS
+    numbers, captcha solves) rather than use idle capacity.
+
+    A day with nothing tagged `human verification` costs nothing extra: the
+    worklist comes back empty and the pass returns immediately.
+    """
+    transport = transport or GeelarkTransport()
+    tag = active_tag_for_now(now)
+    scheduled_results = run_scheduled_pass(adb_client, transport=transport, logger=logger,
+                                           concurrency=concurrency, now=now)
+    human_verification_results: list[dict] = []
+    if tag == lifecycle.TAG_ACTIVE_POSTING:
+        human_verification_results = run_human_verification_pass(
+            adb_client, transport=transport, logger=logger, concurrency=concurrency)
+    return {"scheduled": scheduled_results, "human_verification": human_verification_results}
+
+
 def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
                        logger=None, concurrency: int = CONCURRENCY,
                        now: datetime | None = None) -> list[dict]:
@@ -372,7 +403,8 @@ if __name__ == "__main__":
         tag = active_tag_for_now()
         print(f"window: {tag} ({datetime.now(BERLIN).strftime('%H:%M %Z')})")
         kwargs = {"concurrency": args.concurrency} if args.concurrency else {}
-        results = run_scheduled_pass(adb_client, logger=logger, **kwargs)
+        combined = run_day_pass(adb_client, logger=logger, **kwargs)
+        results = combined["scheduled"] + combined["human_verification"]
 
     print(f"{len(results)} profile(s) processed")
     for r in results:
