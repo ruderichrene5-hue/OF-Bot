@@ -3770,12 +3770,43 @@ def geelark_status() -> dict:
     except Exception:
         account_stats_by_id = {}
 
+    # Today's post outcomes per phone, read from the shared post_ledger.
+    # GeeLark's InstagramReelUploadU2Flow writes profile_id = the phone id
+    # (confirmed via prepare_geelark_profile_for_adb, which sets Profile.id
+    # to the same id list.py filters on), so this joins cleanly without any
+    # GeeLark-specific ledger. MLX's own entries use MLX's profile ids, which
+    # simply never match anything here -- no cross-contamination.
+    daily_posts_by_id: dict[str, dict] = {}
+    try:
+        from adb_bot.automation.post_ledger import (
+            PostLedger, STATUS_CONFIRMED, STATUS_DISPROVED,
+        )
+        from adb_bot.automation.geelark_scheduler import BERLIN
+        from datetime import datetime as _dt
+        today = _dt.now(BERLIN).date()
+        for rec in PostLedger().load().values():
+            if not rec.shared_at:
+                continue
+            if _dt.fromtimestamp(rec.shared_at, BERLIN).date() != today:
+                continue
+            bucket = daily_posts_by_id.setdefault(
+                rec.profile_id, {"posted": 0, "failed": 0, "uncertain": 0})
+            if rec.status == STATUS_CONFIRMED:
+                bucket["posted"] += 1
+            elif rec.status == STATUS_DISPROVED:
+                bucket["failed"] += 1
+            else:
+                bucket["uncertain"] += 1
+    except Exception:
+        pass
+
     for row in rows:
         equipment = row.get("equipmentInfo") or {}
         proxy = row.get("proxy") or {}
         phone_id = str(row.get("id"))
         adb_state = adb_by_id.get(phone_id, "unknown")
         stats = account_stats_by_id.get(phone_id)
+        daily = daily_posts_by_id.get(phone_id)
         out["phones"].append({
             "id": phone_id,
             "name": str(row.get("serialName") or ""),
@@ -3807,6 +3838,18 @@ def geelark_status() -> dict:
             "ig_posts": stats.posts if stats else -1,
             "ig_posts_exact": stats.posts_exact if stats else False,
             "ig_stats_at": stats.at if stats else None,
+            # Today's post outcomes for this phone, from the shared
+            # post_ledger -- always present (0s), unlike the ig_* fields
+            # above, since "no posts today" is a real, distinct fact rather
+            # than "never read".
+            "posts_today_confirmed": daily["posted"] if daily else 0,
+            "posts_today_failed": daily["failed"] if daily else 0,
+            "posts_today_uncertain": daily["uncertain"] if daily else 0,
+            # Reel view counts: not wired up yet (2026-08-31) -- the read
+            # mechanism doesn't exist. Present as None throughout so the
+            # dashboard can render an explicit "not connected" placeholder
+            # rather than an empty column with no explanation.
+            "ig_reel_views": None,
         })
 
     out["phones"].sort(key=lambda p: p["name"].lower())

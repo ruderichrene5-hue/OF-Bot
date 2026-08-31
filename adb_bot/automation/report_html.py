@@ -131,12 +131,14 @@ footer { margin-top: 2.5rem; color: var(--muted); font-size: .78rem;
 #tab-warmup:checked ~ #panel-warmup,
 #tab-profiles:checked ~ #panel-profiles,
 #tab-geelark:checked ~ #panel-geelark,
+#tab-geelark-accounts:checked ~ #panel-geelark-accounts,
 #tab-technical:checked ~ #panel-technical { display: block; }
 #tab-server:checked ~ .tabs label[for="tab-server"],
 #tab-schedules:checked ~ .tabs label[for="tab-schedules"],
 #tab-warmup:checked ~ .tabs label[for="tab-warmup"],
 #tab-profiles:checked ~ .tabs label[for="tab-profiles"],
 #tab-geelark:checked ~ .tabs label[for="tab-geelark"],
+#tab-geelark-accounts:checked ~ .tabs label[for="tab-geelark-accounts"],
 #tab-technical:checked ~ .tabs label[for="tab-technical"] {
   color: var(--fg); border-bottom-color: var(--accent); }
 #tab-server:focus-visible ~ .tabs label[for="tab-server"],
@@ -144,6 +146,7 @@ footer { margin-top: 2.5rem; color: var(--muted); font-size: .78rem;
 #tab-warmup:focus-visible ~ .tabs label[for="tab-warmup"],
 #tab-profiles:focus-visible ~ .tabs label[for="tab-profiles"],
 #tab-geelark:focus-visible ~ .tabs label[for="tab-geelark"],
+#tab-geelark-accounts:focus-visible ~ .tabs label[for="tab-geelark-accounts"],
 #tab-technical:focus-visible ~ .tabs label[for="tab-technical"] {
   outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .tabs .count { display: inline-block; margin-left: .4rem; padding: .05rem .4rem;
@@ -1924,6 +1927,81 @@ def _section_geelark(geelark: dict) -> str:
             + proxy_block + tag_block)
 
 
+def _section_geelark_accounts(geelark: dict) -> str:
+    """Per-account content overview, grouped by model folder -- distinct from
+    the infra-focused phones table above (status/ADB/proxy/tags). One
+    sub-table per `group.name`, matching how the fleet is actually run and
+    read (see _section_geelark_folders' migration-state version of the same
+    grouping).
+
+    Reel view counts are NOT wired up yet (2026-08-31) -- there is no read
+    mechanism for them. The column is present and explicitly labelled
+    "not connected" rather than omitted, so this doesn't read as forgotten
+    once the data exists to fill it in.
+    """
+    if not geelark.get("configured"):
+        return '<p class="empty">Needs Geelark credentials — see above.</p>'
+
+    rows = geelark.get("phones") or []
+    if not rows:
+        return '<p class="empty">No cloud phones on this Geelark account.</p>'
+
+    groups: dict = {}
+    for phone in rows:
+        groups.setdefault(phone.get("group") or "(no folder)", []).append(phone)
+
+    def _today_cell(phone) -> str:
+        posted = phone.get("posts_today_confirmed", 0)
+        failed = phone.get("posts_today_failed", 0)
+        uncertain = phone.get("posts_today_uncertain", 0)
+        if not (posted or failed or uncertain):
+            return '<span class="empty">—</span>'
+        parts = []
+        if posted:
+            parts.append(f'<span class="pill ok">{posted} ok</span>')
+        if failed:
+            parts.append(f'<span class="pill bad">{failed} failed</span>')
+        if uncertain:
+            parts.append(f'<span class="pill warn">{uncertain} unsicher</span>')
+        return " ".join(parts)
+
+    def _count_cell(value, exact) -> str:
+        if value is None or value < 0:
+            return '<span class="empty">—</span>'
+        text = f"{value:,}"
+        return f'<span class="mono">{"~" if not exact else ""}{text}</span>'
+
+    def _views_cell(value) -> str:
+        if value is None:
+            return '<span class="empty">— (noch nicht verbunden)</span>'
+        return f'<span class="mono">{value:,}</span>'
+
+    blocks = []
+    for group_name in sorted(groups):
+        phones = sorted(groups[group_name], key=lambda p: p["name"].lower())
+        body = "".join(
+            f"<tr><td class='mono'>{_e(phone['name'])}</td>"
+            f"<td class='mono'>{_e(phone.get('ig_handle')) or '<span class=\"empty\">—</span>'}</td>"
+            f"<td>{_count_cell(phone.get('ig_followers'), phone.get('ig_followers_exact'))}</td>"
+            f"<td>{_count_cell(phone.get('ig_posts'), phone.get('ig_posts_exact'))}</td>"
+            f"<td>{_today_cell(phone)}</td>"
+            f"<td>{_views_cell(phone.get('ig_reel_views'))}</td></tr>"
+            for phone in phones
+        )
+        blocks.append(
+            f'<h3>{_e(group_name)} <span class="sub">({len(phones)})</span></h3>'
+            f'<div class="scroll"><table>'
+            f'<tr><th>Phone</th><th>IG Handle</th><th>Follower</th><th>Posts</th>'
+            f'<th>Heute</th><th>Views</th></tr>{body}</table></div>'
+        )
+
+    return ('<p class="sub">Follower/Posts/Handle sind nur so frisch wie der '
+           'letzte Post des jeweiligen Accounts (kein eigener Scan). "Heute" '
+           'kommt aus dem Post-Ledger. Views sind noch nicht angebunden — '
+           'die Lese-Logik dafür existiert noch nicht.</p>'
+           + "".join(blocks))
+
+
 def _geelark_billing(billing: dict, counts: dict) -> str:
     """Money: what is left, and how many phones can run without spending it.
 
@@ -2950,6 +3028,7 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     <input type="radio" name="adbbot-tab" id="tab-warmup">
     <input type="radio" name="adbbot-tab" id="tab-profiles">
     <input type="radio" name="adbbot-tab" id="tab-geelark">
+    <input type="radio" name="adbbot-tab" id="tab-geelark-accounts">
     <input type="radio" name="adbbot-tab" id="tab-technical">
     <div class="tabs">
       <label for="tab-server">Server</label>
@@ -2959,6 +3038,7 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
       <label for="tab-warmup">Warm-up{warmup_badge}</label>
       <label for="tab-profiles">Profiles</label>
       <label for="tab-geelark">Geelark</label>
+      <label for="tab-geelark-accounts">Geelark Accounts</label>
       <label for="tab-technical">Technical</label>
     </div>
 
@@ -3041,6 +3121,11 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
 
       <h2>Geelark cloud phones</h2>
       {_section_geelark(data.get('geelark') or {})}
+    </section>
+
+    <section class="panel" id="panel-geelark-accounts">
+      <h2>Accounts by model folder</h2>
+      {_section_geelark_accounts(data.get('geelark') or {})}
     </section>
 
     <section class="panel" id="panel-technical">
