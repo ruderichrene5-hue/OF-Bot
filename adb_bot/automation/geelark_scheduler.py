@@ -334,7 +334,8 @@ if __name__ == "__main__":
     parser.add_argument("--human-verification", action="store_true",
                        help="work the human-verification-tagged fleet -- "
                             "spends real money (SMS numbers, captcha "
-                            "solves); not on any timer")
+                            "solves); also on adbbot-geelark-human-"
+                            "verification.timer, once daily at 10:00 Berlin")
     parser.add_argument("--concurrency", type=int, default=None,
                        help="override the default concurrency for this run")
     args = parser.parse_args()
