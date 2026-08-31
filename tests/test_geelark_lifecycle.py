@@ -452,6 +452,27 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_each_attempt_is_written_to_the_run_log(self):
+        """Explicit request 2026-08-31: everything needs to be saved so a
+        full day's run can be analyzed afterwards -- attempts, timing,
+        outcomes, not just the final result."""
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
+                  return_value={"aborted": False}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.submit",
+                  return_value={"submitted": True, "state": {}}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.verify_submitted",
+                  return_value={"success": True}), \
+             patch.object(lifecycle.run_log.RunLogStore, "record") as record:
+            lifecycle.run_active_posting_cycle(
+                "ph1", "Test 1", adb_client=object(), media_paths=["/tmp/x.mp4"])
+        record.assert_called_once()
+        out_arg, kwargs = record.call_args.args[0], record.call_args.kwargs
+        self.assertEqual(out_arg["id"], "ph1")
+        self.assertEqual(out_arg["attempt"], 1)
+        self.assertIn("started_at", kwargs)
+
     def test_media_path_posts_after_scrolling(self):
         with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
              patch.object(lifecycle, "stop_session"), \

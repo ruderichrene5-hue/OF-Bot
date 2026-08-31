@@ -47,6 +47,7 @@ from adb_bot.automation.flows.instagram import InstagramScrollFlow, InstagramWar
 from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
 from adb_bot.automation.flows import reel_verify
 from adb_bot.automation import account_stats
+from adb_bot.automation import run_log
 from adb_bot.automation.flows.verification import (
     RESULT_BANNED,
     RESULT_IN_REVIEW,
@@ -329,9 +330,15 @@ def run_active_posting_cycle(phone_id: str, name: str, adb_client, transport=Non
     transport = transport or GeelarkTransport()
     out = {}
     for attempt in range(1, max_attempts + 1):
+        attempt_started = time.time()
         out = _run_active_posting_cycle_once(phone_id, name, adb_client, transport,
                                              logger, media_paths, caption)
         out["attempt"] = attempt
+        try:
+            run_log.RunLogStore().record(out, started_at=attempt_started)
+        except Exception as exc:
+            if logger:
+                logger.info("geelark_lifecycle: run-log write failed for %s (%s)", name, exc)
         if out["result"] not in _RETRYABLE_RESULTS or attempt == max_attempts:
             return out
         if logger:
