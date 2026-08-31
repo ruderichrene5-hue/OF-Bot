@@ -305,21 +305,28 @@ class ActivePostingContentTest(unittest.TestCase):
 
 
 class NightSequenceTest(unittest.TestCase):
-    """Confirmed order 2026-08-30: in-review recheck first, then the regular
-    window pass -- one service, guaranteed order, not two independently
-    scheduled timers that might race."""
+    """Confirmed order, updated 2026-08-31: in-review recheck, then human
+    verification -- every profile tagged by then, including ones the recheck
+    or the day's Active_Posting just added -- then the regular window pass.
+    One service, guaranteed order, not independently scheduled timers that
+    might race, and human verification kept to this one nightly slot rather
+    than its own timer since it spends real money unattended."""
 
-    def test_recheck_runs_before_warmup(self):
+    def test_recheck_then_human_verification_then_warmup(self):
         order = []
         with patch.object(scheduler, "run_in_review_recheck_pass",
                          side_effect=lambda *a, **k: order.append("recheck") or []) as recheck, \
+             patch.object(scheduler, "run_human_verification_pass",
+                         side_effect=lambda *a, **k: order.append("human_verification") or []) as human, \
              patch.object(scheduler, "run_scheduled_pass",
                          side_effect=lambda *a, **k: order.append("warmup") or []) as warmup:
             result = scheduler.run_night_sequence(adb_client=object())
-        self.assertEqual(order, ["recheck", "warmup"])
+        self.assertEqual(order, ["recheck", "human_verification", "warmup"])
         recheck.assert_called_once()
+        human.assert_called_once()
         warmup.assert_called_once()
         self.assertIn("in_review_recheck", result)
+        self.assertIn("human_verification", result)
         self.assertIn("warmup", result)
 
 

@@ -204,10 +204,12 @@ def run_human_verification_pass(adb_client, transport: GeelarkTransport | None =
                                 ) -> list[dict]:
     """Works the `human verification`-tagged fleet, spending real money
     (SMS numbers, a captcha solve where needed) via
-    `geelark_lifecycle.run_human_verification_cycle`. Not on any timer yet
-    -- meant for a manual invocation until there's a balance/budget policy
-    for running it unattended (see the SMS provider's own balance check
-    before scheduling this)."""
+    `geelark_lifecycle.run_human_verification_cycle`. Called from
+    `run_night_sequence` (2026-08-31), between the in-review recheck and
+    Warmup -- kept to that one nightly slot rather than its own timer, so it
+    never runs unattended outside a time someone chose deliberately. Can
+    still be invoked directly (`--human-verification`) for a manual, one-off
+    run."""
     from adb_bot.automation.flows.verification import TAG_HUMAN_VERIFICATION
 
     transport = transport or GeelarkTransport()
@@ -223,21 +225,29 @@ def run_human_verification_pass(adb_client, transport: GeelarkTransport | None =
 def run_night_sequence(adb_client, transport: GeelarkTransport | None = None,
                        logger=None, concurrency: int = CONCURRENCY,
                        now: datetime | None = None) -> dict:
-    """The confirmed nightly order, 2026-08-30: in-review recheck first (any
-    profile it clears joins the Warmup/Active_Posting worklist the very same
-    run), then the regular window pass -- which resolves to Warmup on its
-    own via `active_tag_for_now`, since this only runs at night.
+    """The confirmed nightly order, updated 2026-08-31: in-review recheck
+    first (any profile it clears joins the human-verification or Warmup
+    worklist the very same run), then human verification -- every profile
+    tagged `human verification` at this point, including ones the recheck
+    step or the day's Active_Posting just added -- and only then Warmup,
+    which resolves on its own via `active_tag_for_now` since this only runs
+    at night.
 
-    One service, run sequentially rather than two independently-scheduled
-    timers, so "recheck, then warmup" is guaranteed order rather than two
-    units racing close together.
+    One service, run sequentially rather than independently-scheduled
+    timers, so the order is guaranteed rather than units racing close
+    together -- and so human verification (spends real money: SMS numbers,
+    captcha solves) never runs unattended outside this one nightly slot.
     """
     transport = transport or GeelarkTransport()
     review_results = run_in_review_recheck_pass(adb_client, transport=transport,
                                                 logger=logger, concurrency=concurrency)
+    human_verification_results = run_human_verification_pass(
+        adb_client, transport=transport, logger=logger, concurrency=concurrency)
     warmup_results = run_scheduled_pass(adb_client, transport=transport, logger=logger,
                                         concurrency=concurrency, now=now)
-    return {"in_review_recheck": review_results, "warmup": warmup_results}
+    return {"in_review_recheck": review_results,
+           "human_verification": human_verification_results,
+           "warmup": warmup_results}
 
 
 def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
@@ -334,8 +344,9 @@ if __name__ == "__main__":
     parser.add_argument("--human-verification", action="store_true",
                        help="work the human-verification-tagged fleet -- "
                             "spends real money (SMS numbers, captcha "
-                            "solves); also on adbbot-geelark-human-"
-                            "verification.timer, once daily at 10:00 Berlin")
+                            "solves); runs automatically as part of "
+                            "--night-sequence, this flag is for a manual "
+                            "one-off run")
     parser.add_argument("--concurrency", type=int, default=None,
                        help="override the default concurrency for this run")
     args = parser.parse_args()
@@ -346,7 +357,8 @@ if __name__ == "__main__":
     if args.night_sequence:
         print(f"night sequence: recheck -> warmup ({datetime.now(BERLIN).strftime('%H:%M %Z')})")
         combined = run_night_sequence(adb_client, logger=logger)
-        results = combined["in_review_recheck"] + combined["warmup"]
+        results = (combined["in_review_recheck"] + combined["human_verification"]
+                  + combined["warmup"])
     elif args.in_review_recheck:
         print(f"in-review recheck ({datetime.now(BERLIN).strftime('%H:%M %Z')})")
         results = run_in_review_recheck_pass(adb_client, logger=logger)
