@@ -28,6 +28,7 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from adb_bot.automation import post_ledger
 from adb_bot.automation.spoof_pipeline import (
     VIDEO_EXTS,
     RawVideo,
@@ -164,23 +165,63 @@ def spoof_for_handle(video: RawVideo, handle: str, client: DriveClient,
 def get_post_media(model: str, handle: str, client: DriveClient | None = None,
                    spoofer_python: str | None = None, spoofer_root: str | None = None,
                    root_folder_id: str | None = None, out_root: str = DEFAULT_SPOOF_OUT_ROOT,
-                   logger=None) -> SpoofedContent | None:
+                   logger=None, ledger: post_ledger.PostLedger | None = None,
+                   exclude_names: set[str] | None = None
+                   ) -> SpoofedContent | None:
     """The one call `geelark_lifecycle.run_active_posting_cycle`'s caller
     needs: today's content for `model`, spoofed fresh for `handle`, or None
-    if there's nothing to post today (no date folder, empty folder, or a
-    download/spoof failure) -- always a valid "skip today" outcome, never
-    an exception a scheduling loop has to catch."""
+    if there's nothing to post today (no date folder, empty folder, every
+    video already posted to this handle, or a download/spoof failure) --
+    always a valid "skip today" outcome, never an exception a scheduling
+    loop has to catch.
+
+    Walks today's videos in a fixed order (by name, not random) and hands
+    back the first one `handle` hasn't already posted -- checked via the
+    same post_ledger the upload flow itself consults, so this agrees with
+    what would actually be allowed to post rather than guessing. Changed
+    2026-08-31: a run picking randomly with replacement meant a
+    several-times-a-day posting cadence mostly re-picked a video already
+    posted earlier that day, which the ledger would then silently refuse at
+    upload time -- a wasted launch that looked like "no content" without
+    saying why. With fewer videos in the folder than calls in a day, this
+    now runs dry and returns None once every video for today is used, rather
+    than repeating one -- fewer posts that day, never a duplicate.
+
+    `exclude_names` additionally skips videos by name regardless of the
+    ledger -- for a caller building a multi-post batch for one launch
+    (`geelark_scheduler`'s POSTS_PER_LAUNCH), where the earlier picks in the
+    same batch haven't been posted (and so aren't in the ledger) yet.
+    """
     client = client or DriveClient(_env("GOOGLE_SERVICE_ACCOUNT_JSON"))
+    exclude_names = exclude_names or set()
     videos = today_raw_videos(model, client=client, root_folder_id=root_folder_id)
+    videos = [v for v in videos if v.name not in exclude_names]
     if not videos:
         if logger:
             logger.info("geelark_content: no content for %s today; skipping", model)
         return None
 
-    import random
-    video = random.choice(videos)
-    return spoof_for_handle(
-        video, handle, client,
-        spoofer_python or _env("SPOOFER_PYTHON"),
-        spoofer_root or _env("SPOOFER_ROOT"),
-        out_root=out_root, logger=logger)
+    ledger = ledger or post_ledger.PostLedger()
+    spoofer_python = spoofer_python or _env("SPOOFER_PYTHON")
+    spoofer_root = spoofer_root or _env("SPOOFER_ROOT")
+
+    for video in sorted(videos, key=lambda v: v.name):
+        spoofed = spoof_for_handle(video, handle, client, spoofer_python, spoofer_root,
+                                   out_root=out_root, logger=logger)
+        if spoofed is None:
+            continue
+        if ledger.already_shared(handle, spoofed.path):
+            if logger:
+                logger.info("geelark_content: %s already posted to %s today; trying the "
+                           "next video", video.name, handle)
+            try:
+                Path(spoofed.path).unlink()
+            except OSError:
+                pass
+            continue
+        return spoofed
+
+    if logger:
+        logger.info("geelark_content: every video for %s today is already posted to %s; "
+                   "skipping this cycle", model, handle)
+    return None

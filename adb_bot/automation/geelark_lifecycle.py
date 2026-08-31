@@ -29,8 +29,12 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import tempfile
 import time
 from pathlib import Path
+
+import requests
 
 from adb_bot.automation.flows.instagram import InstagramScrollFlow, InstagramWarmUpDay1Flow
 # The u2 flow, not the legacy dump/OCR one: only this one carries the
@@ -42,14 +46,20 @@ from adb_bot.automation.flows.instagram import InstagramScrollFlow, InstagramWar
 # scroll flows use on this fleet, so the dependency is already proven here.
 from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
 from adb_bot.automation.flows.verification import (
+    RESULT_BANNED,
+    RESULT_IN_REVIEW,
+    RESULT_SIGNED_OUT,
+    RESULT_SOLVED,
     TAG_BANNED,
     TAG_HUMAN_VERIFICATION,
     TAG_IN_REVIEW,
     TAG_LOGGED_OUT,
+    run_verification,
     simplified_status_tag,
 )
 from adb_bot.automation.flows.verification_driver import AdbChallengeDriver
 from adb_bot.automation.verification_probe import _open_instagram
+from adb_bot.clients.sms.router import build_router
 from adb_bot.automation.workflow import connect_with_retries
 from adb_bot.clients.geelark.ip_rotation import load_reboot_config
 from adb_bot.clients.geelark.phones import GeelarkPhoneClient
@@ -288,7 +298,7 @@ def _run_warmup_cycle_once(phone_id: str, name: str, adb_client, transport,
 
 
 def run_active_posting_cycle(phone_id: str, name: str, adb_client, transport=None,
-                             logger=None, media_path: str | None = None,
+                             logger=None, media_paths: list[str] | None = None,
                              caption: str | None = None,
                              max_attempts: int = _DEFAULT_MAX_CYCLE_ATTEMPTS) -> dict:
     """One Active_Posting pass, relaunched up to `max_attempts` times on an
@@ -300,15 +310,25 @@ def run_active_posting_cycle(phone_id: str, name: str, adb_client, transport=Non
     that clip regardless, and retrying can't resolve the uncertainty any
     faster than just waiting could.
 
-    Short scroll, then a post if `media_path` is given. The tag is otherwise
-    permanent once a profile reaches it -- the one exception is a challenge
-    screen showing up before this cycle even starts, which pulls the profile
-    straight out of Active_Posting instead of scrolling/posting through it."""
+    `media_paths` is a list, not a single path (changed 2026-08-31): the
+    launch itself (GeeLark cold boot + IP rotation + ADB connect) is a fixed
+    ~90s cost paid once per launch, so posting N clips in one already-open
+    session instead of N separate launches saves (N-1) x that cost. Each
+    entry gets its own scroll immediately before its post -- scrolling is
+    still per-post, only the launch is shared. A retry relaunches the whole
+    batch; anything already posted is safe because the post_ledger refuses a
+    second Share on the same clip regardless of how it gets asked again.
+    With no content for the day (`media_paths` empty or None) this cycle
+    does neither scroll nor post and reports "no_content" (changed
+    2026-08-31, was scroll-always). The tag is otherwise permanent once a
+    profile reaches it -- the one exception is a challenge screen showing up
+    before this cycle even starts, which pulls the profile straight out of
+    Active_Posting instead of scrolling/posting through it."""
     transport = transport or GeelarkTransport()
     out = {}
     for attempt in range(1, max_attempts + 1):
         out = _run_active_posting_cycle_once(phone_id, name, adb_client, transport,
-                                             logger, media_path, caption)
+                                             logger, media_paths, caption)
         out["attempt"] = attempt
         if out["result"] not in _RETRYABLE_RESULTS or attempt == max_attempts:
             return out
@@ -320,9 +340,11 @@ def run_active_posting_cycle(phone_id: str, name: str, adb_client, transport=Non
 
 
 def _run_active_posting_cycle_once(phone_id: str, name: str, adb_client, transport,
-                                   logger, media_path: str | None,
+                                   logger, media_paths: list[str] | None,
                                    caption: str | None) -> dict:
-    out = {"id": phone_id, "name": name, "at": time.time(), "cycle": "active_posting"}
+    media_paths = list(media_paths or [])
+    out = {"id": phone_id, "name": name, "at": time.time(), "cycle": "active_posting",
+          "posts": []}
     session = None
     try:
         session, target = _launch(phone_id, transport, logger, adb_client)
@@ -336,30 +358,44 @@ def _run_active_posting_cycle_once(phone_id: str, name: str, adb_client, transpo
             out["result"] = f"aborted_{blocked.replace(' ', '_')}"
             return out
 
-        scroll_result = InstagramScrollFlow(scroll_seconds=ACTIVE_POSTING_SCROLL_SECONDS).run(
-            session.profile, adb_client=adb_client, logger=logger)
-        out["scroll_result"] = scroll_result
+        if not media_paths:
+            out["result"] = "no_content"
+            return out
 
-        if media_path:
+        # Scroll only runs ahead of an actual post now (changed 2026-08-31,
+        # was unconditional) -- with several posts/day/profile targeted and
+        # only 4 real proxy ports, a fixed 40s scroll on every cycle --
+        # including the ones with nothing to post -- was most of the day's
+        # posting budget spent on nothing.
+        worst = "posted"   # priority for the retry decision: post_failed > post_uncertain > posted
+        for media_path in media_paths:
+            scroll_result = InstagramScrollFlow(scroll_seconds=ACTIVE_POSTING_SCROLL_SECONDS).run(
+                session.profile, adb_client=adb_client, logger=logger)
+
             session.profile.media_path = media_path
             if caption is not None:
                 session.profile.caption = caption
             post_result = InstagramReelUploadU2Flow().run(
                 session.profile, adb_client=adb_client, logger=logger)
-            out["post_result"] = post_result
             if post_result.get("success"):
-                out["result"] = "posted"
+                post_outcome = "posted"
             elif post_result.get("uncertain"):
                 # Share was tapped but nothing proved it landed (or failed) --
                 # a real duplicate-post risk. The flow's own post_ledger
                 # already blocks a second Share tap for this exact clip, but
                 # a retry still can't resolve the uncertainty any faster than
                 # waiting can, so this is deliberately not retried.
-                out["result"] = "post_uncertain"
+                post_outcome = "post_uncertain"
             else:
-                out["result"] = "post_failed"
-        else:
-            out["result"] = "scrolled_only"
+                post_outcome = "post_failed"
+            out["posts"].append({"media_path": media_path, "result": post_outcome,
+                                "scroll_result": scroll_result, "post_result": post_result})
+            if post_outcome == "post_failed":
+                worst = "post_failed"
+            elif post_outcome == "post_uncertain" and worst != "post_failed":
+                worst = "post_uncertain"
+
+        out["result"] = worst
     except Exception as exc:
         out["result"] = "error"
         out["error"] = str(exc)
@@ -433,6 +469,147 @@ def run_in_review_recheck_cycle(phone_id: str, name: str, adb_client, transport=
             logger.exception("geelark_lifecycle: %s cycle raised for %s (%s)",
                             out.get("cycle"), name, exc)
     finally:
+        if session is not None:
+            try:
+                stop_session(session, logger=logger)
+            except Exception as exc:
+                if logger:
+                    logger.warning("geelark_lifecycle: stop_session failed for %s (%s)",
+                                   name, exc)
+    return out
+
+
+# thispersondoesnotexist.com serves an HTML page to a bare GET (a naive
+# request saves a 4.5KB text/html file that looks like a broken image); a
+# browser User-Agent plus a same-site Referer is what actually gets the
+# JPEG. Confirmed 2026-08-28 across 11 real profiles, Meta APPROVED the
+# result -- see the "geelark-selfie-verification-ai-face" memory.
+_AI_FACE_URL = "https://thispersondoesnotexist.com/random-person.jpeg"
+_AI_FACE_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/128.0 Safari/537.36"),
+    "Referer": "https://thispersondoesnotexist.com/",
+}
+
+
+def _fetch_ai_face(out_dir: Path, logger=None) -> str | None:
+    """A fresh (never reused) AI-generated face, downscaled and ready for
+    `AdbChallengeDriver.upload_photo`. `None` on any failure -- a photo
+    challenge that can't get a face is a legitimate `needs_human` outcome,
+    never an exception a caller has to catch.
+
+    The downscale is not cosmetic: a straight-from-the-source ~508KB JPEG
+    left Instagram's Submit button spinning 4+ minutes and never completed
+    (confirmed 2026-08-28); the same face scaled to 720px width / ~38KB
+    submitted in seconds. Every call fetches a new face -- reusing one
+    across accounts is an obvious link between them.
+    """
+    try:
+        response = requests.get(_AI_FACE_URL, headers=_AI_FACE_HEADERS, timeout=15)
+        response.raise_for_status()
+    except Exception as exc:
+        if logger:
+            logger.warning("geelark_lifecycle: AI face fetch failed (%s)", exc)
+        return None
+
+    raw_path = out_dir / "face_raw.jpg"
+    raw_path.write_bytes(response.content)
+    small_path = out_dir / "face.jpg"
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(raw_path), "-vf", "scale=720:-1", "-q:v", "4",
+             str(small_path)],
+            capture_output=True, timeout=30)
+    except Exception as exc:
+        if logger:
+            logger.warning("geelark_lifecycle: AI face downscale failed (%s)", exc)
+        return None
+    if result.returncode != 0 or not small_path.exists():
+        if logger:
+            logger.warning("geelark_lifecycle: ffmpeg downscale failed (%s)",
+                           result.stderr.decode(errors="replace")[-300:])
+        return None
+    return str(small_path)
+
+
+def run_human_verification_cycle(phone_id: str, name: str, adb_client, transport=None,
+                                 logger=None) -> dict:
+    """One real attempt at clearing a `human verification`-tagged profile:
+    launches the phone, drives whatever challenge chain Instagram shows
+    (phone number, SMS code, image captcha, photo) via `run_verification`,
+    and retags on a conclusive outcome.
+
+    Reuses the MLX verification stack essentially as-is -- `run_verification`
+    only needs a `ChallengeDriver` (ADB-generic; `AdbChallengeDriver` already
+    is one) and an `SmsRouter` (provider-agnostic), neither of which has any
+    MultiLogin- or Airtable-specific plumbing baked in. Money is spent here
+    (SMS numbers, possibly a captcha solve), so unlike the other cycles this
+    one is deliberately NOT wrapped in the generic launch-retry -- a blind
+    relaunch-and-retry on an infrastructure hiccup could rent a second set of
+    numbers for a run that never needed the first set refunded. If the phone
+    never comes up over ADB, no number is ever rented.
+
+    * `solved` -> Active_Posting
+    * `banned` -> banned (matches _check_for_challenge_and_abort's tag)
+    * `signed_out` -> logged out (matches _check_for_challenge_and_abort's tag)
+    * `needs_human` / `stuck` / `failed` -> tag stays exactly where it is;
+      this profile needs a person, or another attempt later
+    """
+    transport = transport or GeelarkTransport()
+    out = {"id": phone_id, "name": name, "at": time.time(), "cycle": "human_verification"}
+    session = None
+    face_dir = None
+    try:
+        session, target = _launch(phone_id, transport, logger, adb_client)
+        if not target:
+            out["result"] = "could_not_reach_over_adb"
+            return out
+
+        face_dir = Path(tempfile.mkdtemp(prefix="geelark-ai-face-"))
+        photo_source_path = _fetch_ai_face(face_dir, logger=logger) or ""
+
+        driver = AdbChallengeDriver(target, adb_client, logger=logger,
+                                    photo_source_path=photo_source_path)
+        router = build_router(logger=logger)
+        result = run_verification(driver, router, logger=logger)
+        out["status"] = result.status
+        out["detail"] = result.detail
+        out["numbers_used"] = result.numbers_used
+
+        if result.status == RESULT_SOLVED:
+            _retag(phone_id, transport, remove=TAG_HUMAN_VERIFICATION,
+                  add=TAG_ACTIVE_POSTING, logger=logger)
+            out["result"] = "solved"
+        elif result.status == RESULT_BANNED:
+            _retag(phone_id, transport, remove=TAG_HUMAN_VERIFICATION,
+                  add=TAG_BANNED, logger=logger)
+            out["result"] = "banned"
+        elif result.status == RESULT_SIGNED_OUT:
+            _retag(phone_id, transport, remove=TAG_HUMAN_VERIFICATION,
+                  add=TAG_LOGGED_OUT, logger=logger)
+            out["result"] = "signed_out"
+        elif result.status == RESULT_IN_REVIEW:
+            # An appeal is already submitted and waiting on Meta's own
+            # review clock -- not human verification (nothing for a person
+            # to do either) and not resolved yet. The existing daily
+            # in-review recheck (run_in_review_recheck_cycle) already knows
+            # how to watch this tag and move it to Active_Posting once
+            # Instagram clears it on its own.
+            _retag(phone_id, transport, remove=TAG_HUMAN_VERIFICATION,
+                  add=TAG_IN_REVIEW, logger=logger)
+            out["result"] = "in_review"
+        else:
+            out["result"] = result.status
+    except Exception as exc:
+        out["result"] = "error"
+        out["error"] = str(exc)
+        if logger:
+            logger.exception("geelark_lifecycle: %s cycle raised for %s (%s)",
+                            out.get("cycle"), name, exc)
+    finally:
+        if face_dir is not None:
+            import shutil
+            shutil.rmtree(face_dir, ignore_errors=True)
         if session is not None:
             try:
                 stop_session(session, logger=logger)

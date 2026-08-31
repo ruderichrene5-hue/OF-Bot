@@ -52,13 +52,19 @@ DIALLING_CODES = {
 
 # Where numbers are rented from unless a caller says otherwise.
 #
-# Switched to US 2026-08-30 (was DE) on explicit instruction -- confirmed a US
-# number is received regardless of the challenge screen's country picker. The
-# switch is also a real efficacy win on 5sim: DE Instagram pools were reading
-# ~0-7% success, vs 72.7% on the US `virtual28` pool, at the same $0.30/number.
+# Reverted to DE 2026-08-31 (was briefly switched to US on 2026-08-30). 5sim's
+# own "Can't receive SMS?" guidance says the rented number's country should
+# match the IP address' country -- our whole fleet runs on German mobile
+# proxies (that's the persona: German device, German timezone), so a US
+# number was never a same-country match. The 72.7% US success figure that
+# motivated the earlier switch was 5sim's own aggregate across everyone
+# renting US numbers, most of whom presumably verify from US IPs; live on
+# this fleet a US number went 0/5 in one session (2026-08-30/31,
+# ph 635169233503191254) after correctly requesting SMS delivery each time --
+# consistent with the country mismatch, not a bad pool.
 #
 # Overridable with SMS_COUNTRY for a one-off.
-DEFAULT_COUNTRY = os.environ.get("SMS_COUNTRY", "").strip().upper() or COUNTRY_US
+DEFAULT_COUNTRY = os.environ.get("SMS_COUNTRY", "").strip().upper() or COUNTRY_DE
 
 
 class SmsProviderError(RuntimeError):

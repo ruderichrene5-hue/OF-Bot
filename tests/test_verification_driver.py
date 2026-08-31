@@ -329,6 +329,55 @@ class PhotoTest(unittest.TestCase):
         # the photo cell, then Submit.
         self.assertEqual(len(adb.taps), 6)
 
+    def test_the_android_13_plus_three_button_permission_dialog_is_handled(self):
+        """Confirmed live 2026-08-31 on Android 16: the old two-button
+        ALLOW/DON'T ALLOW dialog this driver was written against does not
+        exist there -- the real labels are 'ALLOW LIMITED ACCESS', 'ALLOW
+        ALL', "DON'T ALLOW". Before this fix `_find_exact(("ALLOW",
+        "Allow"))` never matched any of the three, so the code assumed the
+        dialog was not there and moved on to a picker still sitting blocked
+        behind it -- every real run hit 'no photo cell found in the picker'
+        with those same three labels, never actually granting access."""
+        import itertools
+
+        sheet_root = _root(_button("Choose From Gallery"))
+        allow_root = _root(_button("ALLOW LIMITED ACCESS"),
+                           _button("ALLOW ALL"), _button("DON'T ALLOW"))
+        picker_root = _root(
+            '<node class="android.widget.ImageView" bounds="[0,300][300,600]" '
+            'content-desc="Photo, taken today"/>',
+        )
+        # sheet_root twice -- the post-"Upload photo instead" dump (checked
+        # for the optional "Upload a photo" screen, absent here, so skipped)
+        # and then the "Choose From Gallery" search loop's own dump, which
+        # needs to actually find it -- then allow_root twice: the tap-retry
+        # loop's own check (exits immediately, this screen has no "Choose
+        # From Gallery" text) and the permission-search loop's fresh dump,
+        # same shape as the working two-button case above. A generous repeat
+        # tail after that -- the point of this test is that ALLOW ALL gets
+        # tapped at all, not the exact dump count past it (that belongs to
+        # the other PhotoTest cases).
+        dumps = itertools.chain([sheet_root, sheet_root, allow_root, allow_root],
+                                itertools.repeat(picker_root))
+        adb = FakeAdb()
+        rec = Recording()
+        with mock.patch.object(ig, "_adb_push_media_to_device",
+                               return_value=True), \
+             mock.patch.object(ig, "_adb_verify_remote_media_exists",
+                               return_value=True), \
+             mock.patch.object(ig, "_adb_verify_remote_media_matches_local",
+                               return_value=True), \
+             mock.patch.object(ig, "_adb_wait_for_media_store_index",
+                               return_value=True), \
+             mock.patch.object(ig, "_adb_capture_ui_dump",
+                               side_effect=lambda *a, **kw: next(dumps)):
+            driver = self._photo_driver(adb=adb, logger=rec)
+
+            self.assertTrue(driver.upload_photo())
+        matched = [line for line in rec.lines if "matched button" in line[1]]
+        self.assertTrue(any("ALLOW ALL" in line[1] for line in matched),
+                        f"ALLOW ALL was never matched/tapped; log: {rec.lines}")
+
     def test_the_permission_dialog_is_skipped_when_already_granted(self):
         """A phone that already granted photo access on an earlier attempt
         must not wait on a dialog that is never going to appear -- the Allow

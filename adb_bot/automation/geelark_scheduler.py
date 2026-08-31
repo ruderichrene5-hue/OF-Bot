@@ -3,7 +3,8 @@
 Confirmed schedule 2026-08-29:
 
 * 06:00-23:00 Europe/Berlin -- only `Active_Posting`-tagged profiles run,
-  each a short scroll then a post (`geelark_lifecycle.run_active_posting_cycle`).
+  each up to `POSTS_PER_LAUNCH` posts (a scroll before each) in one launch
+  (`geelark_lifecycle.run_active_posting_cycle`).
 * 23:00-06:00 Europe/Berlin -- only `Warmup`-tagged profiles run, each one
   10-minute pass, then the tag flips to `Active_Posting` on success
   (`geelark_lifecycle.run_warmup_cycle`). Already-`Active_Posting` profiles
@@ -20,7 +21,8 @@ from __future__ import annotations
 
 import queue
 import threading
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -32,6 +34,21 @@ WARMUP_WINDOW_START_HOUR = 23    # inclusive
 WARMUP_WINDOW_END_HOUR = 6       # exclusive
 
 CONCURRENCY = 4    # one per real modem
+
+# Posts per launch, not per day. Changed 2026-08-31: the launch itself (cold
+# boot + IP rotation + ADB connect) is a fixed ~90s cost regardless of how
+# many clips get posted once it's up, so batching 2 posts into one launch
+# instead of running two separate launches saves that ~90s every other post.
+# Scrolling stays per-post (see geelark_lifecycle.run_active_posting_cycle) --
+# only the launch is shared.
+POSTS_PER_LAUNCH = 2
+
+# How long before the 23:00 Warmup window an Active_Posting pass must stop
+# claiming new profiles. Not zero: the last profile claimed just before the
+# deadline still needs time to actually finish (one cycle is ~6 min at
+# POSTS_PER_LAUNCH=2), so this is a floor under the deadline, not the
+# deadline itself -- see _active_posting_deadline.
+NIGHT_WINDOW_SAFETY_BUFFER_SECONDS = 15 * 60
 
 
 def in_warmup_window(now: datetime | None = None) -> bool:
@@ -46,11 +63,67 @@ def active_tag_for_now(now: datetime | None = None) -> str:
     return lifecycle.TAG_WARMUP if in_warmup_window(now) else lifecycle.TAG_ACTIVE_POSTING
 
 
-def run_queue(worklist: list[dict], work_fn, concurrency: int = CONCURRENCY) -> list[dict]:
+def _next_night_window_start(now: datetime) -> datetime:
+    """The next 23:00 Berlin at or after `now` -- today's if `now` is still
+    before it, otherwise tomorrow's."""
+    berlin_now = now.astimezone(BERLIN)
+    candidate = berlin_now.replace(hour=WARMUP_WINDOW_START_HOUR, minute=0,
+                                   second=0, microsecond=0)
+    if candidate <= berlin_now:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def active_posting_budget_seconds(now: datetime | None = None) -> float:
+    """How many seconds an Active_Posting pass starting at `now` has before
+    it must stop claiming new profiles -- `NIGHT_WINDOW_SAFETY_BUFFER_SECONDS`
+    before the next 23:00 Berlin. A duration, not an absolute deadline, on
+    purpose: `run_queue` turns it into a real deadline by adding it to its
+    own wall-clock start time, so a caller testing with a fake `now` (see
+    `tests/test_geelark_scheduler.py`) gets a budget many hours long instead
+    of one measured against a `now` the real clock has no relationship to.
+
+    This is what makes the fleet's size a visible, self-limiting problem
+    instead of a silent one as more profiles are added over time: three
+    fixed fire times (or six, or however many later) never by themselves
+    guarantee a pass finishes before the next one -- only checking against
+    the actual clock does, at any fleet size, without needing to keep
+    re-tuning fire times or a systemd RuntimeMaxSec by hand as the fleet
+    grows. See run_queue's deadline handling for what happens when a pass
+    doesn't fit -- it stops cleanly and logs how much of the worklist was
+    reached, rather than getting killed mid-cycle.
+    """
+    now = now or datetime.now(BERLIN)
+    deadline_dt = _next_night_window_start(now) - timedelta(
+        seconds=NIGHT_WINDOW_SAFETY_BUFFER_SECONDS)
+    return (deadline_dt - now).total_seconds()
+
+
+def run_queue(worklist: list[dict], work_fn, concurrency: int = CONCURRENCY,
+             budget_seconds: float | None = None, logger=None) -> list[dict]:
     """Keeps exactly `concurrency` cycles running at once, refilling from
     `worklist` (Geelark phone rows, each needs "id" and "serialName") as
     slots free up. `work_fn(phone_id, name) -> dict` is one full cycle
-    (warmup or active-posting) for one phone."""
+    (warmup or active-posting) for one phone.
+
+    `budget_seconds`, if given, is turned into a real deadline right here
+    (`time.time() + budget_seconds`) and checked only before a worker claims
+    its *next* item -- never mid-cycle, so a phone already launched always
+    runs to completion and is always closed. Taking a duration rather than
+    an absolute deadline is what keeps this testable with a fake `now`
+    upstream (`geelark_scheduler.active_posting_budget_seconds`): the
+    duration is still meaningful however that `now` was constructed, whereas
+    an absolute deadline computed from a fake `now` would be compared
+    against the real wall clock and could already be in the past. This is
+    also what keeps the fleet's size from being a silent problem: as long as
+    each day-posting pass logs how much of the worklist it actually reached,
+    a fleet that has outgrown its window shows up as "cut off at N/M" in the
+    log rather than an external kill leaving a phone open mid-post. Added
+    2026-08-31 -- an external RuntimeMaxSec kill (systemd's blunt tool for
+    "must not run into the night window") can land mid-launch or mid-post.
+    """
+    deadline = time.time() + budget_seconds if budget_seconds is not None else None
+
     pending: queue.Queue = queue.Queue()
     for row in worklist:
         pending.put(row)
@@ -60,6 +133,8 @@ def run_queue(worklist: list[dict], work_fn, concurrency: int = CONCURRENCY) -> 
 
     def worker():
         while True:
+            if deadline is not None and time.time() >= deadline:
+                return
             try:
                 row = pending.get_nowait()
             except queue.Empty:
@@ -77,6 +152,15 @@ def run_queue(worklist: list[dict], work_fn, concurrency: int = CONCURRENCY) -> 
         t.start()
     for t in threads:
         t.join()
+
+    if deadline is not None and not pending.empty():
+        remaining = pending.qsize()
+        if logger:
+            logger.warning(
+                "geelark_scheduler: deadline reached with %s/%s profiles still "
+                "unprocessed -- the fleet no longer fits its window at the "
+                "current size/concurrency; consider a earlier start, a shorter "
+                "POSTS_PER_LAUNCH, or more real proxies", remaining, len(worklist))
 
     return results
 
@@ -101,6 +185,36 @@ def run_in_review_recheck_pass(adb_client, transport: GeelarkTransport | None = 
 
     def work_fn(phone_id, name):
         return lifecycle.run_in_review_recheck_cycle(
+            phone_id, name, adb_client, transport=transport, logger=logger)
+
+    return run_queue(worklist, work_fn, concurrency=concurrency)
+
+
+# Not CONCURRENCY (4) by default -- this pass rents real SMS numbers and
+# possibly pays for a captcha solve per profile, and it is meant to run
+# *alongside* Warmup/Active_Posting on the same 4 real proxy ports rather
+# than claim all of them. 2026-08-31 explicit instruction: 2 profiles
+# warmup, 2 profiles human verification, at the same time.
+HUMAN_VERIFICATION_CONCURRENCY = 2
+
+
+def run_human_verification_pass(adb_client, transport: GeelarkTransport | None = None,
+                                logger=None,
+                                concurrency: int = HUMAN_VERIFICATION_CONCURRENCY
+                                ) -> list[dict]:
+    """Works the `human verification`-tagged fleet, spending real money
+    (SMS numbers, a captcha solve where needed) via
+    `geelark_lifecycle.run_human_verification_cycle`. Not on any timer yet
+    -- meant for a manual invocation until there's a balance/budget policy
+    for running it unattended (see the SMS provider's own balance check
+    before scheduling this)."""
+    from adb_bot.automation.flows.verification import TAG_HUMAN_VERIFICATION
+
+    transport = transport or GeelarkTransport()
+    worklist = lifecycle.phones_by_tag(TAG_HUMAN_VERIFICATION, transport=transport)
+
+    def work_fn(phone_id, name):
+        return lifecycle.run_human_verification_cycle(
             phone_id, name, adb_client, transport=transport, logger=logger)
 
     return run_queue(worklist, work_fn, concurrency=concurrency)
@@ -132,24 +246,45 @@ def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
     """One pass: pick the tag for the current time, list its profiles, run
     them 4-at-a-time through the matching lifecycle cycle.
 
+    Active_Posting stops claiming new profiles `NIGHT_WINDOW_SAFETY_BUFFER_SECONDS`
+    before the next 23:00 Berlin (`active_posting_deadline`), whatever fire
+    time this pass started at -- a phone already launched always finishes and
+    closes normally, only the *next* claim is refused past the deadline. This
+    is deliberately a deadline the code itself enforces, not just a systemd
+    RuntimeMaxSec: an external kill can land mid-launch or mid-post, and
+    neither fixed fire times nor a fixed kill timeout stay correct as the
+    fleet grows -- the clock check does, at any size, and logs "N/M reached"
+    when it doesn't fit rather than failing silently.
+
     Active_Posting resolves its own content per phone (today's Drive date
     folder for that phone's model -- geelark_content.get_post_media, no
     caption per the confirmed 2026-08-30 decision) rather than taking a
     single media_path for the whole pass, since different phones belong to
-    different models. No content today for a phone's model means that phone
-    just gets the pre-post scroll with no post -- not an error, not a
-    fallback to older content. The spoofed variant is deleted after the
-    cycle either way; nothing else tracks or cleans these up.
+    different models. Up to `POSTS_PER_LAUNCH` distinct videos are resolved
+    per phone per pass (changed 2026-08-31, was one) and posted in the same
+    launch -- get_post_media's own dedup (by name, checked against both the
+    post_ledger and this batch's own earlier picks) means a model with fewer
+    videos than POSTS_PER_LAUNCH today just gets a shorter batch, never a
+    repeat. No content at all today for a phone's model means that phone is
+    launched, checked for a challenge, and closed again with neither a
+    scroll nor a post (changed 2026-08-31 -- was scroll-with-no-post; a fixed
+    40s scroll on every cycle, including the ones with nothing to post, was
+    costing ~10 of the day's 17 posting hours once the target moved to
+    several posts/profile/day). Not an error, not a fallback to older
+    content. Every spoofed variant in the batch is deleted after the cycle
+    either way; nothing else tracks or cleans these up.
     """
     transport = transport or GeelarkTransport()
     tag = active_tag_for_now(now)
     worklist = lifecycle.phones_by_tag(tag, transport=transport)
+    budget_seconds = None
 
     if tag == lifecycle.TAG_WARMUP:
         def work_fn(phone_id, name):
             return lifecycle.run_warmup_cycle(phone_id, name, adb_client,
                                               transport=transport, logger=logger)
     else:
+        budget_seconds = active_posting_budget_seconds(now)
         model_by_id = {str(row.get("id")): (row.get("group") or {}).get("name")
                       for row in worklist}
 
@@ -157,23 +292,29 @@ def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
             from adb_bot.automation import geelark_content
 
             model = model_by_id.get(phone_id)
-            media_path = None
-            spoofed = None
+            spoofed_batch = []
             if model:
-                spoofed = geelark_content.get_post_media(model, phone_id, logger=logger)
-                media_path = spoofed.path if spoofed else None
+                excluded = set()
+                for _ in range(POSTS_PER_LAUNCH):
+                    spoofed = geelark_content.get_post_media(
+                        model, phone_id, logger=logger, exclude_names=excluded)
+                    if spoofed is None:
+                        break
+                    spoofed_batch.append(spoofed)
+                    excluded.add(spoofed.raw_video.name)
             try:
                 return lifecycle.run_active_posting_cycle(
                     phone_id, name, adb_client, transport=transport, logger=logger,
-                    media_path=media_path)
+                    media_paths=[s.path for s in spoofed_batch])
             finally:
-                if spoofed:
+                for spoofed in spoofed_batch:
                     try:
                         Path(spoofed.path).unlink()
                     except OSError:
                         pass
 
-    return run_queue(worklist, work_fn, concurrency=concurrency)
+    return run_queue(worklist, work_fn, concurrency=concurrency,
+                     budget_seconds=budget_seconds, logger=logger)
 
 
 if __name__ == "__main__":
@@ -190,6 +331,12 @@ if __name__ == "__main__":
                        help="run the in-review recheck, then the regular "
                             "window pass (Warmup, at night) -- the confirmed "
                             "once-nightly order")
+    parser.add_argument("--human-verification", action="store_true",
+                       help="work the human-verification-tagged fleet -- "
+                            "spends real money (SMS numbers, captcha "
+                            "solves); not on any timer")
+    parser.add_argument("--concurrency", type=int, default=None,
+                       help="override the default concurrency for this run")
     args = parser.parse_args()
 
     logger = get_logger("adb_bot")
@@ -202,13 +349,21 @@ if __name__ == "__main__":
     elif args.in_review_recheck:
         print(f"in-review recheck ({datetime.now(BERLIN).strftime('%H:%M %Z')})")
         results = run_in_review_recheck_pass(adb_client, logger=logger)
+    elif args.human_verification:
+        concurrency = args.concurrency or HUMAN_VERIFICATION_CONCURRENCY
+        print(f"human verification, {concurrency} concurrent "
+             f"({datetime.now(BERLIN).strftime('%H:%M %Z')})")
+        results = run_human_verification_pass(adb_client, logger=logger,
+                                              concurrency=concurrency)
     else:
         tag = active_tag_for_now()
         print(f"window: {tag} ({datetime.now(BERLIN).strftime('%H:%M %Z')})")
-        results = run_scheduled_pass(adb_client, logger=logger)
+        kwargs = {"concurrency": args.concurrency} if args.concurrency else {}
+        results = run_scheduled_pass(adb_client, logger=logger, **kwargs)
 
     print(f"{len(results)} profile(s) processed")
     for r in results:
-        print(f"  {r.get('name')}: {r.get('result')}")
+        suffix = f" ({r['error']})" if r.get("error") else ""
+        print(f"  {r.get('name')}: {r.get('result')}{suffix}")
     if not results:
         sys.exit(0)

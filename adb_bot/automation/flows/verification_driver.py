@@ -1157,10 +1157,20 @@ class AdbChallengeDriver:
         # the two dialogs before it. Same patient retry, not a longer fixed
         # wait: a fixed 3s dump found nothing at t+3s and the caller moved
         # straight on to searching for a picker that was not there yet.
+        # Android 13+'s granular media-access dialog has three buttons
+        # ("Allow limited access" / "Allow all" / "Don't allow"), not the
+        # old two-button "Allow"/"Deny" pair -- confirmed live 2026-08-31 on
+        # Android 16: the labels present were exactly ["ALLOW LIMITED
+        # ACCESS", "ALLOW ALL", "DON'T ALLOW"], which never matched the old
+        # search, so this fell through to "assume already granted" and the
+        # picker sat empty behind the still-unanswered dialog for the rest
+        # of the attempt. "Allow all" (not "limited access") is the one
+        # that actually lets the picker enumerate every photo -- "limited
+        # access" opens Android's own selection UI first, a different flow.
         allow_center = None
         for attempt in range(5):
             self._root, _xml = self._dump()
-            allow_center = self._find_exact(("ALLOW", "Allow"))
+            allow_center = self._find_exact(("ALLOW ALL", "Allow all", "ALLOW", "Allow"))
             if allow_center is not None:
                 break
             time.sleep(2.0)

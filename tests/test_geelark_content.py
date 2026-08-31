@@ -6,12 +6,14 @@ no fallback to older content, by design (forgetting to upload must mean no
 post, not a silent repeat).
 """
 
+import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
 from adb_bot.automation import geelark_content as content
+from adb_bot.automation import post_ledger
 
 
 class FakeDriveClient:
@@ -201,6 +203,78 @@ class GetPostMediaTest(unittest.TestCase):
                 spoofer_python="python3", spoofer_root="/spoofer")
         self.assertIsNotNone(result)
         self.assertEqual(result.raw_video.name, "clip.mp4")
+
+    def _fake_spoof_fn(self, raw_path, out_dir, seed, logger=None):
+        produced = Path(out_dir) / f"clip-{seed}.mp4"
+        produced.parent.mkdir(parents=True, exist_ok=True)
+        produced.write_bytes(f"spoofed-{seed}".encode())
+        return produced
+
+    def test_picks_deterministically_by_name_not_randomly(self):
+        """Changed 2026-08-31: was random.choice -- with several posts a day
+        now landing on the same handle, a random pick mostly re-picked a
+        video already posted earlier that day, which the ledger then
+        silently refused at upload time."""
+        tree, files = _tree_for("Luisa", "2026-08-30", [
+            {"id": "v2", "name": "b_clip.mp4", "link": None},
+            {"id": "v1", "name": "a_clip.mp4", "link": None},
+        ])
+        client = FakeDriveClient(tree, files)
+        tmp_ledger = post_ledger.PostLedger(
+            path=Path(tempfile.mkdtemp()) / "ledger.jsonl")
+
+        with patch.object(content, "build_cli_spoofer", return_value=self._fake_spoof_fn), \
+             patch.object(content, "datetime") as mock_dt:
+            mock_dt.now.return_value.date.return_value = date(2026, 8, 30)
+            first = content.get_post_media(
+                "Luisa", "handle1", client=client, root_folder_id=ROOT,
+                spoofer_python="python3", spoofer_root="/spoofer", ledger=tmp_ledger)
+        self.assertEqual(first.raw_video.name, "a_clip.mp4")
+
+    def test_skips_a_video_already_posted_to_this_handle_today(self):
+        tree, files = _tree_for("Luisa", "2026-08-30", [
+            {"id": "v1", "name": "a_clip.mp4", "link": None},
+            {"id": "v2", "name": "b_clip.mp4", "link": None},
+        ])
+        client = FakeDriveClient(tree, files)
+        tmp_ledger = post_ledger.PostLedger(
+            path=Path(tempfile.mkdtemp()) / "ledger.jsonl")
+
+        with patch.object(content, "build_cli_spoofer", return_value=self._fake_spoof_fn), \
+             patch.object(content, "datetime") as mock_dt:
+            mock_dt.now.return_value.date.return_value = date(2026, 8, 30)
+            first = content.get_post_media(
+                "Luisa", "handle1", client=client, root_folder_id=ROOT,
+                spoofer_python="python3", spoofer_root="/spoofer", ledger=tmp_ledger)
+            self.assertEqual(first.raw_video.name, "a_clip.mp4")
+            tmp_ledger.record_share("handle1", first.path)
+
+            second = content.get_post_media(
+                "Luisa", "handle1", client=client, root_folder_id=ROOT,
+                spoofer_python="python3", spoofer_root="/spoofer", ledger=tmp_ledger)
+        self.assertIsNotNone(second)
+        self.assertEqual(second.raw_video.name, "b_clip.mp4")
+
+    def test_every_video_already_posted_today_returns_none(self):
+        tree, files = _tree_for("Luisa", "2026-08-30", [
+            {"id": "v1", "name": "a_clip.mp4", "link": None},
+        ])
+        client = FakeDriveClient(tree, files)
+        tmp_ledger = post_ledger.PostLedger(
+            path=Path(tempfile.mkdtemp()) / "ledger.jsonl")
+
+        with patch.object(content, "build_cli_spoofer", return_value=self._fake_spoof_fn), \
+             patch.object(content, "datetime") as mock_dt:
+            mock_dt.now.return_value.date.return_value = date(2026, 8, 30)
+            first = content.get_post_media(
+                "Luisa", "handle1", client=client, root_folder_id=ROOT,
+                spoofer_python="python3", spoofer_root="/spoofer", ledger=tmp_ledger)
+            tmp_ledger.record_share("handle1", first.path)
+
+            second = content.get_post_media(
+                "Luisa", "handle1", client=client, root_folder_id=ROOT,
+                spoofer_python="python3", spoofer_root="/spoofer", ledger=tmp_ledger)
+        self.assertIsNone(second)
 
 
 if __name__ == "__main__":

@@ -43,6 +43,29 @@ class WindowTest(unittest.TestCase):
                          lifecycle.TAG_ACTIVE_POSTING)
 
 
+class ActivePostingBudgetTest(unittest.TestCase):
+    """Added 2026-08-31: a duration until the next 23:00 Berlin (minus the
+    safety buffer), not an absolute deadline -- see active_posting_budget_seconds's
+    own docstring for why that split matters for testability."""
+
+    def test_midday_has_most_of_a_day_left(self):
+        budget = scheduler.active_posting_budget_seconds(_at(12, 0))
+        self.assertAlmostEqual(budget, 10 * 3600 + 45 * 60, delta=1)
+
+    def test_inside_the_safety_buffer_before_23_is_negative(self):
+        """22:50 is only 10 min before 23:00, less than the 15-min buffer --
+        a pass starting this close to the window must not claim new work."""
+        budget = scheduler.active_posting_budget_seconds(_at(22, 50))
+        self.assertLess(budget, 0)
+
+    def test_just_after_midnight_counts_to_that_same_calendar_days_23_00(self):
+        """Not reachable via run_scheduled_pass (00:30 resolves to Warmup),
+        but the function itself must pick the *upcoming* 23:00 (still later
+        that same calendar day), not a stale or off-by-one-day one."""
+        budget = scheduler.active_posting_budget_seconds(_at(0, 30))
+        self.assertAlmostEqual(budget, 22 * 3600 + 15 * 60, delta=1)
+
+
 class RunQueueTest(unittest.TestCase):
     def test_processes_every_item_exactly_once(self):
         worklist = [{"id": str(i), "serialName": f"P{i}"} for i in range(10)]
@@ -79,6 +102,48 @@ class RunQueueTest(unittest.TestCase):
 
     def test_empty_worklist_returns_empty_without_hanging(self):
         self.assertEqual(scheduler.run_queue([], lambda *_: {}), [])
+
+    def test_a_negative_budget_claims_nothing(self):
+        """Already past the deadline when the pass starts -- the fleet has
+        badly outgrown its window. Must not crash or hang, just do nothing
+        and let the caller's warning explain why."""
+        worklist = [{"id": "1", "serialName": "P1"}]
+        work_fn = unittest.mock.Mock()
+        results = scheduler.run_queue(worklist, work_fn, concurrency=1,
+                                      budget_seconds=-10)
+        self.assertEqual(results, [])
+        work_fn.assert_not_called()
+
+    def test_an_in_flight_item_finishes_even_past_the_budget(self):
+        """The deadline is checked only before claiming the *next* item --
+        a phone already launched must always run to completion."""
+        import threading
+        import time
+
+        worklist = [{"id": "1", "serialName": "P1"}, {"id": "2", "serialName": "P2"}]
+        started = threading.Event()
+
+        def work_fn(phone_id, name):
+            if phone_id == "1":
+                started.set()
+                time.sleep(0.15)   # still "in flight" when the budget expires
+            return {"id": phone_id, "result": "ok"}
+
+        # Budget expires 0.05s in -- item "1" is already claimed and running
+        # (concurrency=1, so "2" is still waiting) by the time it does.
+        results = scheduler.run_queue(worklist, work_fn, concurrency=1,
+                                      budget_seconds=0.05)
+        self.assertTrue(started.is_set())
+        self.assertEqual([r["id"] for r in results], ["1"])
+
+    def test_logs_how_much_of_the_worklist_the_budget_did_not_reach(self):
+        worklist = [{"id": str(i), "serialName": f"P{i}"} for i in range(3)]
+        logger = unittest.mock.Mock()
+        scheduler.run_queue(worklist, lambda *_: {}, concurrency=1,
+                            budget_seconds=-1, logger=logger)
+        logger.warning.assert_called_once()
+        message = logger.warning.call_args.args[0] % logger.warning.call_args.args[1:]
+        self.assertIn("3/3", message)
 
 
 class RunScheduledPassTest(unittest.TestCase):
@@ -143,37 +208,74 @@ class ActivePostingContentTest(unittest.TestCase):
     phone (model from the phone's Geelark group, today's date folder), not
     one media_path for the whole pass."""
 
-    def test_resolves_content_by_the_phones_group_and_posts_it(self):
+    def _content(self, name, path):
+        from adb_bot.automation import geelark_content
+        return geelark_content.SpoofedContent(
+            path=path, raw_video=geelark_content.RawVideo(model="Luisa", name=name, path=""),
+            handle="1")
+
+    def test_resolves_up_to_posts_per_launch_videos_and_posts_the_batch(self):
+        """POSTS_PER_LAUNCH=2 (changed 2026-08-31): one launch posts up to 2
+        clips instead of 1, so the fixed ~90s launch cost is paid once for
+        two posts instead of twice."""
         from adb_bot.automation import geelark_content
 
         row = {"id": "1", "serialName": "P1", "group": {"name": "Luisa"}}
-        fake_content = geelark_content.SpoofedContent(
-            path="/tmp/spoofed_x.mp4",
-            raw_video=geelark_content.RawVideo(model="Luisa", name="c.mp4", path=""),
-            handle="1")
+        first = self._content("a.mp4", "/tmp/spoofed_a.mp4")
+        second = self._content("b.mp4", "/tmp/spoofed_b.mp4")
+        # exclude_names is mutated in place across the two calls, so a
+        # mock's call_args_list (which stores a live reference, not a
+        # snapshot) would show the same final set for both calls if
+        # inspected afterwards -- snapshot it as a copy at call time instead.
+        seen_excludes = []
+
+        def fake_get_post_media(model, handle, logger=None, exclude_names=None):
+            seen_excludes.append(set(exclude_names or ()))
+            return [first, second][len(seen_excludes) - 1]
+
         with patch.object(lifecycle, "phones_by_tag", return_value=[row]), \
              patch.object(geelark_content, "get_post_media",
-                         return_value=fake_content) as get_media, \
+                         side_effect=fake_get_post_media), \
              patch.object(lifecycle, "run_active_posting_cycle",
                          return_value={"result": "posted"}) as posting_cycle, \
              patch("pathlib.Path.unlink"):
             scheduler.run_scheduled_pass(adb_client=object(), now=_at(12, 0))
-        get_media.assert_called_once()
-        self.assertEqual(get_media.call_args.args[0], "Luisa")
-        self.assertEqual(get_media.call_args.args[1], "1")
-        self.assertEqual(posting_cycle.call_args.kwargs["media_path"],
-                         "/tmp/spoofed_x.mp4")
+        self.assertEqual(len(seen_excludes), scheduler.POSTS_PER_LAUNCH)
+        self.assertEqual(seen_excludes[0], set())
+        # the second call must exclude the first pick, or a model with fewer
+        # videos than POSTS_PER_LAUNCH today would post the same clip twice
+        # in one launch before either lands in the post_ledger.
+        self.assertEqual(seen_excludes[1], {"a.mp4"})
+        self.assertEqual(posting_cycle.call_args.kwargs["media_paths"],
+                         ["/tmp/spoofed_a.mp4", "/tmp/spoofed_b.mp4"])
 
-    def test_no_content_today_still_scrolls_with_no_media_path(self):
+    def test_fewer_videos_than_posts_per_launch_gives_a_shorter_batch(self):
+        """A model with only one video today gets a 1-post batch, not a
+        repeat of that video to fill POSTS_PER_LAUNCH."""
+        from adb_bot.automation import geelark_content
+
+        row = {"id": "1", "serialName": "P1", "group": {"name": "Luisa"}}
+        first = self._content("a.mp4", "/tmp/spoofed_a.mp4")
+        with patch.object(lifecycle, "phones_by_tag", return_value=[row]), \
+             patch.object(geelark_content, "get_post_media",
+                         side_effect=[first, None]), \
+             patch.object(lifecycle, "run_active_posting_cycle",
+                         return_value={"result": "posted"}) as posting_cycle, \
+             patch("pathlib.Path.unlink"):
+            scheduler.run_scheduled_pass(adb_client=object(), now=_at(12, 0))
+        self.assertEqual(posting_cycle.call_args.kwargs["media_paths"],
+                         ["/tmp/spoofed_a.mp4"])
+
+    def test_no_content_today_calls_the_cycle_with_an_empty_batch(self):
         from adb_bot.automation import geelark_content
 
         row = {"id": "1", "serialName": "P1", "group": {"name": "Luisa"}}
         with patch.object(lifecycle, "phones_by_tag", return_value=[row]), \
              patch.object(geelark_content, "get_post_media", return_value=None), \
              patch.object(lifecycle, "run_active_posting_cycle",
-                         return_value={"result": "scrolled_only"}) as posting_cycle:
+                         return_value={"result": "no_content"}) as posting_cycle:
             scheduler.run_scheduled_pass(adb_client=object(), now=_at(12, 0))
-        self.assertIsNone(posting_cycle.call_args.kwargs["media_path"])
+        self.assertEqual(posting_cycle.call_args.kwargs["media_paths"], [])
 
     def test_a_phone_with_no_group_never_calls_get_post_media(self):
         from adb_bot.automation import geelark_content
@@ -182,26 +284,24 @@ class ActivePostingContentTest(unittest.TestCase):
         with patch.object(lifecycle, "phones_by_tag", return_value=[row]), \
              patch.object(geelark_content, "get_post_media") as get_media, \
              patch.object(lifecycle, "run_active_posting_cycle",
-                         return_value={"result": "scrolled_only"}):
+                         return_value={"result": "no_content"}):
             scheduler.run_scheduled_pass(adb_client=object(), now=_at(12, 0))
         get_media.assert_not_called()
 
-    def test_spoofed_file_is_deleted_after_the_cycle(self):
+    def test_every_spoofed_file_in_the_batch_is_deleted_after_the_cycle(self):
         from adb_bot.automation import geelark_content
 
         row = {"id": "1", "serialName": "P1", "group": {"name": "Luisa"}}
-        fake_content = geelark_content.SpoofedContent(
-            path="/tmp/spoofed_y.mp4",
-            raw_video=geelark_content.RawVideo(model="Luisa", name="c.mp4", path=""),
-            handle="1")
+        first = self._content("a.mp4", "/tmp/spoofed_a.mp4")
+        second = self._content("b.mp4", "/tmp/spoofed_b.mp4")
         with patch.object(lifecycle, "phones_by_tag", return_value=[row]), \
              patch.object(geelark_content, "get_post_media",
-                         return_value=fake_content), \
+                         side_effect=[first, second]), \
              patch.object(lifecycle, "run_active_posting_cycle",
                          return_value={"result": "posted"}), \
              patch("pathlib.Path.unlink") as unlink:
             scheduler.run_scheduled_pass(adb_client=object(), now=_at(12, 0))
-        unlink.assert_called_once()
+        self.assertEqual(unlink.call_count, 2)
 
 
 class NightSequenceTest(unittest.TestCase):

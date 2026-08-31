@@ -283,16 +283,20 @@ class ActivePostingCycleTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_no_media_path_only_scrolls_no_retag_available(self):
-        """Active_Posting is permanent -- this cycle has no retag call at
-        all, unlike warmup."""
+    def test_no_media_path_does_nothing_and_reports_no_content(self):
+        """Changed 2026-08-31: no content for the day means no scroll and no
+        post, not a scroll-only consolation cycle -- a fixed 40s scroll on
+        every content-less cycle was most of the day's posting budget once
+        the target moved to several posts/profile/day. Active_Posting is
+        also permanent -- this cycle has no retag call at all, unlike
+        warmup."""
         with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
              patch.object(lifecycle, "stop_session"), \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
                   return_value={"aborted": False}) as scroll:
             out = lifecycle.run_active_posting_cycle("ph1", "Test 1", adb_client=object())
-        self.assertEqual(out["result"], "scrolled_only")
-        scroll.assert_called_once()
+        self.assertEqual(out["result"], "no_content")
+        scroll.assert_not_called()
 
     def test_uses_the_short_scroll_duration(self):
         with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
@@ -300,8 +304,11 @@ class ActivePostingCycleTest(unittest.TestCase):
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.__init__",
                   return_value=None) as init, \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
-                  return_value={"aborted": False}):
-            lifecycle.run_active_posting_cycle("ph1", "Test 1", adb_client=object())
+                  return_value={"aborted": False}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.run",
+                  return_value={"success": True}):
+            lifecycle.run_active_posting_cycle("ph1", "Test 1", adb_client=object(),
+                                               media_paths=["/tmp/x.mp4"])
         init.assert_called_once_with(scroll_seconds=lifecycle.ACTIVE_POSTING_SCROLL_SECONDS)
 
 
@@ -447,7 +454,7 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
              patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.run",
                   return_value={"success": True}) as post:
             out = lifecycle.run_active_posting_cycle(
-                "ph1", "Test 1", adb_client=object(), media_path="/tmp/x.mp4")
+                "ph1", "Test 1", adb_client=object(), media_paths=["/tmp/x.mp4"])
         self.assertEqual(out["result"], "posted")
         post.assert_called_once()
 
@@ -461,7 +468,7 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
              patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.run",
                   return_value={"success": False, "uncertain": False}) as post:
             out = lifecycle.run_active_posting_cycle(
-                "ph1", "Test 1", adb_client=object(), media_path="/tmp/x.mp4",
+                "ph1", "Test 1", adb_client=object(), media_paths=["/tmp/x.mp4"],
                 max_attempts=3)
         self.assertEqual(out["result"], "post_failed")
         self.assertEqual(post.call_count, 3)
@@ -477,10 +484,140 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
              patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.run",
                   return_value={"success": False, "uncertain": True}) as post:
             out = lifecycle.run_active_posting_cycle(
-                "ph1", "Test 1", adb_client=object(), media_path="/tmp/x.mp4",
+                "ph1", "Test 1", adb_client=object(), media_paths=["/tmp/x.mp4"],
                 max_attempts=3)
         self.assertEqual(out["result"], "post_uncertain")
         post.assert_called_once()
+
+
+class HumanVerificationCycleTest(unittest.TestCase):
+    """Added 2026-08-31: reuses run_verification (ADB-generic, no MLX/Airtable
+    dependency) plus a freshly-fetched AI face for the photo challenge --
+    see the "geelark-selfie-verification-ai-face" memory for why an AI face
+    rather than a real one."""
+
+    def setUp(self):
+        patcher = patch.object(lifecycle, "_fetch_ai_face", return_value="/tmp/face.jpg")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher2 = patch.object(lifecycle, "build_router", return_value=object())
+        patcher2.start()
+        self.addCleanup(patcher2.stop)
+
+    def _verification_result(self, status, **kwargs):
+        from adb_bot.automation.flows.verification import VerificationResult
+        return VerificationResult(status=status, **kwargs)
+
+    def test_solved_retags_to_active_posting(self):
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch.object(lifecycle, "_retag") as retag, \
+             patch.object(lifecycle, "run_verification",
+                         return_value=self._verification_result(lifecycle.RESULT_SOLVED)):
+            out = lifecycle.run_human_verification_cycle("ph1", "Test 1", adb_client=object())
+        self.assertEqual(out["result"], "solved")
+        retag.assert_called_once_with(
+            "ph1", unittest.mock.ANY, remove=lifecycle.TAG_HUMAN_VERIFICATION,
+            add=lifecycle.TAG_ACTIVE_POSTING, logger=None)
+
+    def test_banned_retags_to_banned(self):
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch.object(lifecycle, "_retag") as retag, \
+             patch.object(lifecycle, "run_verification",
+                         return_value=self._verification_result(lifecycle.RESULT_BANNED)):
+            out = lifecycle.run_human_verification_cycle("ph1", "Test 1", adb_client=object())
+        self.assertEqual(out["result"], "banned")
+        self.assertEqual(retag.call_args.kwargs["add"], lifecycle.TAG_BANNED)
+
+    def test_signed_out_retags_to_logged_out(self):
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch.object(lifecycle, "_retag") as retag, \
+             patch.object(lifecycle, "run_verification",
+                         return_value=self._verification_result(lifecycle.RESULT_SIGNED_OUT)):
+            out = lifecycle.run_human_verification_cycle("ph1", "Test 1", adb_client=object())
+        self.assertEqual(out["result"], "signed_out")
+        self.assertEqual(retag.call_args.kwargs["add"], lifecycle.TAG_LOGGED_OUT)
+
+    def test_in_review_retags_to_in_review_not_human_verification(self):
+        """An already-submitted appeal is Meta's own review clock, not
+        something a person needs to solve either -- the daily in-review
+        recheck already knows how to watch this tag."""
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch.object(lifecycle, "_retag") as retag, \
+             patch.object(lifecycle, "run_verification",
+                         return_value=self._verification_result(lifecycle.RESULT_IN_REVIEW)):
+            out = lifecycle.run_human_verification_cycle("ph1", "Test 1", adb_client=object())
+        self.assertEqual(out["result"], "in_review")
+        self.assertEqual(retag.call_args.kwargs["add"], lifecycle.TAG_IN_REVIEW)
+        self.assertEqual(retag.call_args.kwargs["remove"], lifecycle.TAG_HUMAN_VERIFICATION)
+
+    def test_needs_human_leaves_the_tag_untouched(self):
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch.object(lifecycle, "_retag") as retag, \
+             patch.object(lifecycle, "run_verification",
+                         return_value=self._verification_result("needs_human")):
+            out = lifecycle.run_human_verification_cycle("ph1", "Test 1", adb_client=object())
+        self.assertEqual(out["result"], "needs_human")
+        retag.assert_not_called()
+
+    def test_unreachable_over_adb_never_rents_a_number(self):
+        """No phone, no verification attempt -- must not build a router or
+        call run_verification at all, so nothing gets rented for nothing."""
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), None)), \
+             patch.object(lifecycle, "stop_session"), \
+             patch.object(lifecycle, "build_router") as build_router, \
+             patch.object(lifecycle, "run_verification") as run_verification:
+            out = lifecycle.run_human_verification_cycle("ph1", "Test 1", adb_client=object())
+        self.assertEqual(out["result"], "could_not_reach_over_adb")
+        build_router.assert_not_called()
+        run_verification.assert_not_called()
+
+    def test_session_is_always_stopped(self):
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session") as stop, \
+             patch.object(lifecycle, "run_verification",
+                         side_effect=RuntimeError("boom")):
+            out = lifecycle.run_human_verification_cycle("ph1", "Test 1", adb_client=object())
+        self.assertEqual(out["result"], "error")
+        stop.assert_called_once()
+
+
+class FetchAiFaceTest(unittest.TestCase):
+    def test_success_downscales_and_returns_the_small_path(self):
+        tmp = Path(tempfile.mkdtemp())
+        fake_response = unittest.mock.Mock(content=b"fake jpeg bytes")
+        fake_response.raise_for_status = lambda: None
+
+        def fake_run(cmd, **kwargs):
+            # ffmpeg's output path is the last argument
+            Path(cmd[-1]).write_bytes(b"small")
+            return unittest.mock.Mock(returncode=0)
+
+        with patch.object(lifecycle.requests, "get", return_value=fake_response), \
+             patch.object(lifecycle.subprocess, "run", side_effect=fake_run):
+            result = lifecycle._fetch_ai_face(tmp)
+        self.assertEqual(result, str(tmp / "face.jpg"))
+        self.assertTrue(Path(result).exists())
+
+    def test_download_failure_returns_none(self):
+        tmp = Path(tempfile.mkdtemp())
+        with patch.object(lifecycle.requests, "get", side_effect=RuntimeError("network down")):
+            result = lifecycle._fetch_ai_face(tmp)
+        self.assertIsNone(result)
+
+    def test_ffmpeg_failure_returns_none(self):
+        tmp = Path(tempfile.mkdtemp())
+        fake_response = unittest.mock.Mock(content=b"fake jpeg bytes")
+        fake_response.raise_for_status = lambda: None
+        with patch.object(lifecycle.requests, "get", return_value=fake_response), \
+             patch.object(lifecycle.subprocess, "run",
+                         return_value=unittest.mock.Mock(returncode=1, stderr=b"broken")):
+            result = lifecycle._fetch_ai_face(tmp)
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

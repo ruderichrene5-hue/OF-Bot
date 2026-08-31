@@ -21,6 +21,7 @@ from adb_bot.automation.flows.verification import (
     CHALLENGE_VERIFY_INTRO,
     CHALLENGE_SIGNED_OUT,
     RESULT_BANNED,
+    RESULT_IN_REVIEW,
     RESULT_NEEDS_HUMAN,
     RESULT_SIGNED_OUT,
     RESULT_SOLVED,
@@ -59,6 +60,12 @@ SCREEN_SIGNED_OUT = ("english (us) join instagram share what you're into with "
                      "profile meta logo")
 SCREEN_IN_REVIEW = ("thanks for confirming your info we will review your "
                     "info and get back to you within 24 hours")
+# Verbatim wording confirmed live 2026-08-31, after a photo/selfie appeal --
+# not covered by SCREEN_IN_REVIEW's marker at all, so it fell through to
+# CHALLENGE_NONE and read as an unrecognised screen instead of "wait".
+SCREEN_APPEAL_SUBMITTED = ("you submitted an appeal on august 31, 2026 it "
+                          "usually takes us about an hour to review your "
+                          "information. check back here.")
 
 
 class ClassifyTest(TestCase):
@@ -72,6 +79,7 @@ class ClassifyTest(TestCase):
             (SCREEN_FEED, CHALLENGE_NONE),
             (SCREEN_BANNED, CHALLENGE_BANNED),
             (SCREEN_IN_REVIEW, CHALLENGE_IN_REVIEW),
+            (SCREEN_APPEAL_SUBMITTED, CHALLENGE_IN_REVIEW),
         ]
         for text, expected in cases:
             self.assertEqual(classify_challenge(text), expected, text)
@@ -316,6 +324,16 @@ class OrderIndependenceTest(FlowTestCase):
         self.assertEqual(result.status, RESULT_BANNED)
         self.assertEqual(provider.purchases, 0, "a banned account must not cost a number")
 
+    def test_an_appeal_already_submitted_is_in_review_not_needs_human(self):
+        """Distinct from needs_human on purpose: there is nothing for a
+        person to do either, only Meta's own review clock -- and the
+        existing daily in-review recheck already knows how to watch this
+        tag for when it clears on its own."""
+        result, driver, provider = self.run_chain([SCREEN_APPEAL_SUBMITTED])
+        self.assertEqual(result.status, RESULT_IN_REVIEW)
+        self.assertEqual(provider.purchases, 0,
+                         "nothing to solve here, so nothing should be rented")
+
 
 class SwitchToSmsTest(FlowTestCase):
     """A rented SMS-pool number can never receive a WhatsApp message --
@@ -446,23 +464,31 @@ class RealScreenTest(FlowTestCase):
 
 
 class GermanNumbersTest(FlowTestCase):
-    """Both countries stay supported; only the default has moved.
+    """Germany is the default again, because the fleet's IPs are.
 
     2026-08-11: DE became the default after the real challenge screen turned
     out to have its country picker fixed at `DE +49` -- a US number under a
     +49 prefix looked like a different, unreachable number.
 
-    2026-08-30: switched back to US on explicit instruction -- confirmed a US
-    number is received regardless of the picker, and it is also the better
-    pool on 5sim (72.7% success vs DE's 0-7%, same $0.30/number).
+    2026-08-30: switched to US on explicit instruction -- confirmed a US
+    number is received regardless of the picker, and 5sim's own aggregate
+    reads 72.7% success on US vs 0-7% on DE.
+
+    2026-08-31: reverted. 5sim's own troubleshooting guidance says the
+    rented number's country should match the IP's country -- the whole
+    fleet runs on German mobile proxies, so a US number was never a
+    same-country match, and the 72.7% figure was an aggregate across
+    everyone renting US numbers (mostly from US IPs), not this fleet's
+    number. Live: 0/5 on US in one session after correctly requesting SMS
+    delivery each time.
     """
 
-    def test_the_default_country_is_us(self):
-        """Switched back to US 2026-08-30 on explicit instruction: a US
-        number is received regardless of the picker, and 5sim's US pool
-        reads 72.7% success vs DE's 0-7%, at the same $0.30/number."""
+    def test_the_default_country_is_germany(self):
+        """Reverted 2026-08-31: matches the fleet's German mobile proxies,
+        per 5sim's own guidance that the number's country should match the
+        IP's country. See the class docstring for the full history."""
         from adb_bot.clients.sms import base
-        self.assertEqual(base.DEFAULT_COUNTRY, base.COUNTRY_US)
+        self.assertEqual(base.DEFAULT_COUNTRY, base.COUNTRY_DE)
 
     def test_both_providers_can_sell_a_german_number(self):
         from adb_bot.clients.sms import fivesim, smspool
@@ -1223,6 +1249,67 @@ class ConsentGateTest(FlowTestCase):
         self.assertFalse(hasattr(driver, "clear_blocking_prompts"))
         result, _, _ = self.run_chain(None, driver=driver)
         self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+
+
+class UnrecognisedScreenPromptTest(FlowTestCase):
+    """An unrecognised screen (no challenge marker, not classified healthy)
+    gets one attempt at `clear_blocking_prompts` before being handed to a
+    person -- confirmed live 2026-08-31: Instagram's own "Allow Instagram to
+    send you notifications?" dialog is an Android system prompt, not a Meta
+    consent screen, so `looks_like_consent_gate` never recognised it and it
+    fell straight to `needs_human` even though `interruptions` already knows
+    this exact prompt and would have tapped through it."""
+
+    NOTIFICATIONS_DIALOG = "allow instagram to send you notifications? allow don't allow"
+
+    class PromptDriver(FakeDriver):
+        def __init__(self, screens, can_clear=True):
+            super().__init__(screens)
+            self.can_clear = can_clear
+            self.cleared = 0
+
+        def clear_blocking_prompts(self):
+            self.cleared += 1
+            return self._advance() if self.can_clear else False
+
+    def test_a_dismissable_prompt_is_cleared_and_the_screen_behind_it_read(self):
+        driver = self.PromptDriver([self.NOTIFICATIONS_DIALOG, SCREEN_FEED])
+        result, _, _ = self.run_chain(None, driver=driver)
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertEqual(driver.cleared, 1)
+
+    def test_a_prompt_that_will_not_clear_still_goes_to_a_person(self):
+        """No regression for the ordinary case: nothing to dismiss still
+        ends in needs_human, same as before this fix."""
+        driver = self.PromptDriver([self.NOTIFICATIONS_DIALOG], can_clear=False)
+        result, _, _ = self.run_chain(None, driver=driver)
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+        self.assertEqual(driver.cleared, 1)
+
+    def test_only_one_dismiss_attempt_even_if_the_screen_stays_unrecognised(self):
+        """The retry is a single guarded attempt, not a second loop hiding
+        behind the main one -- clearing something that reveals another
+        unrecognised screen must not try clearing again."""
+        driver = self.PromptDriver(
+            [self.NOTIFICATIONS_DIALOG, self.NOTIFICATIONS_DIALOG])
+        driver.can_clear = True
+        result, _, _ = self.run_chain(None, driver=driver)
+        self.assertEqual(result.status, RESULT_NEEDS_HUMAN)
+        self.assertEqual(driver.cleared, 1)
+
+    def test_a_real_challenge_behind_the_prompt_is_handled_properly(self):
+        """The bug this fix's first version had: dismissing the prompt must
+        hand whatever is behind it through the *normal* classify+dispatch
+        pipeline, not straight back into the "unrecognised screen" leaf --
+        confirmed live 2026-08-31, a real photo/selfie challenge revealed
+        behind a dismissed notifications dialog was misread as just another
+        unrecognised screen and reported needs_human, never reaching
+        `upload_photo` at all."""
+        driver = self.PromptDriver(
+            [self.NOTIFICATIONS_DIALOG, SCREEN_PHONE, SCREEN_CODE, SCREEN_FEED])
+        result, _, _ = self.run_chain(None, driver=driver)
+        self.assertEqual(result.status, RESULT_SOLVED)
+        self.assertEqual([a[0] for a in driver.actions], ["phone", "code"])
 
 
 class ConsentMarkersDoNotShadowAFeedTest(FlowTestCase):

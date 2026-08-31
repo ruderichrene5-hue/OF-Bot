@@ -79,6 +79,7 @@ RESULT_BANNED = "banned"            # account disabled -- stop, flag it
 RESULT_STUCK = "stuck"              # the same screen kept coming back
 RESULT_FAILED = "failed"            # a step the driver could not perform
 RESULT_SIGNED_OUT = "signed_out"    # nobody is logged in; there is nothing to verify
+RESULT_IN_REVIEW = "in_review"      # an appeal was submitted; Meta is checking, not this bot
 
 # --- screen markers -----------------------------------------------------------
 # Matched against *visible* screen text only (element `text` / `content-desc`,
@@ -301,6 +302,11 @@ _IN_REVIEW_MARKERS = (
     "thanks for confirming your info",
     "thanks for confirming your account information",
     "your account has been reviewed",   # completed-review wording still means "wait"
+    # Confirmed live 2026-08-31: the wording after a photo/selfie appeal is
+    # submitted, not covered by any marker above -- fell through to
+    # CHALLENGE_NONE and read as an unrecognised screen instead of "wait".
+    "you submitted an appeal",
+    "it usually takes us about an hour to review",
 )
 
 _CONSENT_GATE_MARKERS = (
@@ -756,6 +762,7 @@ class _Session:
         self._number_takeovers = 0   # see `_handle_code`
         self._captcha_blind_reads = 0  # see `_handle_image_captcha`
         self._app_restarts = 0       # see `looks_like_launcher`
+        self._none_dismiss_attempted = False  # see `_clear_screen_result`
 
     # --- main loop ------------------------------------------------------------
     def run(self, max_steps: int) -> VerificationResult:
@@ -798,6 +805,54 @@ class _Session:
                 # challenge is merely late, this is where it is caught; if the
                 # screen is genuinely clear, this returns none and we are done.
                 challenge, text = self._confirm_clear(text)
+            if (challenge == CHALLENGE_NONE and not self._none_dismiss_attempted
+                    and not screen_is_healthy(text)
+                    and not looks_like_consent_gate(text)):
+                # A screen with no challenge marker, that is also neither a
+                # healthy feed nor Meta's own consent gate (both already
+                # handled on their own terms elsewhere), might be a blocking
+                # prompt `classify_challenge` doesn't cover -- confirmed live
+                # 2026-08-31, Instagram's own "Allow Instagram to send you
+                # notifications?" dialog is an Android system prompt, not a
+                # Meta consent screen, so it read as CHALLENGE_NONE and would
+                # have gone straight to needs_human even though
+                # `interruptions.handle_blocking_prompts` already knows this
+                # exact prompt and would have tapped through it. The
+                # healthy/consent-gate exclusion here matters as much as the
+                # dismiss itself: without it, this fired on every ordinary
+                # healthy feed too, spending a redundant dismiss-attempt (and,
+                # in `ConsentGateTest`, wrongly popping the *next* screen off
+                # a driver whose `clear_blocking_prompts` also advances a
+                # script) on screens with nothing to clear.
+                #
+                # `continue` back to the top rather than re-classifying
+                # inline here: whatever was behind the dismissed prompt (a
+                # real challenge, the actual clear feed, or nothing) must go
+                # through the same full pipeline as every other read --
+                # `looks_like_launcher`, `classify_challenge`,
+                # `_confirm_clear` -- not a hand-rolled shortcut that risks
+                # treating a real challenge behind the prompt as just another
+                # unrecognised screen. Guarded by a once-per-run flag, not a
+                # loop: a dismiss that doesn't lead anywhere is reported the
+                # same as if it had never been tried.
+                self._none_dismiss_attempted = True
+                clear = getattr(self.driver, "clear_blocking_prompts", None)
+                if callable(clear):
+                    try:
+                        dismissed = clear()
+                    except Exception as exc:
+                        dismissed = False
+                        self._log("warning",
+                                  "verification: clearing blocking prompts "
+                                  "before giving up on an unrecognised "
+                                  "screen raised (%s)", exc)
+                    if dismissed:
+                        self._log("info",
+                                  "verification: an unrecognised screen "
+                                  "cleared a blocking prompt (e.g. a system "
+                                  "permission dialog); re-reading before "
+                                  "deciding")
+                        continue
             if challenge == CHALLENGE_NONE:
                 return self._clear_screen_result(text)
             if challenge == CHALLENGE_BANNED:
@@ -846,6 +901,14 @@ class _Session:
         the `Issue` tag it already had and somebody glances at it. Erring the
         other way hands a profile nobody fixed back to the posting loop, which
         is how a phone spends launches for days achieving nothing.
+
+        The caller already gave this screen one chance at
+        `clear_blocking_prompts` (see the main loop, right before this is
+        called) -- if that had cleared something, this function would never
+        have been reached at all this round, since the loop `continue`s back
+        to a fresh classification instead. Reaching here means either that
+        was already tried and didn't lead anywhere, or the driver has no such
+        method.
         """
         if screen_is_healthy(text):
             self._dismiss_confirmation()
@@ -994,6 +1057,19 @@ class _Session:
 
         if challenge == CHALLENGE_IMAGE_CAPTCHA:
             return self._handle_image_captcha()
+
+        if challenge == CHALLENGE_IN_REVIEW:
+            # Not needs_human -- there is nothing for a person to do here
+            # either. An appeal (photo/selfie or otherwise) was already
+            # submitted, and Meta's own review is what resolves it, on its
+            # own clock (the screen said "about an hour"). Distinct result
+            # so the caller can tag this `in review` instead of `human
+            # verification` -- the existing daily in-review recheck already
+            # knows how to watch for it clearing on its own.
+            return self._result(
+                RESULT_IN_REVIEW,
+                "an appeal was already submitted and is waiting on Meta's "
+                "own review -- nothing for this run or a person to do")
 
         return self._result(RESULT_FAILED, f"unhandled challenge {challenge!r}")
 
