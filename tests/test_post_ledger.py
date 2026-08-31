@@ -193,18 +193,30 @@ class FlowWiringTest(TestCase):
     """The ledger only works if the flow writes it at the right moment."""
 
     def test_share_is_recorded_before_verification_runs(self):
+        # run() is submit() followed by verify_submitted() (split 2026-08-31 so
+        # GeeLark can overlap one post's verification wait with the next post's
+        # scroll); record_share now lives in submit(), verify_reel_posted in
+        # verify_submitted(). The invariant this test guards -- a crash during
+        # verification must not lose the record that Share was tapped -- now
+        # means: submit() alone writes the ledger, and run() cannot reach
+        # verify_submitted() without submit() having returned first.
         import inspect
         from adb_bot.automation.flows import instagram_reel
-        src = inspect.getsource(instagram_reel.InstagramReelUploadU2Flow.run)
-        recorded_at = src.index("ledger.record_share(")
-        verified_at = src.index("reel_verify.verify_reel_posted(")
-        self.assertLess(recorded_at, verified_at,
-                        "a crash during verification would leave no record that Share was tapped")
+        submit_src = inspect.getsource(instagram_reel.InstagramReelUploadU2Flow.submit)
+        verify_src = inspect.getsource(instagram_reel.InstagramReelUploadU2Flow.verify_submitted)
+        run_src = inspect.getsource(instagram_reel.InstagramReelUploadU2Flow.run)
+        self.assertIn("ledger.record_share(", submit_src)
+        self.assertNotIn("ledger.record_share(", verify_src,
+                         "a crash during verification would leave no record that Share was tapped")
+        self.assertIn("reel_verify.verify_reel_posted(", verify_src)
+        submit_called_at = run_src.index("self.submit(")
+        verify_called_at = run_src.index("self.verify_submitted(")
+        self.assertLess(submit_called_at, verify_called_at)
 
     def test_the_flow_checks_the_ledger_before_pushing_media(self):
         import inspect
         from adb_bot.automation.flows import instagram_reel
-        src = inspect.getsource(instagram_reel.InstagramReelUploadU2Flow.run)
+        src = inspect.getsource(instagram_reel.InstagramReelUploadU2Flow.submit)
         checked_at = src.index("prior.blocks_repost()")
         pushed_at = src.index("_adb_push_media_to_device(")
         self.assertLess(checked_at, pushed_at,

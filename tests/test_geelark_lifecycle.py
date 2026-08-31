@@ -305,11 +305,17 @@ class ActivePostingCycleTest(unittest.TestCase):
                   return_value=None) as init, \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
                   return_value={"aborted": False}), \
-             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.run",
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.submit",
+                  return_value={"submitted": True, "state": {}}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.verify_submitted",
                   return_value={"success": True}):
             lifecycle.run_active_posting_cycle("ph1", "Test 1", adb_client=object(),
                                                media_paths=["/tmp/x.mp4"])
-        init.assert_called_once_with(scroll_seconds=lifecycle.ACTIVE_POSTING_SCROLL_SECONDS)
+        # Two calls now: the pre-post scroll (asserted here) and a trailing
+        # scroll covering this post's own confirmation wait, since it has no
+        # following post to fold into -- see test_a_single_post_batch_still_
+        # gets_a_trailing_scroll in ActivePostingCycleMediaTest.
+        init.assert_any_call(scroll_seconds=lifecycle.ACTIVE_POSTING_SCROLL_SECONDS)
 
 
 class ChallengeAbortTest(unittest.TestCase):
@@ -451,12 +457,63 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
              patch.object(lifecycle, "stop_session"), \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
                   return_value={"aborted": False}), \
-             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.run",
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.submit",
+                  return_value={"submitted": True, "state": {}}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.verify_submitted",
                   return_value={"success": True}) as post:
             out = lifecycle.run_active_posting_cycle(
                 "ph1", "Test 1", adb_client=object(), media_paths=["/tmp/x.mp4"])
         self.assertEqual(out["result"], "posted")
         post.assert_called_once()
+
+    def test_the_second_posts_scroll_absorbs_the_first_posts_confirmation_wait(self):
+        """Not about finishing faster (explicit 2026-08-31 instruction) --
+        trust score and time-on-account. Post 1's scroll is the normal
+        duration; post 2 onward gets stretched by the fast verification
+        timeout, so the time that would otherwise be a dead confirmation wait
+        becomes real scrolling instead. A trailing scroll after the last
+        submit covers that last post's own wait the same way, since it has
+        no following post's scroll to fold into."""
+        from adb_bot.automation.flows import reel_verify
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.__init__",
+                  return_value=None) as init, \
+             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
+                  return_value={"aborted": False}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.submit",
+                  return_value={"submitted": True, "state": {}}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.verify_submitted",
+                  return_value={"success": True}):
+            lifecycle.run_active_posting_cycle(
+                "ph1", "Test 1", adb_client=object(),
+                media_paths=["/tmp/a.mp4", "/tmp/b.mp4"])
+        first_call, second_call, trailing_call = init.call_args_list
+        self.assertEqual(first_call.kwargs["scroll_seconds"], lifecycle.ACTIVE_POSTING_SCROLL_SECONDS)
+        self.assertEqual(second_call.kwargs["scroll_seconds"],
+                         lifecycle.ACTIVE_POSTING_SCROLL_SECONDS + reel_verify.FAST_TIMEOUT_SECONDS)
+        self.assertEqual(trailing_call.kwargs["scroll_seconds"], reel_verify.FAST_TIMEOUT_SECONDS)
+
+    def test_a_single_post_batch_still_gets_a_trailing_scroll(self):
+        """One post has no following post's scroll to absorb its confirmation
+        wait either -- the trailing scroll must not be conditional on there
+        being a second post."""
+        from adb_bot.automation.flows import reel_verify
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.__init__",
+                  return_value=None) as init, \
+             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
+                  return_value={"aborted": False}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.submit",
+                  return_value={"submitted": True, "state": {}}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.verify_submitted",
+                  return_value={"success": True}):
+            lifecycle.run_active_posting_cycle(
+                "ph1", "Test 1", adb_client=object(), media_paths=["/tmp/a.mp4"])
+        pre_scroll, trailing_scroll = init.call_args_list
+        self.assertEqual(pre_scroll.kwargs["scroll_seconds"], lifecycle.ACTIVE_POSTING_SCROLL_SECONDS)
+        self.assertEqual(trailing_scroll.kwargs["scroll_seconds"], reel_verify.FAST_TIMEOUT_SECONDS)
 
     def test_a_conclusive_post_failure_is_retried(self):
         """error dialog / draft prompt / stuck composer -- post_ledger has
@@ -465,7 +522,9 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
              patch.object(lifecycle, "stop_session"), \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
                   return_value={"aborted": False}), \
-             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.run",
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.submit",
+                  return_value={"submitted": True, "state": {}}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.verify_submitted",
                   return_value={"success": False, "uncertain": False}) as post:
             out = lifecycle.run_active_posting_cycle(
                 "ph1", "Test 1", adb_client=object(), media_paths=["/tmp/x.mp4"],
@@ -481,7 +540,9 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
              patch.object(lifecycle, "stop_session"), \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
                   return_value={"aborted": False}), \
-             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.run",
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.submit",
+                  return_value={"submitted": True, "state": {}}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.verify_submitted",
                   return_value={"success": False, "uncertain": True}) as post:
             out = lifecycle.run_active_posting_cycle(
                 "ph1", "Test 1", adb_client=object(), media_paths=["/tmp/x.mp4"],

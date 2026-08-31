@@ -693,7 +693,7 @@ class InstagramReelUploadU2Flow:
     def get_progress_total_steps(self, target: str) -> int:
         return 7
 
-    def run(
+    def submit(
         self,
         profile: Profile,
         adb_client=None,
@@ -703,6 +703,25 @@ class InstagramReelUploadU2Flow:
         manual_continue_event=None,
         manual_continue_callback=None,
     ):
+        """First half of the reel-upload flow: push, compose, and tap Share.
+
+        Split out of `run()` (which is now just `submit()` followed by
+        `verify_submitted()`, unchanged in behavior) so a caller posting more
+        than one clip per launch -- GeeLark's batching -- can submit clip N,
+        move straight on to preparing clip N+1 (e.g. scrolling) while
+        Instagram works on N's confirmation in the background, and only pay
+        for `verify_submitted()`'s wait once it actually needs the verdict.
+        MLX keeps calling `run()` and never sees any of this.
+
+        Returns one of:
+          {"submitted": False, "result": {...}} -- a terminal outcome was
+              already reached (aborted / no media / push failed / flagged /
+              wrong account / Share never tapped). `result` is exactly what
+              `run()` would have returned for the same situation.
+          {"submitted": True, "state": {...}} -- Share was tapped and the
+              ledger entry written. `state` is an opaque bundle to hand to
+              `verify_submitted()`; it must not be inspected or mutated.
+        """
         if not adb_client:
             raise ValueError("adb_client is required")
         if not profile.target:
@@ -731,6 +750,9 @@ class InstagramReelUploadU2Flow:
             if hasattr(adb_client, "mark_progress_step"):
                 adb_client.mark_progress_step()
 
+        def terminal(result: dict) -> dict:
+            return {"submitted": False, "result": result}
+
         if u2 is None:
             emit(
                 "warning",
@@ -741,7 +763,7 @@ class InstagramReelUploadU2Flow:
                 bool(getattr(sys, "frozen", False)),
                 profile.id,
             )
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+            return terminal({"profile_id": profile.id, "target": target, "aborted": False, "success": False})
 
         emit("info", "Starting Instagram reel upload (u2) flow for profile %s", profile.id)
 
@@ -751,7 +773,7 @@ class InstagramReelUploadU2Flow:
         media_path = getattr(profile, "media_path", None) or _adb_resolve_story_media_path(logger=log)
         if media_path is None:
             emit("warning", "No reel upload media found for profile %s", profile.id)
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+            return terminal({"profile_id": profile.id, "target": target, "aborted": False, "success": False})
 
         media_source = Path(media_path)
         selected_media = None
@@ -761,7 +783,7 @@ class InstagramReelUploadU2Flow:
             selected_media = media_queue.get_next_media()
             if selected_media is None:
                 emit("warning", "No pending reel media available for profile %s from folder %s", profile.id, media_source)
-                return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+                return terminal({"profile_id": profile.id, "target": target, "aborted": False, "success": False})
             media_path = str(selected_media)
             emit("info", "Assigned reel media %s to profile %s from folder %s", media_path, profile.id, media_source)
         else:
@@ -781,16 +803,16 @@ class InstagramReelUploadU2Flow:
                  "clip %.0f min ago (%s). Not a failure: the earlier post is live or still "
                  "being verified.",
                  Path(media_path).name, profile.id, prior.age_seconds / 60.0, prior.status)
-            return {"profile_id": profile.id, "target": target, "aborted": False,
+            return terminal({"profile_id": profile.id, "target": target, "aborted": False,
                     "success": False, "uncertain": False, "already_shared": True,
-                    "verify_method": "ledger", "verify_detail": f"already shared ({prior.status})"}
+                    "verify_method": "ledger", "verify_detail": f"already shared ({prior.status})"})
 
         remote_media_path = self._build_remote_media_path(media_path)
         emit("info", "Preparing to push reel media for profile %s: %s -> %s", profile.id, media_path, remote_media_path)
         mark_step()
         if not _adb_push_media_to_device(target, media_path, remote_media_path, logger=log):
             emit("warning", "adb push failed for profile %s on target %s", profile.id, target)
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+            return terminal({"profile_id": profile.id, "target": target, "aborted": False, "success": False})
         emit("info", "adb push succeeded for profile %s on target %s", profile.id, target)
         # Push + media scan only: the on-device file matched the local one on
         # every run we checked, so the ls + sha256sum verification (and its
@@ -813,7 +835,7 @@ class InstagramReelUploadU2Flow:
 
         mark_step()
         if check_abort():
-            return {"profile_id": profile.id, "target": target, "aborted": True}
+            return terminal({"profile_id": profile.id, "target": target, "aborted": True})
 
         # Pick up the configured speed profile for this run's waits.
         waits.set_speed(None)
@@ -822,7 +844,7 @@ class InstagramReelUploadU2Flow:
         # --- Launch Instagram (same commands as the dump/OCR flow) -----------
         for command in self.build_launch_commands(target):
             if check_abort():
-                return {"profile_id": profile.id, "target": target, "aborted": True}
+                return terminal({"profile_id": profile.id, "target": target, "aborted": True})
             adb_client.run_command(command)
             is_start = "monkey" in command or "am start" in command
             # Wait for Instagram to actually reach the foreground instead of
@@ -841,7 +863,7 @@ class InstagramReelUploadU2Flow:
             d.implicitly_wait(self.SELECTOR_WAIT_SECONDS)
         except Exception as exc:
             emit("warning", "uiautomator2 could not connect to %s: %s", target, exc)
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+            return terminal({"profile_id": profile.id, "target": target, "aborted": False, "success": False})
 
         # Instagram is up, but its first frame may still be loading. Wait for a
         # real piece of UI (bottom nav) rather than a flat 10-second sleep.
@@ -857,7 +879,7 @@ class InstagramReelUploadU2Flow:
 
         self._ensure_feed_usable_u2(d, target, adb_client, logger=log)
         if check_abort():
-            return {"profile_id": profile.id, "target": target, "aborted": True}
+            return terminal({"profile_id": profile.id, "target": target, "aborted": True})
 
         # --- Step 0: be on the account this post is for -----------------------
         # Before the baseline count, not after: the count only proves anything
@@ -874,7 +896,7 @@ class InstagramReelUploadU2Flow:
         if want_handle and not account_ok:
             flagged = self._account_flag_result_u2(d, profile, target, emit, "switching accounts")
             if flagged:
-                return flagged
+                return terminal(flagged)
             # The phone demonstrably does not have this account, and it will not
             # have it next time either. Rather than park the clip forever, post
             # it on the account the phone *does* have: same model, and a queued
@@ -905,7 +927,7 @@ class InstagramReelUploadU2Flow:
                     # than half the fleet's launches on 2026-08-14 for 0 posts.
                     result["wrong_account"] = True
                     result["wanted_handle"] = str(want_handle)
-                return result
+                return terminal(result)
 
         # Baseline for post-verification: read the account's post count BEFORE
         # uploading, so afterwards a +1 proves the reel landed even if Instagram
@@ -928,21 +950,21 @@ class InstagramReelUploadU2Flow:
         if not self._open_reel_composer_u2(d, target, emit, log):
             flagged = self._account_flag_result_u2(d, profile, target, emit, "opening the composer")
             if flagged:
-                return flagged
+                return terminal(flagged)
             emit("warning", "Unable to open the Instagram reel composer for %s (leaving Instagram open)", target)
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False, "failed": True}
+            return terminal({"profile_id": profile.id, "target": target, "aborted": False, "success": False, "failed": True})
         mark_step()
         if check_abort():
-            return {"profile_id": profile.id, "target": target, "aborted": True}
+            return terminal({"profile_id": profile.id, "target": target, "aborted": True})
 
         # --- Step 2: select REEL mode + first media --------------------------
         emit("info", "Selecting reel media for %s", target)
         if not self._select_media_u2(d, target, emit, log):
             flagged = self._account_flag_result_u2(d, profile, target, emit, "selecting media")
             if flagged:
-                return flagged
+                return terminal(flagged)
             emit("warning", "Unable to select reel media for %s", target)
-            return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+            return terminal({"profile_id": profile.id, "target": target, "aborted": False, "success": False})
         mark_step()
         # The editor screen is up once its Next/advance control appears.
         waits.settle(3, ready=waits.u2_ready(d, *self._NEXT_SELECTORS),
@@ -1012,11 +1034,50 @@ class InstagramReelUploadU2Flow:
             # number of retries will clear.
             flagged = self._account_flag_result_u2(d, profile, target, emit, "the Share step")
             if flagged:
-                return flagged
+                return terminal(flagged)
             emit("warning", "Instagram reel upload (u2) did not complete successfully for %s "
                             "(the Share button was never tapped -- nothing was posted)", target)
-            return {"profile_id": profile.id, "target": target, "aborted": False,
-                    "success": False, "uncertain": False}
+            return terminal({"profile_id": profile.id, "target": target, "aborted": False,
+                    "success": False, "uncertain": False})
+
+        return {"submitted": True, "state": {
+            "profile": profile,
+            "target": target,
+            "adb_client": adb_client,
+            "log": log,
+            "should_stop": should_stop,
+            "d": d,
+            "ledger": ledger,
+            "media_hash": media_hash,
+            "media_path": media_path,
+            "baseline_count": baseline_count,
+            "posted_as": posted_as,
+            "emit": emit,
+            "mark_step": mark_step,
+            "commit_media_used": commit_media_used,
+            "keep_media_for_retry": keep_media_for_retry,
+        }}
+
+    def verify_submitted(self, state: dict) -> dict:
+        """Second half of the reel-upload flow: confirm the post landed,
+        resolve the ledger, and build the same result shape `run()` has
+        always returned. Takes the `state` bundle from a `submitted: True`
+        result of `submit()` -- see that method's docstring."""
+        profile = state["profile"]
+        target = state["target"]
+        adb_client = state["adb_client"]
+        log = state["log"]
+        should_stop = state["should_stop"]
+        d = state["d"]
+        ledger = state["ledger"]
+        media_hash = state["media_hash"]
+        media_path = state["media_path"]
+        baseline_count = state["baseline_count"]
+        posted_as = state["posted_as"]
+        emit = state["emit"]
+        mark_step = state["mark_step"]
+        commit_media_used = state["commit_media_used"]
+        keep_media_for_retry = state["keep_media_for_retry"]
 
         # --- Step 5: confirm the post ----------------------------------------
         # Look at the screen before touching it. Share has just landed and the
@@ -1124,6 +1185,29 @@ class InstagramReelUploadU2Flow:
             # went out on the account that was. None on every ordinary post.
             "posted_as": posted_as,
         }
+
+    def run(
+        self,
+        profile: Profile,
+        adb_client=None,
+        logger=None,
+        should_stop=None,
+        status_callback=None,
+        manual_continue_event=None,
+        manual_continue_callback=None,
+    ):
+        outcome = self.submit(
+            profile,
+            adb_client=adb_client,
+            logger=logger,
+            should_stop=should_stop,
+            status_callback=status_callback,
+            manual_continue_event=manual_continue_event,
+            manual_continue_callback=manual_continue_callback,
+        )
+        if not outcome["submitted"]:
+            return outcome["result"]
+        return self.verify_submitted(outcome["state"])
 
     def build_launch_commands(self, target: str) -> list[str]:
         return [

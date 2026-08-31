@@ -45,6 +45,7 @@ from adb_bot.automation.flows.instagram import InstagramScrollFlow, InstagramWar
 # case a retry can actually double-post. u2 is already what the warm-up and
 # scroll flows use on this fleet, so the dependency is already proven here.
 from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
+from adb_bot.automation.flows import reel_verify
 from adb_bot.automation.flows.verification import (
     RESULT_BANNED,
     RESULT_IN_REVIEW,
@@ -368,15 +369,59 @@ def _run_active_posting_cycle_once(phone_id: str, name: str, adb_client, transpo
         # including the ones with nothing to post -- was most of the day's
         # posting budget spent on nothing.
         worst = "posted"   # priority for the retry decision: post_failed > post_uncertain > posted
-        for media_path in media_paths:
-            scroll_result = InstagramScrollFlow(scroll_seconds=ACTIVE_POSTING_SCROLL_SECONDS).run(
+
+        # Submit every post in the batch first (scroll, push, compose, tap
+        # Share), and only verify each one afterwards -- instead of scroll ->
+        # submit -> verify, scroll -> submit, per post, back to back. Share is
+        # tapped (and the ledger entry written) for post N before post N+1's
+        # scroll even starts, so post N's ~45s confirmation wait happens
+        # *during* post N+1's ~40s scroll instead of after it. Added
+        # 2026-08-31; submit()/verify_submitted() are additive methods next to
+        # run() on InstagramReelUploadU2Flow -- MLX still calls run() and never
+        # sees this. The one real trade-off: verify_submitted() for post N no
+        # longer runs immediately after its Share tap, so the perishable
+        # "confirmed on the feed right after Share" fast path (see that
+        # method's docstring) rarely fires for anything but the last post in
+        # the batch -- the full verify_reel_posted() post-count check is the
+        # fallback for all the others, same as it always was when that fast
+        # path missed.
+        #
+        # The point of the overlap is NOT to finish the launch faster (2026-08-31,
+        # explicit instruction) -- it's trust score and time-on-account: real
+        # scrolling is the valuable activity here, so every post after the first
+        # gets its scroll stretched by reel_verify.FAST_TIMEOUT_SECONDS on top of
+        # the normal duration, turning what would otherwise be dead
+        # confirmation-wait time into more genuine engagement instead of just
+        # reclaiming it as saved time.
+        flow = InstagramReelUploadU2Flow()
+        submissions = []
+        for index, media_path in enumerate(media_paths):
+            # Only posts after the first have a previous post's confirmation
+            # wait to fold in -- post 1 has nothing preceding it to cover.
+            scroll_seconds = ACTIVE_POSTING_SCROLL_SECONDS
+            if index > 0:
+                scroll_seconds += reel_verify.FAST_TIMEOUT_SECONDS
+            scroll_result = InstagramScrollFlow(scroll_seconds=scroll_seconds).run(
                 session.profile, adb_client=adb_client, logger=logger)
 
             session.profile.media_path = media_path
             if caption is not None:
                 session.profile.caption = caption
-            post_result = InstagramReelUploadU2Flow().run(
+            outcome = flow.submit(session.profile, adb_client=adb_client, logger=logger)
+            submissions.append((media_path, scroll_result, outcome))
+
+        # The last post in the batch has no following post's scroll to fold its
+        # confirmation wait into, so it gets one of its own here -- same reasoning
+        # as above, applied to the one post the loop otherwise leaves out.
+        if submissions:
+            InstagramScrollFlow(scroll_seconds=reel_verify.FAST_TIMEOUT_SECONDS).run(
                 session.profile, adb_client=adb_client, logger=logger)
+
+        for media_path, scroll_result, outcome in submissions:
+            if outcome["submitted"]:
+                post_result = flow.verify_submitted(outcome["state"])
+            else:
+                post_result = outcome["result"]
             if post_result.get("success"):
                 post_outcome = "posted"
             elif post_result.get("uncertain"):
