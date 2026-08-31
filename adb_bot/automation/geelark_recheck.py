@@ -23,6 +23,7 @@ from __future__ import annotations
 import time
 
 from adb_bot.automation import post_ledger
+from adb_bot.automation.flows import waits
 from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
 from adb_bot.automation.geelark_lifecycle import _launch, stop_session
 from adb_bot.automation.recheck_runner import (
@@ -38,6 +39,55 @@ try:
     import uiautomator2 as u2
 except Exception:  # pragma: no cover - matches instagram_reel.py's own guard
     u2 = None
+
+
+def _emit(logger, level, message, *args):
+    method = getattr(logger, level, None) if logger is not None else None
+    if callable(method):
+        method(message, *args)
+
+
+def _open_instagram_u2(flow, target, adb_client, logger=None):
+    """Bring Instagram to the foreground and to a stable, readable state.
+
+    `_launch()` only brings up ADB -- it says nothing about what's on
+    screen. Found live 2026-08-31: skipping this step gave a 100%
+    "could not read the profile's post count" rate, because every phone
+    landed on the recheck straight from a cold ADB connect, not already
+    sitting in Instagram. Mirrors the setup `InstagramReelUploadU2Flow.run()`
+    does for a real post, minus the parts (account baseline, composer) that
+    only matter for posting.
+
+    Returns a connected uiautomator2 device, or None if Instagram never
+    came up.
+    """
+    for command in flow.build_launch_commands(target):
+        adb_client.run_command(command)
+        is_start = "monkey" in command or "am start" in command
+        waits.settle(
+            5 if is_start else 2,
+            ready=(lambda: flow._ig_is_foreground(target, adb_client)) if is_start else None,
+            logger=logger, what="Instagram in foreground",
+        )
+    try:
+        d = u2.connect(target)
+        d.implicitly_wait(flow.SELECTOR_WAIT_SECONDS)
+    except Exception as exc:
+        _emit(logger, "warning", "geelark_recheck: uiautomator2 could not connect to %s (%s)",
+             target, exc)
+        return None
+
+    waits.settle(
+        10,
+        ready=waits.u2_ready(
+            d,
+            {"resourceId": "com.instagram.android:id/feed_tab"},
+            {"resourceIdMatches": r"com\.instagram\.android:id/.*(tab_bar|profile_tab).*"},
+        ),
+        logger=logger, what="Instagram UI loaded",
+    )
+    flow._ensure_feed_usable_u2(d, target, adb_client, logger=logger)
+    return d
 
 # Same floor as the MLX module's own reasoning: give Instagram's post-count
 # cache time to settle before trusting a comparison against it. Explicit
@@ -111,31 +161,64 @@ def run_geelark_recheck(adb_client, transport=None, logger=None) -> list[dict]:
                                     "outcome": "could_not_reach_over_adb"})
                 continue
 
-            d = u2.connect(target)
-            current = None
-            if flow._open_profile_tab_u2(d, target, logger=logger):
-                current = flow._read_post_count_u2(d, target, logger=logger)
+            d = _open_instagram_u2(flow, target, adb_client, logger=logger)
+            if d is None:
+                for record in records:
+                    results.append({"phone_id": phone_id, "media_hash": record.media_hash,
+                                    "outcome": "could_not_open_instagram"})
+                continue
 
+            # Group by target_handle: on a two-account phone, whichever
+            # account is in front is sticky (whatever the last run left
+            # there), so a count read is only meaningful for the record it
+            # was actually taken for. Reading once for the whole phone would
+            # silently score every other account's records against the wrong
+            # account's count.
+            by_handle: dict[str, list] = {}
             for record in records:
-                age_seconds = max(0.0, time.time() - (record.shared_at or 0.0))
-                outcome, detail = decide_recheck(
-                    record.baseline_count, record.baseline_exact, current, age_seconds,
-                )
-                if logger:
-                    logger.info("geelark_recheck: %s (%s): %s -- %s",
-                               phone_id, record.media_hash[:12], outcome, detail)
-                if outcome == OUTCOME_POSTED:
-                    ledger.resolve(record.profile_id, record.media_hash,
-                                   post_ledger.STATUS_CONFIRMED, f"geelark_recheck: {detail}")
-                elif outcome == OUTCOME_FAILED:
-                    # Only ever done on positive evidence of absence -- this
-                    # is what re-opens the clip for another send.
-                    ledger.resolve(record.profile_id, record.media_hash,
-                                   post_ledger.STATUS_DISPROVED, f"geelark_recheck: {detail}")
-                # OUTCOME_UNKNOWN / OUTCOME_ABANDONED: leave the ledger as is
-                # -- still blocking, on purpose (see post_ledger.blocks_repost).
-                results.append({"phone_id": phone_id, "media_hash": record.media_hash,
-                                "outcome": outcome, "detail": detail})
+                by_handle.setdefault(record.target_handle or "", []).append(record)
+
+            for handle, handle_records in by_handle.items():
+                if handle:
+                    account_ok, reason = flow._ensure_account_state_u2(
+                        d, target, handle, lambda level, msg, *a: _emit(logger, level, msg, *a),
+                        logger=logger)
+                    if not account_ok:
+                        if logger:
+                            logger.info("geelark_recheck: %s could not confirm @%s is in front "
+                                       "(%s) -- skipping this account's records",
+                                       phone_id, handle, reason)
+                        for record in handle_records:
+                            results.append({"phone_id": phone_id, "media_hash": record.media_hash,
+                                            "outcome": "account_unreadable", "detail": reason})
+                        continue
+
+                current = None
+                if flow._open_profile_tab_u2(d, target, logger=logger):
+                    waits.settle(2, ready=waits.u2_ready(d, *flow._POST_COUNT_SELECTORS),
+                                logger=logger, what="profile header")
+                    current = flow._read_post_count_u2(d, target, logger=logger)
+
+                for record in handle_records:
+                    age_seconds = max(0.0, time.time() - (record.shared_at or 0.0))
+                    outcome, detail = decide_recheck(
+                        record.baseline_count, record.baseline_exact, current, age_seconds,
+                    )
+                    if logger:
+                        logger.info("geelark_recheck: %s (%s): %s -- %s",
+                                   phone_id, record.media_hash[:12], outcome, detail)
+                    if outcome == OUTCOME_POSTED:
+                        ledger.resolve(record.profile_id, record.media_hash,
+                                       post_ledger.STATUS_CONFIRMED, f"geelark_recheck: {detail}")
+                    elif outcome == OUTCOME_FAILED:
+                        # Only ever done on positive evidence of absence -- this
+                        # is what re-opens the clip for another send.
+                        ledger.resolve(record.profile_id, record.media_hash,
+                                       post_ledger.STATUS_DISPROVED, f"geelark_recheck: {detail}")
+                    # OUTCOME_UNKNOWN / OUTCOME_ABANDONED: leave the ledger as is
+                    # -- still blocking, on purpose (see post_ledger.blocks_repost).
+                    results.append({"phone_id": phone_id, "media_hash": record.media_hash,
+                                    "outcome": outcome, "detail": detail})
         except Exception as exc:
             if logger:
                 logger.exception("geelark_recheck: raised for %s (%s)", phone_id, exc)

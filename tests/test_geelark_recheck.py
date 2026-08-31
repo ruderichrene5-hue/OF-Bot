@@ -46,17 +46,20 @@ class RunGeelarkRecheckTest(unittest.TestCase):
         self._seed("ph-1", "cafebabe" * 8, age_seconds=20 * 60, baseline_count=5)
         fake_session = MagicMock()
         fake_target = "127.0.0.1:5555"
+        fake_device = MagicMock()
         fake_current = MagicMock(value=6, exact=True)
 
         with patch("adb_bot.automation.geelark_recheck.GeelarkPhoneClient") as client_cls, \
              patch("adb_bot.automation.geelark_recheck._launch",
                   return_value=(fake_session, fake_target)) as launch, \
              patch("adb_bot.automation.geelark_recheck.stop_session"), \
-             patch("adb_bot.automation.geelark_recheck.u2") as u2_mod, \
+             patch("adb_bot.automation.geelark_recheck.u2"), \
+             patch("adb_bot.automation.geelark_recheck._open_instagram_u2",
+                  return_value=fake_device) as open_ig, \
+             patch("adb_bot.automation.geelark_recheck.waits.settle"), \
              patch("adb_bot.automation.geelark_recheck.InstagramReelUploadU2Flow") as flow_cls, \
              patch.object(post_ledger, "PostLedger", lambda path=None: self._ledger()):
             client_cls.return_value.list_phones.return_value = [{"id": "ph-1"}]
-            u2_mod.connect.return_value = MagicMock()
             flow = flow_cls.return_value
             flow._open_profile_tab_u2.return_value = True
             flow._read_post_count_u2.return_value = fake_current
@@ -64,12 +67,80 @@ class RunGeelarkRecheckTest(unittest.TestCase):
             results = geelark_recheck.run_geelark_recheck(adb_client=object(), logger=None)
 
         launch.assert_called_once()
+        open_ig.assert_called_once()
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["outcome"], "posted")
 
         resolved = self._ledger().load()
         self.assertEqual(resolved["ph-1:" + "cafebabe" * 8].status,
                          post_ledger.STATUS_CONFIRMED)
+
+    def test_instagram_never_coming_up_is_reported_without_reading_anything(self):
+        self._seed("ph-2", "12345678" * 8, age_seconds=20 * 60, baseline_count=5)
+        fake_session = MagicMock()
+        fake_target = "127.0.0.1:5555"
+
+        with patch("adb_bot.automation.geelark_recheck.GeelarkPhoneClient") as client_cls, \
+             patch("adb_bot.automation.geelark_recheck._launch",
+                  return_value=(fake_session, fake_target)), \
+             patch("adb_bot.automation.geelark_recheck.stop_session"), \
+             patch("adb_bot.automation.geelark_recheck.u2"), \
+             patch("adb_bot.automation.geelark_recheck._open_instagram_u2", return_value=None), \
+             patch("adb_bot.automation.geelark_recheck.InstagramReelUploadU2Flow") as flow_cls, \
+             patch.object(post_ledger, "PostLedger", lambda path=None: self._ledger()):
+            client_cls.return_value.list_phones.return_value = [{"id": "ph-2"}]
+            results = geelark_recheck.run_geelark_recheck(adb_client=object(), logger=None)
+
+        flow_cls.return_value._open_profile_tab_u2.assert_not_called()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["outcome"], "could_not_open_instagram")
+
+    def test_a_two_account_phone_reads_each_handle_separately(self):
+        """A count read only means anything for the account it was taken
+        for -- reading once for the whole phone would score records for
+        the OTHER account against the wrong count entirely."""
+        self._seed("ph-3", "aaaaaaaa" * 8, age_seconds=20 * 60, baseline_count=5)
+        record_a = self._ledger().load()["ph-3:" + "aaaaaaaa" * 8]
+        record_a.target_handle = "handle_a"
+        with self._ledger().path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(asdict(record_a)) + "\n")
+
+        record_b = post_ledger.ShareRecord(
+            profile_id="ph-3", media_hash="bbbbbbbb" * 8, status=post_ledger.STATUS_SHARED,
+            shared_at=time.time() - 20 * 60, baseline_count=9, baseline_exact=True,
+            target_handle="handle_b")
+        with self._ledger().path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(asdict(record_b)) + "\n")
+
+        fake_session = MagicMock()
+        fake_target = "127.0.0.1:5555"
+        fake_device = MagicMock()
+
+        with patch("adb_bot.automation.geelark_recheck.GeelarkPhoneClient") as client_cls, \
+             patch("adb_bot.automation.geelark_recheck._launch",
+                  return_value=(fake_session, fake_target)), \
+             patch("adb_bot.automation.geelark_recheck.stop_session"), \
+             patch("adb_bot.automation.geelark_recheck.u2"), \
+             patch("adb_bot.automation.geelark_recheck._open_instagram_u2",
+                  return_value=fake_device), \
+             patch("adb_bot.automation.geelark_recheck.waits.settle"), \
+             patch("adb_bot.automation.geelark_recheck.InstagramReelUploadU2Flow") as flow_cls, \
+             patch.object(post_ledger, "PostLedger", lambda path=None: self._ledger()):
+            client_cls.return_value.list_phones.return_value = [{"id": "ph-3"}]
+            flow = flow_cls.return_value
+            flow._ensure_account_state_u2.return_value = (True, "ok")
+            flow._open_profile_tab_u2.return_value = True
+            flow._read_post_count_u2.side_effect = [
+                MagicMock(value=6, exact=True), MagicMock(value=9, exact=True)]
+
+            results = geelark_recheck.run_geelark_recheck(adb_client=object(), logger=None)
+
+        self.assertEqual(flow._ensure_account_state_u2.call_count, 2)
+        switched_to = {c.args[2] for c in flow._ensure_account_state_u2.call_args_list}
+        self.assertEqual(switched_to, {"handle_a", "handle_b"})
+        outcomes = {r["media_hash"]: r["outcome"] for r in results}
+        self.assertEqual(outcomes["aaaaaaaa" * 8], "posted")
+        self.assertEqual(outcomes["bbbbbbbb" * 8], "failed")
 
 
 if __name__ == "__main__":
