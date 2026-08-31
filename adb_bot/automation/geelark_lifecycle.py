@@ -431,7 +431,8 @@ def _run_active_posting_cycle_once(phone_id: str, name: str, adb_client, transpo
             session.profile.media_path = media_path
             if caption is not None:
                 session.profile.caption = caption
-            outcome = flow.submit(session.profile, adb_client=adb_client, logger=logger)
+            outcome = flow.submit(session.profile, adb_client=adb_client, logger=logger,
+                                 platform="geelark")
             submissions.append((media_path, scroll_result, outcome))
 
         # The last post in the batch has no following post's scroll to fold its

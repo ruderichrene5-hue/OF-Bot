@@ -106,6 +106,36 @@ def run_geelark_recheck(adb_client, transport=None, logger=None) -> list[dict]:
     if not pending:
         return []
 
+    # post_ledger.py is written by ONE shared code path used by both MLX and
+    # GeeLark (see ShareRecord.platform) -- `pending` above is everything
+    # unresolved on BOTH fleets. Filter to GeeLark's own records BEFORE any
+    # other processing (including the age-ceiling short-circuit below),
+    # never after: sorting this out from a live phone list after the fact is
+    # exactly what produced a wrong report live on 2026-08-31 (495 of 750
+    # "GeeLark" shares that day were actually MLX). A record explicitly
+    # tagged "mlx" is always excluded; a record tagged "geelark" is always
+    # kept; a record with no tag at all (written before this field existed)
+    # falls back to the phone-list check, which is what covers tonight's
+    # existing backlog.
+    try:
+        geelark_ids = {str(row.get("id"))
+                       for row in GeelarkPhoneClient(transport).list_phones()}
+    except Exception as exc:
+        if logger:
+            logger.warning("geelark_recheck: could not list Geelark phones (%s)", exc)
+        return []
+
+    def _is_geelark(record) -> bool:
+        if record.platform == "geelark":
+            return True
+        if record.platform:
+            return False
+        return record.profile_id in geelark_ids
+
+    pending = [r for r in pending if _is_geelark(r)]
+    if not pending:
+        return []
+
     results: list[dict] = []
     now = time.time()
 
@@ -128,14 +158,6 @@ def run_geelark_recheck(adb_client, transport=None, logger=None) -> list[dict]:
         else:
             worklist.append(record)
     if not worklist:
-        return results
-
-    try:
-        geelark_ids = {str(row.get("id"))
-                       for row in GeelarkPhoneClient(transport).list_phones()}
-    except Exception as exc:
-        if logger:
-            logger.warning("geelark_recheck: could not list Geelark phones (%s)", exc)
         return results
 
     by_phone: dict[str, list] = {}

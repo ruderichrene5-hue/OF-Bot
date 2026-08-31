@@ -63,6 +63,17 @@ class ShareRecord:
     # it a ledger line for a two-account phone cannot say *whose* post it was,
     # which is the first question anyone asks when reading it back.
     target_handle: str = ""
+    # "mlx" or "geelark" -- which fleet this phone belongs to. Added
+    # 2026-08-31: this file is written by ONE shared code path
+    # (InstagramReelUploadU2Flow.submit()) used by both platforms, and a
+    # report built by cross-referencing profile_id against a live phone list
+    # got it wrong live -- 495 of 750 "GeeLark" shares on 2026-08-31 turned
+    # out to be MLX, because a phone list is a moving target and this field
+    # simply didn't exist yet to say so directly. Empty string on any record
+    # written before this field existed; there is no reliable way to
+    # backfill those after the fact, so treat an empty value as "unknown
+    # platform", not as either fleet.
+    platform: str = ""
     # The account's post count as it was just before this share. The deferred
     # recheck has no other baseline to work from -- it arrives fifteen minutes
     # later with no memory of the run -- so carrying it here is what turns the
@@ -178,11 +189,15 @@ class PostLedger:
 
     def record_share(self, profile_id: str, media_path, caption: str = "",
                      queue_id: str = "", media_hash: str | None = None,
-                     baseline_count=None, target_handle: str = "") -> ShareRecord | None:
+                     baseline_count=None, target_handle: str = "",
+                     platform: str = "") -> ShareRecord | None:
         """Note that Share was just tapped. Call this *before* verification.
 
         `baseline_count` is the reel_verify.Count read before the upload (or
         None); it is what lets the deferred recheck do an exact comparison.
+
+        `platform` should always be "mlx" or "geelark" from a real caller --
+        see ShareRecord.platform for why this must not be inferred later.
 
         Returns the record, or None if no fingerprint could be taken (in which
         case there is nothing meaningful to remember).
@@ -201,6 +216,7 @@ class PostLedger:
             baseline_count=int(getattr(baseline_count, "value", -1)),
             baseline_exact=bool(getattr(baseline_count, "exact", False)),
             target_handle=str(target_handle or ""),
+            platform=str(platform or ""),
         )
         self._append(record)
         return record

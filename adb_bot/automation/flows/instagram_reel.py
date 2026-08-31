@@ -720,8 +720,15 @@ class InstagramReelUploadU2Flow:
         status_callback=None,
         manual_continue_event=None,
         manual_continue_callback=None,
+        platform: str = "mlx",
     ):
         """First half of the reel-upload flow: push, compose, and tap Share.
+
+        `platform` is recorded on the post_ledger entry as-is -- "mlx" by
+        default since that was this method's only caller before GeeLark
+        existed; GeeLark's own call site passes "geelark" explicitly. See
+        ShareRecord.platform for why this must be passed at write time
+        rather than reconstructed later from a phone list.
 
         Split out of `run()` (which is now just `submit()` followed by
         `verify_submitted()`, unchanged in behavior) so a caller posting more
@@ -1037,7 +1044,8 @@ class InstagramReelUploadU2Flow:
                                 queue_id=getattr(profile, "queue_id", "") or "",
                                 media_hash=media_hash,
                                 baseline_count=baseline_count,
-                                target_handle=want_handle or "")
+                                target_handle=want_handle or "",
+                                platform=platform)
             # Share registered once the composer is gone (we're back on a feed
             # tab). Verification below does the real confirmation work.
             waits.settle(8, ready=waits.u2_ready(d, {"resourceId": "com.instagram.android:id/feed_tab"}),
