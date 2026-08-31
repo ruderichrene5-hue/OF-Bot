@@ -24,6 +24,7 @@ Configuration (all from the environment, and `/etc/adbbot/env` is the place):
     ADBBOT_SITE_SECRET          random string; signs the session cookie
     ADBBOT_SITE_PORT            default 8088
     ADBBOT_SITE_HOST            default 0.0.0.0
+    ADBBOT_SITE_GEELARK_ONLY    "1" to serve only the Geelark tabs (see --geelark-only)
 
 Generate the first two with:
 
@@ -156,8 +157,10 @@ class PageCache:
     """
 
     def __init__(self, airtable=None, ttl: int = REFRESH_SECONDS,
-                 title: str = "ADB bot", collect=None, render=None):
+                 title: str = "ADB bot", collect=None, render=None,
+                 geelark_only: bool = False):
         self.airtable, self.ttl, self.title = airtable, ttl, title
+        self.geelark_only = geelark_only
         self._collect = collect or report.collect
         self._render = render or report_html.render
         self._lock = threading.Lock()
@@ -170,7 +173,8 @@ class PageCache:
                 return self._page
             data = self._collect(airtable=self.airtable, use_cache=False)
             self._page = self._render(data, live=True, title=self.title,
-                                      refresh_seconds=self.ttl)
+                                      refresh_seconds=self.ttl,
+                                      geelark_only=self.geelark_only)
             self._built = now
             return self._page
 
@@ -355,9 +359,9 @@ class SiteHandler(BaseHTTPRequestHandler):
 
 def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *, password_hash: str,
           secret: str, airtable=None, ttl: int = REFRESH_SECONDS,
-          title: str = "ADB bot") -> None:
+          title: str = "ADB bot", geelark_only: bool = False) -> None:
     handler = type("BoundSiteHandler", (SiteHandler,), {
-        "cache": PageCache(airtable=airtable, ttl=ttl, title=title),
+        "cache": PageCache(airtable=airtable, ttl=ttl, title=title, geelark_only=geelark_only),
         "throttle": Throttle(),
         "password_hash": password_hash,
         "secret": secret,
@@ -395,6 +399,12 @@ def main(argv=None) -> int:
     parser.add_argument("--title", default="ADB bot")
     parser.add_argument("--hash-password", action="store_true",
                         help="print a hash + secret for /etc/adbbot/env and exit")
+    parser.add_argument("--geelark-only", action="store_true",
+                        default=os.environ.get("ADBBOT_SITE_GEELARK_ONLY", "").strip() == "1",
+                        help="serve a page with only the Geelark tabs -- no MLX "
+                             "data reachable at all (added 2026-08-31, for a "
+                             "genuinely separate instance/port rather than a "
+                             "different default tab on the shared page)")
     args = parser.parse_args(argv)
 
     if args.hash_password:
@@ -416,7 +426,8 @@ def main(argv=None) -> int:
         return 2
 
     serve(args.host, args.port, password_hash=password_hash, secret=secret,
-          airtable=_build_airtable(), ttl=args.refresh, title=args.title)
+          airtable=_build_airtable(), ttl=args.refresh, title=args.title,
+          geelark_only=args.geelark_only)
     return 0
 
 

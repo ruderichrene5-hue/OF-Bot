@@ -2910,7 +2910,8 @@ def _refresh_words(seconds: int) -> str:
 
 
 def render(data: dict, *, live: bool = True, title: str = "ADB bot",
-           standalone: bool = True, refresh_seconds: int = REFRESH_SECONDS) -> str:
+           standalone: bool = True, refresh_seconds: int = REFRESH_SECONDS,
+           geelark_only: bool = False) -> str:
     """The whole page.
 
     `live` adds the meta-refresh; a snapshot must not have one -- a shared copy
@@ -2924,46 +2925,52 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
     `standalone=False` returns the style and body content *without* the document
     skeleton, for hosts that supply their own `<html>`/`<head>`/`<body>`. Same
     markup either way, so the shared copy and the local one cannot drift.
+
+    `geelark_only=True` (added 2026-08-31, explicit request for a genuinely
+    separate page rather than just a different default tab on the shared
+    one) drops every MLX tab and the MLX-derived banner entirely -- down to
+    Geelark and Geelark Accounts, nothing else reachable on the page.
     """
     refresh = (f'<meta http-equiv="refresh" content="{refresh_seconds}">' if live else "")
-    triage = data.get("needs_human") or {}
-    # Profiles only. The abandoned rows below them are a *consequence* of those
-    # profiles -- one flagged account leaves six dead slots behind it -- so
-    # adding the two counted the same problem twice and put a number on the
-    # banner (72) that nothing else on the page agreed with: the Profiles tab
-    # said 22, because 22 accounts is what a person actually has to work
-    # through. Fixing the account is the job; the rows are just its wreckage.
-    waiting = len(triage.get("profiles") or [])
-    # Profiles off the warm-up waiting on a bio, a picture and a first post.
-    # Counted alongside the flagged ones because both are the same errand to the
-    # person reading this -- open a phone and do something to it -- and both
-    # live on the same tab now.
-    handoff = len((data.get("handoff") or {}).get("profiles") or [])
-    bad = data["health"]["bad"]
     banner = ""
-    if waiting or handoff:
-        what = " and ".join(
-            part for part in (f"{waiting} profile(s) need a person" if waiting else "",
-                              f"{handoff} finished warm-up" if handoff else "") if part)
-        banner = (f'<p><span class="pill bad">{what}</span> '
-                  f'— open the <strong>Needs human</strong> tab.</p>')
-    stopped_timers = [t["loop"] for t in (data.get("timers") or []) if t.get("stopped")]
-    if stopped_timers:
-        banner += (f'<p><span class="pill bad">{len(stopped_timers)} loop(s) not scheduled</span> '
-                   f'{_e(", ".join(stopped_timers))} — these produce nothing and cannot alert.</p>')
-    if bad:
-        names = ", ".join(sorted(r["loop"] for r in bad))
-        # Appended, not assigned. A sick loop and a queue of people-work are
-        # different problems with different readers, and this line used to
-        # replace the worklist banner outright -- so on any day a loop was
-        # unhappy, the twenty profiles waiting on somebody vanished from the
-        # top of the page.
-        banner += (f'<p><span class="pill bad">needs attention</span> '
-                   f'{_e(names)} — see Health below.</p>')
-    if data.get("airtable_error"):
-        banner += (f'<p><span class="pill warn">Airtable unreachable</span> '
-                   f'<span class="mono">{_e(data["airtable_error"])}</span> — '
-                   f'the local sections below are still accurate.</p>')
+    if not geelark_only:
+        triage = data.get("needs_human") or {}
+        # Profiles only. The abandoned rows below them are a *consequence* of those
+        # profiles -- one flagged account leaves six dead slots behind it -- so
+        # adding the two counted the same problem twice and put a number on the
+        # banner (72) that nothing else on the page agreed with: the Profiles tab
+        # said 22, because 22 accounts is what a person actually has to work
+        # through. Fixing the account is the job; the rows are just its wreckage.
+        waiting = len(triage.get("profiles") or [])
+        # Profiles off the warm-up waiting on a bio, a picture and a first post.
+        # Counted alongside the flagged ones because both are the same errand to the
+        # person reading this -- open a phone and do something to it -- and both
+        # live on the same tab now.
+        handoff = len((data.get("handoff") or {}).get("profiles") or [])
+        bad = data["health"]["bad"]
+        if waiting or handoff:
+            what = " and ".join(
+                part for part in (f"{waiting} profile(s) need a person" if waiting else "",
+                                  f"{handoff} finished warm-up" if handoff else "") if part)
+            banner = (f'<p><span class="pill bad">{what}</span> '
+                      f'— open the <strong>Needs human</strong> tab.</p>')
+        stopped_timers = [t["loop"] for t in (data.get("timers") or []) if t.get("stopped")]
+        if stopped_timers:
+            banner += (f'<p><span class="pill bad">{len(stopped_timers)} loop(s) not scheduled</span> '
+                       f'{_e(", ".join(stopped_timers))} — these produce nothing and cannot alert.</p>')
+        if bad:
+            names = ", ".join(sorted(r["loop"] for r in bad))
+            # Appended, not assigned. A sick loop and a queue of people-work are
+            # different problems with different readers, and this line used to
+            # replace the worklist banner outright -- so on any day a loop was
+            # unhappy, the twenty profiles waiting on somebody vanished from the
+            # top of the page.
+            banner += (f'<p><span class="pill bad">needs attention</span> '
+                       f'{_e(names)} — see Health below.</p>')
+        if data.get("airtable_error"):
+            banner += (f'<p><span class="pill warn">Airtable unreachable</span> '
+                       f'<span class="mono">{_e(data["airtable_error"])}</span> — '
+                       f'the local sections below are still accurate.</p>')
 
     mode = (f"live, refreshes every {_refresh_words(refresh_seconds)}"
             if live else "snapshot — not live")
@@ -3015,20 +3022,49 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
         stuck = len(progress["profiles"])
     warmup_badge = f'<span class="count">{stuck}</span>' if stuck else ""
 
-    body = f"""<div class="wrap">
-  <h1>{_e(title)}</h1>
-  <div class="sub">{_e(data['day'])} · generated {_e(data['generated_at'])} · {_e(mode)}</div>
-  {banner}
+    geelark_panels = f"""
+    <section class="panel" id="panel-geelark">
+      <h2>Can the fleet move?</h2>
+      {_section_geelark_migration(data.get('geelark') or {})}
 
-  <div class="tabnav">
-    <input type="radio" name="adbbot-tab" id="tab-server">
+      <h2>By model folder</h2>
+      {_section_geelark_folders(data.get('geelark') or {})}
+
+      <h2>New accounts being created</h2>
+      {_section_geelark_signup(data.get('geelark') or {})}
+
+      <h2>Geelark cloud phones</h2>
+      {_section_geelark(data.get('geelark') or {})}
+    </section>
+
+    <section class="panel" id="panel-geelark-accounts">
+      <h2>Accounts by model folder</h2>
+      {_section_geelark_accounts(data.get('geelark') or {})}
+    </section>"""
+
+    if geelark_only:
+        # A genuinely separate page (added 2026-08-31, explicit request) --
+        # not just a different default tab on the shared MLX+Geelark one.
+        # Nothing MLX-derived is reachable from here at all.
+        tabnav_block = f"""
+    <input type="radio" name="adbbot-tab" id="tab-geelark" checked>
+    <input type="radio" name="adbbot-tab" id="tab-geelark-accounts">
+    <div class="tabs">
+      <label for="tab-geelark">Geelark</label>
+      <label for="tab-geelark-accounts">Geelark Accounts</label>
+    </div>
+{geelark_panels}
+  </div>"""
+    else:
+        tabnav_block = f"""
+    <input type="radio" name="adbbot-tab" id="tab-server" checked>
     <input type="radio" name="adbbot-tab" id="tab-human">
     <input type="radio" name="adbbot-tab" id="tab-posts">
     <input type="radio" name="adbbot-tab" id="tab-schedules">
     <input type="radio" name="adbbot-tab" id="tab-warmup">
     <input type="radio" name="adbbot-tab" id="tab-profiles">
     <input type="radio" name="adbbot-tab" id="tab-geelark">
-    <input type="radio" name="adbbot-tab" id="tab-geelark-accounts" checked>
+    <input type="radio" name="adbbot-tab" id="tab-geelark-accounts">
     <input type="radio" name="adbbot-tab" id="tab-technical">
     <div class="tabs">
       <label for="tab-server">Server</label>
@@ -3108,25 +3144,7 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
       <h2>Phones with two accounts</h2>
       {_section_second_accounts(data.get('second_accounts') or {})}
     </section>
-
-    <section class="panel" id="panel-geelark">
-      <h2>Can the fleet move?</h2>
-      {_section_geelark_migration(data.get('geelark') or {})}
-
-      <h2>By model folder</h2>
-      {_section_geelark_folders(data.get('geelark') or {})}
-
-      <h2>New accounts being created</h2>
-      {_section_geelark_signup(data.get('geelark') or {})}
-
-      <h2>Geelark cloud phones</h2>
-      {_section_geelark(data.get('geelark') or {})}
-    </section>
-
-    <section class="panel" id="panel-geelark-accounts">
-      <h2>Accounts by model folder</h2>
-      {_section_geelark_accounts(data.get('geelark') or {})}
-    </section>
+{geelark_panels}
 
     <section class="panel" id="panel-technical">
       <h2>Live right now</h2>
@@ -3153,7 +3171,14 @@ def render(data: dict, *, live: bool = True, title: str = "ADB bot",
       <h2>Content stock</h2>
       {_section_content(data['content'])}
     </section>
-  </div>
+  </div>"""
+
+    body = f"""<div class="wrap">
+  <h1>{_e(title)}</h1>
+  <div class="sub">{_e(data['day'])} · generated {_e(data['generated_at'])} · {_e(mode)}</div>
+  {banner}
+
+  <div class="tabnav">{tabnav_block}
 
   <footer>
     Read-only. Sources: Posting Queue, post ledger, logs/loop_posting.log,

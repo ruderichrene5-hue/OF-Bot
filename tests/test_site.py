@@ -77,7 +77,7 @@ class PageCacheTest(unittest.TestCase):
             self.built += 1
             return {"n": self.built}
 
-        def render(data, live=True, title="", refresh_seconds=0):
+        def render(data, live=True, title="", refresh_seconds=0, geelark_only=False):
             self.refresh_seconds = refresh_seconds
             return f"page {data['n']}"
 
