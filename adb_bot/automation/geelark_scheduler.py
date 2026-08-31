@@ -50,6 +50,17 @@ POSTS_PER_LAUNCH = 2
 # deadline itself -- see _active_posting_deadline.
 NIGHT_WINDOW_SAFETY_BUFFER_SECONDS = 15 * 60
 
+# The day-posting timer's own fire times (Europe/Berlin) -- deliberately
+# duplicated from adbbot-geelark-day-posting.timer's OnCalendar lines.
+# Added 2026-08-31: without this, one long Active_Posting pass silently
+# absorbed a later scheduled fire (systemd does not start a second instance
+# of an already-active oneshot service), which meant a code change made
+# between two fire times never actually ran until the pass finished on its
+# own, hours later. active_posting_budget_seconds now yields at whichever
+# comes first, this or the night boundary, so each scheduled slot reliably
+# gets a fresh process -- and whatever is on disk at that moment.
+DAY_POSTING_FIRE_TIMES_BERLIN = ((7, 0), (12, 30), (18, 30))
+
 
 def in_warmup_window(now: datetime | None = None) -> bool:
     """True during the 23:00-06:00 Berlin freeze window -- the one that
@@ -74,28 +85,52 @@ def _next_night_window_start(now: datetime) -> datetime:
     return candidate
 
 
+def _next_day_posting_fire(now: datetime) -> datetime | None:
+    """The next of DAY_POSTING_FIRE_TIMES_BERLIN strictly after `now`, today.
+    None once `now` is past all of today's -- the night boundary is always
+    earlier than tomorrow's 07:00 anyway, so there is nothing to gain from
+    wrapping to the next day here."""
+    berlin_now = now.astimezone(BERLIN)
+    for hour, minute in DAY_POSTING_FIRE_TIMES_BERLIN:
+        candidate = berlin_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate > berlin_now:
+            return candidate
+    return None
+
+
 def active_posting_budget_seconds(now: datetime | None = None) -> float:
     """How many seconds an Active_Posting pass starting at `now` has before
     it must stop claiming new profiles -- `NIGHT_WINDOW_SAFETY_BUFFER_SECONDS`
-    before the next 23:00 Berlin. A duration, not an absolute deadline, on
-    purpose: `run_queue` turns it into a real deadline by adding it to its
-    own wall-clock start time, so a caller testing with a fake `now` (see
-    `tests/test_geelark_scheduler.py`) gets a budget many hours long instead
-    of one measured against a `now` the real clock has no relationship to.
+    before whichever comes first: the next 23:00 Berlin, or the day-posting
+    timer's own next scheduled fire (see DAY_POSTING_FIRE_TIMES_BERLIN).
+    A duration, not an absolute deadline, on purpose: `run_queue` turns it
+    into a real deadline by adding it to its own wall-clock start time, so a
+    caller testing with a fake `now` (see `tests/test_geelark_scheduler.py`)
+    gets a budget measured against that fake `now`, not one the real clock
+    has no relationship to.
 
-    This is what makes the fleet's size a visible, self-limiting problem
-    instead of a silent one as more profiles are added over time: three
-    fixed fire times (or six, or however many later) never by themselves
-    guarantee a pass finishes before the next one -- only checking against
-    the actual clock does, at any fleet size, without needing to keep
-    re-tuning fire times or a systemd RuntimeMaxSec by hand as the fleet
-    grows. See run_queue's deadline handling for what happens when a pass
-    doesn't fit -- it stops cleanly and logs how much of the worklist was
-    reached, rather than getting killed mid-cycle.
+    The fire-time half exists so a long pass yields control back at each
+    scheduled slot instead of silently absorbing it -- systemd does not
+    start a second instance of an already-active oneshot service, so
+    without this, a pass that happened to still be running at 12:30 or
+    18:30 meant that slot did nothing at all, including never picking up
+    whatever code changed since the pass started. The night-boundary half
+    is what makes the fleet's size a visible, self-limiting problem instead
+    of a silent one as more profiles are added over time -- three (or six,
+    or however many later) fixed fire times never by themselves guarantee a
+    pass finishes before the next one; only checking against the actual
+    clock does, at any fleet size. See run_queue's deadline handling for
+    what happens when a pass doesn't fit either boundary -- it stops
+    cleanly and logs how much of the worklist was reached, rather than
+    getting killed mid-cycle.
     """
     now = now or datetime.now(BERLIN)
-    deadline_dt = _next_night_window_start(now) - timedelta(
-        seconds=NIGHT_WINDOW_SAFETY_BUFFER_SECONDS)
+    deadlines = [_next_night_window_start(now) - timedelta(
+        seconds=NIGHT_WINDOW_SAFETY_BUFFER_SECONDS)]
+    next_fire = _next_day_posting_fire(now)
+    if next_fire is not None:
+        deadlines.append(next_fire - timedelta(seconds=NIGHT_WINDOW_SAFETY_BUFFER_SECONDS))
+    deadline_dt = min(deadlines)
     return (deadline_dt - now).total_seconds()
 
 
