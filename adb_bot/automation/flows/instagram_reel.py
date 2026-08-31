@@ -1554,78 +1554,94 @@ class InstagramReelUploadU2Flow:
                 "success": False, "account_flag": flag}
 
     def _open_reel_composer_u2(self, d, target, emit, logger=None) -> bool:
-        # Make sure Instagram is the foreground app before hunting for the + --
-        # a stray nav could have dropped us to the launcher, and we must not dump
-        # / tap launcher controls.
-        self._recover_to_instagram_u2(d, target, emit, logger)
-        # Find it from ONE view-tree dump rather than asking the device about
-        # each candidate name in turn. On this build the + is an *unlabeled*
-        # node -- no resource-id, no content-desc -- so the six name lookups
-        # could never match and cost ~10s of pure latency every run. The dump
-        # scan below matches ids and content-descs too (scoring them higher than
-        # position), so a build that does label the button is still handled --
-        # just locally, for the price of a single RPC.
-        clicked = False
-        center = self._find_create_via_dump_u2(d, target, logger)
-        if center is not None:
-            _emit(logger, "info", "u2: tapping Create (+) located via view-tree dump at %s for %s", center, target)
-            try:
-                d.click(center[0], center[1])
-                clicked = True
-            except Exception as exc:
-                _emit(logger, "warning", "u2: dump-located Create tap failed for %s: %s", target, exc)
+        # One retry (added 2026-08-31): live evidence from a batch's second
+        # post showed the Home-tab recovery in _ensure_instagram_home_feed_u2
+        # tapping Home but returning after a flat 1.5s sleep with no
+        # confirmation the feed actually settled -- the Create (+) tap that
+        # followed ~5s later landed on a screen still mid-transition and the
+        # gallery never appeared. A single extra attempt, with a proper
+        # popup-dismiss and a fresh home-feed recovery in between, catches
+        # exactly that case instead of failing the whole post over a
+        # transition that just needed a moment longer. Harmless for the
+        # common case: it only runs when the first attempt already failed.
+        for attempt in (1, 2):
+            # Make sure Instagram is the foreground app before hunting for the
+            # + -- a stray nav could have dropped us to the launcher, and we
+            # must not dump / tap launcher controls.
+            self._recover_to_instagram_u2(d, target, emit, logger)
+            # Find it from ONE view-tree dump rather than asking the device about
+            # each candidate name in turn. On this build the + is an *unlabeled*
+            # node -- no resource-id, no content-desc -- so the six name lookups
+            # could never match and cost ~10s of pure latency every run. The dump
+            # scan below matches ids and content-descs too (scoring them higher than
+            # position), so a build that does label the button is still handled --
+            # just locally, for the price of a single RPC.
+            clicked = False
+            center = self._find_create_via_dump_u2(d, target, logger)
+            if center is not None:
+                _emit(logger, "info", "u2: tapping Create (+) located via view-tree dump at %s for %s", center, target)
+                try:
+                    d.click(center[0], center[1])
+                    clicked = True
+                except Exception as exc:
+                    _emit(logger, "warning", "u2: dump-located Create tap failed for %s: %s", target, exc)
 
-        if not clicked:
-            try:
-                w, h = d.window_size()
-            except Exception:
-                w, h = (0, 0)
-            _emit(logger, "info", "u2: Create (+) not found in the view tree; FALLBACK tap top-left (0.08,0.08) ~ px (%s,%s) for %s", int(w * 0.08) if w else "?", int(h * 0.08) if h else "?", target)
-            try:
-                d.click(0.08, 0.08)
-            except Exception as exc:
-                _emit(logger, "warning", "u2: fallback Create tap failed for %s: %s", target, exc)
+            if not clicked:
+                try:
+                    w, h = d.window_size()
+                except Exception:
+                    w, h = (0, 0)
+                _emit(logger, "info", "u2: Create (+) not found in the view tree; FALLBACK tap top-left (0.08,0.08) ~ px (%s,%s) for %s", int(w * 0.08) if w else "?", int(h * 0.08) if h else "?", target)
+                try:
+                    d.click(0.08, 0.08)
+                except Exception as exc:
+                    _emit(logger, "warning", "u2: fallback Create tap failed for %s: %s", target, exc)
 
-        # The composer usually opens straight into the gallery; only wait for it
-        # if it isn't up yet.
-        waits.settle(3, ready=waits.u2_ready(d, *self._GALLERY_SELECTORS),
-                     logger=logger, what="reel gallery")
+            # The composer usually opens straight into the gallery; only wait for it
+            # if it isn't up yet.
+            waits.settle(3, ready=waits.u2_ready(d, *self._GALLERY_SELECTORS),
+                         logger=logger, what="reel gallery")
 
-        # Some accounts land on a draft dialog offering to resume a previous
-        # video. Only a *clickable* control counts: the gallery's own title is
-        # the text "New reel" (id gallery_title_text, clickable=false), which
-        # used to match here and cost a wasted click on a plain label.
-        draft = _u2_find(
-            d,
-            [{"textContains": "Start new video", "clickable": True},
-             {"descriptionContains": "Start new video", "clickable": True},
-             {"textMatches": "(?i)^(start new video|new video)$", "clickable": True}],
-            logger=logger,
-            purpose="'Start new video' draft dialog",
-        )
-        if draft is not None:
-            _emit(logger, "info", "u2: clicking draft dialog -> %s", _u2_describe(draft))
-            try:
-                draft.click()
-                waits.settle(3, ready=waits.u2_ready(d, *self._GALLERY_SELECTORS),
-                             logger=logger, what="gallery after draft dialog")
-            except Exception as exc:
-                _emit(logger, "warning", "u2: draft dialog click failed: %s", exc)
-        else:
-            _emit(logger, "info", "u2: no draft dialog present for %s; continuing", target)
+            # Some accounts land on a draft dialog offering to resume a previous
+            # video. Only a *clickable* control counts: the gallery's own title is
+            # the text "New reel" (id gallery_title_text, clickable=false), which
+            # used to match here and cost a wasted click on a plain label.
+            draft = _u2_find(
+                d,
+                [{"textContains": "Start new video", "clickable": True},
+                 {"descriptionContains": "Start new video", "clickable": True},
+                 {"textMatches": "(?i)^(start new video|new video)$", "clickable": True}],
+                logger=logger,
+                purpose="'Start new video' draft dialog",
+            )
+            if draft is not None:
+                _emit(logger, "info", "u2: clicking draft dialog -> %s", _u2_describe(draft))
+                try:
+                    draft.click()
+                    waits.settle(3, ready=waits.u2_ready(d, *self._GALLERY_SELECTORS),
+                                 logger=logger, what="gallery after draft dialog")
+                except Exception as exc:
+                    _emit(logger, "warning", "u2: draft dialog click failed: %s", exc)
+            else:
+                _emit(logger, "info", "u2: no draft dialog present for %s; continuing", target)
 
-        # Composer/gallery is open once any of these are present.
-        gallery_ready = self._first_present(
-            d,
-            list(self._GALLERY_SELECTORS),
-            timeout=self.SELECTOR_WAIT_SECONDS,
-            logger=logger,
-            purpose="reel composer / gallery",
-        )
-        if gallery_ready is None:
-            _emit(logger, "warning", "Reel composer/gallery did not appear for %s", target)
-            return False
-        return True
+            # Composer/gallery is open once any of these are present.
+            gallery_ready = self._first_present(
+                d,
+                list(self._GALLERY_SELECTORS),
+                timeout=self.SELECTOR_WAIT_SECONDS,
+                logger=logger,
+                purpose="reel composer / gallery",
+            )
+            if gallery_ready is not None:
+                return True
+
+            _emit(logger, "warning", "Reel composer/gallery did not appear for %s (attempt %s/2)", target, attempt)
+            if attempt == 1:
+                self._dismiss_popups_u2(d, logger=logger, max_rounds=1)
+                instagram_module._ensure_instagram_home_feed_u2(d, target, logger=logger)
+                waits.settle(2)
+        return False
 
     def _reel_tab_selectors(self):
         return [

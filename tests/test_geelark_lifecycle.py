@@ -282,6 +282,12 @@ class ActivePostingCycleTest(unittest.TestCase):
                                return_value=None)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Without this, every test here writes a real "ph1"/"Test 1" record
+        # into the live run_log.jsonl at get_app_data_dir() -- confirmed live
+        # 2026-08-31, 20 bogus records found mixed into a real day's data.
+        log_patcher = patch.object(lifecycle.run_log.RunLogStore, "record")
+        log_patcher.start()
+        self.addCleanup(log_patcher.stop)
 
     def test_no_media_path_does_nothing_and_reports_no_content(self):
         """Changed 2026-08-31: no content for the day means no scroll and no
@@ -367,7 +373,8 @@ class ChallengeAbortTest(unittest.TestCase):
                   return_value="whatever"), \
              patch.object(lifecycle, "simplified_status_tag",
                          return_value="human verification"), \
-             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run") as scroll_run:
+             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run") as scroll_run, \
+             patch.object(lifecycle.run_log.RunLogStore, "record"):
             out = lifecycle.run_active_posting_cycle("ph1", "Test 1", adb_client)
         self.assertEqual(out["result"], "aborted_human_verification")
         scroll_run.assert_not_called()
@@ -451,6 +458,11 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
                                return_value=None)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Same reasoning as ActivePostingCycleTest.setUp: without this, every
+        # test here writes a real record into the live run_log.jsonl.
+        log_patcher = patch.object(lifecycle.run_log.RunLogStore, "record")
+        log_patcher.start()
+        self.addCleanup(log_patcher.stop)
 
     def test_each_attempt_is_written_to_the_run_log(self):
         """Explicit request 2026-08-31: everything needs to be saved so a
