@@ -370,6 +370,18 @@ def run_day_pass(adb_client, transport: GeelarkTransport | None = None,
     from adb_bot.automation.geelark_recheck import run_geelark_recheck
     recheck_results = run_geelark_recheck(adb_client, transport=transport, logger=logger)
 
+    # A real posting attempt already reads a phone's screen once before
+    # doing anything else and retags it away from Active_Posting if it's
+    # unhealthy -- but only for phones the day's worklist actually reached.
+    # Added 2026-08-31: of 172 Active_Posting phones that day, 92 never got
+    # a post attempt at all, so their screen state was never looked at.
+    # This sweeps whichever of them haven't been checked yet today (by a
+    # real post or by this sweep itself) -- same reasoning as recheck: runs
+    # every hourly fire, costs nothing once today's phones are all covered.
+    from adb_bot.automation.geelark_account_check import run_geelark_account_check
+    account_check_results = run_geelark_account_check(adb_client, transport=transport,
+                                                       logger=logger, now=now)
+
     human_verification_results: list[dict] = []
     warmup_results: list[dict] = []
     # Off-switch for the whole human-verification step -- added 2026-08-31 so
@@ -396,7 +408,8 @@ def run_day_pass(adb_client, transport: GeelarkTransport | None = None,
                                                 concurrency=concurrency, now=now,
                                                 tag=lifecycle.TAG_WARMUP)
     return {"scheduled": scheduled_results, "human_verification": human_verification_results,
-           "warmup": warmup_results, "recheck": recheck_results}
+           "warmup": warmup_results, "recheck": recheck_results,
+           "account_check": account_check_results}
 
 
 def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
@@ -508,6 +521,7 @@ if __name__ == "__main__":
     logger = get_logger("adb_bot")
     adb_client = ADBClient()
     recheck_results: list[dict] = []
+    account_check_results: list[dict] = []
 
     if args.night_sequence:
         print(f"night sequence: recheck -> warmup ({datetime.now(BERLIN).strftime('%H:%M %Z')})")
@@ -531,6 +545,7 @@ if __name__ == "__main__":
         results = (combined["scheduled"] + combined["human_verification"]
                   + combined["warmup"])
         recheck_results = combined["recheck"]
+        account_check_results = combined["account_check"]
 
     print(f"{len(results)} profile(s) processed")
     for r in results:
@@ -540,5 +555,9 @@ if __name__ == "__main__":
         print(f"{len(recheck_results)} geelark_recheck entrie(s) processed")
         for r in recheck_results:
             print(f"  {r.get('phone_id')}: {r.get('outcome')}")
+    if account_check_results:
+        print(f"{len(account_check_results)} geelark_account_check phone(s) processed")
+        for r in account_check_results:
+            print(f"  {r.get('name')}: {r.get('result')}")
     if not results:
         sys.exit(0)

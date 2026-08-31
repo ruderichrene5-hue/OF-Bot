@@ -376,6 +376,13 @@ class DayPassTest(unittest.TestCase):
                         return_value=[])
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Same reasoning as the recheck patch above, for the account-check
+        # sweep added the same day.
+        account_check_patcher = patch(
+            "adb_bot.automation.geelark_account_check.run_geelark_account_check",
+            return_value=[])
+        account_check_patcher.start()
+        self.addCleanup(account_check_patcher.stop)
 
     def test_daytime_runs_human_verification_after_the_scheduled_pass(self):
         order = []
@@ -469,6 +476,23 @@ class DayPassTest(unittest.TestCase):
             result = scheduler.run_day_pass(adb_client=object(), now=_at(12, 0))
         recheck.assert_called_once()
         self.assertEqual(result["recheck"], [{"phone_id": "ph1", "outcome": "posted"}])
+
+    def test_account_check_runs_every_time_and_its_results_come_back(self):
+        """Requested 2026-08-31: sweep untouched Active_Posting phones for
+        human-verification/logged-out/banned once a day -- same
+        unconditional placement as recheck, for the same reason (bounded
+        and fast, must not wait on the Active_Posting/Warmup tag)."""
+        with patch.object(scheduler, "run_scheduled_pass", return_value=[]), \
+             patch.object(scheduler, "_best_sms_balance", return_value=5.0), \
+             patch.object(scheduler, "run_human_verification_pass", return_value=[]), \
+             patch("adb_bot.automation.geelark_recheck.run_geelark_recheck", return_value=[]), \
+             patch("adb_bot.automation.geelark_account_check.run_geelark_account_check",
+                  return_value=[{"phone_id": "ph1", "name": "Lea 1", "result": "healthy"}]
+                  ) as account_check:
+            result = scheduler.run_day_pass(adb_client=object(), now=_at(12, 0))
+        account_check.assert_called_once()
+        self.assertEqual(result["account_check"],
+                         [{"phone_id": "ph1", "name": "Lea 1", "result": "healthy"}])
 
 
 class BestSmsBalanceTest(unittest.TestCase):
