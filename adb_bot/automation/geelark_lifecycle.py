@@ -46,6 +46,7 @@ from adb_bot.automation.flows.instagram import InstagramScrollFlow, InstagramWar
 # scroll flows use on this fleet, so the dependency is already proven here.
 from adb_bot.automation.flows.instagram_reel import InstagramReelUploadU2Flow
 from adb_bot.automation.flows import reel_verify
+from adb_bot.automation import account_stats
 from adb_bot.automation.flows.verification import (
     RESULT_BANNED,
     RESULT_IN_REVIEW,
@@ -420,6 +421,19 @@ def _run_active_posting_cycle_once(phone_id: str, name: str, adb_client, transpo
         for media_path, scroll_result, outcome in submissions:
             if outcome["submitted"]:
                 post_result = flow.verify_submitted(outcome["state"])
+                # Dashboard data, piggybacked on this same profile-tab visit --
+                # best-effort only, never allowed to affect the post's own
+                # outcome. See account_stats.py for why there is no separate
+                # scan for this.
+                try:
+                    stats = flow.read_account_stats(outcome["state"])
+                    account_stats.AccountStatsStore().record(
+                        phone_id, handle=stats.get("handle"),
+                        followers=stats.get("followers"), posts=stats.get("posts"))
+                except Exception as exc:
+                    if logger:
+                        logger.info("geelark_lifecycle: account-stats read failed for %s (%s)",
+                                   name, exc)
             else:
                 post_result = outcome["result"]
             if post_result.get("success"):

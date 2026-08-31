@@ -661,6 +661,24 @@ class InstagramReelUploadU2Flow:
         {"resourceId": "com.instagram.android:id/row_profile_header_textview_post_count"},
         {"resourceIdMatches": r"(?i)com\.instagram\.android:id/.*post.*count.*"},
     )
+    # Same header row, the followers counter. Read for the account-stats
+    # dashboard (added 2026-08-31) -- piggybacks on the profile-tab visit
+    # every post already makes, no dedicated scan.
+    #
+    # Confirmed live 2026-08-31 against a real profile header: the current
+    # build does NOT use a "*_count" id for this at all (unlike the post
+    # counter) -- it's "profile_header_familiar_followers_value", a sibling
+    # "profile_header_familiar_followers_label" carries the word "followers".
+    # Kept the originally-guessed "*_count" form too in case an older build
+    # still uses it; _read_follower_count_u2's content-desc fallback is what
+    # actually caught it on the real check ("0followers" on the stacked
+    # container), which is why that fallback exists rather than trusting a
+    # single guessed id.
+    _FOLLOWER_COUNT_SELECTORS = (
+        {"resourceId": "com.instagram.android:id/profile_header_familiar_followers_value"},
+        {"resourceId": "com.instagram.android:id/row_profile_header_textview_followers_count"},
+        {"resourceIdMatches": r"(?i)com\.instagram\.android:id/.*follower.*(count|value).*"},
+    )
 
     # The composer/gallery is open once any of these is on screen.
     #
@@ -2104,6 +2122,57 @@ class InstagramReelUploadU2Flow:
             pass
         _emit(logger, "info", "u2: could not read the post count for %s", target)
         return None
+
+    def _read_follower_count_u2(self, d, target, logger=None):
+        """The account's own follower count, read from the profile header.
+        Same approach as `_read_post_count_u2` -- see that method. Almost
+        always rounded ("12.3K") rather than exact, unlike the post count."""
+        for kwargs in self._FOLLOWER_COUNT_SELECTORS:
+            try:
+                node = d(**kwargs)
+                if node.exists:
+                    parsed = reel_verify.parse_count(node.info.get("text"))
+                    if parsed is not None:
+                        return parsed
+            except Exception:
+                continue
+        try:
+            node = d(descriptionMatches=r"(?i)^\s*[\d.,\s]+\s*(followers?|follower).*")
+            if node.exists:
+                parsed = reel_verify.parse_count(node.info.get("contentDescription"))
+                if parsed is not None:
+                    return parsed
+        except Exception:
+            pass
+        _emit(logger, "info", "u2: could not read the follower count for %s", target)
+        return None
+
+    def read_account_stats(self, state: dict) -> dict:
+        """Handle, post count and follower count for the account `state`
+        belongs to -- take the `state` bundle from a `submitted: True` result
+        of `submit()` (see its docstring). Best-effort, like the probes it
+        calls: never raises, missing values come back as None. Meant to be
+        called after `verify_submitted()`, piggybacking on the same phone
+        session rather than a dedicated visit -- so results are only as
+        fresh as the account's last post."""
+        d = state.get("d")
+        target = state.get("target")
+        log = state.get("log")
+        out = {"handle": None, "followers": None, "posts": None}
+        if d is None or target is None:
+            return out
+        try:
+            if not self._open_profile_tab_u2(d, target, logger=log):
+                return out
+            waits.settle(2, ready=waits.u2_ready(d, *self._POST_COUNT_SELECTORS,
+                                                 *self._FOLLOWER_COUNT_SELECTORS),
+                         logger=log, what="profile header (account stats)")
+            out["handle"] = self._read_current_handle_u2(d, target, logger=log)
+            out["posts"] = self._read_post_count_u2(d, target, logger=log)
+            out["followers"] = self._read_follower_count_u2(d, target, logger=log)
+        except Exception as exc:
+            _emit(log, "info", "u2: account-stats read failed for %s (%s)", target, exc)
+        return out
 
     def _browse_and_refresh_profile_u2(self, d, target, logger=None) -> bool:
         """Move through the feed and back to the profile so its post count is
