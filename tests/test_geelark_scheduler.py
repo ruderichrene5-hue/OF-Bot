@@ -2,6 +2,7 @@
 midnight), Active_Posting by day. Confirmed schedule 2026-08-29.
 """
 
+import os
 import unittest
 from datetime import datetime
 from unittest.mock import patch
@@ -390,6 +391,22 @@ class DayPassTest(unittest.TestCase):
         self.assertIn("scheduled", result)
         self.assertIn("human_verification", result)
         self.assertEqual(result["warmup"], [])
+
+    def test_the_env_toggle_skips_human_verification_without_falling_back_to_warmup(self):
+        """Added 2026-08-31: needs to be pausable without a code change, and
+        without spending the freed-up capacity on Warmup either -- unlike the
+        no-SMS-balance fallback, this is "focus on posting", not "keep busy"."""
+        with patch.dict(os.environ, {"ADBBOT_GEELARK_HUMAN_VERIFICATION_ENABLED": "0"}), \
+             patch.object(scheduler, "run_scheduled_pass", return_value=[]) as scheduled, \
+             patch.object(scheduler, "_best_sms_balance") as balance, \
+             patch.object(scheduler, "run_human_verification_pass") as human:
+            result = scheduler.run_day_pass(adb_client=object(), now=_at(12, 0))
+        human.assert_not_called()
+        balance.assert_not_called()
+        self.assertEqual(result["human_verification"], [])
+        self.assertEqual(result["warmup"], [])
+        # The posting pass itself is unaffected by the toggle.
+        scheduled.assert_called_once()
 
     def test_nighttime_skips_both_fallbacks_to_avoid_double_spending(self):
         """If this ever runs during the Warmup window, run_night_sequence

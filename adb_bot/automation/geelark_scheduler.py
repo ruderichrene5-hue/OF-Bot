@@ -19,6 +19,7 @@ module only owns picking the window/tag and keeping 4 slots busy.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -371,7 +372,16 @@ def run_day_pass(adb_client, transport: GeelarkTransport | None = None,
 
     human_verification_results: list[dict] = []
     warmup_results: list[dict] = []
-    if tag == lifecycle.TAG_ACTIVE_POSTING:
+    # Off-switch for the whole human-verification step -- added 2026-08-31 so
+    # it can be paused (focus capacity on posting/recheck instead) without a
+    # code change. Unset or any value other than "0"/"false" leaves it on.
+    verification_enabled = os.environ.get(
+        "ADBBOT_GEELARK_HUMAN_VERIFICATION_ENABLED", "1").strip().lower() not in ("0", "false")
+    if tag == lifecycle.TAG_ACTIVE_POSTING and not verification_enabled:
+        if logger:
+            logger.info("geelark_scheduler: human verification disabled via "
+                       "ADBBOT_GEELARK_HUMAN_VERIFICATION_ENABLED -- skipping this pass")
+    elif tag == lifecycle.TAG_ACTIVE_POSTING:
         from adb_bot.automation.verification_runner import MIN_BALANCE_TO_START
         balance = _best_sms_balance(logger=logger)
         if balance is None or balance >= MIN_BALANCE_TO_START:
