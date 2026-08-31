@@ -46,23 +46,29 @@ class WindowTest(unittest.TestCase):
 class ActivePostingBudgetTest(unittest.TestCase):
     """Added 2026-08-31, extended same day: a duration until whichever comes
     first -- the next 23:00 Berlin, or the day-posting timer's own next fire
-    (07/12:30/18:30) -- minus the safety buffer. Not an absolute deadline --
-    see active_posting_budget_seconds's own docstring for why that split
-    matters for testability. The fire-time half exists because systemd
-    won't start a second instance of an already-active oneshot service: a
-    pass still running at 12:30 previously absorbed that slot silently,
-    which meant it never picked up whatever code changed since it started."""
+    -- minus the safety buffer. Not an absolute deadline -- see
+    active_posting_budget_seconds's own docstring for why that split matters
+    for testability. The fire-time half exists because systemd won't start a
+    second instance of an already-active oneshot service: a pass still
+    running at the next fire previously absorbed that slot silently, which
+    meant it never picked up whatever code changed since it started.
+
+    Fire times went from 3x/day (07/12:30/18:30) to hourly (07:00-22:00)
+    later the same day -- explicit instruction: a run finishing after its
+    next fixed slot had already passed left the fleet idle for hours with
+    nobody noticing. Hourly keeps that gap to under an hour without anyone
+    having to restart it by hand."""
 
     def test_a_pass_yields_before_the_next_fire_time_not_just_at_23_00(self):
-        """Starting at noon, the 12:30 fire is the nearer boundary --
-        the old behavior (ignoring fire times) would have given ~10h45m."""
+        """Starting at noon, the 13:00 fire is the nearer boundary --
+        the old behavior (ignoring fire times) would have given ~11h."""
         budget = scheduler.active_posting_budget_seconds(_at(12, 0))
-        self.assertAlmostEqual(budget, 15 * 60, delta=1)
+        self.assertAlmostEqual(budget, 45 * 60, delta=1)
 
     def test_inside_the_safety_buffer_before_23_is_negative(self):
         """22:50 is only 10 min before 23:00, less than the 15-min buffer,
-        and past every fire time today -- a pass starting this close to the
-        window must not claim new work."""
+        and past every fire time today (the last is 22:00) -- a pass
+        starting this close to the window must not claim new work."""
         budget = scheduler.active_posting_budget_seconds(_at(22, 50))
         self.assertLess(budget, 0)
 
@@ -74,16 +80,16 @@ class ActivePostingBudgetTest(unittest.TestCase):
         self.assertAlmostEqual(budget, 6 * 3600 + 15 * 60, delta=1)
 
     def test_after_the_last_daily_fire_only_the_night_boundary_applies(self):
-        """19:00 is after 18:30, the last of today's fire times -- nothing
-        left to yield early for until the night window itself."""
-        budget = scheduler.active_posting_budget_seconds(_at(19, 0))
-        self.assertAlmostEqual(budget, 3 * 3600 + 45 * 60, delta=1)
+        """22:30 is after 22:00, the last of today's hourly fire times --
+        nothing left to yield early for until the night window itself."""
+        budget = scheduler.active_posting_budget_seconds(_at(22, 30))
+        self.assertAlmostEqual(budget, 15 * 60, delta=1)
 
     def test_starting_exactly_at_a_fire_time_is_not_the_next_one(self):
-        """12:30 itself is not > 12:30 -- the next boundary is 18:30, not an
+        """15:00 itself is not > 15:00 -- the next boundary is 16:00, not an
         instant, zero-length budget."""
-        budget = scheduler.active_posting_budget_seconds(_at(12, 30))
-        self.assertAlmostEqual(budget, 5 * 3600 + 45 * 60, delta=1)
+        budget = scheduler.active_posting_budget_seconds(_at(15, 0))
+        self.assertAlmostEqual(budget, 45 * 60, delta=1)
 
 
 class RunQueueTest(unittest.TestCase):
