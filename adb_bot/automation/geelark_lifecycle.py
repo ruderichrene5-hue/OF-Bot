@@ -206,8 +206,15 @@ def _launch(phone_id: str, transport: GeelarkTransport, logger, adb_client
     # busy, not stuck. 1200s comfortably covers one sibling cycle finishing.
     session = start_session(phone_id, transport=transport, logger=logger,
                             owner=phone_id, wait_for_lease_seconds=1200.0)
+    # Bumped from 5 attempts (50s budget) 2026-08-31: the recheck's first real
+    # run showed phones repeatedly failing at attempt 2-4 with "device
+    # offline" and then connecting fine on a later attempt within the same
+    # budget -- the tunnel just needed a bit more time, not a different
+    # approach. Explicit instruction: wait longer on a slow phone instead of
+    # writing it off as could_not_reach_over_adb, as long as there's still a
+    # real cap. 8 attempts / 190s is that cap.
     target = connect_with_retries(adb_client, session.profile, logger,
-                                  phone_id, max_attempts=5, retry_delay_seconds=5)
+                                  phone_id, max_attempts=8, retry_delay_seconds=5)
     return session, target
 
 
