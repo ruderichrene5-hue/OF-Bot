@@ -335,12 +335,15 @@ class DayPassTest(unittest.TestCase):
     whatever proxy capacity it leaves free, instead of that capacity sitting
     idle until the once-nightly slot. Only during the daytime window --
     outside it, run_night_sequence already owns human verification, and a
-    second run here would double-spend the real money it costs."""
+    second run here would double-spend the real money it costs. Falls back
+    to Warmup instead when there's no SMS balance for human verification,
+    so idle capacity always has *something* to do."""
 
     def test_daytime_runs_human_verification_after_the_scheduled_pass(self):
         order = []
         with patch.object(scheduler, "run_scheduled_pass",
                          side_effect=lambda *a, **k: order.append("scheduled") or []) as scheduled, \
+             patch.object(scheduler, "_best_sms_balance", return_value=5.0), \
              patch.object(scheduler, "run_human_verification_pass",
                          side_effect=lambda *a, **k: order.append("human_verification") or []) as human:
             result = scheduler.run_day_pass(adb_client=object(), now=_at(12, 0))
@@ -349,22 +352,96 @@ class DayPassTest(unittest.TestCase):
         human.assert_called_once()
         self.assertIn("scheduled", result)
         self.assertIn("human_verification", result)
+        self.assertEqual(result["warmup"], [])
 
-    def test_nighttime_skips_human_verification_to_avoid_double_spending(self):
+    def test_nighttime_skips_both_fallbacks_to_avoid_double_spending(self):
         """If this ever runs during the Warmup window, run_night_sequence
-        already covers human verification for that slot."""
+        already covers human verification for that slot -- and the regular
+        Warmup pass already happened as the scheduled pass itself."""
         with patch.object(scheduler, "run_scheduled_pass", return_value=[]), \
+             patch.object(scheduler, "_best_sms_balance") as balance, \
              patch.object(scheduler, "run_human_verification_pass") as human:
             result = scheduler.run_day_pass(adb_client=object(), now=_at(23, 30))
         human.assert_not_called()
+        balance.assert_not_called()
         self.assertEqual(result["human_verification"], [])
+        self.assertEqual(result["warmup"], [])
 
     def test_nothing_tagged_costs_nothing_extra(self):
         with patch.object(scheduler, "run_scheduled_pass", return_value=[]), \
+             patch.object(scheduler, "_best_sms_balance", return_value=5.0), \
              patch.object(scheduler, "run_human_verification_pass", return_value=[]) as human:
             result = scheduler.run_day_pass(adb_client=object(), now=_at(9, 0))
         human.assert_called_once()
         self.assertEqual(result["human_verification"], [])
+
+    def test_low_balance_falls_back_to_warmup_instead_of_sitting_idle(self):
+        from adb_bot.automation.verification_runner import MIN_BALANCE_TO_START
+        calls = []
+
+        def fake_scheduled(*a, **k):
+            calls.append(k.get("tag"))
+            return []
+
+        with patch.object(scheduler, "run_scheduled_pass", side_effect=fake_scheduled), \
+             patch.object(scheduler, "_best_sms_balance", return_value=MIN_BALANCE_TO_START - 0.5), \
+             patch.object(scheduler, "run_human_verification_pass") as human:
+            result = scheduler.run_day_pass(adb_client=object(), now=_at(12, 0))
+        human.assert_not_called()
+        # First call is the normal Active_Posting pass (tag=None -> resolved
+        # by the clock), second is the explicit Warmup fallback.
+        self.assertEqual(calls, [None, scheduler.lifecycle.TAG_WARMUP])
+        self.assertEqual(result["human_verification"], [])
+
+    def test_an_unreadable_balance_check_tries_human_verification_anyway(self):
+        """Failing to preflight the balance must never itself be the reason
+        real work doesn't happen -- only a genuinely low read balance is."""
+        with patch.object(scheduler, "run_scheduled_pass", return_value=[]), \
+             patch.object(scheduler, "_best_sms_balance", return_value=None), \
+             patch.object(scheduler, "run_human_verification_pass", return_value=[]) as human:
+            scheduler.run_day_pass(adb_client=object(), now=_at(12, 0))
+        human.assert_called_once()
+
+
+class BestSmsBalanceTest(unittest.TestCase):
+    """The preflight check itself -- see verification_runner's own version,
+    which this mirrors."""
+
+    def test_takes_the_best_of_several_providers_not_the_first(self):
+        class Provider:
+            def __init__(self, name, value):
+                self.name = name
+                self._value = value
+            def balance(self):
+                return self._value
+
+        class FakeRouter:
+            providers = [Provider("5sim", 0.10), Provider("smspool", 4.50)]
+
+        with patch("adb_bot.clients.sms.router.build_router", return_value=FakeRouter()):
+            self.assertEqual(scheduler._best_sms_balance(), 4.50)
+
+    def test_a_provider_that_cannot_report_its_balance_is_skipped_not_fatal(self):
+        class BadProvider:
+            name = "5sim"
+            def balance(self):
+                raise RuntimeError("network error")
+
+        class GoodProvider:
+            name = "smspool"
+            def balance(self):
+                return 2.0
+
+        class FakeRouter:
+            providers = [BadProvider(), GoodProvider()]
+
+        with patch("adb_bot.clients.sms.router.build_router", return_value=FakeRouter()):
+            self.assertEqual(scheduler._best_sms_balance(), 2.0)
+
+    def test_the_router_itself_being_unavailable_returns_none_not_zero(self):
+        with patch("adb_bot.clients.sms.router.build_router",
+                  side_effect=RuntimeError("no credentials")):
+            self.assertIsNone(scheduler._best_sms_balance())
 
 
 if __name__ == "__main__":

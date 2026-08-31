@@ -250,42 +250,96 @@ def run_night_sequence(adb_client, transport: GeelarkTransport | None = None,
            "warmup": warmup_results}
 
 
+def _best_sms_balance(logger=None) -> float | None:
+    """The best (not necessarily currently-active) SMS provider's balance --
+    the breaker switches to whichever still has credit, so a flat 5sim does
+    not mean SMSPool is broke too. Same check verification_runner's own
+    preflight uses.
+
+    Returns None when the check itself couldn't run (import/config problem,
+    every provider's own `.balance()` raising) -- distinct from a real read
+    of a low number. A caller should treat None as "assume funded, try
+    anyway": failing to preflight is never itself a reason to refuse real
+    work, only a genuinely low balance is.
+    """
+    try:
+        from adb_bot.clients.sms.router import build_router
+        providers = build_router(logger=logger).providers
+    except Exception as exc:
+        if logger:
+            logger.warning("geelark_scheduler: SMS router unavailable for the "
+                          "balance preflight (%s)", exc)
+        return None
+    best = None
+    for provider in providers:
+        try:
+            value = float(provider.balance())
+        except Exception as exc:
+            if logger:
+                logger.warning("geelark_scheduler: %s balance unreadable (%s)",
+                              provider.name, exc)
+            continue
+        best = value if best is None else max(best, value)
+    return best
+
+
 def run_day_pass(adb_client, transport: GeelarkTransport | None = None,
                  logger=None, concurrency: int = CONCURRENCY,
                  now: datetime | None = None) -> dict:
     """Active_Posting's own pass, then human verification with whatever
-    proxy capacity it leaves free. Instruction 2026-08-31: if Active_Posting
+    proxy capacity it leaves free -- or Warmup, if there's no SMS balance to
+    work human verification with. Instruction 2026-08-31: if Active_Posting
     finishes ahead of the next scheduled fire (nothing due, fewer profiles
     than usual, whatever the reason), that freed-up capacity should not sit
-    idle until the once-nightly slot -- it should work whatever is currently
-    tagged `human verification` instead.
+    idle until the once-nightly slot, and it should always have *something*
+    to do rather than nothing just because human verification specifically
+    is blocked on money.
 
-    Only runs the trailing step when the tag this pass actually resolved to
-    was Active_Posting (daytime). If it resolved to Warmup instead -- this
-    function called outside its normal daytime slot -- run_night_sequence
-    already owns human verification for that window, and a second,
-    unscheduled run here would double-spend the real money it costs (SMS
-    numbers, captcha solves) rather than use idle capacity.
+    Only runs either trailing step when the tag this pass actually resolved
+    to was Active_Posting (daytime). If it resolved to Warmup instead --
+    this function called outside its normal daytime slot --
+    run_night_sequence already owns human verification for that window, and
+    a second, unscheduled run here would double-spend the real money it
+    costs (SMS numbers, captcha solves) rather than use idle capacity.
 
-    A day with nothing tagged `human verification` costs nothing extra: the
-    worklist comes back empty and the pass returns immediately.
+    A day with nothing tagged `human verification` (or nothing tagged
+    `Warmup`, on the fallback path) costs nothing extra: the worklist comes
+    back empty and that step returns immediately.
     """
     transport = transport or GeelarkTransport()
     tag = active_tag_for_now(now)
     scheduled_results = run_scheduled_pass(adb_client, transport=transport, logger=logger,
                                            concurrency=concurrency, now=now)
     human_verification_results: list[dict] = []
+    warmup_results: list[dict] = []
     if tag == lifecycle.TAG_ACTIVE_POSTING:
-        human_verification_results = run_human_verification_pass(
-            adb_client, transport=transport, logger=logger, concurrency=concurrency)
-    return {"scheduled": scheduled_results, "human_verification": human_verification_results}
+        from adb_bot.automation.verification_runner import MIN_BALANCE_TO_START
+        balance = _best_sms_balance(logger=logger)
+        if balance is None or balance >= MIN_BALANCE_TO_START:
+            human_verification_results = run_human_verification_pass(
+                adb_client, transport=transport, logger=logger, concurrency=concurrency)
+        else:
+            if logger:
+                logger.info("geelark_scheduler: best SMS balance %.2f is under the "
+                          "%.2f floor -- running Warmup instead of human verification "
+                          "so the freed-up capacity isn't idle", balance, MIN_BALANCE_TO_START)
+            warmup_results = run_scheduled_pass(adb_client, transport=transport, logger=logger,
+                                                concurrency=concurrency, now=now,
+                                                tag=lifecycle.TAG_WARMUP)
+    return {"scheduled": scheduled_results, "human_verification": human_verification_results,
+           "warmup": warmup_results}
 
 
 def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
                        logger=None, concurrency: int = CONCURRENCY,
-                       now: datetime | None = None) -> list[dict]:
+                       now: datetime | None = None, tag: str | None = None) -> list[dict]:
     """One pass: pick the tag for the current time, list its profiles, run
     them 4-at-a-time through the matching lifecycle cycle.
+
+    `tag` overrides the time-of-day resolution (`active_tag_for_now`) --
+    used by `run_day_pass` to run a Warmup pass outside its normal nightly
+    window, as the fallback when there's no SMS balance for human
+    verification. Leave it None for the normal, clock-driven behavior.
 
     Active_Posting stops claiming new profiles `NIGHT_WINDOW_SAFETY_BUFFER_SECONDS`
     before the next 23:00 Berlin (`active_posting_deadline`), whatever fire
@@ -316,7 +370,7 @@ def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
     either way; nothing else tracks or cleans these up.
     """
     transport = transport or GeelarkTransport()
-    tag = active_tag_for_now(now)
+    tag = tag or active_tag_for_now(now)
     worklist = lifecycle.phones_by_tag(tag, transport=transport)
     budget_seconds = None
 
@@ -404,7 +458,8 @@ if __name__ == "__main__":
         print(f"window: {tag} ({datetime.now(BERLIN).strftime('%H:%M %Z')})")
         kwargs = {"concurrency": args.concurrency} if args.concurrency else {}
         combined = run_day_pass(adb_client, logger=logger, **kwargs)
-        results = combined["scheduled"] + combined["human_verification"]
+        results = (combined["scheduled"] + combined["human_verification"]
+                  + combined["warmup"])
 
     print(f"{len(results)} profile(s) processed")
     for r in results:
