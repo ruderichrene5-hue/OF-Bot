@@ -963,6 +963,8 @@ class InstagramReelUploadU2Flow:
             waits.settle(2, ready=waits.u2_ready(d, *self._POST_COUNT_SELECTORS),
                          logger=log, what="profile header")
             baseline_count = self._read_post_count_u2(d, target, logger=log)
+        baseline_count = self._sanity_check_baseline_count(
+            baseline_count, ledger, str(profile.id), target, emit)
         emit("info", "Baseline post count for %s: %s", target,
              baseline_count.value if baseline_count else "unavailable")
 
@@ -2200,6 +2202,41 @@ class InstagramReelUploadU2Flow:
             pass
         _emit(logger, "info", "u2: could not read the post count for %s", target)
         return None
+
+    @staticmethod
+    def _sanity_check_baseline_count(baseline_count, ledger, profile_id: str, target,
+                                     emit):
+        """Refuse to trust a freshly-read baseline that contradicts what the
+        ledger already knows landed for this account.
+
+        Confirmed live 2026-09-01: a fresh app launch (a composer retry after
+        an earlier post_failed in the same cycle) read a baseline of 0 a full
+        7 minutes after an EARLIER post in that same cycle had already
+        confirmed, live, via banner. That stale-0 baseline then let a totally
+        unrelated real count change get misattributed as this later post's
+        own +1 -- a false CONFIRMED for a clip that was actually still
+        sitting as an unpublished Instagram draft.
+
+        The true post count can never be lower than what the ledger already
+        proved landed, so a baseline that contradicts that is not
+        trustworthy. Downgraded to inexact rather than corrected to a guessed
+        number -- the same handling `decide_recheck` already gives any other
+        unreadable baseline ("no exact baseline count was captured before
+        the post, so a +1 cannot be checked").
+        """
+        if baseline_count is None or not baseline_count.exact:
+            return baseline_count
+        already_confirmed = sum(
+            1 for r in ledger.load().values()
+            if r.profile_id == profile_id and r.status == post_ledger.STATUS_CONFIRMED)
+        if baseline_count.value >= already_confirmed:
+            return baseline_count
+        emit("warning",
+            "Baseline post count %s for %s is lower than the %s already-confirmed "
+            "post(s) the ledger has for this account -- treating it as unreadable "
+            "rather than trusting a stale count", baseline_count.value, target,
+            already_confirmed)
+        return reel_verify.Count(value=baseline_count.value, exact=False)
 
     def _read_follower_count_u2(self, d, target, logger=None):
         """The account's own follower count, read from the profile header.
