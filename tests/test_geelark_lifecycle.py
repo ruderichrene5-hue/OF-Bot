@@ -290,18 +290,21 @@ class ActivePostingCycleTest(unittest.TestCase):
         self.addCleanup(log_patcher.stop)
 
     def test_no_media_path_does_nothing_and_reports_no_content(self):
-        """Changed 2026-08-31: no content for the day means no scroll and no
-        post, not a scroll-only consolation cycle -- a fixed 40s scroll on
-        every content-less cycle was most of the day's posting budget once
-        the target moved to several posts/profile/day. Active_Posting is
+        """Changed 2026-09-01: no content for the day means the phone is
+        never launched at all, not launched-and-closed for a "free"
+        challenge check -- geelark_account_check.py now covers that need
+        directly, once a day, so the launch only ever duplicated it. Found
+        live: 25 no-content launches for one model cost ~80 of 99 total
+        minutes spent on it that day, for zero posts. Active_Posting is
         also permanent -- this cycle has no retag call at all, unlike
         warmup."""
-        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")) as launch, \
              patch.object(lifecycle, "stop_session"), \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
                   return_value={"aborted": False}) as scroll:
             out = lifecycle.run_active_posting_cycle("ph1", "Test 1", adb_client=object())
         self.assertEqual(out["result"], "no_content")
+        launch.assert_not_called()
         scroll.assert_not_called()
 
     def test_uses_the_short_scroll_duration(self):
@@ -375,7 +378,11 @@ class ChallengeAbortTest(unittest.TestCase):
                          return_value="human verification"), \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run") as scroll_run, \
              patch.object(lifecycle.run_log.RunLogStore, "record"):
-            out = lifecycle.run_active_posting_cycle("ph1", "Test 1", adb_client)
+            # media_paths must be non-empty -- otherwise the no-content
+            # short-circuit (added 2026-09-01, checked before _launch) would
+            # return before the challenge check this test is exercising.
+            out = lifecycle.run_active_posting_cycle("ph1", "Test 1", adb_client,
+                                                      media_paths=["fake.mp4"])
         self.assertEqual(out["result"], "aborted_human_verification")
         scroll_run.assert_not_called()
         retag.assert_called_once_with("ph1", unittest.mock.ANY,

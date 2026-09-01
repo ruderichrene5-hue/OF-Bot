@@ -442,11 +442,12 @@ def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
     post_ledger and this batch's own earlier picks) means a model with fewer
     videos than POSTS_PER_LAUNCH today just gets a shorter batch, never a
     repeat. No content at all today for a phone's model means that phone is
-    launched, checked for a challenge, and closed again with neither a
-    scroll nor a post (changed 2026-08-31 -- was scroll-with-no-post; a fixed
-    40s scroll on every cycle, including the ones with nothing to post, was
-    costing ~10 of the day's 17 posting hours once the target moved to
-    several posts/profile/day). Not an error, not a fallback to older
+    never launched at all (changed 2026-09-01 -- was launched anyway for a
+    "free" challenge check; geelark_account_check.py now covers that need
+    directly, once a day, for whichever phones a post never reaches, so the
+    launch was only ever duplicating that check. Found live: 25 no-content
+    launches for one model alone cost ~80 of 99 total minutes spent on it
+    that day, for zero posts). Not an error, not a fallback to older
     content. Every spoofed variant in the batch is deleted after the cycle
     either way; nothing else tracks or cleans these up.
     """

@@ -368,6 +368,19 @@ def _run_active_posting_cycle_once(phone_id: str, name: str, adb_client, transpo
     media_paths = list(media_paths or [])
     out = {"id": phone_id, "name": name, "at": time.time(), "cycle": "active_posting",
           "posts": []}
+    # Checked before ever launching -- changed 2026-09-01, was launched anyway
+    # (to get a challenge check "for free" on an otherwise-wasted cycle).
+    # That reasoning no longer holds: geelark_account_check.py now covers
+    # exactly this -- a once-a-day screen check for whichever Active_Posting
+    # phones a post never reached -- so launching a phone that already knows
+    # it has nothing to post is a launch bought purely to duplicate a check
+    # that module already does. Found live 2026-09-01: 25 no-content launches
+    # for one model (Lea) alone cost ~80 of 99 total minutes spent on it that
+    # day, for zero posts.
+    if not media_paths:
+        out["result"] = "no_content"
+        return out
+
     session = None
     try:
         session, target = _launch(phone_id, transport, logger, adb_client)
@@ -379,10 +392,6 @@ def _run_active_posting_cycle_once(phone_id: str, name: str, adb_client, transpo
                                                  transport, name, TAG_ACTIVE_POSTING, logger)
         if blocked:
             out["result"] = f"aborted_{blocked.replace(' ', '_')}"
-            return out
-
-        if not media_paths:
-            out["result"] = "no_content"
             return out
 
         # Scroll only runs ahead of an actual post now (changed 2026-08-31,
