@@ -143,6 +143,23 @@ def start_session(phone_id: str, transport: GeelarkTransport | None = None,
         return GeelarkSession(profile=profile, lease=lease, rotation=rotation,
                               phone_id=str(phone_id), transport=transport)
     except Exception:
+        # Releasing the lease only frees our own internal lock -- it says
+        # nothing to Geelark. If prepare_geelark_profile_for_adb got far
+        # enough to actually start the phone (its default start_if_stopped
+        # path) before ADB-readiness failed, that phone is left running on
+        # Geelark's side with nothing here ever telling it to stop: no
+        # caller ever gets a GeelarkSession back to pass to stop_session.
+        # Found live 2026-09-01: two phones stuck open this way ate up the
+        # account's whole 4-parallel-phone quota, refusing every other
+        # launch with "balance not enough" until they were found and closed
+        # by hand. Best-effort and safe to call even when the phone was
+        # never started -- same call stop_session already makes.
+        try:
+            release_geelark_phone(str(phone_id), transport, logger=logger)
+        except Exception as exc:
+            _emit(logger, "warning",
+                 "cleanup: could not confirm %s is stopped after a failed "
+                 "start_session (%s)", phone_id, exc)
         proxy_pool.release_proxy(lease)
         raise
 
