@@ -572,6 +572,55 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
         self.assertEqual(out["result"], "post_failed")
         self.assertEqual(post.call_count, 3)
 
+    def test_a_posting_retry_stays_on_the_same_open_session(self):
+        """Explicit instruction 2026-09-01: don't pay for a fresh launch
+        just to retry a posting failure on a phone that is already open and
+        working -- only a launch failure (no open session to keep) should
+        ever cause a relaunch."""
+        with patch.object(lifecycle, "_launch",
+                         return_value=(_fake_session(), "1.2.3.4:5555")) as launch, \
+             patch.object(lifecycle, "stop_session") as stop, \
+             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
+                  return_value={"aborted": False}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.submit",
+                  return_value={"submitted": True, "state": {}}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.verify_submitted",
+                  return_value={"success": False, "uncertain": False}):
+            out = lifecycle.run_active_posting_cycle(
+                "ph1", "Test 1", adb_client=object(), media_paths=["/tmp/x.mp4"],
+                max_attempts=3)
+        self.assertEqual(out["result"], "post_failed")
+        launch.assert_called_once()
+        stop.assert_called_once()
+
+    def test_a_launch_failure_relaunches_and_closes_each_failed_attempt(self):
+        """No open session to keep alive when the launch itself fails, so
+        this retries by relaunching -- unlike a posting failure. Each
+        failed attempt's session (the phone may have booted even though ADB
+        never connected) must be closed before the next attempt, not just
+        the last one."""
+        failed_session = _fake_session()
+        good_session = _fake_session()
+        with patch.object(lifecycle, "_launch",
+                         side_effect=[(failed_session, None), (good_session, "1.2.3.4:5555")]
+                         ) as launch, \
+             patch.object(lifecycle, "stop_session") as stop, \
+             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
+                  return_value={"aborted": False}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.submit",
+                  return_value={"submitted": True, "state": {}}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.verify_submitted",
+                  return_value={"success": True, "uncertain": False}):
+            out = lifecycle.run_active_posting_cycle(
+                "ph1", "Test 1", adb_client=object(), media_paths=["/tmp/x.mp4"],
+                max_attempts=3)
+        self.assertEqual(out["result"], "posted")
+        self.assertEqual(launch.call_count, 2)
+        # Once for the failed attempt's session, once for the good one at the end.
+        self.assertEqual(stop.call_count, 2)
+        stop.assert_any_call(failed_session, logger=None)
+        stop.assert_any_call(good_session, logger=None)
+
     def test_only_the_first_attempt_scrolls_retries_skip_it(self):
         """Explicit instruction 2026-08-31: a retry means the first attempt
         already didn't go through -- skip scrolling and just try to get the

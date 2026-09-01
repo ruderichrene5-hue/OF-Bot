@@ -311,83 +311,133 @@ def run_active_posting_cycle(phone_id: str, name: str, adb_client, transport=Non
                              logger=None, media_paths: list[str] | None = None,
                              caption: str | None = None,
                              max_attempts: int = _DEFAULT_MAX_CYCLE_ATTEMPTS) -> dict:
-    """One Active_Posting pass, relaunched up to `max_attempts` times on an
-    infrastructure hiccup or a conclusive posting failure (`_RETRYABLE_RESULTS`)
-    -- same reasoning as `run_warmup_cycle`. `post_uncertain` (Share was
-    tapped but the outcome couldn't be proven either way -- e.g. the upload
-    was still showing its in-progress notification when the wait gave up) is
+    """One Active_Posting pass. `post_uncertain` (Share was tapped but the
+    outcome couldn't be proven either way -- e.g. the upload was still
+    showing its in-progress notification when the wait gave up) is
     deliberately NOT retried: the post_ledger blocks another Share attempt on
     that clip regardless, and retrying can't resolve the uncertainty any
     faster than just waiting could.
+
+    Two separate retry budgets, both `max_attempts` (changed 2026-09-01,
+    was one budget that closed and relaunched the phone on every retry --
+    explicit instruction: don't pay for a fresh launch just to retry a
+    posting failure on a phone that is already open and working):
+
+    - **Launch**: if the phone never comes up over ADB, there is no open
+      session to keep alive, so this retries by relaunching -- same as
+      before.
+    - **Posting**: once launched, every retry (`_RETRYABLE_RESULTS`: an
+      exception, or a conclusive `post_failed`) stays on that SAME open
+      session -- no relaunch, no proxy re-rotation, no losing the minute or
+      two of trust-building time-on-account the phone already spent this
+      cycle. Only a conclusive posting failure or an unhandled exception
+      triggers this; an ADB tunnel drop mid-cycle still surfaces as an
+      exception here and is retried the same way, on whatever the reconnect
+      leaves in place.
 
     `media_paths` is a list, not a single path (changed 2026-08-31): the
     launch itself (GeeLark cold boot + IP rotation + ADB connect) is a fixed
     ~90s cost paid once per launch, so posting N clips in one already-open
     session instead of N separate launches saves (N-1) x that cost. Each
     entry gets its own scroll immediately before its post -- scrolling is
-    still per-post, only the launch is shared. A retry relaunches the whole
-    batch; anything already posted is safe because the post_ledger refuses a
-    second Share on the same clip regardless of how it gets asked again.
+    still per-post, only the launch is shared. Anything already posted before
+    a retry is safe because the post_ledger refuses a second Share on the
+    same clip regardless of how it gets asked again.
     With no content for the day (`media_paths` empty or None) this cycle
-    does neither scroll nor post and reports "no_content" (changed
-    2026-08-31, was scroll-always). The tag is otherwise permanent once a
+    does neither scroll nor post and reports "no_content", and the phone is
+    never launched at all (changed 2026-09-01 -- was launched anyway for a
+    "free" challenge check; geelark_account_check.py now covers that need
+    directly, so the launch was only ever duplicating it. Found live: 25
+    no-content launches for one model cost ~80 of 99 total minutes spent on
+    it that day, for zero posts). The tag is otherwise permanent once a
     profile reaches it -- the one exception is a challenge screen showing up
-    before this cycle even starts, which pulls the profile straight out of
+    before posting even starts, which pulls the profile straight out of
     Active_Posting instead of scrolling/posting through it."""
     transport = transport or GeelarkTransport()
-    out = {}
-    for attempt in range(1, max_attempts + 1):
-        attempt_started = time.time()
-        # Explicit instruction 2026-08-31: a retry (the first attempt already
-        # didn't go through) skips scrolling entirely -- get the post done
-        # rather than spend more time on the step most often implicated in
-        # today's post_failed cases (the composer failing to open after a
-        # long scroll left Instagram mid-transition). The first attempt is
-        # unaffected; only attempt 2+ of the SAME cycle skips it.
-        out = _run_active_posting_cycle_once(phone_id, name, adb_client, transport,
-                                             logger, media_paths, caption,
-                                             skip_scroll=(attempt > 1))
-        out["attempt"] = attempt
-        try:
-            run_log.RunLogStore().record(out, started_at=attempt_started)
-        except Exception as exc:
-            if logger:
-                logger.info("geelark_lifecycle: run-log write failed for %s (%s)", name, exc)
-        if out["result"] not in _RETRYABLE_RESULTS or attempt == max_attempts:
-            return out
-        if logger:
-            logger.warning(
-                "geelark_lifecycle: active_posting cycle for %s got %r (attempt %s/%s); retrying",
-                name, out["result"], attempt, max_attempts)
-    return out
-
-
-def _run_active_posting_cycle_once(phone_id: str, name: str, adb_client, transport,
-                                   logger, media_paths: list[str] | None,
-                                   caption: str | None, skip_scroll: bool = False) -> dict:
     media_paths = list(media_paths or [])
     out = {"id": phone_id, "name": name, "at": time.time(), "cycle": "active_posting",
           "posts": []}
-    # Checked before ever launching -- changed 2026-09-01, was launched anyway
-    # (to get a challenge check "for free" on an otherwise-wasted cycle).
-    # That reasoning no longer holds: geelark_account_check.py now covers
-    # exactly this -- a once-a-day screen check for whichever Active_Posting
-    # phones a post never reached -- so launching a phone that already knows
-    # it has nothing to post is a launch bought purely to duplicate a check
-    # that module already does. Found live 2026-09-01: 25 no-content launches
-    # for one model (Lea) alone cost ~80 of 99 total minutes spent on it that
-    # day, for zero posts.
     if not media_paths:
         out["result"] = "no_content"
         return out
 
     session = None
     try:
-        session, target = _launch(phone_id, transport, logger, adb_client)
-        if not target:
+        target = None
+        for launch_attempt in range(1, max_attempts + 1):
+            attempt_started = time.time()
+            session, target = _launch(phone_id, transport, logger, adb_client)
+            if target:
+                break
+            # The phone itself may still have booted even though ADB never
+            # connected -- close it before the next attempt's _launch() gets
+            # a fresh session, or a failed-to-connect attempt leaks an open
+            # phone every time but the last.
+            if session is not None:
+                try:
+                    stop_session(session, logger=logger)
+                except Exception as exc:
+                    if logger:
+                        logger.warning("geelark_lifecycle: stop_session failed for %s (%s)",
+                                       name, exc)
+                session = None
             out["result"] = "could_not_reach_over_adb"
-            return out
+            out["attempt"] = launch_attempt
+            try:
+                run_log.RunLogStore().record(out, started_at=attempt_started)
+            except Exception as exc:
+                if logger:
+                    logger.info("geelark_lifecycle: run-log write failed for %s (%s)", name, exc)
+            if launch_attempt == max_attempts:
+                return out
+            if logger:
+                logger.warning("geelark_lifecycle: launch failed for %s (attempt %s/%s); "
+                              "retrying with a fresh launch", name, launch_attempt, max_attempts)
 
+        for attempt in range(1, max_attempts + 1):
+            attempt_started = time.time()
+            # Explicit instruction 2026-08-31: a retry (the first attempt
+            # already didn't go through) skips scrolling entirely -- get the
+            # post done rather than spend more time on the step most often
+            # implicated in post_failed cases (the composer failing to open
+            # after a long scroll left Instagram mid-transition). The first
+            # attempt is unaffected; only attempt 2+ of the SAME cycle skips it.
+            out = _post_batch_on_open_session(phone_id, name, adb_client, transport, session,
+                                              target, media_paths, caption,
+                                              skip_scroll=(attempt > 1), logger=logger)
+            out["attempt"] = attempt
+            try:
+                run_log.RunLogStore().record(out, started_at=attempt_started)
+            except Exception as exc:
+                if logger:
+                    logger.info("geelark_lifecycle: run-log write failed for %s (%s)", name, exc)
+            if out["result"] not in _RETRYABLE_RESULTS or attempt == max_attempts:
+                return out
+            if logger:
+                logger.warning(
+                    "geelark_lifecycle: active_posting cycle for %s got %r (attempt %s/%s); "
+                    "retrying on the same open session", name, out["result"], attempt, max_attempts)
+        return out
+    finally:
+        if session is not None:
+            try:
+                stop_session(session, logger=logger)
+            except Exception as exc:
+                if logger:
+                    logger.warning("geelark_lifecycle: stop_session failed for %s (%s)",
+                                   name, exc)
+
+
+def _post_batch_on_open_session(phone_id: str, name: str, adb_client, transport, session,
+                                target: str, media_paths: list[str], caption: str | None,
+                                skip_scroll: bool = False, logger=None) -> dict:
+    """The posting work for one attempt, on a phone that is already launched
+    and connected -- split out of run_active_posting_cycle 2026-09-01 so a
+    retry can call this again on the SAME session instead of closing and
+    relaunching. Does not launch or close the phone; the caller owns both."""
+    out = {"id": phone_id, "name": name, "at": time.time(), "cycle": "active_posting",
+          "posts": []}
+    try:
         blocked = _check_for_challenge_and_abort(target, adb_client, phone_id,
                                                  transport, name, TAG_ACTIVE_POSTING, logger)
         if blocked:
@@ -494,14 +544,6 @@ def _run_active_posting_cycle_once(phone_id: str, name: str, adb_client, transpo
         if logger:
             logger.exception("geelark_lifecycle: %s cycle raised for %s (%s)",
                             out.get("cycle"), name, exc)
-    finally:
-        if session is not None:
-            try:
-                stop_session(session, logger=logger)
-            except Exception as exc:
-                if logger:
-                    logger.warning("geelark_lifecycle: stop_session failed for %s (%s)",
-                                   name, exc)
     return out
 
 
