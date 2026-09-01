@@ -190,57 +190,37 @@ def run_geelark_recheck(adb_client, transport=None, logger=None) -> list[dict]:
                                     "outcome": "could_not_open_instagram"})
                 continue
 
-            # Group by target_handle: on a two-account phone, whichever
-            # account is in front is sticky (whatever the last run left
-            # there), so a count read is only meaningful for the record it
-            # was actually taken for. Reading once for the whole phone would
-            # silently score every other account's records against the wrong
-            # account's count.
-            by_handle: dict[str, list] = {}
+            # No account switching on Geelark -- unlike MLX, a Geelark phone
+            # never carries two Instagram accounts (confirmed 2026-09-01;
+            # target_handle is never set anywhere in the Geelark code path).
+            # One post-count read is meaningful for every pending record on
+            # this phone.
+            current = None
+            if flow._open_profile_tab_u2(d, target, logger=logger):
+                waits.settle(2, ready=waits.u2_ready(d, *flow._POST_COUNT_SELECTORS),
+                            logger=logger, what="profile header")
+                current = flow._read_post_count_u2(d, target, logger=logger)
+
             for record in records:
-                by_handle.setdefault(record.target_handle or "", []).append(record)
-
-            for handle, handle_records in by_handle.items():
-                if handle:
-                    account_ok, reason = flow._ensure_account_state_u2(
-                        d, target, handle, lambda level, msg, *a: _emit(logger, level, msg, *a),
-                        logger=logger)
-                    if not account_ok:
-                        if logger:
-                            logger.info("geelark_recheck: %s could not confirm @%s is in front "
-                                       "(%s) -- skipping this account's records",
-                                       phone_id, handle, reason)
-                        for record in handle_records:
-                            results.append({"phone_id": phone_id, "media_hash": record.media_hash,
-                                            "outcome": "account_unreadable", "detail": reason})
-                        continue
-
-                current = None
-                if flow._open_profile_tab_u2(d, target, logger=logger):
-                    waits.settle(2, ready=waits.u2_ready(d, *flow._POST_COUNT_SELECTORS),
-                                logger=logger, what="profile header")
-                    current = flow._read_post_count_u2(d, target, logger=logger)
-
-                for record in handle_records:
-                    age_seconds = max(0.0, time.time() - (record.shared_at or 0.0))
-                    outcome, detail = decide_recheck(
-                        record.baseline_count, record.baseline_exact, current, age_seconds,
-                    )
-                    if logger:
-                        logger.info("geelark_recheck: %s (%s): %s -- %s",
-                                   phone_id, record.media_hash[:12], outcome, detail)
-                    if outcome == OUTCOME_POSTED:
-                        ledger.resolve(record.profile_id, record.media_hash,
-                                       post_ledger.STATUS_CONFIRMED, f"geelark_recheck: {detail}")
-                    elif outcome == OUTCOME_FAILED:
-                        # Only ever done on positive evidence of absence -- this
-                        # is what re-opens the clip for another send.
-                        ledger.resolve(record.profile_id, record.media_hash,
-                                       post_ledger.STATUS_DISPROVED, f"geelark_recheck: {detail}")
-                    # OUTCOME_UNKNOWN / OUTCOME_ABANDONED: leave the ledger as is
-                    # -- still blocking, on purpose (see post_ledger.blocks_repost).
-                    results.append({"phone_id": phone_id, "media_hash": record.media_hash,
-                                    "outcome": outcome, "detail": detail})
+                age_seconds = max(0.0, time.time() - (record.shared_at or 0.0))
+                outcome, detail = decide_recheck(
+                    record.baseline_count, record.baseline_exact, current, age_seconds,
+                )
+                if logger:
+                    logger.info("geelark_recheck: %s (%s): %s -- %s",
+                               phone_id, record.media_hash[:12], outcome, detail)
+                if outcome == OUTCOME_POSTED:
+                    ledger.resolve(record.profile_id, record.media_hash,
+                                   post_ledger.STATUS_CONFIRMED, f"geelark_recheck: {detail}")
+                elif outcome == OUTCOME_FAILED:
+                    # Only ever done on positive evidence of absence -- this
+                    # is what re-opens the clip for another send.
+                    ledger.resolve(record.profile_id, record.media_hash,
+                                   post_ledger.STATUS_DISPROVED, f"geelark_recheck: {detail}")
+                # OUTCOME_UNKNOWN / OUTCOME_ABANDONED: leave the ledger as is
+                # -- still blocking, on purpose (see post_ledger.blocks_repost).
+                results.append({"phone_id": phone_id, "media_hash": record.media_hash,
+                                "outcome": outcome, "detail": detail})
         except Exception as exc:
             if logger:
                 logger.exception("geelark_recheck: raised for %s (%s)", phone_id, exc)
