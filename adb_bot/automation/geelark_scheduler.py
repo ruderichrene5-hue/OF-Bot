@@ -61,13 +61,12 @@ NIGHT_WINDOW_SAFETY_BUFFER_SECONDS = 15 * 60
 # comes first, this or the night boundary, so each scheduled slot reliably
 # gets a fresh process -- and whatever is on disk at that moment.
 #
-# Changed same day, 3x/day -> hourly: a run that finished after its next
-# fixed slot had already passed left the fleet idle for hours with nobody
-# noticing -- explicit instruction that posting must keep going, not wait
-# on a person to notice a gap and restart it by hand. An idle hourly fire
-# (nothing left to claim) costs almost nothing: phones_by_tag comes back
-# empty or already-worked and the pass exits in seconds.
-DAY_POSTING_FIRE_TIMES_BERLIN = tuple((h, 0) for h in range(7, 23))
+# Was briefly hourly (tuple((h, 0) for h in range(7, 23))) the same day, then
+# reverted back to 3x/day on explicit instruction ("stell wieder zurück") --
+# the hourly change traded away the larger per-slot time budget the 3x/day
+# spacing gave each run, which matters for how long the live post-confirm
+# window (reel_verify.FAST_TIMEOUT_SECONDS) can afford to be.
+DAY_POSTING_FIRE_TIMES_BERLIN = ((7, 0), (12, 30), (18, 30))
 
 
 def in_warmup_window(now: datetime | None = None) -> bool:
