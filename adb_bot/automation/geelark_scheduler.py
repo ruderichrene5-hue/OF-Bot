@@ -134,9 +134,18 @@ def active_posting_budget_seconds(now: datetime | None = None) -> float:
     now = now or datetime.now(BERLIN)
     deadlines = [_next_night_window_start(now) - timedelta(
         seconds=NIGHT_WINDOW_SAFETY_BUFFER_SECONDS)]
-    next_fire = _next_day_posting_fire(now)
-    if next_fire is not None:
-        deadlines.append(next_fire - timedelta(seconds=NIGHT_WINDOW_SAFETY_BUFFER_SECONDS))
+    # Off-switch for the fire-time half of the boundary -- added 2026-09-01
+    # for a manual "run until the fleet is actually through" day, requested
+    # explicitly rather than waiting out the normal fire-time yield points.
+    # The night boundary above still applies unconditionally: it protects
+    # the nightly in-review-recheck/human-verification/Warmup sequence, not
+    # just this pass's own tidiness.
+    ignore_fire_boundary = os.environ.get(
+        "ADBBOT_GEELARK_IGNORE_FIRE_BUDGET", "0").strip().lower() in ("1", "true")
+    if not ignore_fire_boundary:
+        next_fire = _next_day_posting_fire(now)
+        if next_fire is not None:
+            deadlines.append(next_fire - timedelta(seconds=NIGHT_WINDOW_SAFETY_BUFFER_SECONDS))
     deadline_dt = min(deadlines)
     return (deadline_dt - now).total_seconds()
 
@@ -454,6 +463,20 @@ def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
     transport = transport or GeelarkTransport()
     tag = tag or active_tag_for_now(now)
     worklist = lifecycle.phones_by_tag(tag, transport=transport)
+
+    # Push one model's phones to the back of the worklist -- added
+    # 2026-09-01 for a manual run where that model's Drive content lands
+    # later than the others', so hitting its phones early would just be
+    # "no content, skip" instead of a real attempt. Stable partition, not a
+    # sort: everything keeps its relative order within its own half.
+    defer_model = os.environ.get("ADBBOT_GEELARK_DEFER_MODEL", "").strip()
+    if defer_model:
+        deferred = defer_model.lower()
+        worklist = (
+            [row for row in worklist if ((row.get("group") or {}).get("name") or "").lower() != deferred]
+            + [row for row in worklist if ((row.get("group") or {}).get("name") or "").lower() == deferred]
+        )
+
     budget_seconds = None
 
     if tag == lifecycle.TAG_WARMUP:
