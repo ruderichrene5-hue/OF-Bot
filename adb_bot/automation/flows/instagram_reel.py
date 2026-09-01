@@ -1657,8 +1657,13 @@ class InstagramReelUploadU2Flow:
             # SELECTOR_WAIT_SECONDS wait on the common case where there was
             # never a dialog to begin with.
             if self._grant_photo_permission_u2(d, target, logger=logger):
+                # 3s here originally; too short in practice -- confirmed live
+                # 2026-09-01 that `com.android.permissioncontroller` can stay
+                # in the foreground a beat after the grant tap (needing a
+                # Back-press recovery before the gallery ever shows), which
+                # this window was routinely too short to cover.
                 gallery_ready = self._first_present(
-                    d, list(self._GALLERY_SELECTORS), timeout=3,
+                    d, list(self._GALLERY_SELECTORS), timeout=8,
                     logger=logger, purpose="reel composer / gallery (after permission grant)")
                 if gallery_ready is not None:
                     return True
@@ -1668,7 +1673,29 @@ class InstagramReelUploadU2Flow:
                 self._dismiss_popups_u2(d, logger=logger, max_rounds=1)
                 instagram_module._ensure_instagram_home_feed_u2(d, target, logger=logger)
                 waits.settle(2)
+        self._dump_composer_failure_u2(d, target, logger=logger)
         return False
+
+    def _dump_composer_failure_u2(self, d, target: str, logger=None) -> None:
+        """Both attempts to open the composer failed and the cause isn't
+        always the known photo-permission dialog (confirmed live 2026-09-01:
+        some cases show no permission dialog at all, no draft dialog, no
+        error -- the Create tap just doesn't lead anywhere). Save a
+        screenshot + view-tree dump so the next occurrence has real evidence
+        instead of only the log's text trail, which has repeatedly not been
+        enough to tell what was actually on screen."""
+        out_dir = Path("/root/.adb_bot/composer_failure_dumps")
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            safe_target = target.replace(":", "_").replace(".", "_")
+            base = out_dir / f"{stamp}_{safe_target}"
+            d.screenshot(str(base.with_suffix(".png")))
+            base.with_suffix(".xml").write_text(d.dump_hierarchy())
+            _emit(logger, "warning", "u2: saved composer-failure dump for %s to %s.{png,xml}",
+                  target, base)
+        except Exception as exc:
+            _emit(logger, "warning", "u2: composer-failure dump failed for %s: %s", target, exc)
 
     def _grant_photo_permission_u2(self, d, target, logger=None) -> bool:
         """Android's system "Allow access to photos and videos?" dialog is
