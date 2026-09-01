@@ -66,6 +66,7 @@ from adb_bot.clients.sms.router import build_router
 from adb_bot.automation.workflow import connect_with_retries
 from adb_bot.clients.geelark.ip_rotation import load_reboot_config
 from adb_bot.clients.geelark.phones import GeelarkPhoneClient
+from adb_bot.clients.geelark.readiness import phone_is_started, prepare_geelark_profile_for_adb
 from adb_bot.clients.geelark.session import GeelarkSession, start_session, stop_session
 from adb_bot.clients.geelark.tags import GeelarkTagClient
 from adb_bot.clients.geelark.transport import GeelarkTransport
@@ -218,6 +219,46 @@ def _launch(phone_id: str, transport: GeelarkTransport, logger, adb_client
     return session, target
 
 
+def open_for_manual_access(phone_id: str, transport: GeelarkTransport, logger, adb_client
+                           ) -> tuple[GeelarkSession | None, str | None]:
+    """Like `_launch`, but for a human looking at the phone right now --
+    never disrupts a phone that's already running.
+
+    Found live 2026-09-01: a manual batch launch hit
+    "port 54028 refused the rotation call" on a phone GeeLark's own console
+    showed as "shutting down" -- while the user had that exact phone open
+    and on Instagram seconds earlier. `_launch()` always forces a fresh
+    proxy rotation (right, for the real posting pipeline, where every
+    session wants a new IP) and always calls through to Geelark's own
+    start-phone endpoint, regardless of whether the phone is already up.
+    For a phone someone is actively viewing, that rotation-and-restart is
+    exactly what can knock it into a shutdown cycle out from under them.
+
+    If the phone is already started, this skips the proxy reassignment,
+    the rotation, and the start call entirely -- just enables ADB (a no-op
+    if it already is) and connects to whatever proxy/IP the phone is
+    already running on. No `GeelarkSession` is created in that case (no
+    lease was taken, nothing new was started), so the caller must not
+    call `stop_session` on the `None` returned alongside it -- there is
+    nothing to stop that this call opened.
+
+    Only actually launches (full rotation, same as `_launch`) when the
+    phone is confirmed NOT already running.
+    """
+    if phone_is_started(GeelarkPhoneClient(transport), phone_id):
+        if logger:
+            logger.info("geelark_lifecycle: %s is already running; reconnecting without "
+                       "rotating its proxy or restarting it", phone_id)
+        profile = prepare_geelark_profile_for_adb(
+            phone_id, transport, logger=logger, start_if_stopped=False)
+        if profile is None:
+            return None, None
+        target = connect_with_retries(adb_client, profile, logger,
+                                      phone_id, max_attempts=8, retry_delay_seconds=5)
+        return None, target
+    return _launch(phone_id, transport, logger, adb_client)
+
+
 def _check_for_challenge_and_abort(target: str, adb_client, phone_id: str, transport,
                                    name: str, current_tag: str, logger=None) -> str | None:
     """Read the current screen before doing any real work; if it's one of the
@@ -366,7 +407,24 @@ def run_active_posting_cycle(phone_id: str, name: str, adb_client, transport=Non
         target = None
         for launch_attempt in range(1, max_attempts + 1):
             attempt_started = time.time()
-            session, target = _launch(phone_id, transport, logger, adb_client)
+            try:
+                session, target = _launch(phone_id, transport, logger, adb_client)
+            except Exception as exc:
+                # _launch() can raise (SessionError -- proxy rotation refused,
+                # phone never became ADB-ready) rather than returning
+                # (None, None). Uncaught here, that exception used to kill
+                # this worker THREAD outright, not just this one phone --
+                # found live 2026-09-01: a run of proxy-rotation refusals
+                # took out enough of the 4 concurrent workers within two
+                # minutes that a pass with 5+ hours of budget and 129
+                # profiles still queued silently stalled, logged as
+                # "deadline reached" even though nothing had actually timed
+                # out. Same recovery as a plain failed-to-connect attempt.
+                session = None
+                target = None
+                if logger:
+                    logger.warning("geelark_lifecycle: _launch raised for %s (attempt %s/%s): %s",
+                                   name, launch_attempt, max_attempts, exc)
             if target:
                 break
             # The phone itself may still have booted even though ADB never
