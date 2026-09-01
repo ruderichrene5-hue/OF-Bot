@@ -1072,7 +1072,29 @@ def _adb_wait_for_media_store_index(target: str, remote_media_path: str, logger=
     return False
 
 
-def _adb_push_media_to_device(target: str, local_media_path: str, remote_media_path: str, logger=None) -> bool:
+def _adb_push_media_to_device(target: str, local_media_path: str, remote_media_path: str,
+                              logger=None, max_attempts: int = 3,
+                              retry_delay_seconds: float = 5.0) -> bool:
+    """Retries the push itself on failure -- requested 2026-09-01 after a real
+    failure that was purely a network hiccup on the tunnel to a remote cloud
+    phone (`file_sync_client.cpp:473 protocol fault: failed to read stat
+    response: Success`), not a real error. `_adb_push_media_to_device_once`
+    already treats "exited non-zero but the file matches on the device" as
+    success; this covers the case where it doesn't -- the file genuinely
+    never arrived, and a second attempt likely just works, same as a flaky
+    network transfer usually does on a plain retry."""
+    for attempt in range(1, max_attempts + 1):
+        if _adb_push_media_to_device_once(target, local_media_path, remote_media_path,
+                                          logger=logger):
+            return True
+        if attempt < max_attempts:
+            _emit(logger, "warning", "adb push attempt %s/%s failed for %s; retrying in %ss",
+                 attempt, max_attempts, target, retry_delay_seconds)
+            time.sleep(retry_delay_seconds)
+    return False
+
+
+def _adb_push_media_to_device_once(target: str, local_media_path: str, remote_media_path: str, logger=None) -> bool:
     local_path = Path(local_media_path)
     if not local_path.exists() or not local_path.is_file():
         _emit(logger, "warning", "Local story media file does not exist: %s", local_media_path)
