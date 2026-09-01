@@ -464,17 +464,27 @@ def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
     tag = tag or active_tag_for_now(now)
     worklist = lifecycle.phones_by_tag(tag, transport=transport)
 
-    # Push one model's phones to the back of the worklist -- added
-    # 2026-09-01 for a manual run where that model's Drive content lands
-    # later than the others', so hitting its phones early would just be
-    # "no content, skip" instead of a real attempt. Stable partition, not a
-    # sort: everything keeps its relative order within its own half.
-    defer_model = os.environ.get("ADBBOT_GEELARK_DEFER_MODEL", "").strip()
-    if defer_model:
-        deferred = defer_model.lower()
+    # Push one or more models' phones to the back of the worklist -- added
+    # 2026-09-01 for a manual run where a model's Drive content lands later
+    # than the others' (so hitting its phones early would just be "no
+    # content, skip" instead of a real attempt), and extended the same day
+    # to a second, unrelated reason: a model whose phones are all failing
+    # at launch right now (found live: Luisa alone ate 8 fully-exhausted
+    # launch attempts and 11+ minutes with zero other model even touched,
+    # while every other model's phones sat untried behind it in the queue).
+    # Comma-separated, case-insensitive. Stable partition, not a sort:
+    # everything keeps its relative order within its own half.
+    defer_models = {
+        name.strip().lower()
+        for name in os.environ.get("ADBBOT_GEELARK_DEFER_MODEL", "").split(",")
+        if name.strip()
+    }
+    if defer_models:
+        def _is_deferred(row):
+            return ((row.get("group") or {}).get("name") or "").lower() in defer_models
         worklist = (
-            [row for row in worklist if ((row.get("group") or {}).get("name") or "").lower() != deferred]
-            + [row for row in worklist if ((row.get("group") or {}).get("name") or "").lower() == deferred]
+            [row for row in worklist if not _is_deferred(row)]
+            + [row for row in worklist if _is_deferred(row)]
         )
 
     budget_seconds = None
