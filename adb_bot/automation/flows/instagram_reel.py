@@ -1644,12 +1644,66 @@ class InstagramReelUploadU2Flow:
             if gallery_ready is not None:
                 return True
 
+            # Android's own "Allow access to photos and videos?" dialog sits
+            # OVER the gallery a beat after a fresh account first opens it --
+            # confirmed live 2026-09-01 (this exact log sequence: Create
+            # tapped, no draft dialog, then a straight timeout with nothing
+            # in between). Documented as a known gap for this flow back on
+            # 2026-08-19 (see the profile-picture fix) but never closed here.
+            # One check after the gallery wait already gave it time to
+            # render, then one more gallery check -- not a second full
+            # SELECTOR_WAIT_SECONDS wait on the common case where there was
+            # never a dialog to begin with.
+            if self._grant_photo_permission_u2(d, target, logger=logger):
+                gallery_ready = self._first_present(
+                    d, list(self._GALLERY_SELECTORS), timeout=3,
+                    logger=logger, purpose="reel composer / gallery (after permission grant)")
+                if gallery_ready is not None:
+                    return True
+
             _emit(logger, "warning", "Reel composer/gallery did not appear for %s (attempt %s/2)", target, attempt)
             if attempt == 1:
                 self._dismiss_popups_u2(d, logger=logger, max_rounds=1)
                 instagram_module._ensure_instagram_home_feed_u2(d, target, logger=logger)
                 waits.settle(2)
         return False
+
+    def _grant_photo_permission_u2(self, d, target, logger=None) -> bool:
+        """Android's system "Allow access to photos and videos?" dialog is
+        not part of Instagram's own view hierarchy in the sense
+        _dismiss_popups_u2 expects (it looks for safe, repeatable dismiss
+        controls, not a permission grant), so a fresh account's first reel
+        upload can sit blocked behind it with nothing answering it -- the
+        gallery/composer readiness check just times out looking as if the
+        composer never opened. See adbbot-photo-permission-blocks-gallery
+        memory: fixed once already for the profile-picture flow (an
+        unmerged branch), documented there as still open for reel upload.
+
+        "Allow all" preferred over "allow limited" -- limited access opens a
+        second per-item picker that nothing here drives, and the media is
+        already pushed to /sdcard/Download rather than picked from a
+        restricted set. Exact ids/text only, never a substring: "allow"
+        alone also matches "Don't allow". Returns True only if something was
+        actually tapped -- the caller decides whether to re-check the
+        gallery, not this method.
+        """
+        selectors = [
+            {"resourceIdMatches": r".*:id/permission_allow_all_button"},
+            {"resourceIdMatches": r".*:id/permission_allow_selected_button"},
+            {"textMatches": r"(?i)^allow all$"},
+            {"textMatches": r"(?i)^while using the app$"},
+            {"textMatches": r"(?i)^allow$"},
+        ]
+        sel = _u2_find(d, selectors, logger=logger, purpose="photo access permission dialog")
+        if sel is None:
+            return False
+        try:
+            sel.click()
+            _emit(logger, "info", "u2: granted photo access permission for %s", target)
+            return True
+        except Exception as exc:
+            _emit(logger, "warning", "u2: photo permission tap failed for %s: %s", target, exc)
+            return False
 
     def _reel_tab_selectors(self):
         return [
