@@ -243,23 +243,24 @@ class ActivePostingContentTest(unittest.TestCase):
             handle="1")
 
     def test_resolves_up_to_posts_per_launch_videos_and_posts_the_batch(self):
-        """POSTS_PER_LAUNCH=2 (changed 2026-08-31): one launch posts up to 2
-        clips instead of 1, so the fixed ~90s launch cost is paid once for
-        two posts instead of twice."""
+        """POSTS_PER_LAUNCH=3 (raised from 2 on 2026-09-02): one launch posts
+        up to 3 clips instead of 1, so the fixed ~90s launch cost is paid
+        once for three posts instead of three times."""
         from adb_bot.automation import geelark_content
 
         row = {"id": "1", "serialName": "P1", "group": {"name": "Luisa"}}
         first = self._content("a.mp4", "/tmp/spoofed_a.mp4")
         second = self._content("b.mp4", "/tmp/spoofed_b.mp4")
-        # exclude_names is mutated in place across the two calls, so a
-        # mock's call_args_list (which stores a live reference, not a
-        # snapshot) would show the same final set for both calls if
-        # inspected afterwards -- snapshot it as a copy at call time instead.
+        third = self._content("c.mp4", "/tmp/spoofed_c.mp4")
+        # exclude_names is mutated in place across the calls, so a mock's
+        # call_args_list (which stores a live reference, not a snapshot)
+        # would show the same final set for every call if inspected
+        # afterwards -- snapshot it as a copy at call time instead.
         seen_excludes = []
 
         def fake_get_post_media(model, handle, logger=None, exclude_names=None):
             seen_excludes.append(set(exclude_names or ()))
-            return [first, second][len(seen_excludes) - 1]
+            return [first, second, third][len(seen_excludes) - 1]
 
         with patch.object(lifecycle, "phones_by_tag", return_value=[row]), \
              patch.object(geelark_content, "get_post_media",
@@ -270,12 +271,13 @@ class ActivePostingContentTest(unittest.TestCase):
             scheduler.run_scheduled_pass(adb_client=object(), now=_at(12, 0))
         self.assertEqual(len(seen_excludes), scheduler.POSTS_PER_LAUNCH)
         self.assertEqual(seen_excludes[0], set())
-        # the second call must exclude the first pick, or a model with fewer
+        # each call must exclude the earlier picks, or a model with fewer
         # videos than POSTS_PER_LAUNCH today would post the same clip twice
         # in one launch before either lands in the post_ledger.
         self.assertEqual(seen_excludes[1], {"a.mp4"})
+        self.assertEqual(seen_excludes[2], {"a.mp4", "b.mp4"})
         self.assertEqual(posting_cycle.call_args.kwargs["media_paths"],
-                         ["/tmp/spoofed_a.mp4", "/tmp/spoofed_b.mp4"])
+                         ["/tmp/spoofed_a.mp4", "/tmp/spoofed_b.mp4", "/tmp/spoofed_c.mp4"])
 
     def test_fewer_videos_than_posts_per_launch_gives_a_shorter_batch(self):
         """A model with only one video today gets a 1-post batch, not a
@@ -324,7 +326,7 @@ class ActivePostingContentTest(unittest.TestCase):
         second = self._content("b.mp4", "/tmp/spoofed_b.mp4")
         with patch.object(lifecycle, "phones_by_tag", return_value=[row]), \
              patch.object(geelark_content, "get_post_media",
-                         side_effect=[first, second]), \
+                         side_effect=[first, second, None]), \
              patch.object(lifecycle, "run_active_posting_cycle",
                          return_value={"result": "posted"}), \
              patch("pathlib.Path.unlink") as unlink:

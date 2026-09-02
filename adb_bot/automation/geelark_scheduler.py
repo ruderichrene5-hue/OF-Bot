@@ -38,17 +38,17 @@ CONCURRENCY = 4    # one per real modem
 
 # Posts per launch, not per day. Changed 2026-08-31: the launch itself (cold
 # boot + IP rotation + ADB connect) is a fixed ~90s cost regardless of how
-# many clips get posted once it's up, so batching 2 posts into one launch
-# instead of running two separate launches saves that ~90s every other post.
-# Scrolling stays per-post (see geelark_lifecycle.run_active_posting_cycle) --
-# only the launch is shared.
-POSTS_PER_LAUNCH = 2
+# many clips get posted once it's up, so batching posts into one launch
+# instead of running separate launches saves that ~90s every extra post.
+# Raised 2 -> 3 on 2026-09-02, explicit instruction, once the scroll gap
+# between posts was dropped (see geelark_lifecycle.run_active_posting_cycle)
+# made a third post cheap enough to be worth it.
+POSTS_PER_LAUNCH = 3
 
 # How long before the 23:00 Warmup window an Active_Posting pass must stop
 # claiming new profiles. Not zero: the last profile claimed just before the
-# deadline still needs time to actually finish (one cycle is ~6 min at
-# POSTS_PER_LAUNCH=2), so this is a floor under the deadline, not the
-# deadline itself -- see _active_posting_deadline.
+# deadline still needs time to actually finish, so this is a floor under the
+# deadline, not the deadline itself -- see _active_posting_deadline.
 NIGHT_WINDOW_SAFETY_BUFFER_SECONDS = 15 * 60
 
 # The day-posting timer's own fire times (Europe/Berlin) -- deliberately
