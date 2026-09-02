@@ -78,6 +78,13 @@ def in_warmup_window(now: datetime | None = None) -> bool:
 
 
 def active_tag_for_now(now: datetime | None = None) -> str:
+    # Off-switch for the whole time-of-day resolution -- added 2026-09-02,
+    # same manual "run until the fleet is actually through" mode as the two
+    # budget bypasses above: forces every pass to resolve Active_Posting so
+    # a backlog can clear across the 23:00 Berlin boundary instead of the
+    # very next pass silently switching over to Warmup on the clock alone.
+    if os.environ.get("ADBBOT_GEELARK_FORCE_ACTIVE_POSTING", "0").strip().lower() in ("1", "true"):
+        return lifecycle.TAG_ACTIVE_POSTING
     return lifecycle.TAG_WARMUP if in_warmup_window(now) else lifecycle.TAG_ACTIVE_POSTING
 
 
@@ -132,20 +139,34 @@ def active_posting_budget_seconds(now: datetime | None = None) -> float:
     getting killed mid-cycle.
     """
     now = now or datetime.now(BERLIN)
-    deadlines = [_next_night_window_start(now) - timedelta(
-        seconds=NIGHT_WINDOW_SAFETY_BUFFER_SECONDS)]
+    deadlines = []
+    # Off-switch for the night-window half of the boundary -- added
+    # 2026-09-02 for the same manual "run until the fleet is actually
+    # through" mode as the fire-time switch below, for a night where the
+    # night-sequence timer itself is disabled (so there is no Warmup/human-
+    # verification handoff to protect) and the day's posting pass should
+    # keep going past 23:00 Berlin instead of stopping with a backlog.
+    ignore_night_boundary = os.environ.get(
+        "ADBBOT_GEELARK_IGNORE_NIGHT_BUDGET", "0").strip().lower() in ("1", "true")
+    if not ignore_night_boundary:
+        deadlines.append(_next_night_window_start(now) - timedelta(
+            seconds=NIGHT_WINDOW_SAFETY_BUFFER_SECONDS))
     # Off-switch for the fire-time half of the boundary -- added 2026-09-01
     # for a manual "run until the fleet is actually through" day, requested
     # explicitly rather than waiting out the normal fire-time yield points.
-    # The night boundary above still applies unconditionally: it protects
-    # the nightly in-review-recheck/human-verification/Warmup sequence, not
-    # just this pass's own tidiness.
+    # The night boundary above still applies unconditionally by default: it
+    # protects the nightly in-review-recheck/human-verification/Warmup
+    # sequence, not just this pass's own tidiness -- unless disabled too.
     ignore_fire_boundary = os.environ.get(
         "ADBBOT_GEELARK_IGNORE_FIRE_BUDGET", "0").strip().lower() in ("1", "true")
     if not ignore_fire_boundary:
         next_fire = _next_day_posting_fire(now)
         if next_fire is not None:
             deadlines.append(next_fire - timedelta(seconds=NIGHT_WINDOW_SAFETY_BUFFER_SECONDS))
+    if not deadlines:
+        # Both boundaries disabled -- fall back to a generous cap so a
+        # stuck pass still ends instead of running forever unbounded.
+        deadlines.append(now + timedelta(hours=12))
     deadline_dt = min(deadlines)
     return (deadline_dt - now).total_seconds()
 
