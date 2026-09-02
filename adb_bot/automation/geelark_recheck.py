@@ -20,6 +20,7 @@ launch/read/write-back plumbing around it.
 
 from __future__ import annotations
 
+import json
 import time
 
 from adb_bot.automation import post_ledger
@@ -34,6 +35,9 @@ from adb_bot.automation.recheck_runner import (
 )
 from adb_bot.clients.geelark.phones import GeelarkPhoneClient
 from adb_bot.clients.geelark.transport import GeelarkTransport
+from adb_bot.config.settings import get_app_data_dir
+
+ABANDONED_LOG_FILENAME = "geelark_recheck_abandoned_logged.json"
 
 try:
     import uiautomator2 as u2
@@ -144,19 +148,50 @@ def run_geelark_recheck(adb_client, transport=None, logger=None) -> list[dict]:
     # MAX_UNRESOLVED_AGE_SECONDS gets the same verdict whether or not we
     # spend a phone launch reading its post count. Settle those without
     # launching anything; only the rest are worth reaching a phone for.
+    #
+    # Deliberately never resolved to DISPROVED (matches recheck_runner.py's
+    # own MLX-side reasoning): we still don't know whether the reel landed,
+    # and guessing wrong would let the clip be sent again -- a real risk of
+    # a genuine duplicate post on the live account. Leaving it STATUS_SHARED
+    # forever is the safe side to be wrong on.
+    #
+    # That correctness choice has a side effect worth damping: with nothing
+    # ever marked resolved, the SAME already-abandoned record gets logged
+    # as "abandoned" again on every single recheck run forever. Found live
+    # 2026-09-02: 5117 such records across 137 profiles, some logged dozens
+    # of times over. abandoned_logged tracks which (profile_id, media_hash)
+    # pairs have already gotten their one-time log line, purely to cut that
+    # noise -- it never touches the ledger's own resolution state.
+    abandoned_log_path = get_app_data_dir() / ABANDONED_LOG_FILENAME
+    try:
+        already_logged = set(json.loads(abandoned_log_path.read_text()))
+    except Exception:
+        already_logged = set()
+    newly_logged = set()
+
     worklist = []
     for record in pending:
         age_seconds = max(0.0, now - (record.shared_at or 0.0))
         if age_seconds >= MAX_UNRESOLVED_AGE_SECONDS:
             outcome, detail = decide_recheck(record.baseline_count, record.baseline_exact,
                                              None, age_seconds)
-            if logger:
+            key = f"{record.profile_id}:{record.media_hash}"
+            if logger and key not in already_logged:
                 logger.info("geelark_recheck: %s (%s): %s -- %s (no launch, already too old)",
                            record.profile_id, record.media_hash[:12], outcome, detail)
+                newly_logged.add(key)
             results.append({"phone_id": record.profile_id, "media_hash": record.media_hash,
                             "outcome": outcome, "detail": detail})
         else:
             worklist.append(record)
+
+    if newly_logged:
+        try:
+            abandoned_log_path.parent.mkdir(parents=True, exist_ok=True)
+            abandoned_log_path.write_text(json.dumps(sorted(already_logged | newly_logged)))
+        except Exception as exc:
+            if logger:
+                logger.warning("geelark_recheck: could not persist abandoned-log dedup (%s)", exc)
     if not worklist:
         return results
 
