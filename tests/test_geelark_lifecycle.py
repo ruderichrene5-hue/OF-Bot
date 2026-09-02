@@ -506,14 +506,11 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
         self.assertEqual(out["result"], "posted")
         post.assert_called_once()
 
-    def test_the_second_posts_scroll_absorbs_the_first_posts_confirmation_wait(self):
-        """Not about finishing faster (explicit 2026-08-31 instruction) --
-        trust score and time-on-account. Post 1's scroll is the normal
-        duration; post 2 onward gets stretched by the fast verification
-        timeout, so the time that would otherwise be a dead confirmation wait
-        becomes real scrolling instead. A trailing scroll after the last
-        submit covers that last post's own wait the same way, since it has
-        no following post's scroll to fold into."""
+    def test_posts_after_the_first_get_no_scroll_gap(self):
+        """Changed 2026-09-02, explicit instruction: no more scroll between
+        post N and post N+1 -- only the pre-scroll before post 1 and the
+        trailing scroll after the last post remain. Two
+        InstagramScrollFlow calls for a two-post batch, not three."""
         from adb_bot.automation.flows import reel_verify
         with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
              patch.object(lifecycle, "stop_session"), \
@@ -528,11 +525,9 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
             lifecycle.run_active_posting_cycle(
                 "ph1", "Test 1", adb_client=object(),
                 media_paths=["/tmp/a.mp4", "/tmp/b.mp4"])
-        first_call, second_call, trailing_call = init.call_args_list
-        self.assertEqual(first_call.kwargs["scroll_seconds"], lifecycle.ACTIVE_POSTING_SCROLL_SECONDS)
-        self.assertEqual(second_call.kwargs["scroll_seconds"],
-                         lifecycle.ACTIVE_POSTING_SCROLL_SECONDS + reel_verify.FAST_TIMEOUT_SECONDS)
-        self.assertEqual(trailing_call.kwargs["scroll_seconds"], reel_verify.FAST_TIMEOUT_SECONDS)
+        pre_scroll, trailing_scroll = init.call_args_list
+        self.assertEqual(pre_scroll.kwargs["scroll_seconds"], lifecycle.ACTIVE_POSTING_SCROLL_SECONDS)
+        self.assertEqual(trailing_scroll.kwargs["scroll_seconds"], reel_verify.FAST_TIMEOUT_SECONDS)
 
     def test_a_single_post_batch_still_gets_a_trailing_scroll(self):
         """One post has no following post's scroll to absorb its confirmation

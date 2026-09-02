@@ -511,38 +511,25 @@ def _post_batch_on_open_session(phone_id: str, name: str, adb_client, transport,
 
         # Submit every post in the batch first (scroll, push, compose, tap
         # Share), and only verify each one afterwards -- instead of scroll ->
-        # submit -> verify, scroll -> submit, per post, back to back. Share is
-        # tapped (and the ledger entry written) for post N before post N+1's
-        # scroll even starts, so post N's ~45s confirmation wait happens
-        # *during* post N+1's ~40s scroll instead of after it. Added
-        # 2026-08-31; submit()/verify_submitted() are additive methods next to
-        # run() on InstagramReelUploadU2Flow -- MLX still calls run() and never
-        # sees this. The one real trade-off: verify_submitted() for post N no
-        # longer runs immediately after its Share tap, so the perishable
-        # "confirmed on the feed right after Share" fast path (see that
-        # method's docstring) rarely fires for anything but the last post in
-        # the batch -- the full verify_reel_posted() post-count check is the
-        # fallback for all the others, same as it always was when that fast
-        # path missed.
+        # submit -> verify, scroll -> submit, per post, back to back.
         #
-        # The point of the overlap is NOT to finish the launch faster (2026-08-31,
-        # explicit instruction) -- it's trust score and time-on-account: real
-        # scrolling is the valuable activity here, so every post after the first
-        # gets its scroll stretched by reel_verify.FAST_TIMEOUT_SECONDS on top of
-        # the normal duration, turning what would otherwise be dead
-        # confirmation-wait time into more genuine engagement instead of just
-        # reclaiming it as saved time.
+        # Changed 2026-09-02, explicit instruction: post 1 and post 2 now go
+        # back to back with NO scroll in between (only MLX-style -- post,
+        # then post again). The 40s-before-post-1 scroll and the 45s wait at
+        # the very end (covering verification, folded into the final
+        # scroll below) both stay -- only the scroll gap that used to sit
+        # *between* posts N and N+1 is gone. That gap cost 85s per extra
+        # post for a trust benefit that turned out not to matter enough to
+        # the timeline this fleet is now running on; the two posts landing
+        # close together in the ledger isn't new either way, since the real
+        # UI navigation between them (composer, media select, Share) already
+        # took minutes on its own -- see the run trace from earlier tonight.
         flow = InstagramReelUploadU2Flow()
         submissions = []
         for index, media_path in enumerate(media_paths):
-            # Only posts after the first have a previous post's confirmation
-            # wait to fold in -- post 1 has nothing preceding it to cover.
             scroll_result = None
-            if not skip_scroll:
-                scroll_seconds = ACTIVE_POSTING_SCROLL_SECONDS
-                if index > 0:
-                    scroll_seconds += reel_verify.FAST_TIMEOUT_SECONDS
-                scroll_result = InstagramScrollFlow(scroll_seconds=scroll_seconds).run(
+            if not skip_scroll and index == 0:
+                scroll_result = InstagramScrollFlow(scroll_seconds=ACTIVE_POSTING_SCROLL_SECONDS).run(
                     session.profile, adb_client=adb_client, logger=logger)
 
             session.profile.media_path = media_path
