@@ -375,8 +375,23 @@ def run_day_pass(adb_client, transport: GeelarkTransport | None = None,
     # a full hourly cycle even though recheck itself is bounded and fast.
     # The video-posting backlog this exists for matters more than verification
     # throughput, and unlike verification it never waits on external SMS state.
-    from adb_bot.automation.geelark_recheck import run_geelark_recheck
-    recheck_results = run_geelark_recheck(adb_client, transport=transport, logger=logger)
+    #
+    # Off-switch added 2026-09-02, explicit instruction: recheck's real
+    # launches (not the free no-launch "abandoned" path) share the same 4
+    # proxy slots as posting itself -- measured live that day at ~104 real
+    # relaunches just to reread a post count, real capacity taken from
+    # posting while a reworked approach is designed separately. Unset or
+    # any value other than "0"/"false" leaves it on.
+    recheck_enabled = os.environ.get(
+        "ADBBOT_GEELARK_RECHECK_ENABLED", "1").strip().lower() not in ("0", "false")
+    if recheck_enabled:
+        from adb_bot.automation.geelark_recheck import run_geelark_recheck
+        recheck_results = run_geelark_recheck(adb_client, transport=transport, logger=logger)
+    else:
+        recheck_results = []
+        if logger:
+            logger.info("geelark_scheduler: recheck disabled via "
+                       "ADBBOT_GEELARK_RECHECK_ENABLED -- skipping this pass")
 
     # A real posting attempt already reads a phone's screen once before
     # doing anything else and retags it away from Active_Posting if it's
