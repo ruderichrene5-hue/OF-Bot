@@ -281,11 +281,29 @@ def run_human_verification_pass(adb_client, transport: GeelarkTransport | None =
     Warmup -- kept to that one nightly slot rather than its own timer, so it
     never runs unattended outside a time someone chose deliberately. Can
     still be invoked directly (`--human-verification`) for a manual, one-off
-    run."""
+    run.
+
+    Optional include-filter -- ADBBOT_GEELARK_VERIFICATION_MODELS,
+    comma-separated, case-insensitive group names -- added 2026-09-03 for a
+    manual run scoped to the real content models only, leaving the
+    onboarding/junk groups (new profiles, waiting IG connection,
+    Unassigned, Katherine, Jil, test claude -- none of them real accounts
+    yet) for later. Unset or empty runs the whole tagged fleet, same as
+    before this existed.
+    """
     from adb_bot.automation.flows.verification import TAG_HUMAN_VERIFICATION
 
     transport = transport or GeelarkTransport()
     worklist = lifecycle.phones_by_tag(TAG_HUMAN_VERIFICATION, transport=transport)
+
+    include_models = {
+        name.strip().lower()
+        for name in os.environ.get("ADBBOT_GEELARK_VERIFICATION_MODELS", "").split(",")
+        if name.strip()
+    }
+    if include_models:
+        worklist = [row for row in worklist
+                   if ((row.get("group") or {}).get("name") or "").lower() in include_models]
 
     def work_fn(phone_id, name):
         return lifecycle.run_human_verification_cycle(
