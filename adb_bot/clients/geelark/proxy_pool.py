@@ -115,6 +115,37 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _proc_start_marker(pid: int) -> str | None:
+    """A fingerprint that changes whenever `pid` is reused by a different
+    process -- /proc/<pid>/stat's starttime field (in clock ticks since
+    boot), which is fixed for the lifetime of one process and never repeats
+    across a reuse. `os.kill(pid, 0)` alone cannot tell "the original holder
+    is still running" from "a brand new, unrelated process now happens to
+    have that pid" -- and under this session's own launch churn (many
+    short-lived worker threads/processes claiming and dropping pids within
+    seconds), that collision is real, not theoretical: found live 2026-09-04,
+    a lease from an already-dead script sat un-reclaimed for the better part
+    of the 20-minute TTL because a *different* process had already taken
+    over its pid by the time anything re-checked liveness. Returns None if
+    `pid` isn't running at all (no /proc/<pid> to read) or the format
+    changes underneath us -- callers must treat that as "can't tell",
+    never as a match.
+    """
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    # comm (field 2) can itself contain spaces/parens; split after its
+    # closing ')' so the fixed-position fields after it stay aligned.
+    rparen = text.rfind(")")
+    if rparen == -1:
+        return None
+    fields = text[rparen + 2:].split()
+    if len(fields) < 20:
+        return None
+    return fields[19]  # starttime is stat's field 22 -> index 19 here
+
+
 def _read_lease_pid(path: Path):
     try:
         text = path.read_text()
@@ -129,6 +160,17 @@ def _read_lease_pid(path: Path):
     return None
 
 
+def _read_lease_field(path: Path, prefix: str):
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    for token in text.split():
+        if token.startswith(prefix):
+            return token[len(prefix):]
+    return None
+
+
 def _is_stale(path: Path, ttl_seconds: int) -> bool:
     try:
         age = time.time() - path.stat().st_mtime
@@ -139,15 +181,27 @@ def _is_stale(path: Path, ttl_seconds: int) -> bool:
 
 def _reclaimable(path: Path, ttl_seconds: int) -> bool:
     pid = _read_lease_pid(path)
-    if pid is not None and not _pid_alive(pid):
-        return True                              # holder was killed: take it back
+    if pid is not None:
+        if not _pid_alive(pid):
+            return True                          # holder was killed: take it back
+        recorded_start = _read_lease_field(path, "start=")
+        current_start = _proc_start_marker(pid)
+        # Both sides known and disagreeing means `pid` has been recycled --
+        # the lease's real holder is long gone even though *some* process
+        # answers to that pid right now. Either side being unreadable (old
+        # lease file predating this field, or /proc racing us) falls back to
+        # the TTL below rather than guessing.
+        if recorded_start is not None and current_start is not None \
+                and recorded_start != current_start:
+            return True
     return _is_stale(path, ttl_seconds)
 
 
 def _claim(directory: Path, port: int, token: str, owner: str, ttl_seconds: int,
            identity: str = ""):
     path = _lease_path(directory, port, identity)
-    payload = (f"pid={os.getpid()} token={token} owner={owner} "
+    start_marker = _proc_start_marker(os.getpid()) or ""
+    payload = (f"pid={os.getpid()} start={start_marker} token={token} owner={owner} "
                f"at={time.strftime('%Y-%m-%d %H:%M:%S')}\n")
     try:
         fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
