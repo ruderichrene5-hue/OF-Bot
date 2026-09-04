@@ -4906,8 +4906,9 @@ class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):
         return self._account_flag_u2(d) is not None
 
     def _open_edit_profile_u2(self, d, target, emit, logger=None) -> bool:
-        # Tap the bottom-nav Profile tab. Its content-desc is a stable handle;
-        # fall back to known relative positions only if the selector misses.
+        # Tap the bottom-nav Profile tab. Its resource-id is the stable
+        # handle -- try that first; fall back to known relative positions
+        # only if the selector misses.
         try:
             width, height = d.window_size()
         except Exception:
@@ -4915,21 +4916,38 @@ class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):
         _emit(logger, "info", "u2: screen size for %s is %sx%s", target, width, height)
 
         tapped_profile = False
-        profile_tab = d(descriptionStartsWith="Profile")
+        profile_tab = d(resourceIdMatches=r"com\.instagram\.android:id/(profile_tab|main_profile_tab)")
         if profile_tab.exists:
-            _emit(logger, "info", "u2: Profile tab candidate -> %s", _u2_describe(profile_tab))
-            try:
-                bounds = profile_tab.info.get("bounds", {})
-                if bounds.get("top", 0) > height * 0.80:
-                    _emit(logger, "info", "u2: clicking bottom-nav Profile tab (in bottom 20%% of screen)")
-                    profile_tab.click()
-                    tapped_profile = True
-                else:
-                    _emit(logger, "info", "u2: Profile candidate not in bottom nav (top=%s); using position fallback", bounds.get("top"))
-            except Exception as exc:
-                _emit(logger, "warning", "u2: could not read Profile tab bounds: %s", exc)
+            _emit(logger, "info", "u2: Profile tab found by resource-id -> %s", _u2_describe(profile_tab))
+            profile_tab.click()
+            tapped_profile = True
         else:
-            _emit(logger, "info", "u2: no 'Profile' content-desc on screen; using position fallback")
+            # Fallback: content-desc, but exact -- `descriptionStartsWith`
+            # also matches "Profile picture of <reel author>" on any avatar
+            # inline in a Reels feed, not just the nav tab. Found live
+            # 2026-09-04: that avatar sat at bounds.top=1942 on a
+            # height=2424 screen (1942/2424=0.8012), just over the old
+            # bounds.top > height*0.80 cutoff -- clicked a stranger's
+            # profile instead of our own, so "Edit profile" was never going
+            # to appear. An exact match plus a stricter, nav-bar-only cutoff
+            # closes both holes at once.
+            profile_tab = d(description="Profile")
+            if not profile_tab.exists:
+                profile_tab = d(descriptionMatches=r"(?i)^profile( tab)?$")
+            if profile_tab.exists:
+                _emit(logger, "info", "u2: Profile tab candidate -> %s", _u2_describe(profile_tab))
+                try:
+                    bounds = profile_tab.info.get("bounds", {})
+                    if bounds.get("top", 0) > height * 0.90:
+                        _emit(logger, "info", "u2: clicking bottom-nav Profile tab (in bottom 10%% of screen)")
+                        profile_tab.click()
+                        tapped_profile = True
+                    else:
+                        _emit(logger, "info", "u2: Profile candidate not in bottom nav (top=%s); using position fallback", bounds.get("top"))
+                except Exception as exc:
+                    _emit(logger, "warning", "u2: could not read Profile tab bounds: %s", exc)
+            else:
+                _emit(logger, "info", "u2: no 'Profile' resource-id or exact content-desc on screen; using position fallback")
 
         if not tapped_profile:
             for fx, fy in ((0.90, 0.95), (0.90, 0.93), (0.93, 0.95)):
