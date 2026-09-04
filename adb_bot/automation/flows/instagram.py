@@ -4823,7 +4823,11 @@ class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):
             return {"profile_id": profile.id, "target": target, "aborted": True}
 
         # Step 2: open the Bio editor; skip if a bio already exists, else type + save.
-        outcome = self._set_bio_u2(d, target, bio_text, emit, log)
+        # `_set_bio_with_mention_u2` handles a bio with an "@handle" mention
+        # (real keystrokes + tapping Instagram's own suggestion, required for
+        # it to become a real link) and delegates to the plain `_set_bio_u2`
+        # for a mention-free bio, so this is always the right call.
+        outcome = self._set_bio_with_mention_u2(d, target, bio_text, emit, log)
         if outcome == "already_has_bio":
             emit("info", "Profile %s already has a bio; it will be closed and skipped", profile.id)
             self._leave_edit_profile_u2(d, logger=log)
@@ -5030,6 +5034,110 @@ class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):
             _emit(logger, "info", "Verified bio set for %s", target)
             return "success"
         _emit(logger, "warning", "Could not verify the bio was set for %s", target)
+        return "failed"
+
+    def _set_bio_with_mention_u2(self, d, target, bio_text, emit, logger=None) -> str:
+        """Like `_set_bio_u2`, but for a bio containing a real `@handle`
+        mention that must come from Instagram's own autocomplete suggestion
+        list to become a genuine, tappable mention -- typing (or `set_text`ing)
+        the string alone leaves "@handle" as plain text forever, never a real
+        link. Confirmed live 2026-09-04: `set_text` never brings up the
+        suggestion list at all (it sets the field's value in one shot, not as
+        a sequence of real keystrokes); `d.send_keys(ch, ...)` one character at
+        a time does, and lands `entity_suggestions_list`
+        (`row_search_user_username` rows) once the typed handle matches a real
+        account. Tapping the row whose username exactly matches replaces
+        whatever was typed with the confirmed handle and turns it blue for
+        real -- unmatched typed text (a typo, a private/renamed account) never
+        produces a row, which is the caller's signal to abort rather than
+        save a bio with a dead "@handle" string in it.
+
+        `bio_text` must contain exactly one `@handle` (letters/digits/dot/
+        underscore); text before and after it is typed the same real-keystroke
+        way, with the suggestion tap in between. A bio with no `@` in it is
+        cheaper to just set in one shot, so this delegates to `_set_bio_u2`.
+        """
+        match = re.search(r"@([A-Za-z0-9_.]+)", bio_text)
+        if not match:
+            return self._set_bio_u2(d, target, bio_text, emit, logger=logger)
+        handle = match.group(1)
+        before_and_handle = bio_text[:match.end()]
+        after = bio_text[match.end():]
+
+        bio_row = self._first_present(
+            d,
+            [{"text": "Bio"}, {"textMatches": "(?i)^(bio|add your bio)$"}],
+            timeout=10,
+            logger=logger,
+            purpose="Bio row",
+        )
+        if bio_row is None:
+            _emit(logger, "warning", "Bio field not found on Edit profile screen for %s", target)
+            return "failed"
+        _emit(logger, "info", "u2: clicking Bio row -> %s", _u2_describe(bio_row))
+        bio_row.click()
+        time.sleep(1.5)
+
+        editor = d(className="android.widget.EditText")
+        if not editor.wait(timeout=self.SELECTOR_WAIT_SECONDS):
+            _emit(logger, "warning", "Bio editor (EditText) did not open for %s", target)
+            return "failed"
+
+        current = ""
+        try:
+            current = (editor.get_text() or "").strip()
+        except Exception:
+            current = ""
+        if current and current.lower() not in ("bio", "add your bio"):
+            _emit(logger, "info", "Bio already set ('%s') for %s; skipping without changes", current, target)
+            self._tap_bio_cancel_u2(d, logger=logger)
+            time.sleep(1)
+            return "already_has_bio"
+
+        try:
+            editor.click()
+        except Exception:
+            pass
+        time.sleep(0.3)
+        _emit(logger, "info", "u2: typing bio up to mention '@%s' for %s via real keystrokes "
+                             "(set_text would never trigger the suggestion list)", handle, target)
+        for ch in before_and_handle:
+            d.send_keys(ch, clear=False)
+            time.sleep(0.05)
+
+        suggestion = self._first_present(
+            d,
+            [{"resourceId": "com.instagram.android:id/row_search_user_username", "text": handle}],
+            timeout=6,
+            logger=logger,
+            purpose=f"mention suggestion for @{handle}",
+        )
+        if suggestion is None:
+            _emit(logger, "warning", "u2: no matching suggestion for @%s on %s -- "
+                        "would save as plain text, not a real mention; aborting", handle, target)
+            self._tap_bio_cancel_u2(d, logger=logger)
+            time.sleep(1)
+            return "failed"
+        _emit(logger, "info", "u2: tapping mention suggestion @%s -> %s", handle, _u2_describe(suggestion))
+        suggestion.click()
+        time.sleep(1)
+
+        if after:
+            for ch in after:
+                d.send_keys(ch, clear=False)
+                time.sleep(0.05)
+            time.sleep(0.5)
+
+        if not self._tap_bio_save_u2(d, logger=logger):
+            _emit(logger, "warning", "Could not find the save control for %s", target)
+            return "failed"
+        time.sleep(2)
+
+        _emit(logger, "info", "u2: verifying Edit profile now shows the mention @%s for %s", handle, target)
+        if d(textContains=handle).wait(timeout=6):
+            _emit(logger, "info", "Verified bio with mention @%s set for %s", handle, target)
+            return "success"
+        _emit(logger, "warning", "Could not verify the bio+mention was set for %s", target)
         return "failed"
 
     def _tap_bio_save_u2(self, d, logger=None) -> bool:
