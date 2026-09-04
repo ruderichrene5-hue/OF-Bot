@@ -4905,6 +4905,29 @@ class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):
         """Back-compat: True if any IG account-flag screen is showing."""
         return self._account_flag_u2(d) is not None
 
+    def _cancel_dangerous_confirm_dialog_u2(self, d, logger=None) -> bool:
+        """True (having cancelled it) if a blind position tap landed on one of
+        Instagram's own "Are you sure you want to change your X to ?" field
+        confirmations (name, username, ...) -- always taps Cancel, never the
+        primary action, since a stray coordinate hit is never real confirmed
+        intent to change anything. See `_open_edit_profile_u2`'s fallback loop
+        for the live incident this exists for."""
+        prompt = d(textMatches=r"(?i)are you sure you want to change your .+ to")
+        if not prompt.exists:
+            return False
+        _emit(logger, "warning", "u2: blind position tap landed on a field-change "
+                    "confirmation (%s) -- cancelling, not confirming", _u2_describe(prompt))
+        cancel = d(textMatches="(?i)^cancel$")
+        if cancel.exists:
+            cancel.click()
+        else:
+            try:
+                d.press("back")
+            except Exception:
+                pass
+        time.sleep(1)
+        return True
+
     def _open_edit_profile_u2(self, d, target, emit, logger=None) -> bool:
         # Tap the bottom-nav Profile tab. Its resource-id is the stable
         # handle -- try that first; fall back to known relative positions
@@ -4958,6 +4981,20 @@ class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):
                     _emit(logger, "warning", "u2: profile position tap failed: %s", exc)
                     continue
                 time.sleep(3)
+                # A blind coordinate tap can land on anything the previous
+                # screen happened to have there, including a field-edit
+                # confirmation dialog. Found live 2026-09-04: on a screen
+                # this loop wasn't expecting (right after a bio save, before
+                # the UI settled), one of these three ratios landed on
+                # Instagram's own "Are you sure you want to change your
+                # name to ?" prompt -- Cancel is safe, but IG's own
+                # "Change name" default action was one wrong tap away from
+                # actually blanking the account's display name. Every field
+                # this pattern guards (name, username, ...) reuses the same
+                # "Are you sure you want to change your X to" wording, so
+                # this one check covers all of them, not just name.
+                if self._cancel_dangerous_confirm_dialog_u2(d, logger=logger):
+                    continue
                 if d(textMatches="(?i)edit profile").wait(timeout=5):
                     _emit(logger, "info", "u2: 'Edit profile' appeared after position tap (%.2f,%.2f)", fx, fy)
                     tapped_profile = True
