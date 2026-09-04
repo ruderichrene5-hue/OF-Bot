@@ -518,6 +518,17 @@ def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
     tag = tag or active_tag_for_now(now)
     worklist = lifecycle.phones_by_tag(tag, transport=transport)
 
+    # A phone tagged `link` is a bio-link/funnel account, not a content
+    # poster -- carrying Active_Posting alongside `link` (as some do, e.g.
+    # for the daily account_check sweep) is not permission to actually post
+    # reels to it. Unconditional, only for the posting pass: explicit
+    # instruction 2026-09-04 after "Cloe Link" was found sitting in the
+    # normal Active_Posting worklist like any other phone.
+    if tag == lifecycle.TAG_ACTIVE_POSTING:
+        def _is_link_account(row):
+            return any(t.get("name") == "link" for t in (row.get("tags") or []))
+        worklist = [row for row in worklist if not _is_link_account(row)]
+
     # Push one or more models' phones to the back of the worklist -- added
     # 2026-09-01 for a manual run where a model's Drive content lands later
     # than the others' (so hitting its phones early would just be "no
