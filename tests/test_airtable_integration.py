@@ -98,7 +98,9 @@ class ModelProfileConfigsTest(TestCase):
     def test_blank_fields_come_back_empty_not_fabricated(self):
         configs = self._configs()
         self.assertEqual(configs["Jasmin"],
-                         {"geelark_tag": "", "link_url": "", "bio_pool": []})
+                         {"geelark_tag": "", "link_url": "", "bio_pool": [],
+                          "backup_link": False, "highlight_link": False,
+                          "backup_account_name": ""})
 
     def test_a_row_with_no_model_name_is_dropped(self):
         configs = self._configs()

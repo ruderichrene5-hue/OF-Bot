@@ -24,7 +24,9 @@ def _phone(phone_id, tags, model="Nikki"):
 
 
 FULL_CONFIG = {"geelark_tag": "Nikki", "link_url": "https://x.example/go",
-              "bio_pool": ["hey ⬇️", "check below ⬇️"]}
+              "bio_pool": ["hey ⬇️", "check below ⬇️"],
+              "backup_link": False, "highlight_link": True,
+              "backup_account_name": ""}
 
 
 class PhonesToCheckTest(unittest.TestCase):
@@ -209,6 +211,84 @@ class RunOneTest(unittest.TestCase):
 
         self.assertIn(trigger.call_args.kwargs["biography"],
                      FULL_CONFIG["bio_pool"])
+
+    def test_neither_link_method_checked_skips_without_triggering_anything(self):
+        phone = _phone("1", ["IG connected"])
+        config = {**FULL_CONFIG, "highlight_link": False}
+
+        with mock.patch.object(c.library, "picture_url_for_tag") as lookup, \
+             mock.patch.object(c.rpa, "trigger_instagram_edit_profile") as trigger:
+            out = c.run_one(phone, config, Args(), mock.Mock(), transport=None)
+
+        self.assertEqual(out["status"], "no-link-method-configured")
+        lookup.assert_not_called()
+        trigger.assert_not_called()
+
+    def test_both_link_methods_checked_is_ambiguous_and_skips(self):
+        phone = _phone("1", ["IG connected"])
+        config = {**FULL_CONFIG, "backup_link": True, "highlight_link": True,
+                  "backup_account_name": "@geheimer.zugang69"}
+
+        with mock.patch.object(c.rpa, "trigger_instagram_edit_profile") as trigger:
+            out = c.run_one(phone, config, Args(), mock.Mock(), transport=None)
+
+        self.assertEqual(out["status"], "ambiguous-link-method")
+        trigger.assert_not_called()
+
+    def test_backup_link_without_a_handle_skips(self):
+        """Kathi's real row (2026-09-04): Backup verlinkung checked, Backup
+        account name left blank -- a bio built from this would have the
+        pointer text and nothing to point at."""
+        phone = _phone("1", ["IG connected"])
+        config = {**FULL_CONFIG, "backup_link": True, "highlight_link": False,
+                  "backup_account_name": ""}
+
+        with mock.patch.object(c.rpa, "trigger_instagram_edit_profile") as trigger:
+            out = c.run_one(phone, config, Args(), mock.Mock(), transport=None)
+
+        self.assertEqual(out["status"], "backup-link-missing-handle")
+        trigger.assert_not_called()
+
+    def test_backup_link_with_a_handle_appends_the_mention_to_the_bio(self):
+        phone = _phone("1", ["IG connected"])
+        config = {**FULL_CONFIG, "backup_link": True, "highlight_link": False,
+                  "backup_account_name": "@geheimer.zugang69"}
+
+        with mock.patch.object(c.library, "picture_url_for_tag",
+                               return_value="https://x/nikki.jpg"), \
+             mock.patch.object(c.rpa, "trigger_instagram_edit_profile",
+                               return_value="") as trigger:
+            c.run_one(phone, config, Args(), mock.Mock(), transport=None)
+
+        bio = trigger.call_args.kwargs["biography"]
+        self.assertTrue(bio.endswith(" @geheimer.zugang69"), bio)
+        self.assertTrue(any(bio.startswith(p) for p in config["bio_pool"]), bio)
+
+    def test_backup_link_handle_works_with_or_without_a_leading_at(self):
+        phone = _phone("1", ["IG connected"])
+        config = {**FULL_CONFIG, "backup_link": True, "highlight_link": False,
+                  "backup_account_name": "geheimer.zugang69"}
+
+        with mock.patch.object(c.library, "picture_url_for_tag",
+                               return_value="https://x/nikki.jpg"), \
+             mock.patch.object(c.rpa, "trigger_instagram_edit_profile",
+                               return_value="") as trigger:
+            c.run_one(phone, config, Args(), mock.Mock(), transport=None)
+
+        self.assertTrue(trigger.call_args.kwargs["biography"]
+                       .endswith(" @geheimer.zugang69"))
+
+    def test_highlight_link_bio_has_no_mention_appended(self):
+        phone = _phone("1", ["IG connected"])
+        config = {**FULL_CONFIG, "backup_link": False, "highlight_link": True}
+
+        with mock.patch.object(c.library, "picture_url_for_tag",
+                               return_value="https://x/nikki.jpg"), \
+             mock.patch.object(c.rpa, "trigger_instagram_edit_profile",
+                               return_value="") as trigger:
+            c.run_one(phone, config, Args(), mock.Mock(), transport=None)
+
+        self.assertIn(trigger.call_args.kwargs["biography"], config["bio_pool"])
 
     def test_nickname_and_username_are_never_sent(self):
         """Changing either on an account already signed in put two real

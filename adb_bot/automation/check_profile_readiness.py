@@ -111,6 +111,9 @@ def run_one(phone: dict, model_config: dict, args, logger, transport) -> dict:
 
     link_url = model_config.get("link_url") or ""
     bio_pool = model_config.get("bio_pool") or []
+    backup_link = bool(model_config.get("backup_link"))
+    highlight_link = bool(model_config.get("highlight_link"))
+    backup_account_name = model_config.get("backup_account_name") or ""
     # "Every model's GeeLark tag matches her name" (2026-08-22) -- the
     # Airtable field only exists for the rare model where that is not true,
     # so an empty field means "same as Model Name", not "not set up yet".
@@ -129,6 +132,24 @@ def run_one(phone: dict, model_config: dict, args, logger, transport) -> dict:
         print(f"  {name:18} skipped -- {model!r} has no name to use as a "
               f"GeeLark tag")
         return out
+    # Two link-out methods, chosen per model in Airtable (confirmed live on
+    # real accounts 2026-09-04) -- neither checked means we don't know which
+    # one this model wants, so this phone is skipped rather than guessed.
+    if backup_link and highlight_link:
+        out["status"] = "ambiguous-link-method"
+        print(f"  {name:18} skipped -- {model!r} has BOTH Backup verlinkung "
+              f"and Highlight verlinkung checked in Airtable; fix that first")
+        return out
+    if not backup_link and not highlight_link:
+        out["status"] = "no-link-method-configured"
+        print(f"  {name:18} skipped -- {model!r} has neither Backup "
+              f"verlinkung nor Highlight verlinkung checked in Airtable")
+        return out
+    if backup_link and not backup_account_name:
+        out["status"] = "backup-link-missing-handle"
+        print(f"  {name:18} skipped -- {model!r} has Backup verlinkung "
+              f"checked but no Backup account name set")
+        return out
 
     picture_url = library.picture_url_for_tag(geelark_tag, transport=transport)
     if not picture_url:
@@ -138,6 +159,23 @@ def run_one(phone: dict, model_config: dict, args, logger, transport) -> dict:
         return out
 
     bio = bio_variations.build_bio(pool=bio_pool)
+    if backup_link:
+        handle = backup_account_name.lstrip("@")
+        bio = f"{bio} @{handle}"
+        # IMPORTANT: this appends the mention as plain text into the bio
+        # string handed to Geelark's own instagramEdit RPA task below.
+        # Confirmed live 2026-09-04: typing (or remotely setting) a bio
+        # string that merely CONTAINS "@handle" never produces a real,
+        # tappable mention -- Instagram only turns it into one when the
+        # text is typed character-by-character and its own suggestion
+        # list is tapped (see instagram.py's _set_bio_with_mention_u2,
+        # built the same day for exactly this). Geelark's remote RPA task
+        # cannot do that interaction. Until this function is rewired to
+        # launch the phone and go through that u2 flow instead of (or in
+        # addition to) instagramEdit for backup-link models, applying this
+        # will save a bio with the right *text* but not a working link --
+        # verify_setup_on_device below only checks that the Bio field
+        # holds something, not that any mention in it is real.
     if not args.apply:
         out["status"] = "dry-run"
         print(f"  {name:18} DRY RUN -- bio={bio!r} link={link_url!r} "

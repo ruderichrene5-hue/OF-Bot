@@ -324,6 +324,20 @@ F_MODEL_LINK_URL = "Link URL"
 # long text: bio variations, one per line. Blank lines are dropped, so
 # spacing between entries in the Airtable cell does not matter.
 F_MODEL_BIO_POOL = "Bio Pool"
+# checkbox: this model's profiles point at their Link URL by mentioning a
+# real @handle in the bio (see instagram.py's _set_bio_with_mention_u2) --
+# mutually exclusive with F_MODEL_HIGHLIGHT_LINK in practice, but both are
+# read independently rather than assumed one implies not-the-other.
+F_MODEL_BACKUP_LINK = "Backup verlinkung"
+# checkbox: this model's profiles point at their Link URL through a Story
+# Highlight (cover image + a Link sticker) instead of a bio mention -- a
+# manual step today (2026-09-04), not yet automated; read here only so
+# callers can tell "no bio mention wanted" apart from "not configured yet".
+F_MODEL_HIGHLIGHT_LINK = "Highlight verlinkung"
+# text: the @handle to mention in the bio when F_MODEL_BACKUP_LINK is set
+# (e.g. "@geheimer.zugang69"). Required for that method to actually work --
+# a bio built without it is just the pointer text with nothing to point at.
+F_MODEL_BACKUP_ACCOUNT_NAME = "Backup account name"
 
 # singleSelect status labels shared across the three synced tables
 STATUS_SELECT_ACTIVE = "Active"
@@ -919,18 +933,20 @@ class AirtableClient:
         return out
 
     def model_profile_configs(self) -> dict:
-        """Model Name -> {geelark_tag, link_url, bio_pool}, for the
-        instagramEdit RPA task (adb_bot/automation/check_profile_readiness.py).
+        """Model Name -> {geelark_tag, link_url, bio_pool, backup_link,
+        highlight_link, backup_account_name}, for the instagramEdit RPA task
+        (adb_bot/automation/check_profile_readiness.py).
 
-        A field left blank in Airtable comes back as an empty string/list
-        here, not a made-up value -- the caller decides what "not
+        A field left blank in Airtable comes back as an empty string/list/
+        False here, not a made-up value -- the caller decides what "not
         configured yet" means (skip the phone, in this case).
         """
         out: dict = {}
         for record in self._list_table(
                 TABLE_MODELS,
                 fields=[F_MODEL_NAME, F_MODEL_GEELARK_TAG, F_MODEL_LINK_URL,
-                       F_MODEL_BIO_POOL]):
+                       F_MODEL_BIO_POOL, F_MODEL_BACKUP_LINK,
+                       F_MODEL_HIGHLIGHT_LINK, F_MODEL_BACKUP_ACCOUNT_NAME]):
             fields = record.get("fields", {}) or {}
             name = str(fields.get(F_MODEL_NAME) or "").strip()
             if not name:
@@ -942,6 +958,9 @@ class AirtableClient:
                 "geelark_tag": str(fields.get(F_MODEL_GEELARK_TAG) or "").strip(),
                 "link_url": str(fields.get(F_MODEL_LINK_URL) or "").strip(),
                 "bio_pool": bio_pool,
+                "backup_link": bool(fields.get(F_MODEL_BACKUP_LINK)),
+                "highlight_link": bool(fields.get(F_MODEL_HIGHLIGHT_LINK)),
+                "backup_account_name": str(fields.get(F_MODEL_BACKUP_ACCOUNT_NAME) or "").strip(),
             }
         return out
 
