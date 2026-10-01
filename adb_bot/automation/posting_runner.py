@@ -19,8 +19,10 @@ from adb_bot.clients import airtable as at
 from adb_bot.clients.multilogin.launch_stats import CountingLauncherClient, MLX_500, classify_launch
 from adb_bot.core.locks import ProfileLocks, live_profile_count, live_profile_slot, max_live_profiles
 from adb_bot.core.batching import LaunchGate, resolve_concurrency, run_rolling
+from adb_bot.automation import daily_post_counter
+from adb_bot.automation import post_pacing
 from adb_bot.automation import incidents
-from adb_bot.automation.posting_planner import plan_posting_queue
+from adb_bot.automation.posting_planner import plan_posting_queue, SkippedPost
 from adb_bot.automation.workflow import STAND_IN_NOTE, run_profile_workflow
 
 # The flow that actually uploads a reel. u2 is the reliable path being standardized.
@@ -189,9 +191,15 @@ def run_posting_queue(
     max_concurrent_profiles=None,
     ignore_needs_human: bool = False,
     max_posts_per_profile=None,
+    daily_cap_per_profile=None,
+    allowed_launch_ids=None,
 ) -> dict:
     """Plan the due posts, launch their profiles, run the reel-upload flow with
-    each post's video + caption, and write results back."""
+    each post's video + caption, and write results back.
+
+    `allowed_launch_ids`, when given, is the set of MLX launch ids that may be
+    launched at all (the profiles carrying the MLX `Active / Posting` tag, see
+    run_loop._mlx_posting_allowed). Anything else stays Pending, untouched."""
 
     def aborted() -> bool:
         return callable(should_stop) and should_stop()
@@ -229,6 +237,59 @@ def run_posting_queue(
     except Exception as exc:
         logger.error("Failed to build the posting-queue plan: %s", exc)
         return result({"processed": 0, "error": str(exc)})
+
+    # 1b) A true daily ceiling per (phone, handle), persisted across runs --
+    # `max_posts_per_profile` above only rations this one run, so a deep
+    # backlog still drains within a few hours on the same day (documented,
+    # previously-accepted behaviour -- see daily_post_counter's module
+    # docstring). This is the explicit reversal of that: once an account has
+    # posted `daily_cap_per_profile` today, further due rows stay Pending and
+    # carry over to tomorrow instead of going out today.
+    if daily_cap_per_profile:
+        today = daily_post_counter.today_key(now)
+        remaining: dict = {}
+        kept = []
+        for item in plan.to_post:
+            key = daily_post_counter.target_key(item.launch_id, item.target_handle)
+            if key not in remaining:
+                already = daily_post_counter.get_count(today, key)
+                remaining[key] = daily_cap_per_profile - already
+            if remaining[key] > 0:
+                kept.append(item)
+                remaining[key] -= 1
+            else:
+                plan.skipped.append(SkippedPost(
+                    item.account_name,
+                    f"daily cap of {daily_cap_per_profile} reels/day already reached today"))
+        plan.to_post = kept
+
+    # 1c) Only phones tagged `Active / Posting` in MultiLogin (2026-09-26: the
+    # tag is the on/off switch; before this the MLX loop ignored it and untagged
+    # phones kept posting and burning minutes).
+    if allowed_launch_ids is not None:
+        kept = []
+        for item in plan.to_post:
+            if str(item.launch_id) in allowed_launch_ids:
+                kept.append(item)
+            else:
+                plan.skipped.append(SkippedPost(
+                    item.account_name, "MLX profile not tagged 'Active / Posting'"))
+        plan.to_post = kept
+
+    # 1d) Pacing: at least `post_pacing.min_gap_minutes()` (default 90) between
+    # any two posts, so a backlog drains one at a time instead of bursting just
+    # because the loop reruns every few minutes (Rene, 2026-10-01). Global, not
+    # per-account -- see post_pacing's module docstring. At most one row goes
+    # out this run; the rest stay Pending for a later tick.
+    if plan.to_post:
+        if post_pacing.gap_elapsed(now=None):
+            held, plan.to_post = plan.to_post[1:], plan.to_post[:1]
+        else:
+            held, plan.to_post = plan.to_post, []
+        gap = post_pacing.min_gap_minutes()
+        for item in held:
+            plan.skipped.append(SkippedPost(
+                item.account_name, f"pacing: min {gap:g}min gap since the last post not elapsed yet"))
 
     for skip in plan.skipped:
         logger.info("Skipping post %s: %s", skip.name, skip.reason)
@@ -320,6 +381,15 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
                 # a row reaching "Retries Exhausted" with nothing wrong here.
                 if consumes_retry_budget(status):
                     stats.note_retry_consumed(item.launch_id)
+                if status == "done":
+                    # Feeds the daily-cap filter above -- a confirmed post,
+                    # counted the moment it lands, not deferred to a later sync.
+                    key = daily_post_counter.target_key(item.launch_id, item.target_handle)
+                    daily_post_counter.increment(daily_post_counter.today_key(), key)
+                    # Feeds the pacing filter above -- starts this post's run's
+                    # minimum-gap clock the moment it's confirmed, not when the
+                    # whole run finishes.
+                    post_pacing.record_post()
             except Exception as exc:
                 logger.warning("Failed to write post result for %s: %s", item.account_name, exc)
 
