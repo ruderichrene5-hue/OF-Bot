@@ -7,7 +7,7 @@ Creation), Signup-Methode (Icloud / SMS-Pool), Uhrzeiten (one HH:MM per line = o
 
   1. refreshes Plan / Status / Fortschritt of every active plan of today (Berlin time);
   2. takes the EARLIEST due time slot (time <= now, not started yet) of all plans and, unless another
-     signup is running, picks a free container (idle phones first; a phone that is posting is fine too)
+     signup is running, picks a free container on the phone with the fewest signups today (all phones do both)
      and asks for the phone: a posting batch there finishes its current post + scroll and pauses before
      its next post / Shortcut (iphone_phone_lock). Then it prepares one Accounts SOP row (reuses a prepared
      empty To-Do row, else creates one; Model, Signup Method, Username, container, a free Mail-Alias for
@@ -254,7 +254,9 @@ def free_container(allowed_phones: list[str], today: dt.date) -> dict | None:
         info = load.get(dev, {})
         if info.get("rate_limited") or info.get("attempts", 0) >= cap:
             continue
-        key = (dev in posting, info.get("attempts", 0), _text(f.get(C["name"])))
+        # 10.10 (Rene: "wir brauchen alle Handys für Sign-ups und Posten"): spread the signups evenly over all
+        # phones -- fewest signups today first; a phone that is posting only loses a tie (it yields between posts)
+        key = (info.get("attempts", 0), dev in posting, _text(f.get(C["name"])))
         if best is None or key < best[0]:
             best = (key, {"id": c["id"], "name": _text(f.get(C["name"])), "device": dev, "phone": _text(f.get(C["phone"]))})
     return best[1] if best else None
