@@ -7,9 +7,11 @@ Creation), Signup-Methode (Icloud / SMS-Pool), Uhrzeiten (one HH:MM per line = o
 
   1. refreshes Plan / Status / Fortschritt of every active plan of today (Berlin time);
   2. takes the EARLIEST due time slot (time <= now, not started yet) of all plans and, unless another
-     signup or a posting batch is running on the farm, prepares one Accounts SOP row for it (reuses a
-     prepared empty To-Do row, else creates one; Model, Signup Method, Username, a free container on an
-     allowed phone, a free Mail-Alias for Icloud) and runs `iphone_signup run <row>` for it;
+     signup is running, picks a free container (idle phones first; a phone that is posting is fine too)
+     and asks for the phone: a posting batch there finishes its current post + scroll and pauses before
+     its next post / Shortcut (iphone_phone_lock). Then it prepares one Accounts SOP row (reuses a prepared
+     empty To-Do row, else creates one; Model, Signup Method, Username, container, a free Mail-Alias for
+     Icloud) and runs `iphone_signup run <row>`; posting goes on right after;
   3. writes the result back into the slot (✅ @username / 🔐 verification / ❌ reason).
 
 It starts nothing on its own schedule -- only the entered times. One signup per run; the systemd timer only
@@ -35,6 +37,8 @@ import sys
 from zoneinfo import ZoneInfo
 
 import requests
+
+from adb_bot.automation import iphone_phone_lock as phone_lock
 
 log = logging.getLogger("signup_planner")
 
@@ -238,7 +242,7 @@ def free_container(allowed_phones: list[str], today: dt.date) -> dict | None:
     the phone with the fewest signups today first."""
     cap = int(os.environ.get("IPHONE_SIGNUP_DEVICE_PER_DAY", "10"))
     load = phone_load(today)
-    posting = busy_phones()          # phones a running posting batch uses stay untouched (10.10)
+    posting = busy_phones()          # phones a running posting batch uses: allowed (it yields between posts), idle ones first
     best = None
     for c in _list(T_CONT, f"{{{C['status']}}} = 'Frei'"):
         f = c["fields"]
@@ -247,12 +251,10 @@ def free_container(allowed_phones: list[str], today: dt.date) -> dict | None:
             continue
         if allowed_phones and dev not in allowed_phones:
             continue
-        if dev in posting:
-            continue
         info = load.get(dev, {})
         if info.get("rate_limited") or info.get("attempts", 0) >= cap:
             continue
-        key = (info.get("attempts", 0), _text(f.get(C["name"])))
+        key = (dev in posting, info.get("attempts", 0), _text(f.get(C["name"])))
         if best is None or key < best[0]:
             best = (key, {"id": c["id"], "name": _text(f.get(C["name"])), "device": dev, "phone": _text(f.get(C["phone"]))})
     return best[1] if best else None
@@ -276,8 +278,7 @@ def free_alias() -> dict | None:
 
 # ---------------------------------------------------------------- one slot
 
-class Waiting(RuntimeError):
-    """The slot cannot start right now but may later (phones busy posting) -- it stays 'wartet'."""
+
 
 def prepare(plan: dict, slot_index: int, today: dt.date, dry_run: bool) -> dict:
     """Fill (or create) the Accounts SOP row for one time slot. Returns {row, container, phone} or raises."""
@@ -290,8 +291,6 @@ def prepare(plan: dict, slot_index: int, today: dt.date, dry_run: bool) -> dict:
     username = names[slot_index] if slot_index < len(names) else ""
     cont = free_container(f.get(P["phones"]) or [], today)
     if not cont:
-        if busy_phones():
-            raise Waiting("auf den erlaubten Handys wird gerade gepostet")
         raise ValueError("kein freier Container auf den erlaubten Handys (oder alle Handys heute am Limit / gesperrt)")
     row = account_row(model_id, method)
     fields = {A["model"]: [model_id], A["container"]: [cont["id"]], A["method"]: method, A["creation"]: "To Do"}
@@ -303,8 +302,15 @@ def prepare(plan: dict, slot_index: int, today: dt.date, dry_run: bool) -> dict:
         if not alias:
             raise ValueError("kein freier Mail-Alias mehr (Mail Aliases)")
         fields[A["alias"]] = [alias["id"]]
+    choice = {"row": row, "container": cont["name"], "phone": cont["phone"], "fields": fields, "alias": alias}
     if dry_run:
-        return {"row": row or "(neue Zeile)", "container": cont["name"], "phone": cont["phone"], "fields": fields}
+        return {**choice, "row": row or "(neue Zeile)"}
+    return commit(plan, choice)
+
+
+def commit(plan: dict, choice: dict) -> dict:
+    """Write the chosen slot: alias Used, account row filled/created, linked to the plan."""
+    alias, row, fields = choice["alias"], choice["row"], choice["fields"]
     if alias:
         # claimed at once (like iphone_signup.claim_fresh_alias): the signup's own "add an email" step takes
         # the first Free alias too and must never get this one
@@ -313,10 +319,10 @@ def prepare(plan: dict, slot_index: int, today: dt.date, dry_run: bool) -> dict:
         row = _create(T_ACC, fields)
     else:
         _patch(T_ACC, row, fields)
-    linked = f.get(P["accounts"]) or []
+    linked = plan["fields"].get(P["accounts"]) or []
     _patch(T_PLAN, plan["id"], {P["accounts"]: linked + [row]})
     plan["fields"][P["accounts"]] = linked + [row]
-    return {"row": row, "container": cont["name"], "phone": cont["phone"]}
+    return {"row": row, "container": choice["container"], "phone": choice["phone"]}
 
 
 def _watchdog(action: str) -> bool:
@@ -460,26 +466,41 @@ def main(argv=None) -> int:
             log.info("slot %s of %s due, but %s", t, plan["id"], busy)
         else:
             try:
-                prep = prepare(plan, i, today, a.dry_run)
-            except Waiting as exc:
-                slots[t] = {"state": "pending", "wait": str(exc)}
-                log.info("slot %s of %s waits: %s", t, plan["id"], exc)
-                prep = None
+                choice = prepare(plan, i, today, dry_run=True)
             except Exception as exc:  # noqa: BLE001 -- the slot fails with its reason, the plan goes on
                 slots[t] = {"state": "failed", "text": f"❌ {exc}"}
                 log.warning("slot %s of %s: %s", t, plan["id"], exc)
-                prep = None
-            if prep and a.dry_run:
-                print(f"would start {t} for plan {plan['id']}: row {prep['row']} on {prep['phone']} / {prep['container']} fields={prep['fields']}")
-            elif prep:
-                slots[t] = {"state": "running", "at": dt.datetime.now(BERLIN).strftime("%H:%M"), **prep}
-                _save_state(state)
+                choice = None
+            if choice and a.dry_run:
+                print(f"would start {t} for plan {plan['id']}: row {choice['row']} on {choice['phone']} / {choice['container']} fields={choice['fields']}")
+            elif choice:
+                if choice["row"] == "(neue Zeile)":
+                    choice["row"] = None
+                letter = choice["container"][:1]
+                # 10.10 (Rene): the signup goes first -- a posting batch on this phone finishes its current
+                # post + scroll, then pauses before its next post / Shortcut until the signup is done
+                phone_lock.want(letter, f"signup {t}")
+                slots[t] = {"state": "pending", "wait": f"{choice['phone']}: der aktuelle Post wird noch fertig gemacht"}
                 refresh(plan, slots, models, False)
-                log.info("slot %s of %s: signup %s on %s / %s", t, plan["id"], prep["row"], prep["phone"], prep["container"])
-                code, tail = run_signup(prep["row"])
-                st, text = outcome(prep["row"], code, tail)
-                slots[t] = {**slots[t], "state": st, "text": text}
-                log.info("slot %s of %s: %s (exit %s)", t, plan["id"], text, code)
+                held = phone_lock.hold(letter, timeout_s=1800)
+                try:
+                    if held is None:
+                        slots[t] = {"state": "pending", "wait": f"{choice['phone']} war 30 min belegt, nächster Versuch gleich"}
+                        log.warning("slot %s of %s: %s stayed busy for 30 min", t, plan["id"], choice["phone"])
+                    else:
+                        prep = commit(plan, choice)
+                        slots[t] = {"state": "running", "at": dt.datetime.now(BERLIN).strftime("%H:%M"), **prep}
+                        _save_state(state)
+                        refresh(plan, slots, models, False)
+                        log.info("slot %s of %s: signup %s on %s / %s", t, plan["id"], prep["row"], prep["phone"], prep["container"])
+                        code, tail = run_signup(prep["row"])
+                        st, text = outcome(prep["row"], code, tail)
+                        slots[t] = {**slots[t], "state": st, "text": text}
+                        log.info("slot %s of %s: %s (exit %s)", t, plan["id"], text, code)
+                finally:
+                    if held:
+                        held.release()
+                    phone_lock.unwant(letter)
     for plan in plans:
         try:
             refresh(plan, state[plan["id"]]["slots"], models, a.dry_run)
