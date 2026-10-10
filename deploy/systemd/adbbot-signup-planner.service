@@ -1,0 +1,10 @@
+[Unit]
+Description=iPhone farm: Tagesplan (Airtable) -> start the signup whose entered time has come (one per run)
+After=network-online.target tailscaled.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+EnvironmentFile=-/etc/adbbot/env
+ExecStart=/usr/bin/flock -n /run/lock/adbbot-signup-planner.lock /root/adb_bot/.venv/bin/python -m adb_bot.automation.signup_planner
+TimeoutStartSec=3600
