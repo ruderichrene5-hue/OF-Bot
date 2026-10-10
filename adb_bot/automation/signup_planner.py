@@ -179,11 +179,51 @@ def _running(pattern: str) -> bool:
     return False
 
 
+def _cmdlines(pattern: str) -> list[list[str]]:
+    """argv of every python process whose command line contains `pattern` (never this process)."""
+    me, out = os.getpid(), []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == me:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                argv = [x.decode(errors="replace") for x in fh.read().split(b"\0") if x]
+        except OSError:
+            continue
+        if argv and "python" in os.path.basename(argv[0]) and pattern in " ".join(argv):
+            out.append(argv)
+    return out
+
+
+def posting_containers() -> set[str]:
+    """Containers of every running iphone_xx_post_batch (its positional args: date, then comma lists per
+    phone, e.g. `2026-10-10 A1,A2 B1,B2`). The batch runs all day and rests 2-4 h between batches, so it
+    is the PHONES it posts on that are off-limits for signups -- not the whole farm (10.10)."""
+    names = set()
+    for argv in _cmdlines("iphone_xx_post_batch"):
+        args = argv[argv.index("adb_bot.automation.iphone_xx_post_batch") + 1:] if "adb_bot.automation.iphone_xx_post_batch" in argv else argv[1:]
+        for a in args[1:]:
+            if a.startswith("-"):
+                break
+            names.update(x.strip() for x in a.split(",") if x.strip())
+    return names
+
+
+def busy_phones() -> set[str]:
+    """Device record ids that a running posting batch uses."""
+    conts = posting_containers()
+    if not conts:
+        return set()
+    out = set()
+    for c in _list(T_CONT):
+        if _text(c["fields"].get(C["name"])) in conts:
+            out.update(c["fields"].get(C["device"]) or [])
+    return out
+
+
 def farm_busy() -> str | None:
     if _running("adb_bot.automation.iphone_signup run"):
         return "ein anderer Signup läuft gerade"
-    if _running("iphone_xx_post_batch"):
-        return "auf der Farm wird gerade gepostet"
     return None
 
 
@@ -198,6 +238,7 @@ def free_container(allowed_phones: list[str], today: dt.date) -> dict | None:
     the phone with the fewest signups today first."""
     cap = int(os.environ.get("IPHONE_SIGNUP_DEVICE_PER_DAY", "10"))
     load = phone_load(today)
+    posting = busy_phones()          # phones a running posting batch uses stay untouched (10.10)
     best = None
     for c in _list(T_CONT, f"{{{C['status']}}} = 'Frei'"):
         f = c["fields"]
@@ -205,6 +246,8 @@ def free_container(allowed_phones: list[str], today: dt.date) -> dict | None:
         if not dev or f.get(C["accounts"]):
             continue
         if allowed_phones and dev not in allowed_phones:
+            continue
+        if dev in posting:
             continue
         info = load.get(dev, {})
         if info.get("rate_limited") or info.get("attempts", 0) >= cap:
@@ -233,6 +276,9 @@ def free_alias() -> dict | None:
 
 # ---------------------------------------------------------------- one slot
 
+class Waiting(RuntimeError):
+    """The slot cannot start right now but may later (phones busy posting) -- it stays 'wartet'."""
+
 def prepare(plan: dict, slot_index: int, today: dt.date, dry_run: bool) -> dict:
     """Fill (or create) the Accounts SOP row for one time slot. Returns {row, container, phone} or raises."""
     f = plan["fields"]
@@ -244,6 +290,8 @@ def prepare(plan: dict, slot_index: int, today: dt.date, dry_run: bool) -> dict:
     username = names[slot_index] if slot_index < len(names) else ""
     cont = free_container(f.get(P["phones"]) or [], today)
     if not cont:
+        if busy_phones():
+            raise Waiting("auf den erlaubten Handys wird gerade gepostet")
         raise ValueError("kein freier Container auf den erlaubten Handys (oder alle Handys heute am Limit / gesperrt)")
     row = account_row(model_id, method)
     fields = {A["model"]: [model_id], A["container"]: [cont["id"]], A["method"]: method, A["creation"]: "To Do"}
@@ -413,6 +461,10 @@ def main(argv=None) -> int:
         else:
             try:
                 prep = prepare(plan, i, today, a.dry_run)
+            except Waiting as exc:
+                slots[t] = {"state": "pending", "wait": str(exc)}
+                log.info("slot %s of %s waits: %s", t, plan["id"], exc)
+                prep = None
             except Exception as exc:  # noqa: BLE001 -- the slot fails with its reason, the plan goes on
                 slots[t] = {"state": "failed", "text": f"❌ {exc}"}
                 log.warning("slot %s of %s: %s", t, plan["id"], exc)
