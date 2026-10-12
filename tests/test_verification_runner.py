@@ -295,23 +295,19 @@ class ReadinessSettingsTest(unittest.TestCase):
 class DiagnosedElsewhereTest(unittest.TestCase):
     """Tags a person wrote that already say verification will not help.
 
-    On the live workspace these cover 14 of the 69 flagged profiles --
-    `logged out` x10, `unable to verify` x3, `Banned / Dead` x1. Each one the
-    runner works costs a two-minute launch, and sometimes a rented number, to
-    rediscover what the tag already says.
+    `unable to verify` is retired (2026-09-24): it never named a different
+    state, so those profiles now carry plain `Human Verification` and are
+    this flow's own population, not diagnosed elsewhere. `logged out` is
+    renamed `Locked Out`. Each one the runner works costs a two-minute
+    launch, and sometimes a rented number, to rediscover what the tag
+    already says.
     """
 
-    def test_a_logged_out_profile_is_not_worked(self):
+    def test_a_locked_out_profile_is_not_worked(self):
         plan = vr.plan_verification(
-            [_item("jil 2", tags=("Issue", "logged out"))], now=NOW)
+            [_item("jil 2", tags=("Issue", "Locked Out"))], now=NOW)
         self.assertEqual(plan.to_run, [])
-        self.assertEqual(plan.diagnosed, [("jil 2", "logged out")])
-
-    def test_unable_to_verify_is_not_worked(self):
-        """Somebody already tried this one by hand and could not do it."""
-        plan = vr.plan_verification(
-            [_item("x", tags=("Issue", "unable to verify"))], now=NOW)
-        self.assertEqual(plan.to_run, [])
+        self.assertEqual(plan.diagnosed, [("jil 2", "Locked Out")])
 
     def test_a_dead_account_is_not_worked(self):
         plan = vr.plan_verification(
@@ -320,7 +316,7 @@ class DiagnosedElsewhereTest(unittest.TestCase):
 
     def test_the_match_survives_hand_typed_casing(self):
         plan = vr.plan_verification(
-            [_item("x", tags=("Issue", "Logged Out"))], now=NOW)
+            [_item("x", tags=("Issue", "locked out"))], now=NOW)
         self.assertEqual(plan.to_run, [])
 
     def test_ordinary_tags_do_not_skip_a_profile(self):
@@ -333,7 +329,7 @@ class DiagnosedElsewhereTest(unittest.TestCase):
 
     def test_the_check_can_be_overridden_for_a_stale_tag(self):
         plan = vr.plan_verification(
-            [_item("x", tags=("Issue", "logged out"))], now=NOW,
+            [_item("x", tags=("Issue", "Locked Out"))], now=NOW,
             respect_diagnosis=False)
         self.assertEqual([p.name for p in plan.to_run], ["x"])
 
@@ -417,7 +413,7 @@ class OnlyListTest(unittest.TestCase):
     def test_an_explicit_name_does_not_override_a_persons_diagnosis(self):
         """That is another person's finding, not a filter."""
         plan = vr.plan_verification(
-            [_item("jil 2", tags=("Issue", "logged out"))],
+            [_item("jil 2", tags=("Issue", "Locked Out"))],
             now=NOW, only=["jil 2"], limit=10)
         self.assertEqual(plan.to_run, [])
         self.assertEqual(len(plan.diagnosed), 1)
@@ -508,7 +504,7 @@ class MatchFilterTest(unittest.TestCase):
 
     def test_it_still_honours_a_persons_diagnosis(self):
         plan = vr.plan_verification(
-            [_item("Blank (19)", tags=("Issue", "logged out")), _item("Blank (7)")],
+            [_item("Blank (19)", tags=("Issue", "Locked Out")), _item("Blank (7)")],
             now=NOW, match="blank", limit=10)
         self.assertEqual([p.name for p in plan.to_run], ["Blank (7)"])
         self.assertEqual(len(plan.diagnosed), 1)
@@ -566,7 +562,7 @@ class DiagnosisTagTest(unittest.TestCase):
     """
 
     class FakeTags:
-        def __init__(self, known=("logged out", "unable to verify", "banned / dead")):
+        def __init__(self, known=("Locked Out", "Human Verification", "banned / dead")):
             self.known = {n.lower(): f"id-{n}" for n in known}
             self.assigned = []
 
@@ -593,20 +589,20 @@ class DiagnosisTagTest(unittest.TestCase):
         return vr.ProfileOutcome(name="x", launch_id="L1", status=status,
                                  detail=detail)
 
-    def test_a_signed_out_profile_is_tagged_logged_out(self):
+    def test_a_signed_out_profile_is_tagged_locked_out(self):
         out = self._outcome_for(status=verification.RESULT_SIGNED_OUT)
         tags = self._apply(out)
-        self.assertEqual(tags.assigned, [("L1", ("id-logged out",))])
-        self.assertEqual(out.diagnosis_tag, "logged out")
+        self.assertEqual(tags.assigned, [("L1", ("id-Locked Out",))])
+        self.assertEqual(out.diagnosis_tag, "Locked Out")
 
     def test_a_banned_profile_is_tagged_dead(self):
         tags = self._apply(self._outcome_for(status=verification.RESULT_BANNED))
         self.assertEqual(tags.assigned, [("L1", ("id-banned / dead",))])
 
-    def test_the_video_selfie_is_tagged_unable_to_verify(self):
+    def test_the_video_selfie_is_tagged_human_verification(self):
         tags = self._apply(self._outcome_for(
             detail="the photo challenge could not be completed"))
-        self.assertEqual(tags.assigned, [("L1", ("id-unable to verify",))])
+        self.assertEqual(tags.assigned, [("L1", ("id-Human Verification",))])
 
     def test_a_bad_sms_hour_is_never_tagged(self):
         """That is weather, not a diagnosis, and a tag would hide the profile
@@ -633,10 +629,20 @@ class DiagnosisTagTest(unittest.TestCase):
         self._apply(out, tags=Exploding())
         self.assertEqual(out.diagnosis_tag, "")
 
-    def test_every_tag_it_writes_is_one_the_next_pass_skips(self):
-        """The loop only closes if these names match DIAGNOSED_ELSEWHERE_TAGS."""
+    def test_every_tag_it_writes_either_closes_the_loop_or_is_its_own_population(self):
+        """A written tag must do one of two things, or a profile falls through
+        the cracks forever: `Locked Out` / `Banned / Dead` mean somebody else
+        already has this, so DIAGNOSED_ELSEWHERE_TAGS must skip it next pass.
+        `Human Verification` means the opposite -- still needs this flow -- so
+        it stays this flow's own selection (HAND_APPLIED_VERIFICATION_TAG)
+        instead, and must NOT be in the skip set or it would never be retried.
+        """
         for _status, _marker, tag in vr._DIAGNOSIS_TAGS:
-            self.assertIn(vr._wanted_key(tag), vr.DIAGNOSED_ELSEWHERE_TAGS, tag)
+            key = vr._wanted_key(tag)
+            if key == vr._wanted_key(vr.HAND_APPLIED_VERIFICATION_TAG):
+                self.assertNotIn(key, vr.DIAGNOSED_ELSEWHERE_TAGS, tag)
+            else:
+                self.assertIn(key, vr.DIAGNOSED_ELSEWHERE_TAGS, tag)
 
 
 class OneLinePerProfileTest(unittest.TestCase):
@@ -736,7 +742,7 @@ class OnlyByIdTest(unittest.TestCase):
 
     def test_an_id_still_does_not_override_a_persons_diagnosis(self):
         plan = vr.plan_verification(
-            [_item("jil 2", launch_id="L1", tags=("Issue", "logged out"))],
+            [_item("jil 2", launch_id="L1", tags=("Issue", "Locked Out"))],
             now=NOW, only=["L1"], limit=10)
         self.assertEqual(plan.to_run, [])
         self.assertEqual(len(plan.diagnosed), 1)

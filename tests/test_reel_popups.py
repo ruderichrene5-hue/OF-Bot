@@ -687,9 +687,14 @@ class EnsureFeedUsableTest(TestCase):
         d = FakeU2Device(feed_exists=False)
         adb_client = mock.Mock()
 
-        def clear_it(target, client, logger=None, flow=None):
+        def clear_it(target, client, logger=None, flow=None, dump=None):
             self.assertEqual(target, "host:1")
             self.assertIs(client, adb_client)
+            # The reader must come from us: the handler's own default shells
+            # out to `uiautomator dump`, which cannot work while u2 holds the
+            # UiAutomation connection -- it comes back blank and clears
+            # nothing. See `_u2_dump`.
+            self.assertIsNotNone(dump, "the u2-backed screen reader must be passed")
             d.feed_exists = True
             return True
 

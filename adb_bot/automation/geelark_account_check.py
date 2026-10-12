@@ -22,6 +22,7 @@ damit wir jeden Tag aktualisieren."
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -73,11 +74,19 @@ def _already_checked_today(log_path: Path, day_start: float) -> set[str]:
 
 
 def run_geelark_account_check(adb_client, transport=None, logger=None,
-                              now: datetime | None = None) -> list[dict]:
+                              now: datetime | None = None,
+                              concurrency: int | None = None) -> list[dict]:
     """Check every Active_Posting phone not yet touched today. Returns one
     dict per phone checked: {"phone_id", "name", "result"} -- result is
     "healthy", the new tag it was retagged to, "could_not_reach_over_adb",
-    or "error"."""
+    or "error".
+
+    Runs `concurrency`-wide (default: geelark_scheduler.CONCURRENCY, the
+    same 9-modem pool everything else uses) via run_queue -- was a plain
+    sequential `for` loop until 2026-09-08, found live doing one phone at a
+    time (~2 min each) while 8 of the 9 real proxies sat idle: a 203-phone
+    sweep was on track to take ~6.5 hours instead of well under one.
+    """
     transport = transport or GeelarkTransport()
     log_path = get_app_data_dir() / LOG_FILENAME
     day_start = _berlin_day_start_epoch(now)
@@ -88,10 +97,24 @@ def run_geelark_account_check(adb_client, transport=None, logger=None,
     if not candidates:
         return []
 
-    results: list[dict] = []
-    for phone in candidates:
-        phone_id = str(phone.get("id"))
-        name = str(phone.get("serialName") or phone_id)
+    from adb_bot.automation.geelark_scheduler import run_queue, CONCURRENCY
+    from adb_bot.automation.geelark_recheck import (
+        pending_by_phone, resolve_pending_on_open_session,
+    )
+    concurrency = concurrency or CONCURRENCY
+
+    # Piggyback recheck on this pass's own open sessions -- added 2026-09-08.
+    # Only for phones that ALSO need a health check today (this pass's own
+    # candidate list); a phone with a pending recheck but no health check
+    # due is left to geelark_recheck's own nightly run, which still covers
+    # it. Computed once up front (read-only afterwards, safe across worker
+    # threads) rather than per-phone, so 203 candidates does not mean 203
+    # separate ledger scans.
+    recheck_by_phone, _already_resolved = pending_by_phone(transport=transport, logger=logger)
+    recheck_results_lock = threading.Lock()
+    recheck_results: list[dict] = []
+
+    def work_fn(phone_id: str, name: str) -> dict:
         session = None
         result = "error"
         try:
@@ -103,6 +126,15 @@ def run_geelark_account_check(adb_client, transport=None, logger=None,
                     target, adb_client, phone_id, transport, name,
                     TAG_ACTIVE_POSTING, logger=logger)
                 result = new_tag if new_tag else "healthy"
+                # Only on a confirmed-healthy phone -- one that just got
+                # retagged away (challenge/banned/etc.) is not a phone whose
+                # post-count reading means anything right now.
+                pending_records = recheck_by_phone.get(phone_id)
+                if result == "healthy" and pending_records:
+                    outcomes = resolve_pending_on_open_session(
+                        phone_id, pending_records, target, adb_client, logger=logger)
+                    with recheck_results_lock:
+                        recheck_results.extend(outcomes)
         except Exception as exc:
             if logger:
                 logger.exception("geelark_account_check: raised for %s (%s)", name, exc)
@@ -119,6 +151,9 @@ def run_geelark_account_check(adb_client, transport=None, logger=None,
             logger.info("geelark_account_check: %s (%s): %s", name, phone_id, result)
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
+            # Append-only JSONL, same pattern as post_ledger.py/account_stats.py --
+            # safe for several worker threads writing at once (a torn write
+            # costs one line, not the whole file).
             with log_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps({"at": time.time(), "phone_id": phone_id,
                                         "name": name, "result": result}) + "\n")
@@ -126,5 +161,10 @@ def run_geelark_account_check(adb_client, transport=None, logger=None,
             if logger:
                 logger.warning("geelark_account_check: could not write log for %s (%s)",
                               name, exc)
-        results.append({"phone_id": phone_id, "name": name, "result": result})
+        return {"phone_id": phone_id, "name": name, "result": result}
+
+    results = run_queue(candidates, work_fn, concurrency=concurrency, logger=logger)
+    if recheck_results and logger:
+        logger.info("geelark_account_check: also resolved %d pending recheck record(s) "
+                   "piggybacked on this pass's own open sessions", len(recheck_results))
     return results

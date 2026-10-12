@@ -398,7 +398,9 @@ def python_exe() -> str:
 #                           wallet two launches in.
 LOOP_EXTRA_ARGS = {
     "pipeline": ("--targets", "profiles"),
-    "queue": ("--targets", "profiles", "--slots", "18:00,20:00,22:00"),
+    "queue": ("--targets", "profiles", "--slots",
+              "06:00,07:00,08:00,09:00,10:00,11:00,12:00,13:00,14:00,15:00,"
+              "16:00,17:00,18:00,19:00,20:00,21:00,22:00,23:00"),
     "verification": ("--limit-profiles", "2", "--max-numbers", "4",
                      "--max-numbers-per-day", "12", "--min-balance", "1.00"),
 }

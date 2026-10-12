@@ -45,6 +45,7 @@ from adb_bot.ui.helpers import (
 )
 from adb_bot.automation.flows.story_media import discover_story_media_files
 from adb_bot.clients.airtable import AirtableClient
+from adb_bot.clients.local_store import LocalAirtableClient
 from adb_bot.automation.airtable_runner import run_airtable_queue
 
 # How long a hand-started profile waits for a place under the global live-phone
@@ -1607,7 +1608,7 @@ class WorkflowUI:
             automation.register_flow(PushMediaTestFlow())
             automation.register_flow(InstagramReelIntentProbeFlow())
 
-            airtable = AirtableClient(token, base_id, table_name)
+            airtable = LocalAirtableClient(token, base_id, table_name)
             run_airtable_queue(
                 airtable,
                 launcher_client,

@@ -44,8 +44,8 @@ def load_settings() -> dict:
         return {
             "bearer_token": "",
             "batch_launch_delay_seconds": 1,
-            "readiness_wait_seconds": 10,
-            "readiness_max_attempts": 2,
+            "readiness_wait_seconds": 12,
+            "readiness_max_attempts": 8,
         }
     
     try:
@@ -55,8 +55,8 @@ def load_settings() -> dict:
         return {
             "bearer_token": "",
             "batch_launch_delay_seconds": 1,
-            "readiness_wait_seconds": 10,
-            "readiness_max_attempts": 2,
+            "readiness_wait_seconds": 12,
+            "readiness_max_attempts": 8,
         }
 
 
@@ -92,7 +92,10 @@ def _get_saved_or_env(settings_key: str, env_key: str) -> str:
 
 
 def get_saved_airtable_token() -> str:
-    return _get_saved_or_env("airtable_token", "AIRTABLE_TOKEN")
+    # 2026-09-17: ignored by LocalAirtableClient (see local_store.py), kept
+    # non-empty so the several `if not token: raise/exit` guards written for
+    # the real Airtable API don't block a store that no longer needs one.
+    return _get_saved_or_env("airtable_token", "AIRTABLE_TOKEN") or "local"
 
 
 # --- SMS verification providers ----------------------------------------------
@@ -147,14 +150,12 @@ def get_saved_geelark_api_key() -> str:
 # error. A missing base id is a broken deployment, and it should say so on the
 # first call rather than quietly do the wrong thing to real data.
 def get_saved_airtable_base_id() -> str:
-    base_id = _get_saved_or_env("airtable_base_id", "AIRTABLE_BASE_ID")
-    if not base_id:
-        raise RuntimeError(
-            "No Airtable base id configured. Set AIRTABLE_BASE_ID (normally from "
-            "/etc/adbbot/env -- check the file exists and is readable) or save an "
-            "`airtable_base_id` in the settings file. There is no default: "
-            "guessing a base risks writing to the wrong one.")
-    return base_id
+    # 2026-09-17: the real Airtable API is no longer used (see
+    # adb_bot/clients/local_store.py) -- there is exactly one local store per
+    # machine, so "guessing a base risks writing to the wrong one" no longer
+    # applies. Kept returning a stable placeholder rather than raising, so
+    # every existing call site keeps working unchanged.
+    return _get_saved_or_env("airtable_base_id", "AIRTABLE_BASE_ID") or "local"
 
 
 def get_saved_airtable_table_name() -> str:
@@ -174,18 +175,18 @@ def get_saved_readiness_wait() -> int:
     """Get saved readiness wait time or default."""
     settings = load_settings()
     try:
-        return max(0, int(settings.get("readiness_wait_seconds", 10)))
+        return max(0, int(settings.get("readiness_wait_seconds", 12)))
     except (ValueError, TypeError):
-        return 10
+        return 12
 
 
 def get_saved_readiness_attempts() -> int:
     """Get saved readiness max attempts or default."""
     settings = load_settings()
     try:
-        return max(1, int(settings.get("readiness_max_attempts", 2)))
+        return max(1, int(settings.get("readiness_max_attempts", 8)))
     except (ValueError, TypeError):
-        return 2
+        return 8
 
 
 # How many MultiLogin phones may be open at once ACROSS EVERY LOOP. This is the
@@ -258,6 +259,55 @@ def get_saved_max_posts_per_profile():
         return DEFAULT_MAX_POSTS_PER_PROFILE
 
 
+# A true daily ceiling, persisted across runs (see automation/daily_post_counter.py)
+# -- distinct from DEFAULT_MAX_POSTS_PER_PROFILE above, which only rations one
+# run and still lets a deep backlog drain within a few hours on the same day.
+# Explicit operator instruction 2026-09-11 (Rene): "max 9 reels pro account"
+# per day, reversing the 2026-08-27 "uncapped, by choice" stance (that one was
+# Caio's call; this is Rene's -- see the module docstring). 0/empty disables it.
+DEFAULT_DAILY_MAX_POSTS_PER_PROFILE = 9
+
+
+def get_saved_daily_max_posts_per_profile():
+    """Posts one account may make per calendar day (Europe/Berlin): saved
+    setting, else ADBBOT_DAILY_MAX_POSTS_PER_PROFILE, else the default. 0 (or a
+    bad value) means uncapped."""
+    raw = load_settings().get("daily_max_posts_per_profile", None)
+    if raw is None or str(raw).strip() == "":
+        raw = os.environ.get("ADBBOT_DAILY_MAX_POSTS_PER_PROFILE", "")
+    if str(raw).strip() == "":
+        return DEFAULT_DAILY_MAX_POSTS_PER_PROFILE
+    try:
+        return max(0, int(str(raw).strip()))
+    except (TypeError, ValueError):
+        return DEFAULT_DAILY_MAX_POSTS_PER_PROFILE
+
+
+# How many MLX profiles the posting loop runs at once, i.e. how many accounts
+# get posted "in one session" -- distinct from DEFAULT_MAX_LIVE_PROFILES (the
+# cross-loop ceiling) and from batching.MAX_CONCURRENT_PROFILES (the code-level
+# fallback used when nothing here or on the CLI overrides it). Explicit
+# operator instruction 2026-09-12 (Rene): match how GeeLark's posting pass is
+# run -- a small, deliberately-sized rolling batch per session, not the wider
+# CLI-only default of 10.
+DEFAULT_POSTING_CONCURRENCY = 3
+
+
+def get_saved_posting_concurrency():
+    """Max MLX profiles the posting loop launches at once: saved setting, else
+    ADBBOT_POSTING_CONCURRENCY, else the default. Only used when --max-concurrent
+    isn't passed on the CLI -- see run_loop.py's posting call site."""
+    raw = load_settings().get("posting_concurrency", None)
+    if raw is None or str(raw).strip() == "":
+        raw = os.environ.get("ADBBOT_POSTING_CONCURRENCY", "")
+    if str(raw).strip() == "":
+        return DEFAULT_POSTING_CONCURRENCY
+    try:
+        return max(1, int(str(raw).strip()))
+    except (TypeError, ValueError):
+        return DEFAULT_POSTING_CONCURRENCY
+
+
 def get_saved_flow_speed() -> str:
     """Speed profile for on-device flows: 'fast' (0.5x waits), 'normal', or
     'slow' (1.5x). Only scales fallback sleeps -- a step that confirms the next
@@ -301,6 +351,15 @@ def get_saved_drive_folder_id() -> str:
     """Google Drive folder id of `01_Raw_Videos` (the pipeline's raw source).
     When set together with a service-account key, Drive wins over the local dir."""
     return _get_saved_or_env("drive_raw_folder_id", "DRIVE_RAW_FOLDER_ID")
+
+
+def get_saved_model_photos_folder_id() -> str:
+    """Google Drive folder id of the VAs' `Models` root (one subfolder per
+    model, e.g. `Models/Nikki/IG/`, curated real face photos -- distinct from
+    `01_Raw_Videos`, which only has raw clips). Used for the verification
+    photo challenge, which needs an actual clear face, not a video frame.
+    Empty until configured; the service account must be shared on it."""
+    return _get_saved_or_env("model_photos_folder_id", "MODEL_PHOTOS_FOLDER_ID")
 
 
 def get_saved_google_service_account_json() -> str:

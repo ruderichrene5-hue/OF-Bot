@@ -101,14 +101,23 @@ def _open_instagram_u2(flow, target, adb_client, logger=None):
 RECHECK_AFTER_SECONDS = 15 * 60
 
 
-def run_geelark_recheck(adb_client, transport=None, logger=None) -> list[dict]:
-    """Work every GeeLark share old enough to recheck. Returns one dict per
-    ledger entry processed: {"phone_id", "media_hash", "outcome", "detail"}."""
+def pending_by_phone(transport=None, logger=None) -> tuple[dict[str, list], list[dict]]:
+    """Every pending GeeLark share worth a phone open, grouped by phone_id --
+    plus results for records already resolved without ever launching
+    anything (too old, or not GeeLark's).
+
+    Split out of run_geelark_recheck 2026-09-08 so a caller that already has
+    its own open session for a phone (geelark_account_check's health-check
+    pass) can ask "does this phone need a recheck" and do the read itself,
+    instead of this module opening a second session for the same phone
+    later the same day. Opens nothing itself -- safe to call from a
+    read-only "what's pending" check.
+    """
     transport = transport or GeelarkTransport()
     ledger = post_ledger.PostLedger()
     pending = ledger.pending(older_than_seconds=RECHECK_AFTER_SECONDS)
     if not pending:
-        return []
+        return {}, []
 
     # post_ledger.py is written by ONE shared code path used by both MLX and
     # GeeLark (see ShareRecord.platform) -- `pending` above is everything
@@ -127,7 +136,7 @@ def run_geelark_recheck(adb_client, transport=None, logger=None) -> list[dict]:
     except Exception as exc:
         if logger:
             logger.warning("geelark_recheck: could not list Geelark phones (%s)", exc)
-        return []
+        return {}, []
 
     def _is_geelark(record) -> bool:
         if record.platform == "geelark":
@@ -138,7 +147,7 @@ def run_geelark_recheck(adb_client, transport=None, logger=None) -> list[dict]:
 
     pending = [r for r in pending if _is_geelark(r)]
     if not pending:
-        return []
+        return {}, []
 
     results: list[dict] = []
     now = time.time()
@@ -193,12 +202,83 @@ def run_geelark_recheck(adb_client, transport=None, logger=None) -> list[dict]:
             if logger:
                 logger.warning("geelark_recheck: could not persist abandoned-log dedup (%s)", exc)
     if not worklist:
-        return results
+        return {}, results
 
     by_phone: dict[str, list] = {}
     for record in worklist:
         if record.profile_id in geelark_ids:
             by_phone.setdefault(record.profile_id, []).append(record)
+    return by_phone, results
+
+
+def resolve_pending_on_open_session(phone_id: str, records: list, target: str,
+                                    adb_client, flow=None, logger=None) -> list[dict]:
+    """The actual recheck read+verdict for one phone, given a session
+    ALREADY open (a `target` from `_launch`, still live) -- opens nothing,
+    starts/stops no session, that is entirely the caller's responsibility.
+
+    Split out 2026-09-08 so geelark_account_check's health-check pass can
+    call this on the same open session it already has for a phone, instead
+    of this module reaching that phone a second time later the same day for
+    the exact same pending records.
+    """
+    flow = flow or InstagramReelUploadU2Flow()
+    ledger = post_ledger.PostLedger()
+    results: list[dict] = []
+
+    d = _open_instagram_u2(flow, target, adb_client, logger=logger)
+    if d is None:
+        for record in records:
+            results.append({"phone_id": phone_id, "media_hash": record.media_hash,
+                            "outcome": "could_not_open_instagram"})
+        return results
+
+    # No account switching on Geelark -- unlike MLX, a Geelark phone
+    # never carries two Instagram accounts (confirmed 2026-09-01;
+    # target_handle is never set anywhere in the Geelark code path).
+    # One post-count read is meaningful for every pending record on
+    # this phone.
+    current = None
+    if flow._open_profile_tab_u2(d, target, logger=logger):
+        waits.settle(2, ready=waits.u2_ready(d, *flow._POST_COUNT_SELECTORS),
+                    logger=logger, what="profile header")
+        current = flow._read_post_count_u2(d, target, logger=logger)
+
+    for record in records:
+        age_seconds = max(0.0, time.time() - (record.shared_at or 0.0))
+        outcome, detail = decide_recheck(
+            record.baseline_count, record.baseline_exact, current, age_seconds,
+        )
+        if logger:
+            logger.info("geelark_recheck: %s (%s): %s -- %s",
+                       phone_id, record.media_hash[:12], outcome, detail)
+        if outcome == OUTCOME_POSTED:
+            ledger.resolve(record.profile_id, record.media_hash,
+                           post_ledger.STATUS_CONFIRMED, f"geelark_recheck: {detail}")
+        elif outcome == OUTCOME_FAILED:
+            # Only ever done on positive evidence of absence -- this
+            # is what re-opens the clip for another send.
+            ledger.resolve(record.profile_id, record.media_hash,
+                           post_ledger.STATUS_DISPROVED, f"geelark_recheck: {detail}")
+        # OUTCOME_UNKNOWN / OUTCOME_ABANDONED: leave the ledger as is
+        # -- still blocking, on purpose (see post_ledger.blocks_repost).
+        results.append({"phone_id": phone_id, "media_hash": record.media_hash,
+                        "outcome": outcome, "detail": detail})
+    return results
+
+
+def run_geelark_recheck(adb_client, transport=None, logger=None) -> list[dict]:
+    """Work every GeeLark share old enough to recheck, each on its own
+    freshly-opened session. Returns one dict per ledger entry processed:
+    {"phone_id", "media_hash", "outcome", "detail"}.
+
+    Phones geelark_account_check already resolved on its own open session
+    today are not reached again here -- see that module: it calls
+    pending_by_phone()/resolve_pending_on_open_session() itself for exactly
+    that overlap.
+    """
+    transport = transport or GeelarkTransport()
+    by_phone, results = pending_by_phone(transport=transport, logger=logger)
     if not by_phone:
         return results
 
@@ -217,45 +297,8 @@ def run_geelark_recheck(adb_client, transport=None, logger=None) -> list[dict]:
                     results.append({"phone_id": phone_id, "media_hash": record.media_hash,
                                     "outcome": "could_not_reach_over_adb"})
                 continue
-
-            d = _open_instagram_u2(flow, target, adb_client, logger=logger)
-            if d is None:
-                for record in records:
-                    results.append({"phone_id": phone_id, "media_hash": record.media_hash,
-                                    "outcome": "could_not_open_instagram"})
-                continue
-
-            # No account switching on Geelark -- unlike MLX, a Geelark phone
-            # never carries two Instagram accounts (confirmed 2026-09-01;
-            # target_handle is never set anywhere in the Geelark code path).
-            # One post-count read is meaningful for every pending record on
-            # this phone.
-            current = None
-            if flow._open_profile_tab_u2(d, target, logger=logger):
-                waits.settle(2, ready=waits.u2_ready(d, *flow._POST_COUNT_SELECTORS),
-                            logger=logger, what="profile header")
-                current = flow._read_post_count_u2(d, target, logger=logger)
-
-            for record in records:
-                age_seconds = max(0.0, time.time() - (record.shared_at or 0.0))
-                outcome, detail = decide_recheck(
-                    record.baseline_count, record.baseline_exact, current, age_seconds,
-                )
-                if logger:
-                    logger.info("geelark_recheck: %s (%s): %s -- %s",
-                               phone_id, record.media_hash[:12], outcome, detail)
-                if outcome == OUTCOME_POSTED:
-                    ledger.resolve(record.profile_id, record.media_hash,
-                                   post_ledger.STATUS_CONFIRMED, f"geelark_recheck: {detail}")
-                elif outcome == OUTCOME_FAILED:
-                    # Only ever done on positive evidence of absence -- this
-                    # is what re-opens the clip for another send.
-                    ledger.resolve(record.profile_id, record.media_hash,
-                                   post_ledger.STATUS_DISPROVED, f"geelark_recheck: {detail}")
-                # OUTCOME_UNKNOWN / OUTCOME_ABANDONED: leave the ledger as is
-                # -- still blocking, on purpose (see post_ledger.blocks_repost).
-                results.append({"phone_id": phone_id, "media_hash": record.media_hash,
-                                "outcome": outcome, "detail": detail})
+            results.extend(resolve_pending_on_open_session(
+                phone_id, records, target, adb_client, flow=flow, logger=logger))
         except Exception as exc:
             if logger:
                 logger.exception("geelark_recheck: raised for %s (%s)", phone_id, exc)

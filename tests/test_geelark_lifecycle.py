@@ -310,6 +310,8 @@ class ActivePostingCycleTest(unittest.TestCase):
     def test_uses_the_short_scroll_duration(self):
         with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
              patch.object(lifecycle, "stop_session"), \
+             patch("adb_bot.automation.geelark_lifecycle.PostLedger.has_ever_posted",
+                  return_value=True), \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.__init__",
                   return_value=None) as init, \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
@@ -325,6 +327,26 @@ class ActivePostingCycleTest(unittest.TestCase):
         # following post to fold into -- see test_a_single_post_batch_still_
         # gets_a_trailing_scroll in ActivePostingCycleMediaTest.
         init.assert_any_call(scroll_seconds=lifecycle.ACTIVE_POSTING_SCROLL_SECONDS)
+
+    def test_first_ever_post_gets_the_long_scroll(self):
+        """No record for this phone_id in the post ledger -- the debut post,
+        not just today's first -- gets the 3-minute scroll instead of the
+        usual 40s. Confirmed 2026-09-25."""
+        with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
+             patch.object(lifecycle, "stop_session"), \
+             patch("adb_bot.automation.geelark_lifecycle.PostLedger.has_ever_posted",
+                  return_value=False), \
+             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.__init__",
+                  return_value=None) as init, \
+             patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
+                  return_value={"aborted": False}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.submit",
+                  return_value={"submitted": True, "state": {}}), \
+             patch("adb_bot.automation.flows.instagram_reel.InstagramReelUploadU2Flow.verify_submitted",
+                  return_value={"success": True}):
+            lifecycle.run_active_posting_cycle("ph1", "Test 1", adb_client=object(),
+                                               media_paths=["/tmp/x.mp4"])
+        init.assert_any_call(scroll_seconds=lifecycle.FIRST_EVER_POST_SCROLL_SECONDS)
 
 
 class ChallengeAbortTest(unittest.TestCase):
@@ -514,6 +536,8 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
         from adb_bot.automation.flows import reel_verify
         with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
              patch.object(lifecycle, "stop_session"), \
+             patch("adb_bot.automation.geelark_lifecycle.PostLedger.has_ever_posted",
+                  return_value=True), \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.__init__",
                   return_value=None) as init, \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",
@@ -536,6 +560,8 @@ class ActivePostingCycleMediaTest(unittest.TestCase):
         from adb_bot.automation.flows import reel_verify
         with patch.object(lifecycle, "_launch", return_value=(_fake_session(), "1.2.3.4:5555")), \
              patch.object(lifecycle, "stop_session"), \
+             patch("adb_bot.automation.geelark_lifecycle.PostLedger.has_ever_posted",
+                  return_value=True), \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.__init__",
                   return_value=None) as init, \
              patch("adb_bot.automation.flows.instagram.InstagramScrollFlow.run",

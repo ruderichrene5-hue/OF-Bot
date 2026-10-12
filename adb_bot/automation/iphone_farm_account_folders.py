@@ -30,14 +30,23 @@ import requests
 REELS_BASE = "appwk9LrgAhJv8iEH"
 ACCOUNTS_TABLE = "tbly0y1I4hNDlvh1K"
 
-FIELD_USERNAME = "fldeeNW0csDWVtlka"
-FIELD_GDRIVE_LINK = "flds4apZwEGd2xYak"
-FIELD_IPHONE_LOOKUP = "fldtSdAP2bOEhO9MA"
+# by NAME, not field id: "Username" was recreated once and got a new id -- the old id silently matched
+# nothing and no account got a folder for days (found 2026-10-10)
+FIELD_USERNAME = "Username"
+FIELD_GDRIVE_LINK = "GDrive Link"
+FIELD_IPHONE_LOOKUP = "iPhone"
+FIELD_CREATION = "Creation Status"
 
 # IG Reels (root) -> per-device folder id. Device names must match exactly
 # what the `iPhone (neu)` lookup returns (i.e. the Containers table's iPhone
 # choices, which mirror the Device table's primary field).
 DEVICE_FOLDERS = {
+    # renamed 2026-10-07: phones are iPhone A, B, C, D… (old names kept so stale lookups still match)
+    "iPhone A": "1TGJ6_pPPRWobC1j-CeftgXVzdB-0Busq",
+    "iPhone B": "1mB7wgXM-5q2eP62a93nIoojLnaJOPtxL",
+    "iPhone C": "1TUZiiLDnlG_e0L1Ps0LOiBZMHaCAf6_1",      # created 2026-10-10
+    "iPhone D": "15x51-nZ75TeKaPbzPZnmJtZ13cKWFZZj",
+    "iPhone E": "10rhmDVyKk0a-fs9XQJjVgT30vMOBWMZp",
     "iPhone 1 (weiß)": "1TGJ6_pPPRWobC1j-CeftgXVzdB-0Busq",
     "iPhone 2 (schwarz)": "1mB7wgXM-5q2eP62a93nIoojLnaJOPtxL",
 }
@@ -52,7 +61,7 @@ def accounts_needing_a_folder() -> list:
     known iPhone, and no GDrive Link yet."""
     out, offset = [], None
     while True:
-        params = {"pageSize": 100, "returnFieldsByFieldId": "true"}
+        params = {"pageSize": 100}
         if offset:
             params["offset"] = offset
         r = requests.get(
@@ -66,6 +75,8 @@ def accounts_needing_a_folder() -> list:
             username = str(f.get(FIELD_USERNAME) or "").strip().lstrip("@")
             if not username or f.get(FIELD_GDRIVE_LINK):
                 continue
+            if (f.get(FIELD_CREATION) or "") == "To Do":
+                continue  # planned, not created on Instagram yet
             iphone_vals = f.get(FIELD_IPHONE_LOOKUP) or []
             iphone = None
             if iphone_vals:

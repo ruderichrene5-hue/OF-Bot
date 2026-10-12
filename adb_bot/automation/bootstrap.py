@@ -13,6 +13,7 @@ from adb_bot.clients.api import MultiloginApiClient
 from adb_bot.clients.multilogin import (
     MultiloginAdbEnableClient,
     MultiloginLauncherClient,
+    MultiloginPhoneStatusClient,
     MultiloginShutdownClient,
 )
 from adb_bot.automation.flows import (
@@ -65,6 +66,7 @@ class MlxClients:
     launcher: MultiloginLauncherClient
     shutdown: MultiloginShutdownClient
     adb_enable: MultiloginAdbEnableClient
+    status: MultiloginPhoneStatusClient
 
 
 def build_mlx_clients(bearer_token: str) -> MlxClients:
@@ -73,4 +75,5 @@ def build_mlx_clients(bearer_token: str) -> MlxClients:
         launcher=MultiloginLauncherClient(bearer_token),
         shutdown=MultiloginShutdownClient(bearer_token),
         adb_enable=MultiloginAdbEnableClient(bearer_token),
+        status=MultiloginPhoneStatusClient(bearer_token),
     )

@@ -16,6 +16,12 @@ it would do, without launching anything or spending a cent.
 Each account is created inside **one** launch of one phone, because there is no
 resuming -- a restarted Instagram returns to "Join Instagram" and throws away
 an already-verified number.
+
+`--workers N` runs N phones at once instead of one after another -- each
+`chosen` phone is a distinct profile before the loop starts, so this is just
+running independent, already-separated work concurrently, not a race over who
+gets which phone (that's what the per-profile lock in `_create_one` is for
+regardless). Default stays 1: sequential, exactly the original behaviour.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from __future__ import annotations
 import argparse
 import random
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 from adb_bot.automation.bootstrap import build_mlx_clients
@@ -94,7 +101,7 @@ def _create_one(profile_item, clients, adb_client, router, args, logger) -> dict
     """One account, start to finish, on one phone. Always shuts the phone down."""
     profile_id = str(profile_item.get("id"))
     name = str(profile_item.get("serial_name") or profile_id)
-    identity = make_identity(random.Random())
+    identity = make_identity(random.Random(), model=getattr(args, "model", "") or "")
 
     print(f"\n{'=' * 66}\n{name} ({profile_id})\n  {identity.summary()}")
     if not args.apply:
@@ -120,7 +127,8 @@ def _create_one(profile_item, clients, adb_client, router, args, logger) -> dict
             profile_id, clients.api, clients.adb_enable, logger,
             max_attempts=args.readiness_attempts,
             wait_seconds=args.readiness_wait,
-            launcher_client=clients.launcher)
+            launcher_client=clients.launcher,
+            status_client=clients.status)
         if not profile:
             return {"profile": name, "status": "not-ready", "username": ""}
 
@@ -168,13 +176,23 @@ def cmd_run(args) -> int:
     logger = get_logger("adb_bot")
     token = _resolve_token(args.mlx_token)
     items = _profiles(token)
-    free = _staging_profiles(items)
 
-    if not free:
-        print("[stop] no staging phone is free.", file=sys.stderr)
-        return 2
-
-    chosen = free[:args.limit or 1]
+    if getattr(args, "phone_id", None):
+        # Bypasses the `Blank`-name staging filter entirely -- for a named
+        # test phone (e.g. sitting in a "Test Nikki ..." folder) that will
+        # never match `_staging_profiles`'s prefix check but is still a
+        # legitimate, empty target a person picked by hand.
+        chosen = [i for i in items if str(i.get("id")) == args.phone_id]
+        if not chosen:
+            print(f"[stop] {args.phone_id} not found in the workspace.", file=sys.stderr)
+            return 2
+        free = chosen
+    else:
+        free = _staging_profiles(items)
+        if not free:
+            print("[stop] no staging phone is free.", file=sys.stderr)
+            return 2
+        chosen = free[:args.limit or 1]
     mode = "APPLY (spends money, creates real accounts)" if args.apply else "DRY RUN"
     print(f"\n{'=' * 66}\n{mode}\n{len(chosen)} phone(s) of {len(free)} free\n"
           f"{'=' * 66}")
@@ -188,18 +206,38 @@ def cmd_run(args) -> int:
     adb_client = ADBClient()
 
     results = []
-    consecutive = 0
-    for item in chosen:
-        outcome = _create_one(item, clients, adb_client, router, args, logger)
-        results.append(outcome)
-        if outcome["status"] in (signup.RESULT_CREATED, "dry-run"):
-            consecutive = 0
-        else:
-            consecutive += 1
-            if consecutive >= MAX_CONSECUTIVE_FAILURES:
-                print(f"\n[stop] {consecutive} failures in a row -- something "
-                      f"bigger than one account is wrong. Stopping the batch.")
-                break
+    workers = max(1, args.workers)
+
+    if workers == 1:
+        consecutive = 0
+        for item in chosen:
+            outcome = _create_one(item, clients, adb_client, router, args, logger)
+            results.append(outcome)
+            if outcome["status"] in (signup.RESULT_CREATED, "dry-run"):
+                consecutive = 0
+            else:
+                consecutive += 1
+                if consecutive >= MAX_CONSECUTIVE_FAILURES:
+                    print(f"\n[stop] {consecutive} failures in a row -- something "
+                          f"bigger than one account is wrong. Stopping the batch.")
+                    break
+    else:
+        # Each phone still gets its own ADBClient: ADBClient tracks a
+        # target->password map per instance, and two phones running at once
+        # would otherwise clobber each other's remembered credentials.
+        print(f"\nrunning {len(chosen)} phone(s), {workers} at a time")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_create_one, item, clients, ADBClient(),
+                                   router, args, logger): item
+                      for item in chosen}
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    outcome = future.result()
+                except Exception as exc:
+                    outcome = {"profile": str(item.get("serial_name")),
+                              "status": f"error: {str(exc)[:80]}", "username": ""}
+                results.append(outcome)
 
     made = [r for r in results if r["status"] == signup.RESULT_CREATED]
     print(f"\n{'=' * 66}\n{len(made)} account(s) created of {len(results)} attempted")
@@ -232,6 +270,17 @@ def build_parser() -> argparse.ArgumentParser:
                         help="save a screenshot per screen (~3s each)")
     parser.add_argument("--readiness-attempts", type=int, default=8)
     parser.add_argument("--readiness-wait", type=int, default=15)
+    parser.add_argument("--model", default="",
+                        help="prefix the generated @handle with this name "
+                             "(e.g. nikki -> nikki_1234)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="run this many phones at once (default 1, "
+                             "sequential)")
+    parser.add_argument("--phone-id", default=None,
+                        help="target this exact MLX phone id instead of "
+                             "auto-picking from staging `Blank` phones -- for "
+                             "a named test phone that free-selection would "
+                             "never see")
     return parser
 
 

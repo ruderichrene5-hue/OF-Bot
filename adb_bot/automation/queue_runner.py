@@ -59,8 +59,11 @@ DEFAULT_ANYTIME_MAX_PER_DAY = 0
 # posting_planner refuses to fire outside them. A row that falls behind (the
 # fleet was down, the profile was flagged) waits for the morning rather than
 # going out at 04:00 to nobody.
-POSTING_WINDOW_START = time(9, 0)
-POSTING_WINDOW_END = time(23, 0)
+# Was 9:00-23:00; pushed to 8:00-23:59 on 2026-09-19 on Rene's instruction so
+# the day's already-scheduled rows finish tonight. Kept in step with
+# posting_planner.POSTING_WINDOW_* -- the two had drifted apart before.
+POSTING_WINDOW_START = time(8, 0)
+POSTING_WINDOW_END = time(23, 59)
 
 # Scheduling stops this far short of the window's end. The posting loop picks a
 # row up on its next tick, so a row written for 23:00 exactly would come round
@@ -475,7 +478,19 @@ def plan_slot_rows(targets, variants, queue_rows, now: datetime | None = None,
         fields = row.get("fields", {}) or {}
         status = at._select_name(fields.get(at.F_PQ_POST_STATUS))
         variant_id = _first_link(fields, at.F_PQ_SPOOF_VARIANT)
-        if variant_id and status in VARIANT_HELD_BY:
+        # A row that gave up for good (`Retries Exhausted`) is not "in flight": no
+        # retry pass will ever pick it up, so it must not keep its variant --
+        # and with it the whole profile -- from getting a fresh row. Left held,
+        # 147 dead rows from the 2026-09-17/18 MultiLogin outages parked ~148
+        # profiles and every posting run launched only ~4 phones instead of 9.
+        # Changed 2026-09-19 on Rene's instruction ("dead rows must not block").
+        # A Failed row parked on Human Verification is just as dead for the
+        # variant: the profile is skipped until cleared, and the clip should not
+        # stay locked to it meanwhile.
+        exhausted = (status == at.POST_STATUS_FAILED and at._select_name(
+            fields.get(at.F_PQ_ISSUE_TYPE)) in (at.ISSUE_RETRIES_EXHAUSTED,
+                                                 at.ISSUE_HUMAN_VERIFICATION))
+        if variant_id and status in VARIANT_HELD_BY and not exhausted:
             held_variants[variant_id] = status
         account_id = _first_link(fields, at.F_PQ_TARGET_ACCOUNT)
         profile_id = _first_link(fields, at.F_PQ_TARGET_PROFILE)

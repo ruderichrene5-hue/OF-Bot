@@ -383,6 +383,130 @@ def wait_for_cooldown(port: int, cooldown_seconds: int = ROTATE_COOLDOWN_SECONDS
     return waited
 
 
+# --- Passive-rotation ports (no reboot/rotation link) ---------------------
+#
+# The 5 proxies added 2026-09-06 have no rotation link at all -- they rotate
+# on their own fixed ~5-minute timer, invisible to us. That means the risk
+# here is the mirror image of the 4-modem pool's: there, WE trigger a
+# rotation and must not double-trigger it; here, nothing we do ever
+# triggers a rotation, but handing a port straight from one phone to another
+# risks the new phone landing mid-cycle on the SAME IP the previous phone
+# was just seen on (or, worse, an IP that changes out from under it a few
+# seconds into its own session). Reuses the exact same cooldown file and
+# functions as the 4-modem pool above -- safe because the two pools' port
+# numbers never overlap, so the shared `{port: timestamp}` map never
+# collides between them -- just with a 5-minute cooldown instead of the
+# vendor's ~65s one, and "record" means "a phone just started using this
+# port" rather than "we just rotated it".
+PASSIVE_ROTATION_SECONDS = 5 * 60
+
+
+def passive_proxy_ports() -> set[int]:
+    """Ports with no rotation link at all -- they rotate on their own fixed
+    ~5-minute timer, covered by `wait_for_passive_rotation` above instead of
+    an active rotate-and-verify call. Read from
+    ADBBOT_GEELARK_PASSIVE_PROXY_PORTS (comma-separated). Added 2026-09-06
+    to raise live posting capacity from 4 to 9 modems: these 5 proxies were
+    previously reserved for admin/setup work only, out of caution while
+    their reliability was unproven; confirmed workable since, and explicit
+    instruction to fold them into the real posting pool now that they're
+    expected to stay available for multiple days, not just today.
+
+    Lives here rather than in geelark_lifecycle.py (which needs it) or
+    session.py (which also needs it) specifically to avoid a cycle: those
+    two already import from each other, and this module imports from
+    neither.
+    """
+    raw = os.environ.get("ADBBOT_GEELARK_PASSIVE_PROXY_PORTS", "")
+    ports: set[int] = set()
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            ports.add(int(token))
+        except ValueError:
+            continue
+    return ports
+
+
+def mark_port_in_use(port: int) -> None:
+    """Call the moment a phone actually starts on `port` (one of the 5
+    passive-rotation proxies) -- resets the 5-minute clock for whoever
+    wants this port next."""
+    record_rotation(port)
+
+
+def wait_for_passive_rotation(port: int, cooldown_seconds: int = PASSIVE_ROTATION_SECONDS,
+                              poll_seconds: float = 2.0) -> float:
+    """Block until at least `cooldown_seconds` have passed since the last
+    phone started on `port`. Returns seconds waited. A port never recorded
+    here (first use ever) returns immediately -- nothing to rotate away
+    from yet."""
+    return wait_for_cooldown(port, cooldown_seconds, poll_seconds)
+
+
+def seconds_until_passive_rotation(port: int,
+                                   cooldown_seconds: int = PASSIVE_ROTATION_SECONDS) -> float:
+    return seconds_until_rotatable(port, cooldown_seconds)
+
+
+# --- Sticky account-to-port preference ------------------------------------
+#
+# Added 2026-09-07: pure round-robin hands each launch of the SAME account a
+# freshly rotated, essentially random IP every time -- many different
+# accounts cycling through a handful of IPs is a real detection pattern, but
+# so is one account jumping IPs on every single session, which is exactly
+# what round-robin does by construction. Preferring an account's own last
+# port (when free) means an account's IP stays stable across its sessions
+# instead of changing every launch, closer to how a real phone behaves, at
+# zero extra cost -- it reuses ports we already have. One JSON file,
+# phone_id -> last port used, same append-light pattern as the rotation
+# state file.
+_STICKY_FILENAME = "geelark_proxy_sticky.json"
+
+
+def _sticky_path() -> Path:
+    return _pool_dir() / _STICKY_FILENAME
+
+
+def sticky_port_for_phone(phone_id: str) -> int | None:
+    """The port this phone used last time, or None if never recorded."""
+    try:
+        data = json.loads(_sticky_path().read_text())
+        port = data.get(str(phone_id))
+        return int(port) if port is not None else None
+    except Exception:
+        return None
+
+
+def record_sticky_port(phone_id: str, port: int) -> None:
+    """Remember that `phone_id` is now using `port`, for next time."""
+    path = _sticky_path()
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        data = {}
+    data[str(phone_id)] = int(port)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+    except OSError:
+        pass
+
+
+def port_available_now(port: int, owner: str = "") -> bool:
+    """True if `port` is free to lease right this instant -- a zero-wait
+    probe, not a real lease (the port is released again immediately). Used
+    to decide whether an account's sticky port can be honoured this launch
+    or a different account already has it, without blocking on it."""
+    lease = acquire_proxy([port], owner=owner, wait_seconds=0.0)
+    if lease is None:
+        return False
+    release_proxy(lease)
+    return True
+
+
 def prepare_proxy_for_session(rotator, owner: str = "",
                                wait_for_lease_seconds: float = 60.0,
                                cooldown_seconds: int = ROTATE_COOLDOWN_SECONDS):

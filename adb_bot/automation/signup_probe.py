@@ -205,6 +205,7 @@ def cmd_open(args) -> int:
             max_attempts=args.readiness_attempts,
             wait_seconds=args.readiness_wait,
             launcher_client=clients.launcher,
+            status_client=clients.status,
         )
         if not profile:
             raise SystemExit(f"[fail] {name} never became ADB-ready.")

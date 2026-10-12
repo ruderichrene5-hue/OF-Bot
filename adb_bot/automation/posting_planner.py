@@ -13,6 +13,7 @@ returns) rather than calling the client itself.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field as dc_field
 from datetime import datetime, time, timezone
 from zoneinfo import ZoneInfo
@@ -24,8 +25,10 @@ from adb_bot.clients import airtable as at
 # while the fleet was down, or a person re-dated it -- and "Scheduled DateTime
 # has passed" would happily fire it at 04:00. This is the guard that says no.
 # Kept in step with queue_runner.POSTING_WINDOW_*.
-POSTING_WINDOW_START = time(9, 0)
-POSTING_WINDOW_END = time(23, 0)
+POSTING_WINDOW_START = time(8, 0)
+# Was 23:00; pushed to 23:59 on 2026-09-19 on Rene's instruction so the day's
+# already-scheduled rows finish tonight. Not past midnight: rows are day-scoped.
+POSTING_WINDOW_END = time(23, 59)
 POSTING_TIMEZONE = "Europe/Berlin"
 
 
@@ -34,7 +37,13 @@ def within_posting_window(now: datetime, tz_name: str = POSTING_TIMEZONE) -> boo
 
     A naive `now` is read as UTC, which is what this server's clock is and what
     Airtable hands back; an aware one is converted.
+
+    `ADBBOT_IGNORE_POSTING_WINDOW=1` forces this true regardless of the clock --
+    an explicit one-off operator override (set for a single manual invocation,
+    not in the systemd env, so the automatic timer keeps respecting the window).
     """
+    if os.environ.get("ADBBOT_IGNORE_POSTING_WINDOW") == "1":
+        return True
     moment = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
     local = moment.astimezone(ZoneInfo(tz_name)).time()
     return POSTING_WINDOW_START <= local < POSTING_WINDOW_END

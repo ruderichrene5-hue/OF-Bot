@@ -100,7 +100,8 @@ class MlxHost:
             profile_id, self.clients.api, self.clients.adb_enable, logger,
             max_attempts=self.args.readiness_attempts,
             wait_seconds=self.args.readiness_wait,
-            launcher_client=self.clients.launcher)
+            launcher_client=self.clients.launcher,
+            status_client=self.clients.status)
 
     def shutdown(self, profile_id: str, logger) -> None:
         try:
@@ -372,6 +373,33 @@ def _apply_status_tags(profile_id: str, host, out: dict, logger) -> None:
         logger.warning("signup_phone: tagging %s failed (%s)", profile_id, exc)
 
 
+def _write_mailbox_remark(profile_id: str, box: dict, logger) -> None:
+    """Stamp the mailbox's address and password into the MLX profile's own
+    Notes field, so a person looking the profile up in MultiLogin can find its
+    login without going back to mailboxes.json. Written unconditionally at the
+    start of every real run, not only on success -- a profile that never
+    finishes signing in still needs its assigned mailbox to be findable.
+    Best effort: any failure is logged and the run carries on regardless.
+    """
+    import os
+
+    import requests
+
+    token = os.environ.get("MULTILOGIN_TOKEN", "")
+    if not token or not box:
+        return
+    remark = f"MAIL:{box.get('address', '')} | PW:{box.get('password', '')}"
+    try:
+        response = requests.put(
+            "https://api.multilogin.com/mobile_profiles/phone/update",
+            headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+            timeout=30, json={"id": profile_id, "remark": remark})
+        if not response.ok:
+            logger.warning("Could not write mailbox notes for %s: HTTP %s", profile_id, response.status_code)
+    except Exception as exc:
+        logger.warning("Could not write mailbox notes for %s: %s", profile_id, exc)
+
+
 def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
     profile_id = str(profile_item.get("id"))
     name = str(profile_item.get("serial_name") or profile_id)
@@ -403,6 +431,8 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
     print(f"\n{'=' * 68}\n{name} ({profile_id})")
     print(f"  mailbox  {box['address'] if box else '(none -- SMS)'}")
     print(f"  identity {identity.summary()}")
+    if args.apply and box:
+        _write_mailbox_remark(profile_id, box, logger)
     if not args.apply:
         out["status"] = "dry-run"
         print("  DRY RUN -- nothing launched, no account created")
@@ -494,6 +524,8 @@ def run_phone(profile_item, box, host, adb_client, args, logger) -> dict:
                 # pick whichever profile suits it, not pinned to this one.
                 mailbox_robot_check.clear(box["address"])
             else:
+                if verdict == google_signin.RESULT_DEVICE_VERIFICATION:
+                    out["keep_open"] = True
                 if verdict == google_signin.RESULT_ROBOT_CHECK:
                     # No automating past this -- the recaptcha lives inside
                     # Google's own account webview with no exposed sitekey
@@ -646,31 +678,168 @@ def seconds_left_for_verification(elapsed: float, host=None) -> float | None:
 
 
 def _download_model_photo(name: str, logger) -> str:
-    """A local copy of the model's own photo, for the verification photo
-    challenge (`AdbChallengeDriver.upload_photo`). "" if there is no model
-    to derive, no picture on her Geelark tag, or the download fails --
-    callers must treat that as "none available", never invent a path.
+    """A local copy of a real photo of the model, for the verification photo
+    challenge (`AdbChallengeDriver.upload_photo`). "" if there is no model to
+    derive or nothing usable was found anywhere -- callers must treat that as
+    "none available", never invent a path.
+
+    Two sources, tried in order:
+
+    1. `_va_library_photo` -- the VAs' own curated `Models/<Model>/IG/`
+       folder on Drive: real, deliberately-taken face photos, dozens per
+       model. The right source whenever it is reachable -- "make sure your
+       face can be clearly seen" is exactly what these were taken for, which
+       a random video frame is not guaranteed to satisfy.
+    2. `_video_frame_photo` -- a still pulled from her own raw footage, for
+       a model the library has nothing configured for yet.
+
+    Not Geelark's Material Library: this fleet runs on MultiLogin, which has
+    no such library, and Geelark's `/material/tag/search` answered every live
+    call with 40011 "only for paid user" (confirmed 2026-09-24, Nikki 26: the
+    photo source was never reachable, on any account, so `upload_photo` had
+    refused with "no picture source is configured" on every real run since it
+    existed).
     """
     model = name.split()[0] if name else ""
     if not model:
         return ""
+    photo = _va_library_photo(model, logger)
+    if photo:
+        return photo
+    return _video_frame_photo(model, logger)
+
+
+def _va_library_photo(model: str, logger) -> str:
+    """A real face photo of `model`, downloaded from the VAs' own
+    `Models/<Model>/IG/` Drive folder. "" if the root isn't configured, no
+    matching model subfolder exists, or `IG/` has nothing image-shaped in it.
+
+    Folder names here vary (`Kathi`, but `Lea OF`, `Nadine OF`) so the match
+    is "starts with", case-insensitive -- same looseness `spoof_pipeline`
+    already uses for the raw-video tree, for the same reason: these are typed
+    by hand, not a fixed enum.
+    """
     try:
-        import requests
+        from adb_bot.clients.gdrive import DriveClient
+        from adb_bot.config import settings
 
-        from adb_bot.clients.geelark import GeelarkTransport, library
-
-        url = library.picture_url_for_tag(model, transport=GeelarkTransport())
-        if not url:
+        root = settings.get_saved_model_photos_folder_id()
+        key_json = settings.get_saved_google_service_account_json()
+        if not root or not key_json:
             return ""
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        suffix = Path(url).suffix or ".jpg"
-        dest = Path(tempfile.gettempdir()) / f"verify-photo-{model}{suffix}"
-        dest.write_bytes(response.content)
-        return str(dest)
+
+        client = DriveClient(service_account_json=key_json)
+        model_folder = next(
+            (f for f in client.list_subfolders(root)
+             if f["name"].strip().lower().startswith(model.strip().lower())),
+            None)
+        if not model_folder:
+            return ""
+
+        ig_folder = next(
+            (f for f in client.list_subfolders(model_folder["id"])
+             if f["name"].strip().lower() == "ig"),
+            None)
+        if not ig_folder:
+            return ""
+
+        images = [f for f in client.list_files(ig_folder["id"])
+                 if Path(f["name"]).suffix.lower() in
+                 (".jpg", ".jpeg", ".png", ".heic", ".heif")]
+        if not images:
+            return ""
+        # Prefer jpg/png -- guaranteed decodable by the picker; HEIC only if
+        # that is all there is.
+        preferred = [f for f in images
+                    if Path(f["name"]).suffix.lower() in (".jpg", ".jpeg", ".png")]
+        pool = preferred or images
+        # Within that, prefer filenames that say this IS a face shot --
+        # confirmed live 2026-09-24, nikki 22: three random picks in a row
+        # from this folder were rejected by Instagram's own face-detection
+        # ("we can't accept this photo... make sure it clearly shows your
+        # face"), out of a folder that also holds candid/lifestyle content
+        # shots never meant to be a clean solo headshot. A name like "Insta
+        # Profil" is a person's own signal that a photo was taken *for* a
+        # profile picture, which is exactly this screen's bar.
+        face_hinted = [f for f in pool
+                      if any(w in f["name"].lower()
+                             for w in ("profil", "profile", "selfie", "headshot"))]
+        pool = face_hinted or pool
+        # Random, not the first match every time: even within the narrowed
+        # pool a pick can still be rejected, so a fixed choice means a
+        # rejected photo is retried forever, identically, on every future
+        # attempt for this model; a random one gives each attempt real odds
+        # of landing on one that passes.
+        import random
+        chosen = random.choice(pool)
+
+        dest = Path(tempfile.gettempdir()) / f"verify-photo-{model}-{chosen['id'][:8]}{Path(chosen['name']).suffix}"
+        client.download(chosen["id"], str(dest))
+        if dest.exists() and dest.stat().st_size > 0:
+            return str(dest)
+        return ""
     except Exception as exc:
         if logger:
-            logger.warning("signup_phone: could not fetch %s's photo for "
+            logger.warning("signup_phone: could not fetch %s's library photo "
+                           "for the verification challenge (%s)", model, exc)
+        return ""
+
+
+def _video_frame_photo(model: str, logger) -> str:
+    """A local copy of a still frame from the model's own raw Drive footage,
+    for the verification photo challenge -- the fallback when
+    `_va_library_photo` finds nothing. "" if there is no footage for her or
+    the extraction fails.
+
+    Sourced from the same Google Drive raw-video folders `spoof_pipeline`
+    already reads (`01_Raw_Videos/<Model>/...`).
+    """
+    try:
+        import subprocess
+
+        from adb_bot.automation import spoof_pipeline
+        from adb_bot.config import settings
+
+        source = spoof_pipeline.build_source(
+            raw_root=settings.get_saved_raw_videos_dir(),
+            drive_folder_id=settings.get_saved_drive_folder_id(),
+            service_account_json=settings.get_saved_google_service_account_json(),
+            logger=logger)
+        if source is None:
+            return ""
+
+        by_model = source.list_by_model()
+        videos = by_model.get(model)
+        if not videos:
+            # The Drive folder is named after the model's raw-footage alias
+            # (e.g. "Nikki I DE"), not the model itself -- match on the
+            # resolved name the same way spoof_pipeline does.
+            videos = next(
+                (v for folder_name, v in by_model.items()
+                 if spoof_pipeline.resolve_model(folder_name).strip().lower()
+                 == model.strip().lower()),
+                None)
+        if not videos:
+            return ""
+
+        video = videos[0]
+        video_path = source.resolve(video)
+        if not video_path:
+            return ""
+        try:
+            dest = Path(tempfile.gettempdir()) / f"verify-photo-{model}.jpg"
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", video_path, "-ss", "00:00:01.000",
+                 "-frames:v", "1", str(dest)],
+                capture_output=True, timeout=30, check=True)
+            if dest.exists() and dest.stat().st_size > 0:
+                return str(dest)
+            return ""
+        finally:
+            source.release(video, video_path)
+    except Exception as exc:
+        if logger:
+            logger.warning("signup_phone: could not extract %s's photo for "
                            "the verification challenge (%s)", model, exc)
         return ""
 

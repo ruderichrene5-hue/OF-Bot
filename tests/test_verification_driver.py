@@ -257,6 +257,22 @@ class PhotoTest(unittest.TestCase):
             driver = self._photo_driver()
             self.assertFalse(driver.upload_photo())
 
+    def test_a_screen_already_showing_the_confirm_step_just_resubmits(self):
+        """The outer loop's screen classifier can still read "photo" for a
+        moment after Submit was already tapped, before Instagram has moved
+        on, and call this again -- confirmed live 2026-09-24, nikki 22. That
+        must not restart the whole push-and-pick dance (there is no 'Upload
+        photo instead' button left to find on this screen, so it would
+        always decline); it must recognise the confirm screen and just tap
+        Submit again."""
+        driver = self._photo_driver()
+        driver._root = _root(_button("Menu"), _button("Choose another photo"),
+                             _button("Submit"), _button("Record video instead"))
+        adb = driver.adb_client
+
+        self.assertTrue(driver.upload_photo())
+        self.assertEqual(len(adb.taps), 1)
+
     def test_no_upload_photo_instead_button_declines(self):
         with mock.patch.object(ig, "_adb_push_media_to_device",
                                return_value=True), \
@@ -346,6 +362,7 @@ class PhotoTest(unittest.TestCase):
         picker_root = _root(
             '<node class="android.widget.ImageView" bounds="[0,300][300,600]" '
             'content-desc="Photo, taken today"/>',
+            _button("Submit"),
         )
         # sheet_root twice -- the post-"Upload photo instead" dump (checked
         # for the optional "Upload a photo" screen, absent here, so skipped)
@@ -386,6 +403,7 @@ class PhotoTest(unittest.TestCase):
         picker_root = _root(
             '<node class="android.widget.ImageView" bounds="[0,300][300,600]" '
             'content-desc="Photo, taken today"/>',
+            _button("Submit"),
         )
         # sheet_root, sheet_root (gallery found), then an endless supply of
         # picker_root for the Allow retries (all miss) and everything after.
@@ -407,9 +425,8 @@ class PhotoTest(unittest.TestCase):
 
             self.assertTrue(driver.upload_photo())
         # Upload photo instead, Choose From Gallery, straight to the photo
-        # cell -- no Allow tap (never found), no Submit button on this
-        # fixture.
-        self.assertEqual(len(adb.taps), 3)
+        # cell, then Submit -- no Allow tap (never found).
+        self.assertEqual(len(adb.taps), 4)
 
     def test_the_allow_dialog_is_retried_before_giving_up(self):
         """Confirmed live 2026-08-23: a single dump 3s after tapping 'Choose
@@ -425,6 +442,7 @@ class PhotoTest(unittest.TestCase):
         picker_root = _root(
             '<node class="android.widget.ImageView" bounds="[0,300][300,600]" '
             'content-desc="Photo, taken today"/>',
+            _button("Submit"),
         )
         adb = FakeAdb()
         with mock.patch.object(ig, "_adb_push_media_to_device",
@@ -444,8 +462,8 @@ class PhotoTest(unittest.TestCase):
 
             self.assertTrue(driver.upload_photo())
         # Upload photo instead, Choose From Gallery, Allow (found on the 3rd
-        # attempt), the photo cell. No Submit button on this fixture.
-        self.assertEqual(len(adb.taps), 4)
+        # attempt), the photo cell, then Submit.
+        self.assertEqual(len(adb.taps), 5)
 
     def test_the_gallery_sheet_is_retried_before_giving_up(self):
         """Confirmed live 2026-08-23: the sheet was visibly on screen (a real
@@ -459,6 +477,7 @@ class PhotoTest(unittest.TestCase):
         picker_root = _root(
             '<node class="android.widget.ImageView" bounds="[0,300][300,600]" '
             'content-desc="Photo, taken today"/>',
+            _button("Submit"),
         )
         import itertools
         dumps = itertools.chain(
@@ -479,9 +498,9 @@ class PhotoTest(unittest.TestCase):
 
             self.assertTrue(driver.upload_photo())
         # Upload photo instead, Upload a photo, Choose From Gallery (found on
-        # the 3rd retry), the photo cell. No Allow/Submit button on this
-        # fixture.
-        self.assertEqual(len(adb.taps), 4)
+        # the 3rd retry), the photo cell, then Submit. No Allow button on
+        # this fixture.
+        self.assertEqual(len(adb.taps), 5)
 
     def test_a_swallowed_tap_on_the_gallery_row_is_retried(self):
         """Confirmed live 2026-08-23: a screenshot taken right after tapping
@@ -495,6 +514,7 @@ class PhotoTest(unittest.TestCase):
         picker_root = _root(
             '<node class="android.widget.ImageView" bounds="[0,300][300,600]" '
             'content-desc="Photo, taken today"/>',
+            _button("Submit"),
         )
         adb = FakeAdb()
         with mock.patch.object(ig, "_adb_push_media_to_device",
@@ -517,8 +537,8 @@ class PhotoTest(unittest.TestCase):
 
             self.assertTrue(driver.upload_photo())
         # Upload photo instead, Choose From Gallery (x2 taps -- the first
-        # didn't register), Allow, the photo cell. No Submit on this fixture.
-        self.assertEqual(len(adb.taps), 5)
+        # didn't register), Allow, the photo cell, then Submit.
+        self.assertEqual(len(adb.taps), 6)
 
     def test_a_picker_reached_without_the_intermediate_screen_still_works(self):
         """Some accounts may skip straight to the picker -- the intermediate
@@ -526,6 +546,7 @@ class PhotoTest(unittest.TestCase):
         picker_root = _root(
             '<node class="android.widget.ImageView" bounds="[0,300][300,600]" '
             'content-desc="Photo, taken today"/>',
+            _button("Submit"),
         )
         adb = FakeAdb()
         with mock.patch.object(ig, "_adb_push_media_to_device",
@@ -541,9 +562,8 @@ class PhotoTest(unittest.TestCase):
             driver = self._photo_driver(adb=adb)
 
             self.assertTrue(driver.upload_photo())
-        # Upload photo instead, then straight to the photo cell (no Submit
-        # button on this fixture, so no third tap).
-        self.assertEqual(len(adb.taps), 2)
+        # Upload photo instead, straight to the photo cell, then Submit.
+        self.assertEqual(len(adb.taps), 3)
 
 
 class ClearFieldTest(unittest.TestCase):

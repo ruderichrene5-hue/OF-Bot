@@ -864,7 +864,8 @@ class AirtableClient:
         rows = self._list_table(
             TABLE_PROFILES,
             fields=[F_PROF_NAME, F_PROF_MLX_SERIAL, F_PROF_MLX_API_ID, F_PROF_TIME_ZONE,
-                    F_PROF_MLX_FOLDER, F_PROF_MLX_TAGS],
+                    F_PROF_MLX_FOLDER, F_PROF_MLX_TAGS, F_PROF_BIO_DONE, F_PROF_PICTURE_DONE,
+                    F_PROF_FIRST_POST_DONE],
         )
         for record in rows:
             fields = record.get("fields", {}) or {}
@@ -885,6 +886,9 @@ class AirtableClient:
                 "tags": tuple(sorted(
                     t for t in (str(x).strip() for x in (fields.get(F_PROF_MLX_TAGS) or [])) if t)),
                 "duplicate": False,
+                "bio_done": bool(fields.get(F_PROF_BIO_DONE)),
+                "picture_done": bool(fields.get(F_PROF_PICTURE_DONE)),
+                "first_post_done": bool(fields.get(F_PROF_FIRST_POST_DONE)),
             }
         return out
 
@@ -1552,7 +1556,7 @@ class AirtableClient:
         return self._list_queue_with_slot(
             [
                 F_PQ_NAME, F_PQ_SCHEDULED, F_PQ_POST_STATUS, F_PQ_SPOOF_VARIANT,
-                F_PQ_TARGET_ACCOUNT, F_PQ_TARGET_PROFILE,
+                F_PQ_TARGET_ACCOUNT, F_PQ_TARGET_PROFILE, F_PQ_ISSUE_TYPE,
             ],
             filter_formula=formula,
         )
@@ -1736,11 +1740,14 @@ class AirtableClient:
         in all three, and `finalize_variant` would have them overwrite each
         other's video.
         """
+        from adb_bot.config.settings import get_raw_folder_model_aliases
+        aliases = get_raw_folder_model_aliases()
+
         out: dict = {}
         # The second-account fields are recent; a base without them must still
         # return its single-account targets rather than raise. Airtable answers
         # 422 for an unknown field name, so ask once and fall back.
-        wanted = [F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_STATUS,
+        wanted = [F_PROF_NAME, F_PROF_MLX_API_ID, F_PROF_STATUS, F_PROF_MLX_FOLDER,
                   F_PROF_HAS_SECOND, F_PROF_PRIMARY_HANDLE, F_PROF_SECOND_HANDLE]
         try:
             records = self._list_table(TABLE_PROFILES, fields=wanted)
@@ -1762,7 +1769,28 @@ class AirtableClient:
             launch_id = str(fields.get(F_PROF_MLX_API_ID) or "").strip()
             if not launch_id:
                 continue
-            model_key = name.split()[0].lower()
+            # The model is which MLX folder the phone physically sits in, never
+            # the profile's own name -- two folders ("Nikki EN", "NIkki DE")
+            # both happen to hold profiles literally named "Nikki N", so the
+            # old `name.split()[0]` key put both folders' phones under the same
+            # "nikki" bucket and could hand English phones German content (or
+            # vice versa) with nothing to tell them apart. `aliases` is the same
+            # folder->model table the raw-video pipeline already uses (see
+            # `spoof_pipeline.resolve_model`), so a folder spelled differently
+            # from its canonical Model name ("Nikki EN" -> "NikkiEN") still
+            # lands on the one bucket the Content Pipeline actually fills.
+            # Falls back to the name-based key only when a profile has no MLX
+            # Folder synced yet, so a fresh profile isn't dropped outright.
+            folder = str(fields.get(F_PROF_MLX_FOLDER) or "").strip()
+            if folder.lower() in ("default folder", "unnamed"):
+                # The blank/staging bucket: phones parked here (new "Blank"
+                # phones, GmailSignup N while a mailbox is being signed in)
+                # belong to no model and must never receive a post.
+                continue
+            if folder:
+                model_key = aliases.get(folder.lower(), folder).lower()
+            else:
+                model_key = name.split()[0].lower()
             primary_handle = _handle(fields.get(F_PROF_PRIMARY_HANDLE))
             second_handle = _handle(fields.get(F_PROF_SECOND_HANDLE))
             two_accounts = (bool(fields.get(F_PROF_HAS_SECOND))

@@ -5,6 +5,7 @@ from .folders import MultiloginFolderClient
 from .mobile_list import MultiloginMobileListClient
 from .launch_stats import CountingLauncherClient, LaunchStats
 from .tags import MultiloginTagClient
+from .phone_status import MultiloginPhoneStatusClient, STATUS_READY, STATUS_STARTING, STATUS_SHUTDOWN, STATUS_EXPIRED
 
 __all__ = [
     "CountingLauncherClient",
@@ -15,4 +16,9 @@ __all__ = [
     "MultiloginShutdownClient",
     "MultiloginFolderClient",
     "MultiloginMobileListClient",
+    "MultiloginPhoneStatusClient",
+    "STATUS_READY",
+    "STATUS_STARTING",
+    "STATUS_SHUTDOWN",
+    "STATUS_EXPIRED",
 ]

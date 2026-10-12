@@ -16,6 +16,7 @@ video_spoofer CLI).
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import subprocess
 import tempfile
@@ -179,26 +180,105 @@ class DriveRawSource:
         self.root_folder_id = root_folder_id
         self.temp_dir = temp_dir
 
+    def _files_with_time_folders(self, folder_id: str) -> list:
+        """Files directly in a date folder plus files one level down, in the
+        time-of-day subfolders ("15 UHR", "17 UHR", ...). Videos are read from
+        both places; the time folders are ordered by name so 15 UHR comes first."""
+        items = list(self.client.list_files(folder_id))
+        for sub in sorted(self.client.list_subfolders(folder_id), key=lambda s: str(s.get("name") or "")):
+            items.extend(self.client.list_files(sub["id"]))
+        return items
+
     def list_folder_names(self) -> list:
         """Every model folder under the raw root, empty ones included. One cheap
         metadata call -- no per-folder file listing. See the local source."""
         return sorted(str(f.get("name") or "") for f in self.client.list_subfolders(self.root_folder_id)
                       if str(f.get("name") or "").strip())
 
-    def list_by_model(self) -> dict:
+    # Models excluded from the yesterday-fallback below (explicit instruction
+    # 2026-09-17): everyone else may post from yesterday's dated folder when
+    # today's is empty (nobody uploaded yet), Nikki keeps the strict
+    # today-only rule. Matched case-insensitively against the model/root
+    # folder name (the plain "Nikki" model, fed from the "nikki i de" raw
+    # folder per RAW_FOLDER_MODEL_ALIASES -- not "Nikki EN"/"NikkiEN", which
+    # is a different model name and is not excluded).
+    YESTERDAY_FALLBACK_EXCLUDE = {"nikki"}
+
+    def list_by_model(self, today: object | None = None) -> dict:
+        """Videos per model, preferring today's `<Model>/<YYYY-MM-DD>/`
+        subfolder (matching GeeLark's layout, see geelark_content.py) with a
+        fallback to files directly under `<Model>/` for any model not yet
+        migrated to date subfolders -- added 2026-09-11, explicit operator
+        instruction, so restructuring one model at a time never blanks out
+        the ones still on the old flat layout.
+
+        For a model migrated to date subfolders that has nothing for today,
+        falls back to *yesterday's* dated folder instead of posting nothing --
+        explicit instruction 2026-09-17, for every model except those in
+        `YESTERDAY_FALLBACK_EXCLUDE` (Nikki keeps the original strict
+        "missing today = no content today" rule).
+
+        `today` is injectable (a `date`) for tests; defaults to the real
+        current Berlin date.
+        """
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        if today is None:
+            today = datetime.now(ZoneInfo("Europe/Berlin")).date()
+        date_str = today.isoformat()
+        yesterday_str = (today - timedelta(days=1)).isoformat()
+
+        aliases = raw_folder_model_aliases()
+
         out: dict = {}
         for folder in self.client.list_subfolders(self.root_folder_id):
-            videos = [
-                RawVideo(
-                    model=folder["name"],
-                    name=item["name"],
-                    path="",                       # not local yet -- see resolve()
-                    raw_link=item.get("link"),
-                    source_id=item["id"],
-                )
-                for item in self.client.list_files(folder["id"])
-                if Path(item["name"]).suffix.lower() in VIDEO_EXTS
-            ]
+            date_folder_id = None
+            yesterday_folder_id = None
+            for sub in self.client.list_subfolders(folder["id"]):
+                if sub["name"] == date_str:
+                    date_folder_id = sub["id"]
+                elif sub["name"] == yesterday_str:
+                    yesterday_folder_id = sub["id"]
+
+            has_any_date_folder = date_folder_id is not None or yesterday_folder_id is not None or any(
+                re.fullmatch(r"\d{4}-\d{2}-\d{2}", sub["name"])
+                for sub in self.client.list_subfolders(folder["id"])
+            )
+
+            if not has_any_date_folder:
+                # Old flat layout: read directly under <Model>/, same as before.
+                candidates = [folder["id"]]
+            else:
+                model_name = resolve_model(folder["name"], aliases)
+                candidates = [c for c in (date_folder_id,) if c is not None]
+                # Today's dated folder existing-but-empty (nobody uploaded yet)
+                # is the normal case, not "missing today" -- fall back to
+                # yesterday's dated folder for every model except the ones in
+                # YESTERDAY_FALLBACK_EXCLUDE, checked against the *resolved*
+                # model name (not the raw Drive folder name), so an alias like
+                # "nikki i de" -> "Nikki" is excluded correctly. Explicit
+                # instruction 2026-09-17.
+                if (yesterday_folder_id is not None
+                        and model_name.strip().lower() not in self.YESTERDAY_FALLBACK_EXCLUDE):
+                    candidates.append(yesterday_folder_id)
+
+            videos: list = []
+            for listing_id in candidates:
+                videos = [
+                    RawVideo(
+                        model=folder["name"],
+                        name=item["name"],
+                        path="",                       # not local yet -- see resolve()
+                        raw_link=item.get("link"),
+                        source_id=item["id"],
+                    )
+                    for item in self._files_with_time_folders(listing_id)
+                    if Path(item["name"]).suffix.lower() in VIDEO_EXTS
+                ]
+                if videos:
+                    break
+
             if videos:
                 out[folder["name"]] = videos
         return out
@@ -293,7 +373,7 @@ def finalize_variant(produced: Path, raw_name: str, handle: str) -> Path:
 
 
 def build_cli_spoofer(spoofer_python: str, spoofer_cwd: str,
-                      preset: str = "low_bandwidth"):
+                      preset: str = "low_bandwidth", keep_size: bool = True):
     """Return a `spoof_fn(raw_path, out_dir, seed, logger) -> Path|None` that runs
     the video_spoofer CLI (`vtf run`) and returns the produced variant file.
 
@@ -316,6 +396,11 @@ def build_cli_spoofer(spoofer_python: str, spoofer_cwd: str,
             "--dest", str(out), "--preset", preset, "--seed", str(seed),
             "--variants", "1", "--overwrite",
         ]
+        if keep_size:
+            # 2026-10-03 (Rene): the per-seed 88-100% downscale gave odd sizes like 642x1148 that
+            # Google Drive's preview / Buffer render as green garbage -- normalize_for_upload()
+            # sets the final size instead.
+            cmd.append("--no-random-size")
         if logger:
             logger.info("spoofer: %s", " ".join(cmd))
         proc = subprocess.run(cmd, cwd=spoofer_cwd, capture_output=True, text=True)
@@ -332,6 +417,137 @@ def build_cli_spoofer(spoofer_python: str, spoofer_cwd: str,
         return produced[0] if produced else None
 
     return spoof_fn
+
+
+MAX_SPOOFED_MB = 3.0
+
+
+UPLOAD_W, UPLOAD_H = 1080, 1920
+UPLOAD_MAX_FPS = 60          # Rene 10-04: "nächstes Mal 60 FPS" -- kept when the source has it
+
+
+def _source_fps(path: str) -> int:
+    """Frame rate to encode at: the clip's own, capped at 60. A 30 fps raw stays 30 --
+    doubling frames would only make the file bigger, not smoother."""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                              "stream=avg_frame_rate", "-of", "csv=p=0", path],
+                             capture_output=True, text=True, timeout=30).stdout.strip()
+        num, _, den = out.partition("/")
+        fps = round(float(num) / float(den or 1))
+    except (ValueError, ZeroDivisionError, subprocess.SubprocessError, OSError):
+        return 30
+    return max(24, min(UPLOAD_MAX_FPS, fps))
+
+
+def normalize_for_upload(path: str, logger=None) -> None:
+    """Re-encode `path` in place to the format Instagram / Buffer / Drive handle best:
+    1080x1920 (scaled to fit, padded if the aspect differs), the source's frame rate up
+    to 60 fps, H.264 High, AAC.
+
+    Replaces cap_file_size() for new variants (2026-10-03, Rene: "einrichten, dass es so
+    passt ... automatisieren"). Before, variants were squeezed to <=3 MB and randomly
+    downscaled (~650x1160): visibly soft, and their odd sizes showed up as green blocks in
+    the Drive preview. crf 20 with an 8 Mbps ceiling keeps a 15 s reel around 8-12 MB.
+    Never raises: on failure the spoofer's own file is left as it was."""
+    tmp = f"{path}.norm.mp4"
+    fps = _source_fps(path)
+    vf = (f"scale={UPLOAD_W}:{UPLOAD_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+          f"pad={UPLOAD_W}:{UPLOAD_H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps={fps}")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-y", "-i", path, "-vf", vf,
+             "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-maxrate", "8M", "-bufsize", "16M",
+             "-profile:v", "high", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
+             # Keep what the spoofer wrote (iPhone/Android QuickTime atoms, creation date) and leave no
+             # ffmpeg traces. Before 2026-10-09 this re-encode dropped the device metadata and stamped
+             # "Lavf62.3.100" / "Lavc libx264" / the x264 SEI string into every file that went to Instagram.
+             "-map_metadata", "0", "-movflags", "+faststart+use_metadata_tags",
+             "-metadata", "encoder=", "-metadata:s:v:0", "encoder=", "-metadata:s:a:0", "encoder=",
+             "-flags", "+bitexact", "-fflags", "+bitexact", "-bsf:v", "filter_units=remove_types=6",
+             tmp],
+            capture_output=True, timeout=300, check=True)
+        os.replace(tmp, path)
+        if logger:
+            logger.info("spoof_pipeline: normalized %s to %dx%d %dfps (%.1fMB)", path, UPLOAD_W, UPLOAD_H,
+                        fps, os.path.getsize(path) / (1024 * 1024))
+    except Exception as exc:
+        if logger:
+            logger.warning("spoof_pipeline: normalize failed for %s (%s); keeping the spoofer's file", path, exc)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def cap_file_size(path: str, max_mb: float = MAX_SPOOFED_MB, logger=None) -> None:
+    """Re-encode `path` in place if it's over `max_mb` -- no-op otherwise.
+
+    Originally built for GeeLark's "normal" preset, whose own bitrate
+    transform (0.8-1.1x of the SOURCE bitrate) has no ceiling: a long or
+    already-high-bitrate raw clip produces a spoofed variant just as big.
+    MLX's `build_cli_spoofer` default ("low_bandwidth", fixed 1200kbps) is
+    already far smaller for typical reel lengths -- but has no hard ceiling
+    either, so a long raw clip still produces a large variant. Applied here
+    too as of 2026-09-11 (explicit request: MLX proxy traffic running very
+    high that day) so MLX gets the same guaranteed ceiling GeeLark already
+    has, regardless of clip length or which preset produced the file.
+
+    `-maxrate`/`-bufsize` (not a hard `-fs` size cut, which would just
+    truncate the clip) keeps the encoder under a bitrate ceiling for the
+    video's own actual duration, computed fresh per file since reels vary in
+    length. 0.85x of the exact target leaves headroom for container/audio
+    overhead so the result lands under `max_mb`, not just close to it.
+    """
+    try:
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+    except OSError:
+        return
+    if size_mb <= max_mb:
+        return
+
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=15, check=True,
+        )
+        duration = float(probe.stdout.strip())
+    except Exception as exc:
+        if logger:
+            logger.warning("spoof_pipeline: could not read duration for %s (%s); "
+                           "leaving the %.1fMB file uncapped", path, exc, size_mb)
+        return
+    if duration <= 0:
+        return
+
+    maxrate_bps = int((max_mb * 1024 * 1024 * 8) / duration * 0.85)
+    capped_path = f"{path}.capped.mp4"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", path,
+             "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+             "-maxrate", str(maxrate_bps), "-bufsize", str(maxrate_bps * 2),
+             "-c:a", "aac", "-b:a", "96k",
+             capped_path],
+            capture_output=True, timeout=120, check=True,
+        )
+    except Exception as exc:
+        if logger:
+            logger.warning("spoof_pipeline: size-cap re-encode failed for %s (%s); "
+                           "leaving the original %.1fMB file", path, exc, size_mb)
+        try:
+            os.unlink(capped_path)
+        except OSError:
+            pass
+        return
+
+    new_size_mb = os.path.getsize(capped_path) / (1024 * 1024)
+    os.replace(capped_path, path)
+    if logger:
+        logger.info("spoof_pipeline: capped %s from %.1fMB to %.1fMB (maxrate %.2fMbps)",
+                    path, size_mb, new_size_mb, maxrate_bps / 1_000_000)
 
 
 def build_source(raw_root: str | None = None, drive_folder_id: str | None = None,
@@ -511,11 +727,13 @@ def run_pipeline(airtable, logger, raw_root: str | None, out_root: str | None,
                     # point at somebody else's video.
                     try:
                         variant_path = finalize_variant(Path(produced), video.name, handle)
+                        normalize_for_upload(str(variant_path), logger=logger)
                     except OSError as exc:
                         logger.warning("could not name the variant for %s/%s: %s", model, handle, exc)
                         any_failed = True
                         report.errors.append((f"{video.name} -> {handle}", f"could not name the variant: {exc}"))
                         continue
+                    cap_file_size(str(variant_path), logger=logger)
                     airtable.create_spoof_variant(
                         cp_id,
                         None if by_profile else acct["account_id"],

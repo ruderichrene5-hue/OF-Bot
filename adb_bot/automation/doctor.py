@@ -219,17 +219,29 @@ def check_mlx_agent() -> CheckResult:
 
 
 def check_airtable(token: str, base_id: str) -> CheckResult:
-    """Token + base reachable, and the tables the loops read/write all exist."""
-    if not token:
-        return CheckResult("Airtable", FAIL, "no token configured",
-                           "Set AIRTABLE_TOKEN (or save it in Dev controls).")
-    from adb_bot.clients import airtable as at
-    from adb_bot.clients.airtable import AirtableClient
+    """The local file-backed store (adb_bot/clients/local_store.py) is writable
+    and the tables the loops read/write are reachable.
 
-    client = AirtableClient(token, base_id, at.TABLE_PROFILES)
-    # Accounts is deliberately not required: it was removed from the production
-    # base on 2026-08-18 and posting is profile-driven, so its absence is a
-    # schema fact rather than a fault. See `AirtableClient.list_accounts`.
+    Renamed-in-place rather than added alongside: every caller already asks
+    for a check named "Airtable" and reports it the same way, and the real
+    Airtable API is no longer consulted at all (switched off 2026-09-17 after
+    the base broke twice -- Accounts vanished for 7h on 2026-08-18, then
+    Models came back with 0 rows and two renamed fields). token/base_id are
+    accepted for call-site compat and ignored.
+    """
+    from adb_bot.clients import airtable as at
+    from adb_bot.clients.local_store import LocalAirtableClient, _tables_dir
+
+    try:
+        d = _tables_dir()
+        probe = d / ".doctor_probe"
+        probe.write_text("ok")
+        probe.unlink()
+    except OSError as exc:
+        return CheckResult("Airtable", FAIL, f"local store not writable: {exc}",
+                           f"Check permissions on {d}")
+
+    client = LocalAirtableClient("local", "local", at.TABLE_PROFILES)
     required = [at.TABLE_PROFILES, at.TABLE_RUN_LOG,
                 at.TABLE_POSTING_QUEUE, at.TABLE_SPOOF_VARIANTS, at.TABLE_BAN_HISTORY]
     missing = []
@@ -238,23 +250,12 @@ def check_airtable(token: str, base_id: str) -> CheckResult:
             client._list_table(table, page_size=1, max_records=1)
         except Exception as exc:
             missing.append((table, str(exc)))
-
-    # A 403 on one table used to return "auth rejected" immediately, and that is
-    # what hid the deleted Accounts table for seven hours: Airtable answers an
-    # unknown table name with 403, so a schema change wore the label of a
-    # credentials problem and the real cause was never in the message. Only call
-    # it auth when *every* table fails, which is what a dead token actually
-    # looks like; a subset failing names the tables instead.
-    if missing and len(missing) == len(required):
-        text = missing[0][1]
-        return CheckResult("Airtable", FAIL, f"auth rejected ({text[:60]})",
-                           "Check the PAT and that it has access to this base.")
     if missing:
         names = ", ".join(f"{t} ({e[:40]})" for t, e in missing)
-        return CheckResult("Airtable", FAIL, f"base {base_id}: missing/unreadable tables: {names}",
-                           "The token reaches the base, so check the table was not "
-                           "renamed or deleted before suspecting the PAT's scopes.")
-    return CheckResult("Airtable", PASS, f"base {base_id}, {len(required)} tables readable")
+        return CheckResult("Airtable", FAIL, f"local store: unreadable tables: {names}",
+                           "This should never fail for a missing table (an absent local "
+                           "JSON file reads as empty) -- an error here is a real bug.")
+    return CheckResult("Airtable", PASS, f"local store ({d}), {len(required)} tables readable")
 
 
 def check_multilogin(token: str) -> CheckResult:
@@ -348,11 +349,11 @@ def check_models(airtable_token: str, base_id: str, mlx_token: str,
     partial = []
     try:
         from adb_bot.clients import airtable as at
-        from adb_bot.clients.airtable import AirtableClient
+        from adb_bot.clients.local_store import LocalAirtableClient
 
-        client = AirtableClient(airtable_token, base_id, at.TABLE_PROFILES)
+        client = LocalAirtableClient(airtable_token, base_id, at.TABLE_PROFILES)
     except Exception as exc:
-        return CheckResult("Model inventory", WARN, f"Airtable unreadable: {str(exc)[:70]}")
+        return CheckResult("Model inventory", WARN, f"local store unreadable: {str(exc)[:70]}")
 
     if mlx_token:
         try:

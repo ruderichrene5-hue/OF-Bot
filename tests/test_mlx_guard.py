@@ -232,10 +232,31 @@ def test_recovery_only_resumes_what_the_guard_itself_stopped(monkeypatch):
     assert calls == [("enable", "--now", "adbbot-posting.timer")]
 
 
-def test_autoresume_is_off_unless_asked_for(monkeypatch, tmp_path):
-    """Resuming spends money and posts to live accounts, so it stays a person's
-    decision unless the box explicitly opts in."""
+def test_a_topped_up_proxy_puts_back_what_the_guard_stopped(monkeypatch,
+                                                            tmp_path):
+    """The guard is the only thing that stops these timers unattended, so
+    leaving them off after a top-up just means the fleet stays down until
+    somebody notices -- which on 2026-08-28 cost 29 hours of posting."""
     monkeypatch.delenv("ADBBOT_GUARD_AUTORESUME", raising=False)
+    monkeypatch.setattr(g, "refusals_501", lambda **kw: 0)
+    _patch_get(monkeypatch, [FakeResponse(200, {"city": "Stuttgart",
+                                                "query": "5.6.7.8"})] * 4)
+    state_path = tmp_path / "s.json"
+    state_path.write_text('{"gateway": "exhausted", '
+                          '"stopped_by_guard": ["adbbot-posting.timer"]}')
+
+    report = g.run_check(profiles=_profiles(4), state_path=state_path,
+                         dry_run=True)
+
+    assert report.resumed == ["adbbot-posting.timer"]
+    assert "proxy_back" in report.sent
+
+
+def test_autoresume_can_be_switched_off(monkeypatch, tmp_path):
+    """Resuming spends money and posts to live accounts, so a box that wants
+    that to stay a person's decision can still say so."""
+    monkeypatch.setenv("ADBBOT_GUARD_AUTORESUME", "0")
+    monkeypatch.setattr(g, "refusals_501", lambda **kw: 0)
     _patch_get(monkeypatch, [FakeResponse(200, {"city": "Stuttgart",
                                                 "query": "5.6.7.8"})] * 4)
     state_path = tmp_path / "s.json"
@@ -247,6 +268,63 @@ def test_autoresume_is_off_unless_asked_for(monkeypatch, tmp_path):
 
     assert report.resumed == []
     assert "proxy_back" in report.sent
+
+
+def test_minutes_coming_back_puts_the_fleet_back(monkeypatch, tmp_path):
+    """The 2026-08-28 outage. The minutes ran out, the guard stopped posting
+    and recheck, the minutes were topped up -- and nothing restarted them,
+    because only the *proxy* branch had ever had a resume."""
+    monkeypatch.delenv("ADBBOT_GUARD_AUTORESUME", raising=False)
+    monkeypatch.setattr(g, "refusals_501", lambda **kw: 0)
+    _patch_get(monkeypatch, [FakeResponse(200, {"city": "Stuttgart",
+                                                "query": "5.6.7.8"})] * 4)
+    state_path = tmp_path / "s.json"
+    state_path.write_text('{"gateway": "ok", "minutes": "exhausted", '
+                          '"stopped_by_guard": ["adbbot-posting.timer", '
+                          '"adbbot-recheck.timer"]}')
+
+    report = g.run_check(profiles=_profiles(4), state_path=state_path,
+                         dry_run=True)
+
+    assert report.minutes_out is False
+    assert report.resumed == ["adbbot-posting.timer", "adbbot-recheck.timer"]
+    assert "minutes_back" in report.sent
+
+
+def test_a_proxy_that_came_back_does_not_restart_a_fleet_out_of_minutes(
+        monkeypatch, tmp_path):
+    """Both outages stop the same timers. Recovering from one while the other
+    is still out must not put the fleet back into a wall it cannot pass."""
+    monkeypatch.delenv("ADBBOT_GUARD_AUTORESUME", raising=False)
+    monkeypatch.setattr(g, "refusals_501", lambda **kw: 999)
+    _patch_get(monkeypatch, [FakeResponse(200, {"city": "Stuttgart",
+                                                "query": "5.6.7.8"})] * 4)
+    state_path = tmp_path / "s.json"
+    state_path.write_text('{"gateway": "exhausted", '
+                          '"stopped_by_guard": ["adbbot-posting.timer"]}')
+
+    report = g.run_check(profiles=_profiles(4), state_path=state_path,
+                         dry_run=True)
+
+    assert report.minutes_out is True
+    assert report.resumed == []
+
+
+def test_a_loop_switched_off_by_hand_is_never_resumed(monkeypatch, tmp_path):
+    """Warm-up has been off deliberately since 2026-08-20. The guard only ever
+    puts back its own record, so a hand-stopped loop stays stopped."""
+    monkeypatch.delenv("ADBBOT_GUARD_AUTORESUME", raising=False)
+    monkeypatch.setattr(g, "refusals_501", lambda **kw: 0)
+    _patch_get(monkeypatch, [FakeResponse(200, {"city": "Stuttgart",
+                                                "query": "5.6.7.8"})] * 4)
+    state_path = tmp_path / "s.json"
+    state_path.write_text('{"gateway": "ok", "minutes": "exhausted", '
+                          '"stopped_by_guard": ["adbbot-posting.timer"]}')
+
+    report = g.run_check(profiles=_profiles(4), state_path=state_path,
+                         dry_run=True)
+
+    assert "adbbot-warmup.timer" not in report.resumed
 
 
 def test_without_a_gb_figure_it_warns_off_the_last_cycles_length(monkeypatch,

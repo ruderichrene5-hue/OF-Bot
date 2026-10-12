@@ -3086,6 +3086,8 @@ class InstagramStoryUploadFlow:
         status_callback=None,
         manual_continue_event=None,
         manual_continue_callback=None,
+        link_url: str | None = None,
+        sticker_text: str | None = None,
     ):
         if not adb_client:
             raise ValueError("adb_client is required")
@@ -3253,6 +3255,16 @@ class InstagramStoryUploadFlow:
         ):
             emit("warning", "Story composer did not show a valid share action for %s; aborting upload", target)
             return {"profile_id": profile.id, "target": target, "aborted": False, "success": False}
+
+        if link_url:
+            try:
+                sticker_ok = self._add_link_sticker(target, adb_client, link_url,
+                                                     sticker_text=sticker_text, logger=log)
+            except Exception as exc:
+                sticker_ok = False
+                emit("warning", "Exception while adding link sticker for %s: %s", target, exc)
+            if not sticker_ok:
+                emit("warning", "Could not add the link sticker for %s; posting without it", target)
 
         # After selecting the media, prefer to directly post via the 'Your story' target if available.
         # We only treat the action as successful after the app moves out of the composer state.
@@ -3445,6 +3457,130 @@ class InstagramStoryUploadFlow:
         if logger is not None:
             logger.warning("Unable to locate a story media thumbnail or gallery button for %s", target)
         return False
+
+    def _add_link_sticker(self, target: str, adb_client, link_url: str,
+                          sticker_text: str | None = None, logger=None) -> bool:
+        """Add a Link sticker to the story currently open in the editor.
+
+        Reverse-engineered live 2026-09-12 (no official docs for any of this):
+
+        1. The sticker tray opens from a button whose ``content-desc`` merely
+           *contains* "sticker" (lowercase) -- there is no stable resource-id.
+        2. Inside the tray, the Link sticker's node has ``content-desc``
+           exactly ``"Link Sticker"`` (capital S) -- among ~15 other stickers
+           (Location, Mention, Music, GIF, Poll, ...), so the match must be
+           case-insensitive substring, not exact.
+        3. Tapping it opens an "Add link" screen with the URL ``EditText``
+           already focused.
+        4. **The trap**: tapping "Customize sticker text" does not move focus
+           anywhere by itself -- it just reveals a *second* ``EditText`` below
+           the first. Typing into "the" EditText after that tap (there being
+           only one on screen before you dump again) hits the URL field a
+           second time and interleaves the sticker text into the middle of the
+           URL, corrupting it silently -- confirmed live, this exact bug once.
+           The fix is to re-dump *after* revealing the second field and index
+           the two EditTexts by document order: ``edits[0]`` is always the
+           URL, ``edits[1]`` (only present once "Customize sticker text" has
+           been tapped) is the sticker text.
+        5. Plain ``adb shell input text`` DOES carry emoji through correctly
+           on this device/IME (confirmed live with the heart emoji) -- so no
+           clipboard workaround is needed here, unlike some other input paths
+           in this codebase.
+        6. "Done" places the sticker on the story and returns to the editor;
+           it does not post anything by itself.
+
+        Returns False (never raises past its own boundary) on any step it
+        cannot complete, so the caller can choose to post without a sticker
+        rather than share a corrupted one.
+        """
+        def emit(level: str, message: str, *args) -> None:
+            _emit(logger, level, message, *args)
+
+        def find_node(root, predicate):
+            for node in root.iter("node"):
+                if predicate(node):
+                    return node
+            return None
+
+        def center(bounds_str: str) -> tuple[int, int]:
+            nums = [int(n) for n in re.findall(r"-?\d+", bounds_str)]
+            x1, y1, x2, y2 = nums
+            return (x1 + x2) // 2, (y1 + y2) // 2
+
+        def tap_node(node) -> None:
+            x, y = center(node.get("bounds"))
+            adb_client.shell_tap(target, x, y)
+
+        root = _adb_capture_ui_dump(target, logger=logger)
+        if root is None:
+            emit("warning", "No UI dump available to find the sticker button on %s", target)
+            return False
+        sticker_btn = find_node(root, lambda n: "sticker" in (n.get("content-desc") or "").lower())
+        if sticker_btn is None:
+            emit("warning", "Sticker tray button not found on %s", target)
+            return False
+        tap_node(sticker_btn)
+        time.sleep(2)
+
+        root = _adb_capture_ui_dump(target, logger=logger)
+        if root is None:
+            emit("warning", "No UI dump available to find 'Link Sticker' on %s", target)
+            return False
+        link_node = find_node(
+            root,
+            lambda n: "link sticker" in (n.get("text") or "").lower()
+                     or "link sticker" in (n.get("content-desc") or "").lower(),
+        )
+        if link_node is None:
+            emit("warning", "'Link Sticker' not found in the sticker tray on %s", target)
+            return False
+        tap_node(link_node)
+        time.sleep(2)
+
+        root = _adb_capture_ui_dump(target, logger=logger)
+        if root is None:
+            emit("warning", "No UI dump available on the Add-link screen for %s", target)
+            return False
+        edits = [n for n in root.iter("node") if n.get("class") == "android.widget.EditText"]
+        if not edits:
+            emit("warning", "URL field not found on the Add-link screen for %s", target)
+            return False
+        tap_node(edits[0])
+        time.sleep(0.5)
+        adb_client.shell_write(target, link_url)
+        time.sleep(1)
+
+        if sticker_text:
+            root = _adb_capture_ui_dump(target, logger=logger)
+            customize = find_node(
+                root, lambda n: "customize sticker text" in (n.get("text") or "").lower())
+            if customize is not None:
+                tap_node(customize)
+                time.sleep(1.5)
+                # Re-dump: the sticker-text EditText does not exist until now.
+                # See the docstring -- indexing by document order is required,
+                # reusing edits[0] here would silently corrupt the URL.
+                root2 = _adb_capture_ui_dump(target, logger=logger)
+                edits2 = [n for n in root2.iter("node") if n.get("class") == "android.widget.EditText"]
+                if len(edits2) >= 2:
+                    tap_node(edits2[1])
+                    time.sleep(0.5)
+                    adb_client.shell_write(target, sticker_text)
+                    time.sleep(1)
+                else:
+                    emit("warning", "Sticker-text field did not appear on %s; leaving the URL as the sticker's label", target)
+            else:
+                emit("info", "'Customize sticker text' option not offered on %s; leaving the URL as the sticker's label", target)
+
+        root = _adb_capture_ui_dump(target, logger=logger)
+        done_node = find_node(root, lambda n: (n.get("text") or "").strip() == "Done")
+        if done_node is None:
+            emit("warning", "'Done' not found on the Add-link screen for %s", target)
+            return False
+        tap_node(done_node)
+        time.sleep(2)
+        emit("info", "Link sticker placed on the story for %s (%s)", target, link_url)
+        return True
 
     def _tap_your_story(self, target: str, adb_client, logger=None) -> bool:
         """Try to locate and tap the 'Your story' share target using UI dump or OCR."""
@@ -4105,6 +4241,23 @@ _SAFE_DISMISS_LABELS = (
     "no thanks",
     "no, thanks",
     "close",
+    # Found live 2026-09-06: a browser-style cookie-consent page (title
+    # "elsewhere, and to embed features..." / "Choose cookies by category",
+    # buttons "Decline optional cookies" / "Allow all cookies") was blocking
+    # the reel composer on several phones at once -- ~500+ composer-failure
+    # dumps that day alone. "Decline" is the safe, no-commitment choice
+    # (consistent with this list never taking an affirmative/consent
+    # action); "Allow all cookies" deliberately excluded for the same
+    # reason "OK"/"Turn on" are.
+    "decline optional cookies",
+    # Found live 2026-09-13: Android's own "Allow Instagram to send you
+    # notifications?" system permission dialog (ALLOW / DON'T ALLOW) blocked
+    # every picture/bio setup attempt on brand-new Lea accounts -- the u2
+    # session connects to the whole device, not just the app, so this
+    # system dialog is tappable the same way as an in-app one. "Don't
+    # Allow" is the safe, no-commitment choice, same reasoning as "Decline
+    # optional cookies" above; "Allow" deliberately excluded.
+    "don't allow",
 )
 
 
@@ -4811,7 +4964,7 @@ class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):
             return {"profile_id": profile.id, "target": target, "aborted": False, "account_flag": _flag}
 
         # Step 1: profile tab -> Edit profile screen.
-        if not self._open_edit_profile_u2(d, target, emit, log):
+        if not self._open_edit_profile_u2(d, target, emit, log, adb_client=adb_client):
             _flag = self._account_flag_u2(d)
             if _flag:
                 emit("warning", "Instagram flagged %s (%s); closing the profile", profile.id, _flag)
@@ -4928,7 +5081,23 @@ class InstagramUpdateBioU2Flow(InstagramNotificationsFlow):
         time.sleep(1)
         return True
 
-    def _open_edit_profile_u2(self, d, target, emit, logger=None) -> bool:
+    def _open_edit_profile_u2(self, d, target, emit, logger=None, adb_client=None) -> bool:
+        # Clear any blocking dialog (Android's own runtime permission
+        # prompts -- notably "Allow Instagram to send you notifications?" --
+        # plus the new-device onboarding/ads-consent chain) before doing
+        # anything else. Found live 2026-09-13: the notifications prompt
+        # sat in front of the Profile tab on every fresh Lea account, and
+        # every picture/bio setup attempt failed with "'Edit profile'
+        # button not found" because nothing here ever looked for it -- the
+        # same interruption handling the warm-up flow already uses (see its
+        # call to `handle_blocking_prompts` before feed verification) was
+        # never wired into this method. adb_client is optional only for
+        # backward compatibility with any stale caller; without it this
+        # no-ops and the old (broken) behaviour is unchanged.
+        if adb_client is not None:
+            if interruptions.handle_blocking_prompts(target, adb_client, logger=logger, flow=self):
+                _emit(logger, "info", "u2: cleared a permission/onboarding prompt for %s before opening Edit profile", target)
+
         # Tap the bottom-nav Profile tab. Its resource-id is the stable
         # handle -- try that first; fall back to known relative positions
         # only if the selector misses.
@@ -5359,7 +5528,7 @@ class InstagramUpdateProfilePictureU2Flow(InstagramUpdateBioU2Flow):
             return {"profile_id": profile.id, "target": target, "aborted": False, "account_flag": _flag}
 
         # --- Reach Edit profile (reused from the bio flow) -------------------
-        if not self._open_edit_profile_u2(d, target, emit, log):
+        if not self._open_edit_profile_u2(d, target, emit, log, adb_client=adb_client):
             _flag = self._account_flag_u2(d)
             if _flag:
                 emit("warning", "Instagram flagged %s (%s); closing the profile", profile.id, _flag)
@@ -5427,6 +5596,31 @@ class InstagramUpdateProfilePictureU2Flow(InstagramUpdateBioU2Flow):
             logger=logger,
             purpose="profile-photo source option (optional)",
         )
+
+        # Android's own "Allow Instagram to access photos and videos on this
+        # device?" dialog sits OVER the gallery here -- not part of
+        # Instagram's own view hierarchy the popup-dismisser above skips on
+        # purpose. GeeLark's virtual phones don't persist this grant across a
+        # cold start, so it can reappear on every fresh session even once
+        # already granted before. Missing it makes every one of the gallery
+        # selectors below time out, which reads as "gallery never opened"
+        # with no hint that a dialog was actually sitting on top of it the
+        # whole time. Found live 2026-09-09: three straight batch retries on
+        # the same 9 accounts all failed here identically. See also
+        # [[adbbot-photo-permission-blocks-gallery]] (same root cause, other
+        # entry point).
+        _u2_click(
+            d,
+            [
+                {"text": "ALLOW ALL"}, {"textMatches": "(?i)^allow all$"},
+                {"text": "Allow all"},
+                {"text": "ALLOW LIMITED ACCESS"}, {"textMatches": "(?i)^allow limited access$"},
+                {"description": "Allow all"},
+            ],
+            logger=logger,
+            purpose="Android photo-access permission dialog (optional)",
+        )
+        time.sleep(0.5)
 
         # Confirm the gallery/photo picker is open.
         ready = self._first_present(

@@ -128,9 +128,12 @@ def make_identity(rng: random.Random | None = None, avoid=None,
     still-unset instagramEdit path, changed here because a real person
     asked for it back for signup specifically, more than once, wanting an
     exact prefix rather than the doubled-letter variation `bio_variations`
-    uses elsewhere (2026-08-23). `full_name` (the profile's real-name
-    field, not the @handle) is untouched either way -- still a random
-    person's name.
+    uses elsewhere (2026-08-23).
+
+    `full_name` (the profile's real-name field, not the @handle) follows
+    `model` too now (2026-09-25) -- a random person's name there was wrong
+    for the same reason a random handle was: the account is the model, not
+    an invented person. Only the un-modelled path still invents one.
     """
     rng = rng or random.Random()
     used = taken_usernames() | {str(name).lower() for name in (avoid or ())}
@@ -155,7 +158,7 @@ def make_identity(rng: random.Random | None = None, avoid=None,
             continue
         day, month, year = _birthday(rng)
         return Identity(
-            full_name=f"{first.capitalize()} {last.capitalize()}",
+            full_name=model.capitalize() if model else f"{first.capitalize()} {last.capitalize()}",
             username=username,
             password=_password(rng),
             birth_day=day, birth_month=month, birth_year=year,

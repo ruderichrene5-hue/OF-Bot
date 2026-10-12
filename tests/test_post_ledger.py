@@ -278,3 +278,19 @@ class QueueIdReachesTheLedgerTest(TestCase):
                 )
 
         self.assertEqual(captured.get("queue_id"), "recQ9")
+
+
+class NoStatusReopensAClipTest(LedgerTestBase):
+    """2026-09-27: a hand-written 'cleared' status re-opened a clip that was
+    still uploading on a slow phone, and it posted twice on @geheime.nikki."""
+
+    def test_any_later_status_still_blocks(self):
+        self.ledger.record_share("p1", self.clip)
+        h = media_fingerprint(self.clip)
+        for status in (STATUS_DISPROVED, "cleared", "whatever", STATUS_CONFIRMED):
+            self.ledger.resolve("p1", h, status)
+            self.assertTrue(self.ledger.already_shared("p1", self.clip), status)
+
+    def test_other_profile_is_unaffected(self):
+        self.ledger.record_share("p1", self.clip)
+        self.assertFalse(self.ledger.already_shared("p2", self.clip))

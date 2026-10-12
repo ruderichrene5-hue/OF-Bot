@@ -665,6 +665,7 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
     # the next screen either.
     dumpless = 0
     robot_check_solves = 0
+    device_verification_tried = False
     totp_submits = 0
     submitted_code, code_waits = None, 0
     restarts = 0
@@ -978,6 +979,22 @@ def sign_in(driver, adb_client, target: str, address: str, password: str,
                            "cannot be signed in from here; use another",
                 address)
             return RESULT_ROBOT_CHECK
+
+        if screen == SCREEN_DEVICE_VERIFICATION and not device_verification_tried:
+            # Save what Google is actually showing so a person can decide what
+            # the bot should do here -- nothing is tapped. 2026-09-19.
+            device_verification_tried = True
+            try:
+                shot = driver.screenshot_bytes()
+                if shot:
+                    import re as _re
+                    from pathlib import Path as _Path
+                    out = _Path.home() / ".adb_bot" / (
+                        "device_verification_" + _re.sub(r"\W+", "_", address) + ".png")
+                    out.write_bytes(shot)
+                    log("info", "device verification screenshot saved to %s", out)
+            except Exception as exc:  # never let a screenshot break the run
+                log("warning", "could not save the device-verification screenshot (%s)", exc)
 
         if screen == SCREEN_DEVICE_VERIFICATION:
             # No captcha to solve here -- Google wants an actual phone number

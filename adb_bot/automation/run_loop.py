@@ -32,6 +32,7 @@ from adb_bot.automation import verification_runner
 from adb_bot.automation.retry_runner import DEFAULT_MAX_RETRIES
 from adb_bot.clients import airtable as at
 from adb_bot.clients.airtable import AirtableClient
+from adb_bot.clients.local_store import LocalAirtableClient
 from adb_bot.config import settings
 from adb_bot.core import locks, shutdown
 from adb_bot.core.logger import get_logger
@@ -55,11 +56,16 @@ def _mlx_token(cli_value=None) -> str:
 
 
 def _airtable(base_id=None, token=None) -> AirtableClient:
-    token = (token or "").strip() or settings.get_saved_airtable_token()
-    base_id = (base_id or "").strip() or settings.get_saved_airtable_base_id()
-    if not token:
-        raise SystemExit("[fatal] No Airtable token (AIRTABLE_TOKEN / dev settings / --airtable-token).")
-    return AirtableClient(token, base_id, at.TABLE_PROFILES)
+    # 2026-09-17: switched off the real Airtable API onto a local, file-backed
+    # store (adb_bot/clients/local_store.py) after the Airtable base broke
+    # twice in ways outside our control -- the Accounts table vanished for 7h
+    # on 2026-08-18, then the Models table came back with 0 rows and two
+    # renamed fields on 2026-09-17, silently degrading the posting schedule.
+    # LocalAirtableClient is a drop-in subclass: every business method on
+    # AirtableClient is written in terms of the same handful of primitives,
+    # which is all that's overridden, so nothing downstream of this function
+    # changes. token/base_id are accepted-and-ignored for call-site compat.
+    return LocalAirtableClient(token or "local", base_id or "local", at.TABLE_PROFILES)
 
 
 def _watch(logger, airtable, observe) -> None:
@@ -124,6 +130,26 @@ def _run_mlx_sync(args, logger) -> int:
     return 1 if report.errors else 0
 
 
+MLX_POSTING_TAG = "active / posting"
+
+
+def _mlx_posting_allowed(token, logger) -> set:
+    """Launch ids of the MLX profiles tagged `Active / Posting` (case-insensitive).
+
+    Fails closed: if MultiLogin can't be listed, nothing is allowed this tick --
+    a launch would fail on the same outage anyway, and posting to an untagged
+    phone is the thing this gate exists to prevent.
+    """
+    from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
+    try:
+        items = MultiloginMobileListClient(token).list_mobile_profiles()
+    except Exception as exc:
+        logger.warning("MLX list failed (%s); no profile may post this tick", exc)
+        return set()
+    return {str(p.get("id")) for p in items
+            if any(str(t).strip().lower() == MLX_POSTING_TAG for t in (p.get("tags") or []))}
+
+
 def _run_posting(args, logger) -> int:
     from adb_bot.automation.posting_planner import plan_posting_queue
     airtable = _airtable(args.base_id, args.airtable_token)
@@ -151,10 +177,16 @@ def _run_posting(args, logger) -> int:
     from adb_bot.automation.posting_runner import run_posting_queue
     token = _mlx_token(args.mlx_token)
     clients = build_mlx_clients(token)
+    allowed = _mlx_posting_allowed(token, logger)
+    logger.info("posting: %d MLX profile(s) tagged 'Active / Posting'", len(allowed))
     result = run_posting_queue(
         airtable, clients.launcher, clients.shutdown, clients.adb_enable, clients.api,
         build_automation(), logger,
-        max_concurrent_profiles=args.max_concurrent,
+        # --max-concurrent on the CLI still wins if given; otherwise the
+        # posting-specific saved/env setting applies (default 3 -- see
+        # DEFAULT_POSTING_CONCURRENCY), not the wider generic default.
+        max_concurrent_profiles=(args.max_concurrent if args.max_concurrent is not None
+                                  else settings.get_saved_posting_concurrency()),
         readiness_wait_seconds=settings.get_saved_readiness_wait(),
         readiness_max_attempts=settings.get_saved_readiness_attempts(),
         batch_launch_delay_seconds=settings.get_saved_batch_launch_delay(),
@@ -162,6 +194,10 @@ def _run_posting(args, logger) -> int:
         # been cleared drains its backlog over days instead of emptying it onto
         # one account in a single launch. See DEFAULT_MAX_POSTS_PER_PROFILE.
         max_posts_per_profile=settings.get_saved_max_posts_per_profile(),
+        # A true per-day ceiling (persisted across runs, not just this one) --
+        # see DEFAULT_DAILY_MAX_POSTS_PER_PROFILE / daily_post_counter.py.
+        daily_cap_per_profile=settings.get_saved_daily_max_posts_per_profile(),
+        allowed_launch_ids=allowed,
     )
     logger.info("posting result: %s", result)
     # Did this tick actually produce anything, given what was owed? A dead MLX
@@ -475,7 +511,15 @@ def _run_pipeline(args, logger) -> int:
         spoofer_python = args.spoofer_python or settings.get_saved_spoofer_python()
         spoofer_root = args.spoofer_root or settings.get_saved_spoofer_root()
         if spoofer_python and spoofer_root:
-            spoof_fn = spoof_pipeline.build_cli_spoofer(spoofer_python, spoofer_root)
+            # "normal" instead of build_cli_spoofer's low_bandwidth default --
+            # matches the 2026-09-06 GeeLark change (geelark_content.py):
+            # low_bandwidth's fixed 1200kbps was visibly degrading quality on
+            # every post. Instruction 2026-09-07: same fix for MLX. Trade-off
+            # to watch: MLX uploads over its own proxy-GB budget (MLX guard,
+            # MLX_PROXY_GB_WARN_BELOW), and full-quality variants run ~20x
+            # larger than low_bandwidth's, so that budget will drain faster.
+            spoof_fn = spoof_pipeline.build_cli_spoofer(spoofer_python, spoofer_root,
+                                                        preset="normal")
         else:
             logger.warning("pipeline: no spoofer configured (SPOOFER_PYTHON / SPOOFER_ROOT); "
                            "variants cannot be produced")
@@ -720,6 +764,7 @@ def _run_recheck(args, logger) -> int:
     token = _mlx_token(args.mlx_token)
     clients = build_mlx_clients(token)
     automation = build_automation()
+    allowed = _mlx_posting_allowed(token, logger)
 
     def read_post_count(profile_id, fields):
         """Launch the profile, read its post count, shut it down again.
@@ -738,6 +783,11 @@ def _run_recheck(args, logger) -> int:
                            fields.get(at.F_PQ_NAME))
             return None
         launch_id = profile_id
+        if str(launch_id) not in allowed:
+            # Not tagged `Active / Posting`: don't spend minutes on it. The row
+            # stays in Verifying and resolves if the tag comes back.
+            logger.info("recheck: %s not tagged 'Active / Posting'; not launching", launch_id)
+            return None
         captured = {}
 
         def capture(result):

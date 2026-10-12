@@ -31,10 +31,12 @@ PROVIDER_5SIM = "5sim"
 
 # --- canonical service / country names ----------------------------------------
 SERVICE_INSTAGRAM = "instagram"
+SERVICE_GOOGLE = "google"
 COUNTRY_US = "US"
 COUNTRY_DE = "DE"
 COUNTRY_GB = "GB"
 COUNTRY_CA = "CA"
+COUNTRY_TH = "TH"
 
 # International dialling code per canonical country. Used to split an
 # international number into the part Instagram's form actually wants: its phone

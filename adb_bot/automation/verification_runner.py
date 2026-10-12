@@ -52,20 +52,54 @@ from adb_bot.clients import airtable as at
 
 ISSUE_TAG = "Issue"
 
+# A profile tagged 'Human Verification' by hand in MultiLogin -- without also
+# carrying 'Issue' -- used to be invisible to this whole pass: the filter below
+# only ever looked at ISSUE_TAG. Three fresh Nikki DE profiles sat flagged this
+# way for a night, "verification pass: nothing" every 30 minutes, until it was
+# noticed and fixed by hand (adding 'Issue' to each). This tag now counts on
+# its own, so a hand-applied verification flag is never silently invisible
+# again -- fixed 2026-09-23.
+HAND_APPLIED_VERIFICATION_TAG = "Human Verification"
+
+# Rene, 2026-09-24 -- the intended lifecycle around a challenge:
+# `Setup` + `Active / Posting` -> a challenge appears -> `Active / Posting`
+# comes off (it cannot post right now), `Setup` stays (it is still a
+# ready account, that fact must not be lost), `Human Verification` is on.
+# This pass works it; whatever the attempt's outcome -- solved, still stuck,
+# or Meta itself now reviewing the appeal -- the profile is tagged `review`
+# so a person (or the next recheck pass) finds it, and is looked at again on
+# a fixed cadence rather than left to sit. A clean recheck retags
+# `Active / Posting`; a recheck that finds the account logged out tags
+# `Locked Out` instead. That recheck pass does not exist yet -- this module
+# only carries its half: tagging `review` and pulling `Active / Posting`.
+REVIEW_TAG = "review"
+ACTIVE_POSTING_TAG = "Active / Posting"
+
+# Outcomes that leave a profile still needing a person, one way or another --
+# as opposed to `solved` (untagged, handed back) or `banned` (flagged, tag
+# left on, never touched again). `RESULT_IN_REVIEW` means Meta is now
+# checking an appeal, not this bot, but it still needs the same "look again
+# later" treatment as a stuck or failed attempt.
+_STILL_NEEDS_A_PERSON = frozenset({
+    verification.RESULT_NEEDS_HUMAN,
+    verification.RESULT_STUCK,
+    verification.RESULT_FAILED,
+    verification.RESULT_IN_REVIEW,
+})
+
 # Tags a person applies in MultiLogin that already say what is wrong -- and say
 # it is not something this flow can fix. Read them: a VA who has looked at a
 # phone knows more than a run that has not started yet, and launching one costs
 # two minutes and possibly a rented number to rediscover what the tag says.
 #
-# On the live workspace these cover **14 of the 69 flagged profiles**:
-#   'logged out'       x10  -- needs credentials, not verification
-#   'unable to verify' x3   -- somebody already tried this and failed
-#   'Banned / Dead'    x1   -- the account is gone
+# Rene, 2026-09-24: 'unable to verify' is retired -- it is not a real state,
+# every case it used to cover still needs a human to clear the verification
+# screen, so it belongs under `Human Verification` instead. 'logged out' is
+# renamed 'Locked Out' to match how the VAs actually say it.
 #
 # Matched lowercased, because they are typed by hand and the casing varies.
 DIAGNOSED_ELSEWHERE_TAGS = {
-    "logged out",
-    "unable to verify",
+    "locked out",
     "banned / dead",
     "banned/dead",
 }
@@ -126,10 +160,10 @@ DEFAULT_MAX_NUMBERS_PER_PASS = 6
 # that resets at midnight: a run at 23:50 and another at 00:10 are twenty
 # minutes apart and would otherwise both get a full day's budget.
 #
-# 12 numbers is roughly $2.40 -- about four profiles' worth of a real challenge
-# chain, which is more than a healthy day ever needs, and survivable when a bad
-# pool eats three numbers for nothing.
-DEFAULT_MAX_NUMBERS_PER_DAY = 12
+# Disabled (0 = no ceiling) at the operator's explicit request, 2026-09-15:
+# the real limiter is the provider balance itself (checked separately by
+# MIN_BALANCE_TO_START), not an arbitrary daily rental count.
+DEFAULT_MAX_NUMBERS_PER_DAY = 0
 
 # Refuse to start a paid pass under this much credit with the active provider.
 # One number is ~$0.20 and a profile can want three, so starting a pass under
@@ -141,7 +175,18 @@ MIN_BALANCE_TO_START = 1.00
 # fix. Every profile costs a launch and about four minutes, so grinding through
 # the whole limit against an empty wallet or a MultiLogin outage spends half an
 # hour to learn the same thing twice.
-MAX_CONSECUTIVE_FLEET_FAILURES = 2
+#
+# Raised from 2 to 3 on 2026-09-23: with the readiness loop's own relaunch and
+# proxy-exit rotation (workflow.py, added the day before), a single "never
+# became ADB-ready" failure now takes 10+ minutes on its own, not the ~49s this
+# constant was tuned against. At 2, three freshly-flagged profiles (nikki
+# 29/30/31, all new phones with a chronic MLX boot problem, not a fleet
+# outage -- posting and every other loop kept launching phones fine the whole
+# time) aborted the pass after only two of them, so the third was never even
+# attempted, pass after pass, all day. 3 costs at most one more ~10-minute
+# profile before the same abort fires, and lets a small batch like this get a
+# fair, once-each look before the breaker trips.
+MAX_CONSECUTIVE_FLEET_FAILURES = 3
 
 # A profile whose result cannot change without a person is not worth retrying
 # every six hours. `Blank (10)` is the case that pays for this: it rented a
@@ -169,25 +214,30 @@ _TERMINAL_MARKERS = (
 
 
 # What to write back into MultiLogin when a run settles something a person will
-# have to act on. Deliberately the tags the VAs *already* use -- `logged out`
-# (11 profiles), `unable to verify` (3), `Banned / Dead` (4) -- rather than a
-# private vocabulary. Three things follow from reusing theirs:
+# have to act on. Deliberately the tags the VAs *already* use -- `Locked Out`,
+# `Human Verification`, `Banned / Dead` -- rather than a private vocabulary.
+# Three things follow from reusing theirs:
 #
 #   * the finding lands where the work actually happens, instead of in a log
 #     file and a local JSON nobody opens;
 #   * `DIAGNOSED_ELSEWHERE_TAGS` already skips these, so the next pass costs
 #     nothing on a profile this one has settled;
-#   * a VA reading the workspace cannot tell a bot's `logged out` from their
+#   * a VA reading the workspace cannot tell a bot's `Locked Out` from their
 #     own, and does not need to -- it means the same thing either way.
 #
 # Only outcomes with a screen behind them get one. "No code arrived" is a bad
 # hour, not a diagnosis, and must never become a tag that hides a profile.
+#
+# 'unable to verify' is retired (2026-09-24): a photo challenge the bot
+# couldn't finish, or a rented number IG won't text, still just means a human
+# needs to clear the verification screen -- that is `Human Verification`, not
+# a separate state.
 _DIAGNOSIS_TAGS = (
     # (status, detail marker or None, tag)
-    (verification.RESULT_SIGNED_OUT, None, "logged out"),
+    (verification.RESULT_SIGNED_OUT, None, "Locked Out"),
     (verification.RESULT_BANNED, None, "Banned / Dead"),
-    (None, "photo challenge could not be completed", "unable to verify"),
-    (None, "number the bot does not control", "unable to verify"),
+    (None, "photo challenge could not be completed", HAND_APPLIED_VERIFICATION_TAG),
+    (None, "number the bot does not control", HAND_APPLIED_VERIFICATION_TAG),
 )
 
 
@@ -435,7 +485,7 @@ def plan_verification(mlx_items, attempts=None, now=None,
                 seen_names[name_key] += 1
             else:
                 continue
-        elif ISSUE_TAG not in tags:
+        elif ISSUE_TAG not in tags and HAND_APPLIED_VERIFICATION_TAG not in tags:
             continue
 
         # A substring of the name, for working a family of profiles at once
@@ -468,8 +518,8 @@ def plan_verification(mlx_items, attempts=None, now=None,
             continue
 
         # A person has already looked and said what is wrong. Believe them:
-        # `logged out` needs credentials and `unable to verify` means somebody
-        # tried. Launching either costs two minutes to rediscover the tag.
+        # `Locked Out` needs credentials, `Banned / Dead` is gone. Launching
+        # either costs two minutes to rediscover the tag.
         if respect_diagnosis:
             diagnosis = next((tag for tag in tags
                               if _wanted_key(tag) in DIAGNOSED_ELSEWHERE_TAGS), None)
@@ -738,6 +788,28 @@ def run_verification_pass(clients, adb_client, airtable, logger, mlx_items,
     return report
 
 
+def _fetch_verification_photo(name: str, logger) -> str:
+    """A local copy of the model's own photo for this run's photo challenge,
+    or "" if it could not be fetched.
+
+    Before 2026-09-23 this loop never passed a photo at all, so every "upload
+    a photo instead of a video selfie" screen was a guaranteed `needs_human`
+    (`AdbChallengeDriver.upload_photo` refuses with nothing configured).
+    `signup_phone.py` already solves exactly this same screen the same way,
+    sourcing the model's own picture (by the name's first word, e.g. "nikki
+    21" -> "nikki") from Geelark's material library rather than a stock/AI
+    face -- reusing that helper here closes the gap instead of duplicating or
+    diverging from it.
+    """
+    from adb_bot.automation.signup_phone import _download_model_photo
+
+    try:
+        return _download_model_photo(name, logger)
+    except Exception as exc:
+        logger.warning("Could not fetch a verification photo for %s: %s", name, exc)
+        return ""
+
+
 def _work_one(clients, adb_client, logger, planned, outcome, country,
               max_seconds: float = verification.MAX_RUN_SECONDS,
               readiness_attempts: int = READINESS_ATTEMPTS,
@@ -750,16 +822,36 @@ def _work_one(clients, adb_client, logger, planned, outcome, country,
         _open_instagram, instagram_installed,
     )
     from adb_bot.automation.workflow import connect_with_retries, prepare_profile_for_adb
+    from adb_bot.clients.multilogin import STATUS_READY
     from adb_bot.clients.sms.base import DEFAULT_COUNTRY
     from adb_bot.clients.sms.router import build_router
 
-    logger.info("verification pass: launching %s", planned.name)
-    clients.launcher.start_profiles([planned.launch_id])
+    # A profile MultiLogin already reports READY must not be launched again --
+    # confirmed 2026-09-17 that relaunching an already-running profile resets
+    # its running_time_secs and can knock it straight back to STATUS_SHUTDOWN
+    # (reproduced twice in the same pass: two profiles that were live and
+    # ADB-active a moment earlier both fell back after this call ran on them).
+    # Batch-launching many profiles at once is also far more reliable than one
+    # at a time (14/15 reached READY together vs. the usual single-profile
+    # flakiness), so a caller that already warmed profiles up in a batch must
+    # not have that undone here.
+    already_ready = False
+    try:
+        already_ready = clients.status.status_for(planned.launch_id) == STATUS_READY
+    except Exception as exc:
+        logger.info("Phone status check failed for %s (%s); launching as usual", planned.launch_id, exc)
+
+    if already_ready:
+        logger.info("verification pass: %s already reports READY -- skipping relaunch", planned.name)
+    else:
+        logger.info("verification pass: launching %s", planned.name)
+        clients.launcher.start_profiles([planned.launch_id])
 
     profile = prepare_profile_for_adb(
         planned.launch_id, clients.api, clients.adb_enable, logger,
         max_attempts=readiness_attempts, wait_seconds=readiness_wait,
-        launcher_client=clients.launcher)
+        launcher_client=clients.launcher,
+        status_client=clients.status)
     if not profile:
         outcome.error = "never became ADB-ready"
         return
@@ -795,8 +887,10 @@ def _work_one(clients, adb_client, logger, planned, outcome, country,
         return
 
     recorder = VerificationRecorder(planned.name, logger=logger)
+    photo_source_path = _fetch_verification_photo(planned.name, logger)
     driver = AdbChallengeDriver(target, adb_client, logger=logger,
-                                recorder=recorder, act=True)
+                                recorder=recorder, act=True,
+                                photo_source_path=photo_source_path)
     result = verification.run_verification(
         driver, build_router(logger=logger), logger=logger,
         country=country or DEFAULT_COUNTRY, max_seconds=max_seconds)
@@ -835,6 +929,44 @@ def _record_diagnosis_tag(tag_client, logger, planned, outcome) -> None:
                        planned.name, tag, exc)
 
 
+def _record_review_state(tag_client, logger, planned, outcome) -> None:
+    """Put a still-unresolved profile into the recheck cycle.
+
+    `outcome.status` is one of `_STILL_NEEDS_A_PERSON` here -- solved, banned
+    and signed-out are each handled elsewhere and never reach this function.
+    `Active / Posting` comes off (the profile cannot post through a challenge
+    screen) and `review` goes on, so a later recheck pass -- not this one --
+    can find it and put it back on `Active / Posting` or tag it `Locked Out`.
+    `Setup` is never touched: it means the account was already built, which
+    stays true whatever the challenge does next.
+
+    Same borrowed-vocabulary rule as `_record_diagnosis_tag`: only tags this
+    workspace already has, silently skipped otherwise.
+    """
+    if tag_client is None or outcome.status not in _STILL_NEEDS_A_PERSON:
+        return
+    try:
+        tag_ids = tag_client.tag_ids_by_name()
+
+        active_id = tag_ids.get(ACTIVE_POSTING_TAG.lower())
+        if active_id and tag_client.unassign(planned.launch_id, [active_id]):
+            logger.info("verification pass: took %s off %s -- a challenge "
+                        "screen is up, it cannot post through it",
+                        ACTIVE_POSTING_TAG, planned.name)
+
+        review_id = tag_ids.get(REVIEW_TAG.lower())
+        if not review_id:
+            logger.info("verification pass: would tag %s %r, but the workspace "
+                        "has no such tag", planned.name, REVIEW_TAG)
+            return
+        if tag_client.assign(planned.launch_id, [review_id]):
+            logger.info("verification pass: tagged %s %r -- for the recheck "
+                        "pass to pick up", planned.name, REVIEW_TAG)
+    except Exception as exc:
+        logger.warning("verification pass: review-state update for %s failed (%s)",
+                       planned.name, exc)
+
+
 def _write_back(airtable, tag_client, logger, planned, outcome, record) -> None:
     """Act on one outcome. Never raises -- a write failure is not worth the pass."""
     if outcome.error or not outcome.status:
@@ -857,16 +989,34 @@ def _write_back(airtable, tag_client, logger, planned, outcome, record) -> None:
             planned.name, outcome.status, reason)
         return
     _record_diagnosis_tag(tag_client, logger, planned, outcome)
+    _record_review_state(tag_client, logger, planned, outcome)
 
     if untag and tag_client is not None:
         try:
             from adb_bot.automation.issue_tags import resolve_issue_tag_id
             tag_id = resolve_issue_tag_id(tag_client)
+            cleared_any = False
             if tag_id and tag_client.unassign(planned.launch_id, [tag_id]):
-                outcome.untagged = True
+                cleared_any = True
                 logger.info("verification pass: took the %s tag off %s -- issue_tags "
                             "will clear the flag and recovery_runner will re-queue it",
                             ISSUE_TAG, planned.name)
+
+            # Since 2026-09-23 a profile can carry `Human Verification` alone,
+            # with no `Issue` tag -- the block above then unassigns nothing,
+            # the tag stays on forever, and the profile never comes back to
+            # posting even though this run solved it. Clear that tag too,
+            # by name rather than through issue_tags's ownership ledger:
+            # that ledger only fences the `Issue` name, and this pass is the
+            # one place that already owns the meaning of `Human Verification`.
+            hv_id = tag_client.tag_ids_by_name().get(HAND_APPLIED_VERIFICATION_TAG.lower())
+            if hv_id and tag_client.unassign(planned.launch_id, [hv_id]):
+                cleared_any = True
+                logger.info("verification pass: took the %s tag off %s",
+                            HAND_APPLIED_VERIFICATION_TAG, planned.name)
+
+            if cleared_any:
+                outcome.untagged = True
             else:
                 logger.warning("verification pass: could not take the %s tag off %s; "
                                "it stays flagged", ISSUE_TAG, planned.name)

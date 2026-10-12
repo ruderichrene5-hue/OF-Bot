@@ -37,6 +37,7 @@ from adb_bot.automation.flows import signup
 from adb_bot.automation.signup_phone import GeelarkHost, run_phone
 from adb_bot.clients.adb import ADBClient
 from adb_bot.clients.airtable import AirtableClient, TABLE_MODELS
+from adb_bot.clients.local_store import LocalAirtableClient
 from adb_bot.clients.geelark import GeelarkTransport
 from adb_bot.clients.geelark.phones import GeelarkPhoneClient
 from adb_bot.config import settings
@@ -293,8 +294,8 @@ def increment_profiles_created(model: str, logger) -> None:
     if not model:
         return
     try:
-        client = AirtableClient(settings.get_saved_airtable_token(),
-                               settings.get_saved_airtable_base_id(),
+        client = LocalAirtableClient(settings.get_saved_airtable_token() or "local",
+                               settings.get_saved_airtable_base_id() or "local",
                                TABLE_MODELS)
         record_id = client.models_by_name().get(model.lower())
         if not record_id:

@@ -139,6 +139,7 @@ ALERT_CATEGORIES = {
     "proxy_low": "proxy",
     "proxy_back": "proxy",
     "minutes_out": "minutes",
+    "minutes_back": "minutes",
 }
 
 
@@ -179,7 +180,8 @@ class GuardReport:
     def summary(self) -> str:
         gb = "unknown" if self.gb_left is None else f"{self.gb_left:.1f}GB"
         return (f"gateway={self.probe.status} minutes_out={self.minutes_out} "
-                f"gb_left={gb} stopped={len(self.stopped)} sent={self.sent}")
+                f"gb_left={gb} stopped={len(self.stopped)} "
+                f"resumed={len(self.resumed)} sent={self.sent}")
 
 
 # --- the gateway probe -----------------------------------------------------
@@ -400,6 +402,18 @@ def _is_enabled(unit: str) -> str:
     return (done.stdout or "").strip()
 
 
+def autoresume_enabled() -> bool:
+    """Whether the guard puts back what it stopped, once the outage clears.
+
+    Defaults to on. The guard is the only thing that stops these timers
+    unattended, so leaving them off after a top-up just means the fleet stays
+    down until somebody notices -- which on 2026-08-28 cost 29 hours of
+    posting. Set ADBBOT_GUARD_AUTORESUME=0 to go back to resuming by hand.
+    """
+    raw = (os.environ.get("ADBBOT_GUARD_AUTORESUME") or "").strip()
+    return raw != "0"
+
+
 def stop_burners(dry_run: bool = False, logger=None) -> list:
     """Disable every launching loop. Returns the ones that were still enabled.
 
@@ -519,6 +533,21 @@ def proxy_back_message(report: GuardReport) -> str:
     return "\n".join(lines)
 
 
+def minutes_back_message(report: GuardReport) -> str:
+    lines = [
+        "\u2705 <b>MultiLogin minutes are back</b>",
+        f"The cloud is starting profiles again "
+        f"({report.refusals_501} refusal(s) in the last "
+        f"{MINUTES_501_WINDOW_MINUTES} minutes, under the "
+        f"{MINUTES_501_THRESHOLD} that stops the fleet).",
+    ]
+    if report.resumed:
+        lines.append(f"Restarted: <b>{_units(report.resumed)}</b>.")
+    else:
+        lines.append("Nothing to restart -- the loops were already running.")
+    return "\n".join(lines)
+
+
 def minutes_out_message(report: GuardReport) -> str:
     return "\n".join([
         "\U0001f6d1 <b>Out of MultiLogin minutes</b>",
@@ -558,6 +587,7 @@ def run_check(logger=None, notifier=None, now=None, state_path=None,
         report.minutes_out = report.refusals_501 >= MINUTES_501_THRESHOLD
 
     alerts = []
+    proxy_came_back = False
 
     if report.probe.exhausted:
         if was != "exhausted":
@@ -590,13 +620,12 @@ def run_check(logger=None, notifier=None, now=None, state_path=None,
                 # channel muted.
                 (report.gb_left, report.gb_allowance, report.burn_rate,
                  report.minutes_this_cycle) = estimate_gb(state, now=now)
-                if (os.environ.get("ADBBOT_GUARD_AUTORESUME") or "").strip() == "1":
-                    report.resumed = resume_burners(
-                        state.get("stopped_by_guard"), dry_run=dry_run,
-                        logger=logger)
-                    if not dry_run:
-                        state["stopped_by_guard"] = []
-                alerts.append(("proxy_back", proxy_back_message(report)))
+                # The resume itself happens at the single site below, once
+                # the minute check has also had its say -- coming back from a
+                # 402 while the minutes are still gone must not restart the
+                # fleet. The message is appended there for the same reason:
+                # it reports what was actually restarted.
+                proxy_came_back = True
             elif not state.get("topped_up_at"):
                 # First healthy tick on a box that has never seen one. Start
                 # counting from now; the estimate is only ever as old as this.
@@ -623,12 +652,35 @@ def run_check(logger=None, notifier=None, now=None, state_path=None,
                                 now=now, state=alerts_state):
         alerts.append(("proxy_low", proxy_low_message(report)))
 
+    was_minutes_out = state.get("minutes") == "exhausted"
     if report.minutes_out:
         report.stopped = report.stopped or stop_burners(dry_run=dry_run,
                                                         logger=logger)
         if report.stopped:
             state["stopped_by_guard"] = sorted(
                 set(state.get("stopped_by_guard") or []) | set(report.stopped))
+    state["minutes"] = "exhausted" if report.minutes_out else "ok"
+
+    # The one place anything gets put back. Both outages -- an empty proxy
+    # allowance and spent minutes -- stop the same timers, so recovering from
+    # one while the other is still out must not restart the fleet: this asks
+    # for both to be clear. `stopped_by_guard` is the guard's own record, so a
+    # loop somebody switched off by hand (warm-up, since 2026-08-20) is never
+    # in it and stays off. Clearing the record makes this idempotent -- it runs
+    # every tick, and only the tick that actually re-enables reports anything.
+    if (not report.minutes_out
+            and report.probe.status == "ok"
+            and state.get("stopped_by_guard")
+            and autoresume_enabled()):
+        report.resumed = resume_burners(state.get("stopped_by_guard"),
+                                        dry_run=dry_run, logger=logger)
+        if not dry_run:
+            state["stopped_by_guard"] = []
+
+    if proxy_came_back:
+        alerts.append(("proxy_back", proxy_back_message(report)))
+    if was_minutes_out and not report.minutes_out:
+        alerts.append(("minutes_back", minutes_back_message(report)))
     if mlx_minutes.should_alert("minutes_out", report.minutes_out, now=now,
                                 state=alerts_state):
         alerts.append(("minutes_out", minutes_out_message(report)))

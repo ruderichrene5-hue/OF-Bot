@@ -18,7 +18,11 @@ from adb_bot.core.models import Profile
 from adb_bot.clients.multilogin import (
     MultiloginAdbEnableClient,
     MultiloginLauncherClient,
+    MultiloginPhoneStatusClient,
     MultiloginShutdownClient,
+    STATUS_READY,
+    STATUS_SHUTDOWN,
+    STATUS_STARTING,
 )
 
 DEFAULT_PROFILE_IDS = ["626005033091072287", "624310694145163612", "625149430776987991", "622381034276651060", "623102213643829576", "623102253758153032"]
@@ -316,6 +320,76 @@ def _enable_reported_not_running(response, profile_id: str) -> bool:
     return False
 
 
+_NEARBY_CITIES = {
+    "north_rhine_westphalia": ["cologne", "dusseldorf", "essen", "dortmund", "duisburg", "bochum", "bonn", "wuppertal"],
+    "baden_wurttemberg": ["stuttgart", "karlsruhe", "mannheim", "freiburg", "heidelberg"],
+    "lower_saxony": ["hanover", "brunswick", "osnabruck", "oldenburg", "gottingen"],
+}
+
+
+def _rotate_proxy_exit(profile_id: str, logger, change_city: bool = False) -> bool:
+    """Give a phone that will not start a new proxy exit in the same region.
+
+    Only the session id in the gateway username changes, so country and region
+    (and therefore the location) stay as they were. Best effort: any failure
+    returns False and the caller carries on as before.
+    """
+    import os
+    import random
+    import re
+    import string
+
+    import requests
+
+    token = os.environ.get("MULTILOGIN_TOKEN", "")
+    if not token:
+        return False
+    headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+    base = "https://api.multilogin.com/mobile_profiles/phone"
+    try:
+        page = 1
+        proxy = None
+        folder_id = None
+        while proxy is None:
+            items = requests.get(base + "/list", headers=headers, timeout=30,
+                                 params={"page": page, "page_size": 100}).json()["data"]["items"]
+            for item in items:
+                if str(item.get("id")) == str(profile_id):
+                    proxy = item.get("proxy") or {}
+                    folder_id = item.get("folder_id")
+                    break
+            if len(items) < 100:
+                break
+            page += 1
+        if not proxy or not re.search(r"-sid-[^-]+", proxy.get("username", "")):
+            return False
+        sid = "".join(random.choices(string.ascii_letters + string.digits, k=8))
+        user = re.sub(r"-sid-[^-]+", "-sid-" + sid, proxy["username"], count=1)
+        if change_city:
+            region = re.search(r"-region-([a-z_]+)-", user)
+            cities = _NEARBY_CITIES.get(region.group(1) if region else "", [])
+            if cities:
+                user = re.sub(r"-city-[a-z_]+", "", user)
+                user = user.replace("-sid-", "-city-%s-sid-" % random.choice(cities), 1)
+        # folder_id is included explicitly and re-fetched right before the call:
+        # omitting it here is what silently knocked profiles out of their model
+        # folder on 2026-09-21/22 (into Default folder, or into another model's
+        # folder) every time this ran. MLX's update endpoint does not leave an
+        # unset field alone -- it must be told the current value on every write.
+        body = {"id": profile_id,
+                "proxy_config": {"use_proxy_cfg": False, "type_id": 1, "protocol": 1,
+                                 "server": proxy["server"], "port": int(proxy["port"]),
+                                 "username": user, "password": proxy["password"]}}
+        if folder_id:
+            body["folder_id"] = folder_id
+        response = requests.put(base + "/update", headers=headers, timeout=30, json=body)
+        logger.info("Proxy exit changed for %s (same region): HTTP %s", profile_id, response.status_code)
+        return response.ok
+    except Exception as exc:
+        logger.warning("Could not change proxy exit for %s: %s", profile_id, exc)
+        return False
+
+
 def prepare_profile_for_adb(
     profile_id: str,
     api_client: MultiloginApiClient,
@@ -331,6 +405,7 @@ def prepare_profile_for_adb(
     target_handle: str | None = None,
     launcher_client=None,
     relaunch_after_attempts: int | None = None,
+    status_client: MultiloginPhoneStatusClient | None = None,
 ):
     """Wait for a launched profile to become ADB-ready.
 
@@ -348,12 +423,25 @@ def prepare_profile_for_adb(
     ``relaunch_after_attempts`` is derived from ``max_attempts`` when left as
     None (see RELAUNCH_ATTEMPT_FRACTION); it stays an explicit parameter so
     callers and tests that pin a threshold keep working.
+
+    ``status_client``, when given, checks the phone's actual lifecycle status
+    (`/mobile_profiles/phone/statuses`) before touching ADB at all -- ground
+    truth this loop never had access to before 2026-09-17, because every prior
+    version of this function only ever inferred boot state indirectly from
+    adb/set's own "not running" (42002) response. A profile still
+    ``STATUS_STARTING`` gets a free wait instead of a wasted enable_adb call
+    (and without being counted as a not-running failure); a profile that has
+    already fallen back to ``STATUS_SHUTDOWN`` triggers the existing relaunch
+    path immediately, on real evidence, instead of after N indirect failures.
+    Any error from this still-new endpoint is swallowed and this call degrades
+    to the old adb-response-only behaviour for that attempt.
     """
     if relaunch_after_attempts is None:
         relaunch_after_attempts = relaunch_after_attempts_for(max_attempts)
     profile = None
     consecutive_not_running = 0
     relaunched = False
+    proxy_rotations = 0
     attempt = 0
     budget = max_attempts
 
@@ -363,13 +451,28 @@ def prepare_profile_for_adb(
         logger.info("Sleeping %s seconds before checking again", wait_seconds)
         time.sleep(wait_seconds)
 
-        logger.info("Enabling ADB for profile %s before checking credentials", profile_id)
-        adb_enable_response = adb_enable_client.enable_adb([profile_id], enabled=True)
-        logger.info("ADB enable response for %s: %s", profile_id, adb_enable_response)
-        if _enable_reported_not_running(adb_enable_response, profile_id):
+        real_status = None
+        if status_client is not None:
+            try:
+                real_status = status_client.status_for(profile_id)
+            except Exception as exc:
+                logger.info("Phone status check failed for %s (%s); falling back to ADB-only signal", profile_id, exc)
+
+        if real_status == STATUS_STARTING:
+            logger.info("Profile %s still booting (STATUS_STARTING); skipping ADB enable this attempt", profile_id)
+            continue
+
+        if real_status == STATUS_SHUTDOWN:
+            logger.info("Profile %s confirmed STATUS_SHUTDOWN by Multilogin's own status endpoint", profile_id)
             consecutive_not_running += 1
         else:
-            consecutive_not_running = 0
+            logger.info("Enabling ADB for profile %s before checking credentials", profile_id)
+            adb_enable_response = adb_enable_client.enable_adb([profile_id], enabled=True)
+            logger.info("ADB enable response for %s: %s", profile_id, adb_enable_response)
+            if _enable_reported_not_running(adb_enable_response, profile_id):
+                consecutive_not_running += 1
+            else:
+                consecutive_not_running = 0
 
         logger.info("Checking ADB credentials for %s", profile_id)
         api_response = api_client.fetch_adb_credentials([profile_id])
@@ -399,6 +502,21 @@ def prepare_profile_for_adb(
                 # so give it a full budget rather than whatever was left over.
                 budget = attempt + max_attempts
                 continue
+
+            if launcher_client is not None and relaunched and proxy_rotations < 2:
+                # The phone will not start on this proxy exit: give it a fresh
+                # exit in the same country/region (so still close to the old
+                # location) and one more full budget.
+                proxy_rotations += 1
+                if _rotate_proxy_exit(profile_id, logger, change_city=proxy_rotations >= 2):
+                    try:
+                        response = launcher_client.start_profiles([profile_id])
+                        logger.info("Relaunch after proxy change for %s: %s", profile_id, response)
+                    except Exception as exc:
+                        logger.warning("Relaunch after proxy change failed for %s: %s", profile_id, exc)
+                    consecutive_not_running = 0
+                    budget = attempt + max_attempts
+                    continue
 
             logger.warning(
                 "Profile %s is still not running after %s attempts%s -- stopping early rather than "
@@ -661,6 +779,7 @@ def _run_profile_workflow(
         queue_id=queue_id,
         target_handle=target_handle,
         launcher_client=launcher_client,
+        status_client=MultiloginPhoneStatusClient(bearer_token),
     )
     if not profile:
         if callable(status_callback):

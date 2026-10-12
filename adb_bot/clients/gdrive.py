@@ -1,9 +1,11 @@
 """Minimal Google Drive access for the spoofing pipeline's raw videos.
 
-The pipeline only needs three things from Drive: list the per-model subfolders of
-`01_Raw_Videos`, list the video files in each, and download one file. That narrow
-surface is what `DriveClient` exposes, so the rest of the pipeline never imports
-a Google library and stays testable with a fake.
+The pipeline needs to list the per-model subfolders of `01_Raw_Videos`, list
+the video files in each, download one file, and (since 2026-09-11, explicit
+operator instruction -- restructuring MLX's raw-video layout to match
+GeeLark's `<Model>/<YYYY-MM-DD>/` date-folder pattern) create folders and move
+files. That narrow surface is what `DriveClient` exposes, so the rest of the
+pipeline never imports a Google library and stays testable with a fake.
 
 Auth is a **service account** JSON key (no interactive OAuth -- this runs
 unattended on the server). Share the Drive folder with the service account's
@@ -18,8 +20,13 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-# Read-only: the bot never modifies the raw-videos folder.
-SCOPES = ("https://www.googleapis.com/auth/drive.readonly",)
+# Read+write (widened 2026-09-11 from drive.readonly, explicit operator
+# instruction -- "du kannst umtauschen von mir aus" -- so this client can
+# create the date subfolders and move the existing raw videos into them.
+# Was deliberately readonly before that; keep new write calls scoped to what
+# the raw-videos restructuring actually needs (create_folder, move_file),
+# not a general excuse to start writing elsewhere in Drive.
+SCOPES = ("https://www.googleapis.com/auth/drive",)
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 
@@ -94,6 +101,30 @@ class DriveClient:
             {"id": f["id"], "name": f["name"], "link": f.get("webViewLink")}
             for f in self._list(query)
         ]
+
+    def create_folder(self, parent_id: str, name: str) -> str:
+        """Create a subfolder named `name` under `parent_id`; returns its id."""
+        body = {"name": name, "mimeType": FOLDER_MIME, "parents": [parent_id]}
+        created = self.service.files().create(
+            body=body, fields="id", supportsAllDrives=True).execute()
+        return created["id"]
+
+    def get_or_create_folder(self, parent_id: str, name: str) -> str:
+        """`create_folder`, but reuses an existing same-named subfolder instead
+        of making a duplicate -- safe to call every run without piling up
+        `<Model>/2026-09-11 (1)/`-style copies."""
+        for f in self.list_subfolders(parent_id):
+            if f["name"] == name:
+                return f["id"]
+        return self.create_folder(parent_id, name)
+
+    def move_file(self, file_id: str, new_parent_id: str, old_parent_id: str) -> None:
+        """Move `file_id` from `old_parent_id` to `new_parent_id` (Drive files
+        can have multiple parents; this adds the new one and removes the old,
+        which is how Drive v3 represents a "move")."""
+        self.service.files().update(
+            fileId=file_id, addParents=new_parent_id, removeParents=old_parent_id,
+            fields="id, parents", supportsAllDrives=True).execute()
 
     def download(self, file_id: str, dest_path: str) -> str:
         """Download `file_id` to `dest_path`; returns the path."""

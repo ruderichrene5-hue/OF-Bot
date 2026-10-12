@@ -66,6 +66,7 @@ CATEGORIES = {
     "fleet": "nothing is launching, cause unattributed (mlx-minutes)",
     "flags": "profiles tagged as needing a person (issue-tags)",
     "digest": "the daily summary (digest)",
+    "phones": "physical iPhone farm: phone/relay offline, live video not restartable (iphone_farm_watchdog)",
 }
 
 

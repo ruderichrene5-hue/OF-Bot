@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import os
 import queue
+import signal
+import sys
 import threading
 import time
 from datetime import datetime, timedelta
@@ -30,11 +32,48 @@ from zoneinfo import ZoneInfo
 from adb_bot.automation import geelark_lifecycle as lifecycle
 from adb_bot.clients.geelark.transport import GeelarkTransport
 
+# Best-effort safety net against orphaned phones on an external kill (an
+# operator's `systemctl restart`, systemd's own RuntimeMaxSec cutoff, a
+# reboot). Found live 2026-09-06: a restart mid-cycle left phones open on
+# Geelark's side with nothing here ever telling them to stop -- silent
+# per-minute billing plus, worse, a shared proxy port re-opened by the next
+# process while the orphan was still holding it (a real "two phones on one
+# modem" collision, the exact failure this whole session has been careful
+# to avoid elsewhere). `run_queue.worker()` below adds a phone_id here right
+# before starting its cycle and removes it right after; the SIGTERM handler
+# sweeps whatever is still in the set. Deliberately a superset (a phone
+# whose cycle already moved past the "open" step is included too) --
+# calling /phone/stop on an already-stopped phone is a harmless no-op, and
+# under-including here is the actual danger.
+_IN_FLIGHT_PHONE_IDS: set[str] = set()
+_IN_FLIGHT_LOCK = threading.Lock()
+_SIGTERM_HANDLER_INSTALLED = False
+
+
+def _install_sigterm_cleanup() -> None:
+    global _SIGTERM_HANDLER_INSTALLED
+    if _SIGTERM_HANDLER_INSTALLED:
+        return
+    _SIGTERM_HANDLER_INSTALLED = True
+
+    def _handler(signum, frame):
+        with _IN_FLIGHT_LOCK:
+            ids = list(_IN_FLIGHT_PHONE_IDS)
+        if ids:
+            try:
+                GeelarkTransport().post("/phone/stop", {"ids": ids})
+            except Exception:
+                pass
+        sys.exit(143)   # 128 + SIGTERM(15), the conventional exit code
+
+    signal.signal(signal.SIGTERM, _handler)
+
 BERLIN = ZoneInfo("Europe/Berlin")
-WARMUP_WINDOW_START_HOUR = 23    # inclusive
+WARMUP_WINDOW_START_HOUR = 0    # inclusive
 WARMUP_WINDOW_END_HOUR = 6       # exclusive
 
-CONCURRENCY = 4    # one per real modem
+CONCURRENCY = 9    # one per real modem -- 4 active-rotation + 5 passive-rotation
+                   # (ADBBOT_GEELARK_PASSIVE_PROXY_PORTS), raised from 4 2026-09-06
 
 # Posts per launch, not per day. Changed 2026-08-31: the launch itself (cold
 # boot + IP rotation + ADB connect) is a fixed ~90s cost regardless of how
@@ -45,7 +84,8 @@ CONCURRENCY = 4    # one per real modem
 # made a third post cheap enough to be worth it.
 POSTS_PER_LAUNCH = 3
 
-# How long before the 23:00 Warmup window an Active_Posting pass must stop
+# How long before the Warmup window (WARMUP_WINDOW_START_HOUR, 00:00 Berlin
+# since 2026-09-06) an Active_Posting pass must stop
 # claiming new profiles. Not zero: the last profile claimed just before the
 # deadline still needs time to actually finish, so this is a floor under the
 # deadline, not the deadline itself -- see _active_posting_deadline.
@@ -66,14 +106,33 @@ NIGHT_WINDOW_SAFETY_BUFFER_SECONDS = 15 * 60
 # the hourly change traded away the larger per-slot time budget the 3x/day
 # spacing gave each run, which matters for how long the live post-confirm
 # window (reel_verify.FAST_TIMEOUT_SECONDS) can afford to be.
-DAY_POSTING_FIRE_TIMES_BERLIN = ((7, 0), (12, 30), (18, 30))
+#
+# Changed 3x/day -> 2x/day 2026-09-06, explicit instruction: with
+# POSTS_PER_LAUNCH already at 3 and live capacity just raised from 4 to 9
+# modems (see CONCURRENCY), two wider-spaced runs cover the same daily
+# volume with a bigger per-slot time budget each, same reasoning as the
+# 3x/day-over-hourly call above. Paired with WARMUP_WINDOW_START_HOUR
+# moving 23 -> 0 the same day (adbbot-geelark-day-posting.timer's
+# OnCalendar lines updated to match -- keep both in sync by hand).
+DAY_POSTING_FIRE_TIMES_BERLIN = ((6, 0), (15, 0))
 
 
 def in_warmup_window(now: datetime | None = None) -> bool:
-    """True during the 23:00-06:00 Berlin freeze window -- the one that
-    wraps past midnight, so it's an OR, not a simple between-check."""
+    """True during the WARMUP_WINDOW_START_HOUR-WARMUP_WINDOW_END_HOUR
+    Berlin freeze window.
+
+    Handles both shapes: a window that wraps past midnight (start > end,
+    e.g. the original 23:00-06:00 -- needs an OR) and one that doesn't
+    (start <= end, e.g. 00:00-06:00 since 2026-09-06 -- needs a plain
+    between-check). Bug found live making this change: the OR form alone
+    silently returns True for every hour of the day once start is 0
+    (`hour >= 0` is always true), which would have frozen Active_Posting
+    around the clock instead of narrowing the window as intended.
+    """
     now = (now or datetime.now(BERLIN))
     hour = now.astimezone(BERLIN).hour
+    if WARMUP_WINDOW_START_HOUR <= WARMUP_WINDOW_END_HOUR:
+        return WARMUP_WINDOW_START_HOUR <= hour < WARMUP_WINDOW_END_HOUR
     return hour >= WARMUP_WINDOW_START_HOUR or hour < WARMUP_WINDOW_END_HOUR
 
 
@@ -194,6 +253,7 @@ def run_queue(worklist: list[dict], work_fn, concurrency: int = CONCURRENCY,
     2026-08-31 -- an external RuntimeMaxSec kill (systemd's blunt tool for
     "must not run into the night window") can land mid-launch or mid-post.
     """
+    _install_sigterm_cleanup()
     deadline = time.time() + budget_seconds if budget_seconds is not None else None
 
     pending: queue.Queue = queue.Queue()
@@ -213,7 +273,13 @@ def run_queue(worklist: list[dict], work_fn, concurrency: int = CONCURRENCY,
                 return
             phone_id = str(row.get("id"))
             name = str(row.get("serialName") or phone_id)
-            out = work_fn(phone_id, name)
+            with _IN_FLIGHT_LOCK:
+                _IN_FLIGHT_PHONE_IDS.add(phone_id)
+            try:
+                out = work_fn(phone_id, name)
+            finally:
+                with _IN_FLIGHT_LOCK:
+                    _IN_FLIGHT_PHONE_IDS.discard(phone_id)
             with results_lock:
                 results.append(out)
             pending.task_done()
@@ -315,27 +381,64 @@ def run_human_verification_pass(adb_client, transport: GeelarkTransport | None =
 def run_night_sequence(adb_client, transport: GeelarkTransport | None = None,
                        logger=None, concurrency: int = CONCURRENCY,
                        now: datetime | None = None) -> dict:
-    """The confirmed nightly order, updated 2026-08-31: in-review recheck
-    first (any profile it clears joins the human-verification or Warmup
-    worklist the very same run), then human verification -- every profile
-    tagged `human verification` at this point, including ones the recheck
-    step or the day's Active_Posting just added -- and only then Warmup,
-    which resolves on its own via `active_tag_for_now` since this only runs
-    at night.
+    """The confirmed nightly order, updated 2026-09-06: post-ledger recheck
+    first (resolves the day's deferred GeeLark share confirmations -- moved
+    here from every daytime fire, see ADBBOT_GEELARK_RECHECK_ENABLED below),
+    then in-review recheck (any profile it clears joins the human-
+    verification or Warmup worklist the very same run), then human
+    verification -- every profile tagged `human verification` at this point,
+    including ones either recheck step or the day's Active_Posting just
+    added -- and only then Warmup, which resolves on its own via
+    `active_tag_for_now` since this only runs at night.
 
     One service, run sequentially rather than independently-scheduled
     timers, so the order is guaranteed rather than units racing close
     together -- and so human verification (spends real money: SMS numbers,
     captcha solves) never runs unattended outside this one nightly slot.
+
+    ledger_recheck_results moved here 2026-09-06: explicit instruction --
+    geelark_recheck's real launches (not the free no-launch "abandoned"
+    path) were competing with live daytime posting for the same 4 modem
+    slots on every single fire (07:00/12:30/18:30 Berlin), even though a
+    deferred confirmation isn't time-critical. Running it once here, after
+    the day's posting is done and the modems are otherwise idle overnight,
+    gets the same result without ever taking a slot away from posting.
+    Respects the same ADBBOT_GEELARK_RECHECK_ENABLED off-switch as before
+    so it can still be paused with the same knob.
     """
     transport = transport or GeelarkTransport()
+
+    recheck_enabled = os.environ.get(
+        "ADBBOT_GEELARK_RECHECK_ENABLED", "1").strip().lower() not in ("0", "false")
+    if recheck_enabled:
+        from adb_bot.automation.geelark_recheck import run_geelark_recheck
+        ledger_recheck_results = run_geelark_recheck(adb_client, transport=transport, logger=logger)
+    else:
+        ledger_recheck_results = []
+        if logger:
+            logger.info("geelark_scheduler: nightly ledger recheck disabled via "
+                       "ADBBOT_GEELARK_RECHECK_ENABLED -- skipping")
+
     review_results = run_in_review_recheck_pass(adb_client, transport=transport,
                                                 logger=logger, concurrency=concurrency)
     human_verification_results = run_human_verification_pass(
         adb_client, transport=transport, logger=logger, concurrency=concurrency)
+    # tag forced to Warmup explicitly, not left to active_tag_for_now's clock
+    # resolution -- found live 2026-09-07: the three steps above can run long
+    # enough (a slow SMS provider, a big recheck backlog) that by the time
+    # this last step actually starts, the wall clock has rolled past the
+    # night window's end. With no explicit tag, active_tag_for_now(now=None)
+    # re-reads the *current* time right here and silently resolved to
+    # Active_Posting instead of Warmup -- a "warmup" step that quietly
+    # started posting real reels at 06:55 Berlin, hours into the next day
+    # and overlapping with that day's own freshly-fired posting service.
+    # This function's whole purpose is the nightly Warmup step, so it must
+    # always run as Warmup regardless of how long getting here took.
     warmup_results = run_scheduled_pass(adb_client, transport=transport, logger=logger,
-                                        concurrency=concurrency, now=now)
-    return {"in_review_recheck": review_results,
+                                        concurrency=concurrency, now=now,
+                                        tag=lifecycle.TAG_WARMUP)
+    return {"ledger_recheck": ledger_recheck_results,
+           "in_review_recheck": review_results,
            "human_verification": human_verification_results,
            "warmup": warmup_results}
 
@@ -528,6 +631,20 @@ def run_scheduled_pass(adb_client, transport: GeelarkTransport | None = None,
         def _is_link_account(row):
             return any(t.get("name") == "link" for t in (row.get("tags") or []))
         worklist = [row for row in worklist if not _is_link_account(row)]
+
+    # Exclude one or more models entirely from this pass -- unlike
+    # ADBBOT_GEELARK_DEFER_MODEL (pushes to the back, still runs eventually),
+    # this drops them from the worklist outright. Comma-separated,
+    # case-insensitive. Added 2026-09-05 for a manual "leave Cloe and Laura
+    # out of posting for now" instruction.
+    exclude_models = {
+        name.strip().lower()
+        for name in os.environ.get("ADBBOT_GEELARK_EXCLUDE_MODEL", "").split(",")
+        if name.strip()
+    }
+    if exclude_models:
+        worklist = [row for row in worklist
+                   if ((row.get("group") or {}).get("name") or "").lower() not in exclude_models]
 
     # Push one or more models' phones to the back of the worklist -- added
     # 2026-09-01 for a manual run where a model's Drive content lands later

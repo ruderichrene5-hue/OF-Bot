@@ -421,6 +421,15 @@ def retry_failed_posts(airtable, ledger=None, logger=None, now=time.time,
             # still being retried -- its row even kept Issue Type
             # "Failed - Needs Retry", which says the opposite of what is true.
             reason = _profile_issue_reason(outcome, fields)
+            # Retries Exhausted is mostly launch/ADB faults on our side, not a
+            # problem with the account: it no longer parks the profile.
+            if reason == at.PROFILE_ISSUE_EXHAUSTED:
+                reason = None
+                if not dry_run:
+                    try:
+                        airtable.mark_post_retries_exhausted(queue_id)
+                    except Exception as exc:
+                        log("warning", "Could not mark %s exhausted: %s", name, exc)
             if reason and not dry_run:
                 profile_recid = _profile_record_id(fields, accounts_by_id)
                 if profile_recid:

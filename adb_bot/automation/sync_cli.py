@@ -29,6 +29,7 @@ import sys
 
 from adb_bot.clients import airtable as at
 from adb_bot.clients.airtable import AirtableClient
+from adb_bot.clients.local_store import LocalAirtableClient
 from adb_bot.clients.multilogin.mobile_list import MultiloginMobileListClient
 from adb_bot.clients.multilogin.folders import MultiloginFolderClient
 from adb_bot.config import settings
@@ -69,7 +70,7 @@ def _print_plan(plan: mlx_sync.SyncPlan) -> None:
 def run_sync(mlx_token: str, airtable_token: str, base_id: str, dry_run: bool = True,
              skip_staging: bool = False, reconcile: bool = True) -> mlx_sync.SyncReport:
     mlx_client = MultiloginMobileListClient(mlx_token)
-    airtable = AirtableClient(airtable_token, base_id, at.TABLE_PROFILES)
+    airtable = LocalAirtableClient(airtable_token, base_id, at.TABLE_PROFILES)
 
     print(f"[sync] Base {base_id} | mode {'DRY-RUN' if dry_run else 'APPLY'}")
     items = mlx_client.list_mobile_profiles()

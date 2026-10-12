@@ -296,6 +296,27 @@ def _plan_reconcile(normalized: NormalizedProfile, existing: dict,
         removed = [f"-{t}" for t in current_tags if t not in normalized.tags]
         reasons.append("tags " + (", ".join(added + removed) or "cleared"))
 
+    # A person only ever tags a profile 'Setup' in MultiLogin once its bio and
+    # profile picture are done by hand -- that is what the tag means to the
+    # people applying it. And 'Setup' + 'Active / Posting' together *is* the
+    # release to post, full stop -- no separate hand-made first post required
+    # (Rene, 2026-09-23: "wenn Setup + Active Posting gemacht ist, ist das
+    # Freigabe"). The hand-off gate (posting_planner.py) checks three
+    # *separate* local checkboxes that nothing was setting from these tags, so
+    # a tagged-ready profile sat parked on "waiting on a person" forever, past
+    # the point a person had actually released it. Backfill only -- never
+    # clears an already-True box.
+    if "Setup" in normalized.tags:
+        if not existing.get("bio_done"):
+            updates[at.F_PROF_BIO_DONE] = True
+            reasons.append("bio done (Setup tag)")
+        if not existing.get("picture_done"):
+            updates[at.F_PROF_PICTURE_DONE] = True
+            reasons.append("picture done (Setup tag)")
+        if "Active / Posting" in normalized.tags and not existing.get("first_post_done"):
+            updates[at.F_PROF_FIRST_POST_DONE] = True
+            reasons.append("first post done (Setup + Active/Posting tags)")
+
     return updates, previous, reasons
 
 

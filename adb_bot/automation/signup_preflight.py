@@ -61,12 +61,19 @@ UNREACHABLE = "unreachable"     # never came up, or died before it could be read
 # claimed phone as free -- not the reverse.
 BUSY_TAGS = frozenset({
     "Issue", "Created", "Account creation done", "gmail", "review",
-    "Banned / Dead", "logged out",
+    "Banned / Dead",
+    # `Locked Out` is the current name (renamed from `logged out` 2026-09-24);
+    # both kept so a not-yet-relabelled phone still reads as claimed.
+    "logged out", "Locked Out",
     # Added 2026-08-16, all seen on phones the old list called empty:
     "Active / Posting",             # `Default profile name (42)`: live account
     "Ready for Posting",
     "Second Account", "2 accounts",
+    # `unable to verify` is retired (2026-09-24, folded into `Human
+    # Verification`) but kept here too: a phone a person hasn't relabelled
+    # yet must still read as claimed, not free.
     "unable to verify",
+    "Human Verification",
     "Link",
     "Warmup ready, need Bio and Pic",
     "Warmup Day 2 Done", "Warmup Day 3 Done",   # `Blank (5)`, `Blank (6)`
@@ -116,7 +123,8 @@ def check_phone(profile_item, clients, adb_client, logger, args) -> dict:
             profile_id, clients.api, clients.adb_enable, logger,
             max_attempts=args.readiness_attempts,
             wait_seconds=args.readiness_wait,
-            launcher_client=clients.launcher)
+            launcher_client=clients.launcher,
+            status_client=clients.status)
         if not profile:
             out["text"] = "never became ADB-ready"
             return out

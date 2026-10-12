@@ -257,6 +257,11 @@ def flag_stale_profiles(airtable, ledger=None, now: float = 0.0,
 
     now = now or _time.time()
     tally = {"considered": 0, "stale": 0, "flagged": 0, "errors": 0}
+    # "No Recent Success" counts our own launch/ADB failures as evidence against
+    # the account, so it flagged healthy profiles over and over. Off by default.
+    import os as _os
+    if _os.environ.get("ADBBOT_STALE_FLAGGING") != "1":
+        return tally
 
     def log(level: str, message: str, *args) -> None:
         if logger is not None:

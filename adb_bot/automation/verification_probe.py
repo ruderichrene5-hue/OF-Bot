@@ -456,6 +456,7 @@ def _run_on_phone(args, clients, adb_client, recorder, logger,
         max_attempts=args.readiness_attempts,
         wait_seconds=args.readiness_wait,
         launcher_client=clients.launcher,
+        status_client=clients.status,
     )
     if not profile:
         print(f"[fail] {name} never became ADB-ready. This is usually MultiLogin's "

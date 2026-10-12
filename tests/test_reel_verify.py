@@ -646,3 +646,45 @@ class VerificationDetailReachesTheLogTest(TestCase):
         src = inspect.getsource(workflow.run_profile_workflow)
         self.assertIn("except TypeError:", src)
         self.assertIn("status_callback(pid, status)", src)
+
+
+class UploadBannerTest(TestCase):
+    """2026-09-27: a slow phone showed "Keep Instagram open to finish posting…"
+    for 5+ minutes; the 45s budget closed the phone and froze the upload."""
+
+    def _run(self, screens, **kwargs):
+        clock = FakeClock()
+        it = iter(screens)
+        last = {"s": ""}
+
+        def screen():
+            try:
+                last["s"] = next(it)
+            except StopIteration:
+                pass
+            return last["s"]
+        return verify_reel_posted(get_screen_text=screen, now=clock.now, sleep=clock.sleep,
+                                  poll_seconds=10, min_wait=20, timeout=45, **kwargs), clock
+
+    def test_classifies_the_banner(self):
+        self.assertEqual(rv.classify_post_screen("Keep Instagram open to finish posting… 56.0"),
+                         rv.STATE_UPLOADING)
+        self.assertEqual(rv.classify_post_screen("Posting to nikki_klaert_auf…"), rv.STATE_UPLOADING)
+
+    def test_waits_past_the_budget_while_uploading_then_confirms(self):
+        screens = ["Keep Instagram open to finish posting… 56.0"] * 30 + ["Posting to x…", "home feed"]
+        result, clock = self._run(screens)
+        self.assertTrue(result.confirmed)
+        self.assertEqual(result.method, rv.VIA_UPLOAD_FINISHED)
+        self.assertGreater(result.waited_seconds, 45)
+
+    def test_hung_upload_is_capped_and_stays_uncertain(self):
+        result, _ = self._run(["Keep Instagram open to finish posting… 10.0"])
+        self.assertFalse(result.confirmed)
+        self.assertTrue(result.uncertain)
+        self.assertLessEqual(result.waited_seconds, rv.UPLOAD_MAX_SECONDS + 10)
+
+    def test_banner_turning_into_an_error_is_a_failure(self):
+        result, _ = self._run(["Keep Instagram open to finish posting…", "Upload failed"])
+        self.assertFalse(result.confirmed)
+        self.assertEqual(result.method, rv.FAIL_ERROR_DIALOG)

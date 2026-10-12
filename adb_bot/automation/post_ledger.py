@@ -93,11 +93,21 @@ class ShareRecord:
     def blocks_repost(self) -> bool:
         """Whether this record should stop the same clip going out again.
 
-        Only positive *disproof* clears the way. An unresolved share blocks,
-        because "we don't know" and "it didn't post" are different things and
-        conflating them is exactly what caused double posts.
+        An unresolved share blocks, because "we don't know" and "it didn't post"
+        are different things and conflating them is exactly what caused double
+        posts. A *disproved* share blocks too (changed 2026-09-21): the check
+        that disproves a post has false negatives, and 17 of 614 shares were
+        re-sent after a wrong "disproved", putting the same reel on the account
+        two or three times. The profile gets a different clip instead.
         """
-        return self.status in (STATUS_SHARED, STATUS_CONFIRMED)
+        # Any record at all blocks (2026-09-27). Before, an unknown status --
+        # e.g. a hand-written "cleared" -- re-opened the clip, and that is how
+        # the same reel went out twice on @geheime.nikki: on a slow phone the
+        # first upload was still running when the post count was re-read, the
+        # block was lifted, and the re-send landed next to the original.
+        # A clip that was ever shared to a profile never goes to it again;
+        # a missed slot gets a new clip instead.
+        return bool(self.status)
 
 
 def media_fingerprint(media_path) -> str:
@@ -170,6 +180,15 @@ class PostLedger:
         """
         record = self.lookup(profile_id, media_fingerprint(media_path))
         return bool(record and record.blocks_repost())
+
+    def has_ever_posted(self, profile_id: str) -> bool:
+        """Whether this account has any Share attempt on record at all --
+        confirmed, disproved, or still unresolved, any of them counts. Used to
+        tell a brand-new account's actual first post apart from "first post of
+        today's batch", which the ledger otherwise has no way to see."""
+        if not profile_id:
+            return False
+        return any(record.profile_id == profile_id for record in self._iter_records())
 
     # -- writing ---------------------------------------------------------
 

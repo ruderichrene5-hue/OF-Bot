@@ -63,12 +63,10 @@ INSTAGRAM_PACKAGE = "com.instagram.android"
 
 
 def airtable_client() -> AirtableClient:
-    token = settings.get_saved_airtable_token()
-    base_id = settings.get_saved_airtable_base_id()
-    if not token:
-        raise SystemExit("[fatal] No Airtable token (AIRTABLE_TOKEN / dev settings).")
+    # Local file-backed store, not the real Airtable API -- see local_store.py.
     from adb_bot.clients import airtable as at
-    return AirtableClient(token, base_id, at.TABLE_MODELS)
+    from adb_bot.clients.local_store import LocalAirtableClient
+    return LocalAirtableClient("local", "local", at.TABLE_MODELS)
 
 
 def phones_to_check(transport=None) -> list[dict]:

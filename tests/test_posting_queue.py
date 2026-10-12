@@ -544,17 +544,17 @@ class PostingWindowTest(TestCase):
         self.assertEqual(plan.to_post, [])
         self.assertIn("outside posting hours", plan.skipped[0].reason)
 
-    def test_the_window_opens_at_nine_berlin(self):
-        self.assertEqual(self._plan_at(datetime(2026, 7, 28, 6, 59)).to_post, [])   # 08:59
-        self.assertEqual(len(self._plan_at(datetime(2026, 7, 28, 7, 0)).to_post), 1)  # 09:00
+    def test_the_window_opens_at_eight_berlin(self):
+        self.assertEqual(self._plan_at(datetime(2026, 7, 28, 5, 59)).to_post, [])   # 07:59
+        self.assertEqual(len(self._plan_at(datetime(2026, 7, 28, 6, 0)).to_post), 1)  # 08:00
 
-    def test_the_window_closes_at_eleven_berlin(self):
-        self.assertEqual(len(self._plan_at(datetime(2026, 7, 28, 20, 59)).to_post), 1)  # 22:59
-        self.assertEqual(self._plan_at(datetime(2026, 7, 28, 21, 0)).to_post, [])       # 23:00
+    def test_the_window_closes_just_before_midnight_berlin(self):
+        self.assertEqual(len(self._plan_at(datetime(2026, 7, 28, 21, 58)).to_post), 1)  # 23:58
+        self.assertEqual(self._plan_at(datetime(2026, 7, 28, 21, 59)).to_post, [])       # 23:59
 
     def test_the_window_is_berlin_wall_clock_not_utc(self):
-        """Same UTC instant, both sides of the line: 07:30 UTC is 09:30 Berlin
-        in August (open) and 08:30 in January (shut). Comparing against UTC
+        """Same UTC instant, both sides of the line: 06:30 UTC is 08:30 Berlin
+        in August (open) and 07:30 in January (shut). Comparing against UTC
         would post an hour early all winter."""
-        self.assertEqual(len(self._plan_at(datetime(2026, 8, 3, 7, 30)).to_post), 1)
-        self.assertEqual(self._plan_at(datetime(2026, 1, 5, 7, 30)).to_post, [])
+        self.assertEqual(len(self._plan_at(datetime(2026, 8, 3, 6, 30)).to_post), 1)
+        self.assertEqual(self._plan_at(datetime(2026, 1, 5, 6, 30)).to_post, [])

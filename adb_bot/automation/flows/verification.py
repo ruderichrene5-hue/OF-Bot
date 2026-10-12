@@ -318,6 +318,13 @@ _CONSENT_GATE_MARKERS = (
     "cookies on our products",
     "consent to meta processing",
     "set up on new device",
+    # Instagram's own standalone cookie banner -- different wording from
+    # Meta's ads-consent chain above, not covered by "cookies on our
+    # products". Found live 2026-09-07: 5 of 7 human-verification runs that
+    # gave up as needs_human were actually just this screen, unrecognised by
+    # any marker anywhere in the codebase (same gap exists in
+    # interruptions._ONBOARDING_MARKERS, fixed there too).
+    "allow the use of cookies by instagram",
 )
 
 

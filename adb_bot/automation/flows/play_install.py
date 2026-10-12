@@ -356,6 +356,23 @@ def install(driver, adb_client, target: str, package: str, logger=None,
             # identical screen. `_DISMISS_LABELS` already covers `Skip`
             # alongside `Continue`, so use the full set here too.
             tapped = driver.tap_label(_DISMISS_LABELS)
+            if not tapped:
+                # The payment-method page of this same review flow ("Add a
+                # payment option to complete your account...") offers a
+                # worded "Skip" in its body text, but that text sits outside
+                # the clickable accessibility tree on some accounts -- the
+                # only clickable node the dump exposes is `Close`. Confirmed
+                # live 2026-09-13 (ambronmorafeloc11@gmail.com): three
+                # identical runs, each stuck on this exact page with
+                # `clickable labels were ['Close']` and no recognised
+                # `_DISMISS_LABELS` match, burning the whole
+                # `MAX_ACCOUNT_SETUP_CONTINUES` budget on a screen that had
+                # one live button the whole time. `Close` is scoped to this
+                # branch only, not added to `_DISMISS_LABELS` generally --
+                # elsewhere in the Play Store `Close` can mean "abandon this
+                # sheet entirely", which is the wrong action outside the
+                # account-review flow this branch is already committed to.
+                tapped = driver.tap_label(("Close", "CLOSE"))
             log("info", "Google wants this account reviewed before it can "
                         "install anything; %s (%d/%d) -- NOT reopening the "
                         "listing, which would abandon the review flow before "

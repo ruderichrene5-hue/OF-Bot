@@ -1035,6 +1035,32 @@ class AdbChallengeDriver:
         _select_first_gallery_photo_u2`): a picker cell's `content-desc`
         starts with "Photo".
         """
+        # Re-entrant, because the caller's screen classifier still reads
+        # "photo" for the post-Submit confirmation screen for a moment after
+        # the tap, before Instagram has actually moved on -- confirmed live
+        # 2026-09-24, nikki 22: the outer loop saw "photo" again and called
+        # this function a second time, which unconditionally restarted the
+        # whole push-and-pick dance and then failed outright, because a
+        # screen with the photo already attached ('Choose another photo' /
+        # 'Submit' / 'Record video instead') has no 'Upload photo instead'
+        # button to find. Recognise that screen up front and just press
+        # Submit again rather than re-running steps that already happened.
+        # Reads `self._root` as the caller's own `read_screen()` left it --
+        # no fresh dump here, so as not to consume one out of turn from a
+        # sequence the rest of this function (and its tests) still expect.
+        if (self._find_exact(("Choose another photo", "CHOOSE ANOTHER PHOTO")) is not None
+                and self._find_exact(("Upload photo instead", "UPLOAD PHOTO INSTEAD",
+                                      "Start video selfie", "START VIDEO SELFIE")) is None):
+            resubmit = self._find_exact(("Submit", "SUBMIT", "Done", "DONE",
+                                         "Select", "SELECT", "Next", "NEXT"))
+            if resubmit is not None:
+                self._log("info", "photo challenge: already on the confirm "
+                                  "screen from an earlier tap -- submitting "
+                                  "again instead of restarting")
+                self._tap(resubmit, "confirm the selected photo (re-entry)")
+                time.sleep(max(self.settle_seconds, 3.0))
+                return True
+
         if not self.photo_source_path:
             self._log("warning",
                       "photo challenge: no picture source is configured, so "
@@ -1219,12 +1245,29 @@ class AdbChallengeDriver:
             return False
         time.sleep(self.settle_seconds)
 
-        self._root, _xml = self._dump()
-        done_center = self._find_exact(("Submit", "SUBMIT", "Done", "DONE",
-                                        "Select", "SELECT", "Next", "NEXT"))
-        if done_center is not None:
-            self._tap(done_center, "confirm the selected photo")
-            time.sleep(max(self.settle_seconds, 3.0))
+        # Same patient-retry as the gallery sheet and the permission dialog
+        # above, not a single dump: the confirm screen's `Submit` can render
+        # a beat after the picker closes. A single miss here used to return
+        # True anyway -- silently claiming the challenge was answered when
+        # nothing was ever tapped, confirmed live 2026-09-24 (nikki 22): no
+        # `Submit` found, no tap logged, yet the caller moved on as if this
+        # step had succeeded.
+        done_center = None
+        for attempt in range(5):
+            self._root, _xml = self._dump()
+            done_center = self._find_exact(("Submit", "SUBMIT", "Done", "DONE",
+                                            "Select", "SELECT", "Next", "NEXT"))
+            if done_center is not None:
+                break
+            time.sleep(2.0)
+        if done_center is None:
+            self._log("warning", "photo challenge: no confirm button found "
+                                 "after picking the photo (labels were %s)",
+                      self._clickable_labels(self._root)[:20])
+            return False
+        if not self._tap(done_center, "confirm the selected photo"):
+            return False
+        time.sleep(max(self.settle_seconds, 3.0))
         return True
 
     def capture_captcha_image(self, attempts: int = _CAPTCHA_RENDER_ATTEMPTS

@@ -78,6 +78,13 @@ SCREEN_UNKNOWN = "unknown"              # stop -- never act on this
 _CHECKPOINT_MARKERS = (
     "confirm you're human to use your account",
     "confirm you are human to use your account",
+    # Same checkpoint, video-selfie wording -- seen on the `nikkis.koenig`
+    # batch, 2026-09-25: "confirm you're a real person with a video selfie /
+    # we need more info to make sure you're human." Read as `unknown_screen`
+    # before this, which hid a real, already-created account behind a status
+    # that looked like nothing had happened.
+    "confirm you're a real person",
+    "confirm you are a real person",
 )
 
 _ENTRY_MARKERS = (
@@ -205,6 +212,11 @@ _EMAIL_MARKERS = (
     "what's your email address",
     "whats your email address",
     "enter the email address at which you can be contacted",
+    # Instagram now titles this screen just "What's your email?" (seen live
+    # 2026-09-13, all Nikki EN / Luisa signups) -- shorter than the original
+    # wording above, so it needs its own marker rather than relying on it.
+    "what's your email?",
+    "whats your email?",
 )
 
 # Strong enough to beat the phone markers, which is why CODE is ordered first:
@@ -279,6 +291,12 @@ _USERNAME_MARKERS = (
 _TERMS_MARKERS = (
     "agree to instagram's terms and policies",
     "by tapping i agree, you agree to create an account",
+    # 11.10, D3: a second, "key points" variant of the same consent screen (short
+    # bullets instead of the long paragraph) was unrecognized as SCREEN_TERMS and
+    # fell into the generic unknown-screen restart, burning a fresh phone number
+    # each time. Same "I agree" button ends it.
+    "read and agree to our terms",
+    "key points you should know",
 )
 
 _PERMISSIONS_MARKERS = (
@@ -314,7 +332,21 @@ _COOKIES_MARKERS = (
 
 _ADD_EMAIL_MARKERS = (
     "add an email address",
-    "enter the email where you can be contacted",
+    # "enter the email where you can be contacted" USED to be here and must
+    # not come back: this is now exactly the live *signup* email screen's own
+    # wording too (Instagram shortened "What's your email address?" to
+    # "What's your email?" some time before 2026-09-13, carrying the same
+    # body text as the post-creation prompt). With it here, SCREEN_ADD_EMAIL
+    # is checked before SCREEN_EMAIL, so every signup misclassified the real
+    # screen as the post-creation one, found nothing to skip, and
+    # dismiss_keyboard() sent a bare BACK press (no keyboard was ever open --
+    # the email field is never even reached) straight back to the phone
+    # screen. 30 screens of phone/add_email ping-pong later the run gave up
+    # as RESULT_STUCK. This is the exact same failure mode already fixed once
+    # for the phone side, see `_ADD_PHONE_MARKERS` below -- confirmed live
+    # 2026-09-13 against the Nikki EN batch (18/20 stuck) and the first Luisa
+    # batch, both showing nothing but alternating "phone"/"add_email" steps
+    # in the log, never reaching "email" or "code".
 )
 
 # Post-creation, Instagram also asks for a phone number. Not the signup phone
@@ -369,6 +401,14 @@ _ACCOUNT_EXISTS_MARKERS = (
     "edit profile",
     "share profile",
     "add your bio",
+    # 11.10, C9: the real feed's own accessibility identifier, present on every
+    # dump of it regardless of which banner happens to be showing. The account
+    # (@nikkiatdawn16) was genuinely created and landed on this exact screen,
+    # but it carried "Suggested for you / Find your friends" instead of "Your
+    # notifications are off" -- neither this list nor `screen_is_healthy`'s
+    # Android-flavored markers ("add to story" with spaces, not iOS's
+    # "Add-to-Story-24") matched, so a real success was read as unknown_screen.
+    "main-feed-screen",
     # The interest-picker screen ("Pick what you want to see more of", real
     # account suggestions like "bkblend_official"), observed 2026-08-22 on
     # `nora.sommer62`: the run had already tapped "I agree" -- the account
@@ -378,6 +418,19 @@ _ACCOUNT_EXISTS_MARKERS = (
     # its credentials were real and already saved; only the ledger status was
     # wrong.
     "pick what you want to see more of",
+    # Three more post-creation prompts, same failure mode, all from the
+    # `nikkis.koenig` batch (2026-09-25): the profile-picture screen ("Create
+    # a profile that shows your vibe... Add profile photo"), the notification
+    # permission prompt ("Your notifications are off"), and the location
+    # permission prompt ("To use location services, allow Instagram..."). None
+    # of these is a step this flow drives -- they're optional and skippable --
+    # so recognizing them is enough; nothing needs to be tapped through them.
+    "add profile photo",
+    "your notifications are off",
+    "to use location services",
+    # Contacts-permission prompt ("Allow access to contacts to find people to
+    # follow"), same batch, same failure mode as the three above.
+    "allow access to contacts to find people to follow",
 )
 # NOT "your profile.": half the signup says "no one will see this on your
 # profile", and so does the post-creation "Add a mobile number" prompt. Reading
@@ -1197,7 +1250,7 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     sleep(6)
                     continue
 
-                if lease is not None and any(marker in text
+                if lease is not None and any(marker in text.lower()
                                              for marker in
                                              _PHONE_INVALID_MARKERS):
                     # Instagram will not even try this number. Retyping it just
@@ -1205,6 +1258,10 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     # phone. Swap it, and do not count it against the provider:
                     # the number was delivered to us fine, Instagram declined
                     # to use it.
+                    # 11.10, E2: `text` is the raw mixed-case dump ("Input Mobile
+                    # number is invalid.") -- the markers are lowercase, so this
+                    # check silently never fired and the same rejected number got
+                    # retyped four times in a row until the run gave up.
                     log("info", "instagram calls %s invalid; swapping it",
                         lease.e164)
                     release(False)
@@ -1397,6 +1454,20 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     sleep(4)
                     continue
                 else:
+                    if "whatsapp" in text.lower():
+                        # Instagram defaults to sending the code over WhatsApp, which a
+                        # rented SMS-Pool number can never receive -- it just times out
+                        # every time (explicit instruction, chat 10.10: always switch to
+                        # SMS here, this is not occasional). "I didn't get the code"
+                        # opens a sheet with another delivery option; label wording is
+                        # a guess (not yet confirmed live) so several are tried.
+                        if driver.tap_label(("I didn't get the code", "I didn't get the code.")):
+                            log("info", "code offered via WhatsApp; switching to SMS")
+                            sleep(2)
+                            driver.tap_label(("Send code via SMS", "Resend via SMS",
+                                             "Get a text message", "Text me a code",
+                                             "Send via SMS", "Send code via text message"))
+                            sleep(2)
                     code = lease.wait_for_code(timeout=CODE_WAIT_SECONDS)
                     if not code:
                         log("warning", "no code for %s; swapping the number",
@@ -1471,9 +1542,9 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 else:
                     ours_on_screen = identity.username.lower() in text
                 if (username_filled and ours_on_screen
-                        and not any(marker in text
+                        and not any(marker in text.lower()
                                     for marker in _USERNAME_TAKEN_MARKERS)
-                        and any(marker in text
+                        and any(marker in text.lower()
                                 for marker in _USERNAME_VALID_MARKERS)):
                     # Instagram has already accepted what is in the box, so
                     # there is nothing left to type -- only a button to press.
@@ -1501,7 +1572,7 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                             driver.tap_label(_SUBMIT_LABELS)
                     sleep(8)
                     continue
-                if any(marker in text for marker in _USERNAME_TAKEN_MARKERS):
+                if any(marker in text.lower() for marker in _USERNAME_TAKEN_MARKERS):
                     # Instagram has rejected this handle, and it will reject it
                     # every time: retyping the same one is what the repeat
                     # guard sees, so the run died "username did not advance in

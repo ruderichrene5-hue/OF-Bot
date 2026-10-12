@@ -328,37 +328,30 @@ class NumberLease:
 
 # --- construction -------------------------------------------------------------
 def build_router(logger=None, **kwargs) -> SmsRouter:
-    """The configured router: 5sim primary, SMSPool fallback.
+    """The configured router: SMSPool only.
 
-    Swapped 2026-08-30 (was SMSPool primary) -- SMSPool's wallet is empty and
-    5sim's has just been topped up; 5sim's own historical delivery rate (289
-    orders, 91.7 rating) is also the better of the two, see
-    [[adbbot-sms-verification-providers]].
+    Rene, 2026-09-24: "5sim raus, komplett, auch kein Fallback" -- not used
+    any more, dropped entirely rather than kept as a second option. Was 5sim
+    primary / SMSPool fallback before that (swapped 2026-08-30, see
+    [[adbbot-sms-verification-providers]] for the history); that reasoning no
+    longer applies now that 5sim isn't in use at all.
 
     A provider with no credential is left out rather than constructed and left
-    to fail on every call, so running with only one key configured degrades to
-    "one provider, no fallback" instead of erroring on every lease.
+    to fail on every call, so running with no key configured raises here
+    instead of erroring on every lease.
     """
-    from adb_bot.clients.sms.fivesim import FiveSimProvider
     from adb_bot.clients.sms.smspool import SmsPoolProvider
-    from adb_bot.config.settings import (
-        get_saved_fivesim_token,
-        get_saved_smspool_key,
-    )
+    from adb_bot.config.settings import get_saved_smspool_key
 
     providers = []
-    fivesim_token = get_saved_fivesim_token()
-    if fivesim_token:
-        providers.append(FiveSimProvider(fivesim_token))
     smspool_key = get_saved_smspool_key()
     if smspool_key:
         providers.append(SmsPoolProvider(smspool_key))
 
     if not providers:
         raise RuntimeError(
-            "No SMS provider configured. Set SMSPOOL_API_KEY and/or FIVESIM_TOKEN "
-            "(normally from /etc/adbbot/env), or save `smspool_api_key` / "
-            "`fivesim_token` in the settings file.")
+            "No SMS provider configured. Set SMSPOOL_API_KEY (normally from "
+            "/etc/adbbot/env), or save `smspool_api_key` in the settings file.")
     if len(providers) == 1 and logger:
         logger.warning("sms: only %s is configured -- there is no fallback "
                        "provider to switch to", providers[0].name)

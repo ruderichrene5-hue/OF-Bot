@@ -152,6 +152,12 @@ _ONBOARDING_MARKERS = (
     "find people to follow",
     "sync your contacts",
     "syncing your contacts",
+    # Instagram's own standalone cookie banner, different wording from
+    # "cookies on our products" above. Found live 2026-09-07 in a human-
+    # verification run: unrecognised here, so a phone parked on this screen
+    # never got treated as a blocker at all -- see verification.py's
+    # _CONSENT_GATE_MARKERS for the matching gap fixed there.
+    "allow the use of cookies by instagram",
 )
 
 # Buttons that ADVANCE the onboarding/consent chain, in preferred order. Matched
@@ -172,6 +178,14 @@ _ONBOARDING_ADVANCE_LABELS = (
 
 # Fields that prove the Edit profile form actually loaded.
 _EDIT_PROFILE_FIELD_MARKERS = ("username", "pronouns", "bio")
+
+# How many extra times to re-read a screen the UI dump could not capture at
+# all, and how long to wait between tries. Small on purpose: this only covers
+# a dump the device killed mid-run (exit 137), which the next attempt almost
+# always survives -- it is not a wait for a slow screen, which `idle_retries`
+# already handles inside the dump itself.
+_UNREADABLE_DUMP_RETRIES = 2
+_UNREADABLE_DUMP_PAUSE = 1.5
 
 
 def _ig():
@@ -352,7 +366,8 @@ def handle_permission_prompts(target, adb_client, logger=None, flow=None, max_ro
     return handled_any
 
 
-def handle_blocking_prompts(target, adb_client, logger=None, flow=None, max_rounds: int = 14) -> bool:
+def handle_blocking_prompts(target, adb_client, logger=None, flow=None,
+                            max_rounds: int = 14, dump=None) -> bool:
     """Clear the chain of new-device onboarding / ads-consent screens AND the
     runtime permission dialogs a fresh profile hits before the feed.
 
@@ -362,14 +377,44 @@ def handle_blocking_prompts(target, adb_client, logger=None, flow=None, max_roun
     app), then loop and re-check. Stops when nothing known is on screen, when a
     screen stops advancing (the marker set repeats), or after ``max_rounds``.
     Returns True if it advanced at least one screen.
+
+    ``dump`` overrides how the screen is read, and a caller that already holds
+    a live uiautomator2 device MUST pass one. The default reader shells out to
+    `uiautomator dump`, and only one process can own Android's UiAutomation
+    connection: with u2 connected the shell dump is SIGKILLed (exit 137), so
+    every screen reads as blank and this clears nothing. That is exactly how
+    `Nikki 28` sat behind Meta's ads-consent gate for four days while the
+    posting flow called this on every attempt.
     """
     ig = _ig()
     handled_any = False
     last_markers = None
     stuck = 0
+    read_screen = dump or (
+        lambda: ig._adb_capture_ui_dump(target, logger=logger, idle_retries=2))
 
     for round_index in range(1, max_rounds + 1):
-        root = ig._adb_capture_ui_dump(target, logger=logger, idle_retries=2)
+        root = read_screen()
+        # A dump that failed outright and a genuinely clear screen look
+        # identical from here -- both give us no text -- and reporting the
+        # first as the second is how a one-tap consent gate becomes a
+        # permanent posting failure. `Nikki 28` on 2026-08-28: `uiautomator`
+        # was SIGKILLed (exit 137), the screen was never read, this logged
+        # "nothing to clear", and the flow walked on into a composer that
+        # could not open behind Meta's ads-consent gate -- four days of
+        # retries, and finally `Retries Exhausted`. The dump is flaky rather
+        # than broken (the same phone dumped 8/8 a minute later), so re-read
+        # before believing the screen is clear.
+        for retry in range(1, _UNREADABLE_DUMP_RETRIES + 1):
+            if root is not None:
+                break
+            ig._emit(logger, "info",
+                     "Fallback (blocking prompts): no UI dump for %s; "
+                     "re-reading the screen (%s/%s)",
+                     target, retry, _UNREADABLE_DUMP_RETRIES)
+            time.sleep(_UNREADABLE_DUMP_PAUSE)
+            root = read_screen()
+
         text = _dump_text(root)
         source = "ui-dump"
         if not text and flow is not None and hasattr(flow, "_ocr_screen_text"):
@@ -379,7 +424,17 @@ def handle_blocking_prompts(target, adb_client, logger=None, flow=None, max_roun
         is_permission = any(marker in text for marker in _PERMISSION_MARKERS)
         is_onboarding = any(marker in text for marker in _ONBOARDING_MARKERS)
         if not is_permission and not is_onboarding:
-            if round_index == 1:
+            if root is None and not text:
+                # Say the true thing: the screen was never read. The caller
+                # gets the same False either way, but the log now names the
+                # phone to look at instead of asserting it was fine.
+                ig._emit(logger, "warning",
+                         "Fallback (blocking prompts): could NOT read the "
+                         "screen for %s (no UI dump after %s attempt(s), no "
+                         "OCR text) -- this is not the same as a clear screen, "
+                         "and a blocker may still be up",
+                         target, _UNREADABLE_DUMP_RETRIES + 1)
+            elif round_index == 1:
                 ig._emit(logger, "info", "Fallback (blocking prompts): none on screen for %s; nothing to clear", target)
             else:
                 ig._emit(logger, "info", "Fallback (blocking prompts): chain cleared for %s after %s screen(s)", target, round_index - 1)

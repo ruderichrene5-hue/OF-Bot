@@ -109,11 +109,13 @@ def start_session(phone_id: str, transport: GeelarkTransport | None = None,
             "cannot lease or rotate one that doesn't exist")
 
     rotator = ProxyRotator(GeelarkProxyClient(transport).list_proxies())
-    if port not in rotator.rotatable_ports():
+    is_passive = port in proxy_pool.passive_proxy_ports()
+    if not is_passive and port not in rotator.rotatable_ports():
         raise SessionError(
-            f"port {port} has no GEELARK_PROXY_REBOOT_URLS entry; cannot "
-            "rotate it, so this session refuses to start on an unrotatable "
-            "proxy rather than silently skip the rotation step")
+            f"port {port} has no GEELARK_PROXY_REBOOT_URLS entry and is not "
+            "in ADBBOT_GEELARK_PASSIVE_PROXY_PORTS either; cannot rotate it "
+            "or safely wait it out, so this session refuses to start on an "
+            "unrotatable proxy rather than silently skip the rotation step")
 
     lease = proxy_pool.acquire_proxy([port], owner=owner or str(phone_id),
                                      wait_seconds=wait_for_lease_seconds)
@@ -122,20 +124,46 @@ def start_session(phone_id: str, transport: GeelarkTransport | None = None,
             f"port {port} is already leased by another running phone; wait "
             "for it to finish or raise wait_for_lease_seconds")
 
+    sticky_reuse = proxy_pool.sticky_port_for_phone(str(phone_id)) == port
+
     try:
-        proxy_pool.wait_for_cooldown(port, cooldown_seconds)
-        rotation = rotator.rotate_until_changed(port)
-        proxy_pool.record_rotation(port)
+        if sticky_reuse:
+            # This exact phone had this exact port last time too -- keep the
+            # IP it already has instead of rotating to a new one. See
+            # proxy_pool.sticky_port_for_phone: an account's IP staying
+            # stable across its own sessions looks more like a real phone
+            # than a fresh IP every single launch. Skips the cooldown/rotate
+            # wait entirely (there is nothing to wait for -- we are not
+            # changing anything), so this path is faster than the normal
+            # one, not slower.
+            _emit(logger, "info",
+                 "port %s: reusing %s's existing IP (sticky), not rotating",
+                 port, phone_id)
+            rotation = {"accepted": True, "changed": False, "sticky": True}
+        elif is_passive:
+            # No rotation link exists for this port -- it rotates on its own
+            # fixed ~5-minute timer, invisible to us. The only thing we can
+            # do is make sure enough time has passed since the last phone
+            # started on it that the IP has genuinely had a chance to move,
+            # then proceed without ever calling a rotation endpoint.
+            proxy_pool.wait_for_passive_rotation(port)
+            proxy_pool.mark_port_in_use(port)
+            rotation = {"accepted": True, "changed": None, "passive": True}
+        else:
+            proxy_pool.wait_for_cooldown(port, cooldown_seconds)
+            rotation = rotator.rotate_until_changed(port)
+            proxy_pool.record_rotation(port)
 
-        if not rotation.get("accepted", True):
-            raise SessionError(
-                f"port {port} refused the rotation call: {rotation.get('detail')}")
-        if not rotation.get("changed"):
-            _emit(logger, "warning",
-                  "port %s did not change IP (vendor accepted the call but "
-                  "handed back the same address -- a real mobile-proxy "
-                  "outcome, proceeding anyway)", port)
+            if not rotation.get("accepted", True):
+                raise SessionError(
+                    f"port {port} refused the rotation call: {rotation.get('detail')}")
+            if not rotation.get("changed"):
+                _emit(logger, "warning",
+                      "port %s did not change IP (vendor accepted the call but "
+                      "handed back the same address -- a real mobile-proxy "
+                      "outcome, proceeding anyway)", port)
 
+        proxy_pool.record_sticky_port(str(phone_id), port)
         profile = prepare_geelark_profile_for_adb(str(phone_id), transport, logger=logger)
         if profile is None:
             raise SessionError(f"{phone.get('serialName')} never became ADB-ready")

@@ -31,12 +31,14 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 import requests
 
 from adb_bot.automation.flows.instagram import InstagramScrollFlow, InstagramWarmUpDay1Flow
+from adb_bot.automation.post_ledger import PostLedger
 # The u2 flow, not the legacy dump/OCR one: only this one carries the
 # post_ledger duplicate-post guard and reports "uncertain" (share tapped,
 # outcome unproven) as distinct from a conclusive failure. Switched 2026-08-30
@@ -65,6 +67,7 @@ from adb_bot.automation.verification_probe import _open_instagram
 from adb_bot.clients.sms.router import build_router
 from adb_bot.automation.workflow import connect_with_retries
 from adb_bot.clients.geelark.ip_rotation import load_reboot_config
+from adb_bot.clients.geelark import proxy_pool
 from adb_bot.clients.geelark.phones import GeelarkPhoneClient
 from adb_bot.clients.geelark.readiness import phone_is_started, prepare_geelark_profile_for_adb
 from adb_bot.clients.geelark.session import GeelarkSession, start_session, stop_session
@@ -95,13 +98,39 @@ _DEFAULT_MAX_CYCLE_ATTEMPTS = 3
 # on InstagramWarmUpDay1Flow's own 600s default, untouched.
 ACTIVE_POSTING_SCROLL_SECONDS = 40.0
 
+# The account's actual first post ever (not just the first of today's batch --
+# `PostLedger.has_ever_posted` tells the two apart) gets a longer scroll than
+# every post after it, 2026-09-25: a debut post going out after the same 40s
+# as any other day looks exactly as scripted as it is. 3 minutes, matching
+# what was asked for -- short of Warmup's own 600s, since the account has
+# already been through that once and this is not a second warm-up.
+FIRST_EVER_POST_SCROLL_SECONDS = 180.0
+
 _ROTATION_STATE_FILE = Path(
     os.environ.get("ADBBOT_STATE_DIR", "/root/.adb_bot")) / "geelark_real_proxy_rotation.json"
+# Guards the read-increment-write below -- without it, several worker
+# threads calling _next_real_proxy at close to the same moment all read the
+# same idx before any of them writes the incremented value back, so they
+# all compute the same port. Only one of the acquire_proxy calls downstream
+# then actually gets it; the rest block for up to wait_for_lease_seconds
+# waiting on that ONE port instead of taking any of the other free ones --
+# real concurrency collapses toward 1 even though `concurrency` worker
+# threads are all technically running. Found live 2026-09-08: a 9-wide
+# account-check pass showed only 1-2 real devices active at a time. A
+# thread lock is enough here (run_queue's workers are threads in one
+# process, not separate processes).
+_ROTATION_STATE_LOCK = threading.Lock()
 
 
 def _real_proxies(transport: GeelarkTransport) -> list[dict]:
-    """The account's saved proxies that sit on one of our real, rotatable
-    ports (from GEELARK_PROXY_REBOOT_URLS) -- not MultiLogin's relay.
+    """The account's saved proxies that sit on one of our real ports --
+    either actively rotatable (GEELARK_PROXY_REBOOT_URLS) or passively
+    rotating on their own timer (ADBBOT_GEELARK_PASSIVE_PROXY_PORTS) -- not
+    MultiLogin's relay. The two groups are deliberately kept as one merged
+    pool here (round-robin doesn't care which kind a port is) but stay
+    distinguishable downstream: `session.start_session` looks the port back
+    up against `passive_proxy_ports()` to choose active-rotate-and-verify
+    vs. passive-cooldown-wait, never treating the two the same way.
 
     One entry per real port -- the account has had a couple of accidental
     re-adds of the same port (serialNo 11/12 duplicating 6/5, confirmed
@@ -115,12 +144,14 @@ def _real_proxies(transport: GeelarkTransport) -> list[dict]:
     and blocks deleting them.
     """
     from adb_bot.clients.geelark.proxies import GeelarkProxyClient
+    from adb_bot.clients.geelark.proxy_pool import passive_proxy_ports
 
-    real_ports = set(load_reboot_config().keys())
+    real_ports = set(load_reboot_config().keys()) | passive_proxy_ports()
     if not real_ports:
         raise RuntimeError(
-            "GEELARK_PROXY_REBOOT_URLS is not set; cannot resolve which "
-            "proxies are our own real ports")
+            "neither GEELARK_PROXY_REBOOT_URLS nor "
+            "ADBBOT_GEELARK_PASSIVE_PROXY_PORTS is set; cannot resolve "
+            "which proxies are our own real ports")
     by_port: dict[int, dict] = {}
     for proxy in GeelarkProxyClient(transport).list_proxies():
         port = proxy.get("port")
@@ -132,26 +163,48 @@ def _real_proxies(transport: GeelarkTransport) -> list[dict]:
     return sorted(by_port.values(), key=lambda p: p.get("port", 0))
 
 
-def _next_real_proxy(transport: GeelarkTransport) -> dict:
-    """Round-robins through the real proxies. Blind (does not check what's
-    live) -- correct here because every caller in this module launches
-    through session.start_session, which leases the port for real before
-    rotating; a busy port blocks/waits rather than colliding."""
+def _next_real_proxy(transport: GeelarkTransport, phone_id: str | None = None) -> dict:
+    """This phone's own last port if it's free right now, otherwise
+    round-robins through the real proxies. Blind on the round-robin side
+    (does not check what's live) -- correct here because every caller in
+    this module launches through session.start_session, which leases the
+    port for real before rotating; a busy port blocks/waits rather than
+    colliding.
+
+    The sticky check IS a live peek (proxy_pool.port_available_now), unlike
+    the round-robin path -- deliberately, since preferring a port that turns
+    out to be busy would mean start_session waiting on that ONE specific
+    port instead of taking whatever else is free, a real slowdown for no
+    benefit. Added 2026-09-07: see proxy_pool's sticky_port_for_phone
+    docstring for why accounts should keep their last IP when possible
+    rather than get a fresh one every single launch.
+    """
     proxies = _real_proxies(transport)
     if not proxies:
         raise RuntimeError("no real proxies found on the Geelark account")
-    idx = 0
-    try:
-        idx = json.loads(_ROTATION_STATE_FILE.read_text()).get("idx", 0)
-    except Exception:
-        pass
-    proxy = proxies[idx % len(proxies)]
-    try:
-        _ROTATION_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _ROTATION_STATE_FILE.write_text(json.dumps({"idx": idx + 1}))
-    except OSError:
-        pass
-    return proxy
+
+    if phone_id is not None:
+        sticky_port = proxy_pool.sticky_port_for_phone(str(phone_id))
+        if sticky_port is not None:
+            for proxy in proxies:
+                if proxy.get("port") == sticky_port:
+                    if proxy_pool.port_available_now(sticky_port, owner=str(phone_id)):
+                        return proxy
+                    break
+
+    with _ROTATION_STATE_LOCK:
+        idx = 0
+        try:
+            idx = json.loads(_ROTATION_STATE_FILE.read_text()).get("idx", 0)
+        except Exception:
+            pass
+        proxy = proxies[idx % len(proxies)]
+        try:
+            _ROTATION_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _ROTATION_STATE_FILE.write_text(json.dumps({"idx": idx + 1}))
+        except OSError:
+            pass
+        return proxy
 
 
 def phones_by_tag(tag_name: str, transport: GeelarkTransport | None = None) -> list[dict]:
@@ -199,7 +252,7 @@ def _launch(phone_id: str, transport: GeelarkTransport, logger, adb_client
     Returns (session, target) or (None, None) if ADB never came up -- the
     session is still returned-stopped-by-caller-safe in that case (the
     phone itself booted; only the ADB handshake failed)."""
-    proxy = _next_real_proxy(transport)
+    proxy = _next_real_proxy(transport, phone_id=phone_id)
     GeelarkPhoneClient(transport).update_phone(phone_id, proxy_id=proxy["id"])
     # A full warm-up/posting cycle runs 12-15 min; 120s was too short under
     # the 4-worker queue and caused 47/155 spurious "already leased" errors
@@ -529,7 +582,14 @@ def _post_batch_on_open_session(phone_id: str, name: str, adb_client, transport,
         for index, media_path in enumerate(media_paths):
             scroll_result = None
             if not skip_scroll and index == 0:
-                scroll_result = InstagramScrollFlow(scroll_seconds=ACTIVE_POSTING_SCROLL_SECONDS).run(
+                first_ever = not PostLedger().has_ever_posted(str(phone_id))
+                scroll_seconds = (FIRST_EVER_POST_SCROLL_SECONDS if first_ever
+                                 else ACTIVE_POSTING_SCROLL_SECONDS)
+                if first_ever and logger:
+                    logger.info("This is %s's first post ever -- scrolling %ss "
+                               "instead of the usual %ss", phone_id,
+                               scroll_seconds, ACTIVE_POSTING_SCROLL_SECONDS)
+                scroll_result = InstagramScrollFlow(scroll_seconds=scroll_seconds).run(
                     session.profile, adb_client=adb_client, logger=logger)
 
             session.profile.media_path = media_path

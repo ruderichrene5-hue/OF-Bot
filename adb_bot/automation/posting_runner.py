@@ -277,16 +277,18 @@ def run_posting_queue(
         plan.to_post = kept
 
     # 1d) Pacing: at least `post_pacing.min_gap_minutes()` (default 90) between
-    # any two posts, so a backlog drains one at a time instead of bursting just
-    # because the loop reruns every few minutes (Rene, 2026-10-01). Global, not
-    # per-account -- see post_pacing's module docstring. At most one row goes
-    # out this run; the rest stay Pending for a later tick.
+    # two posts on the SAME account, so a backlog drains gradually per account
+    # instead of bursting just because the loop reruns every few minutes
+    # (Rene, 2026-10-01; per-account instead of one shared fleet-wide clock,
+    # 2026-10-03 -- see post_pacing's module docstring). Different accounts
+    # pace independently, so a run can post several of them at once.
     if plan.to_post:
-        if post_pacing.gap_elapsed(now=None):
-            held, plan.to_post = plan.to_post[1:], plan.to_post[:1]
-        else:
-            held, plan.to_post = plan.to_post, []
+        kept, held = [], []
         gap = post_pacing.min_gap_minutes()
+        for item in plan.to_post:
+            key = daily_post_counter.target_key(item.launch_id, item.target_handle)
+            (kept if post_pacing.gap_elapsed(key, now=None) else held).append(item)
+        plan.to_post = kept
         for item in held:
             plan.skipped.append(SkippedPost(
                 item.account_name, f"pacing: min {gap:g}min gap since the last post not elapsed yet"))
@@ -386,10 +388,10 @@ def _launch_and_post(plan, launch_ids, airtable, launcher_client, shutdown_clien
                     # counted the moment it lands, not deferred to a later sync.
                     key = daily_post_counter.target_key(item.launch_id, item.target_handle)
                     daily_post_counter.increment(daily_post_counter.today_key(), key)
-                    # Feeds the pacing filter above -- starts this post's run's
+                    # Feeds the pacing filter above -- starts this account's
                     # minimum-gap clock the moment it's confirmed, not when the
                     # whole run finishes.
-                    post_pacing.record_post()
+                    post_pacing.record_post(key)
             except Exception as exc:
                 logger.warning("Failed to write post result for %s: %s", item.account_name, exc)
 

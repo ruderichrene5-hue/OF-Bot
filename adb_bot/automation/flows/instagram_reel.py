@@ -1493,17 +1493,40 @@ class InstagramReelUploadU2Flow:
             # Other corner controls that must never win the position hint: on a
             # build that moves the +, tapping these would open Direct/search/
             # notifications instead of the composer -- a silent wrong turn.
+            # log out/log in/switch account added 2026-09-06: found live --
+            # on a screen with nothing better to score, the account-switcher's
+            # "Log out" button was the only clickable button around, so
+            # score<=0's fallback let it win by default (score=1, clickable
+            # button, no other candidate) and got tapped repeatedly on 3
+            # phones in a stuck loop. No confirmed logout in the logs, but the
+            # button must never be a valid candidate at all, default or not.
             if any(
                 token in desc
                 for token in ("direct", "messenger", "message", "inbox", "notification",
-                              "activity feed", "search", "settings", "back")
+                              "activity feed", "search", "settings", "back",
+                              "log out", "logout", "log in", "switch account")
             ):
                 continue
 
             score = 0
             if "creation" in rid or "new_post" in rid or "create" in rid:
                 score += 10
-            if "create" in desc or "new post" in desc or "compose" in desc or desc == "add":
+            # "create" as a bare substring also matches "unselected video
+            # thumbnail created on 9 september 2026 8:22" -- every gallery
+            # thumbnail's own content-desc states when it was recorded, so
+            # once any gallery/picker screen is on-screen (Story composer,
+            # Reel gallery, wherever) its thumbnails outscored the real
+            # target here and got tapped instead. Found live 2026-09-09: a
+            # phone stuck on Instagram's Story "Add to story" screen kept
+            # re-tapping the same thumbnail every recovery attempt instead
+            # of escaping it, because "created on ..." scored 8 same as a
+            # real Create/Compose button. `thumbnail` never appears on an
+            # actual create/compose control's own desc, so exclude it
+            # explicitly rather than trying to out-guess every future
+            # "created"-shaped phrase.
+            if "thumbnail" not in desc and (
+                "create" in desc or "new post" in desc or "compose" in desc or desc == "add"
+            ):
                 score += 8
             if "camera" in rid:
                 score += 3
@@ -1564,17 +1587,24 @@ class InstagramReelUploadU2Flow:
                 "success": False, "account_flag": flag}
 
     def _open_reel_composer_u2(self, d, target, emit, logger=None) -> bool:
-        # One retry (added 2026-08-31): live evidence from a batch's second
-        # post showed the Home-tab recovery in _ensure_instagram_home_feed_u2
-        # tapping Home but returning after a flat 1.5s sleep with no
-        # confirmation the feed actually settled -- the Create (+) tap that
-        # followed ~5s later landed on a screen still mid-transition and the
-        # gallery never appeared. A single extra attempt, with a proper
+        # Two retries, three attempts total (raised from 2 attempts
+        # 2026-09-09): live evidence from a batch's second post showed the
+        # Home-tab recovery in _ensure_instagram_home_feed_u2 tapping Home
+        # but returning after a flat 1.5s sleep with no confirmation the
+        # feed actually settled -- the Create (+) tap that followed ~5s
+        # later landed on a screen still mid-transition and the gallery
+        # never appeared. A single extra attempt, with a proper
         # popup-dismiss and a fresh home-feed recovery in between, catches
         # exactly that case instead of failing the whole post over a
         # transition that just needed a moment longer. Harmless for the
         # common case: it only runs when the first attempt already failed.
-        for attempt in (1, 2):
+        # Bumped to 3 the same day the Add-to-story escape (below) was
+        # added: landing on Story now spends one whole attempt just backing
+        # out to the feed, so with only 2 total attempts a Story landing on
+        # attempt 1 left exactly one real try at the actual Create tap
+        # afterward -- no cushion left for the ordinary transition-timing
+        # flakiness this retry loop exists to absorb in the first place.
+        for attempt in (1, 2, 3):
             # Make sure Instagram is the foreground app before hunting for the
             # + -- a stray nav could have dropped us to the launcher, and we
             # must not dump / tap launcher controls.
@@ -1635,16 +1665,97 @@ class InstagramReelUploadU2Flow:
             else:
                 _emit(logger, "info", "u2: no draft dialog present for %s; continuing", target)
 
-            # Composer/gallery is open once any of these are present.
-            gallery_ready = self._first_present(
-                d,
-                list(self._GALLERY_SELECTORS),
-                timeout=self.SELECTOR_WAIT_SECONDS,
-                logger=logger,
-                purpose="reel composer / gallery",
+            # Composer/gallery is open once any of these are present. BUT
+            # Instagram's own "Add to story" camera screen also has a
+            # "Recents" section with the exact same gallery-thumbnail
+            # selectors -- `_GALLERY_SELECTORS`'s `{"textContains":
+            # "Recents"}` matches both. Found live 2026-09-09: the Create
+            # (+) tap opened Story instead of Reel on several phones, this
+            # check called it "ready" anyway, and _select_reel_mode_u2's own
+            # safety net then correctly refused to pick media (never posted
+            # a Story as a Reel) but with no way back to a fresh attempt --
+            # every retry just re-hit Create (+) while still buried inside
+            # the Story flow, which doesn't respond to that tap the same
+            # way, so the whole cycle failed instead of just this one
+            # attempt. Checked and escaped BEFORE trusting the selector
+            # match, not after -- once on the wrong screen, back out to the
+            # feed first so the next Create (+) tap starts clean.
+            on_story_screen = _u2_find(
+                d, [{"text": "Add to story"}, {"textContains": "Add to story"}],
+                logger=logger, purpose="Add-to-story screen (wrong camera mode)",
             )
-            if gallery_ready is not None:
-                return True
+            if on_story_screen is not None:
+                _emit(logger, "warning",
+                     "u2: Create (+) opened the Story camera instead of Reel for %s -- "
+                     "closing it and retrying", target)
+                close_btn = _u2_find(
+                    d, [{"resourceIdMatches": r"(?i).*close.*"}, {"description": "Close"},
+                        {"descriptionMatches": "(?i)^close$"}],
+                    logger=logger, purpose="Story-screen close (X) button",
+                )
+                if close_btn is not None:
+                    try:
+                        close_btn.click()
+                    except Exception as exc:
+                        _emit(logger, "warning", "u2: Story-screen close tap failed for %s: %s", target, exc)
+                else:
+                    d.press("back")
+                waits.settle(1.5)
+                instagram_module._ensure_instagram_home_feed_u2(d, target, logger=logger)
+                waits.settle(1.5)
+            else:
+                gallery_ready = self._first_present(
+                    d,
+                    list(self._GALLERY_SELECTORS),
+                    timeout=self.SELECTOR_WAIT_SECONDS,
+                    logger=logger,
+                    purpose="reel composer / gallery",
+                )
+                if gallery_ready is not None:
+                    return True
+
+            # Found live 2026-09-06: a stray/abandoned draft can auto-resume
+            # STRAIGHT into a mid-flow editing screen (caption entry, Edit
+            # video, or the final share screen) when Create (+) is tapped --
+            # skipping the gallery grid and the "Start new video" dialog
+            # entirely, so neither is ever seen. Every warning this produced
+            # that day traced back to the same handful of leftover drafts,
+            # repeated across many phones -- correlated live with a real
+            # ~40% posting-throughput drop that day (fewer than half the
+            # usual shares in several 15-min windows). The fix has to
+            # recognize this state and actually discard the draft; retrying
+            # the same Create tap is a no-op once a compose session is
+            # already open, so every subsequent attempt just re-hits it.
+            stuck_draft = self._first_present(
+                d,
+                list(self._ADVANCE_SELECTORS) + list(self._SHARE_SELECTORS) + list(self._CAPTION_SELECTORS),
+                timeout=1,
+                logger=logger,
+                purpose="stray resumed-draft compose screen",
+            )
+            if stuck_draft is not None:
+                _emit(logger, "warning",
+                     "u2: Create (+) landed on a resumed draft instead of the gallery for %s -- discarding it", target)
+                for _ in range(4):
+                    d.press("back")
+                    waits.settle(1)
+                    discard = _u2_find(
+                        d,
+                        [{"text": "Discard"}, {"textMatches": "(?i)^discard$"},
+                         {"description": "Discard"}, {"descriptionMatches": "(?i)^discard$"}],
+                        logger=logger, purpose="discard-draft confirmation",
+                    )
+                    if discard is not None:
+                        try:
+                            discard.click()
+                        except Exception as exc:
+                            _emit(logger, "warning", "u2: discard tap failed for %s: %s", target, exc)
+                        waits.settle(1)
+                        break
+                    if waits.u2_ready(d, *self._GALLERY_SELECTORS)():
+                        break
+                instagram_module._ensure_instagram_home_feed_u2(d, target, logger=logger)
+                waits.settle(2)
 
             # Android's own "Allow access to photos and videos?" dialog sits
             # OVER the gallery a beat after a fresh account first opens it --
@@ -1668,8 +1779,8 @@ class InstagramReelUploadU2Flow:
                 if gallery_ready is not None:
                     return True
 
-            _emit(logger, "warning", "Reel composer/gallery did not appear for %s (attempt %s/2)", target, attempt)
-            if attempt == 1:
+            _emit(logger, "warning", "Reel composer/gallery did not appear for %s (attempt %s/3)", target, attempt)
+            if attempt < 3:
                 self._dismiss_popups_u2(d, logger=logger, max_rounds=1)
                 instagram_module._ensure_instagram_home_feed_u2(d, target, logger=logger)
                 waits.settle(2)
@@ -1943,7 +2054,10 @@ class InstagramReelUploadU2Flow:
         if self._first_present(
             d,
             [{"text": "Next"}, {"description": "Next"}, {"textMatches": "(?i)^next$"}],
-            timeout=6,
+            # 6s was too short on slow phones (nikki main 1/2, 2026-09-27): the
+            # editor was still loading, so the flow pressed Back below and
+            # closed its own composer.
+            timeout=20,
             logger=logger,
             purpose="Next (post-media check)",
         ) is not None:
@@ -1964,7 +2078,12 @@ class InstagramReelUploadU2Flow:
             purpose="'Edits' editing-app promo marker",
         )
         if promo is None:
-            _emit(logger, "info", "u2: no explicit promo marker, but Next is hidden; attempting to dismiss an overlay for %s", target)
+            # No promo on screen: Back here would close the reel editor itself
+            # (it did, on every nikki main attempt 2026-09-26/27). Leave the
+            # screen alone and let the Next tap below find its button.
+            _emit(logger, "info", "u2: Next not visible yet and no promo marker for %s; "
+                                  "not pressing Back (it would close the editor)", target)
+            return
 
         # 1) Explicit dismiss/close control, if the promo offers one.
         if _u2_click(
@@ -2122,13 +2241,24 @@ class InstagramReelUploadU2Flow:
         self._recover_to_instagram_u2(d, target, emit, logger)
         # The real posting button carries a visible "Share" text label; prefer
         # that over a bare share glyph (content-desc only).
-        return _u2_click(
+        tapped = _u2_click(
             d,
             list(self._SHARE_SELECTORS),
             logger=logger,
             purpose="Share button",
             fallback_ratio=(0.90, 0.94),
         )
+        # First reel on an account: Instagram asks once about reusing its
+        # original audio ("Update on your original audio" -> Share / Turn off
+        # and share). Nothing uploads until it's answered.
+        if tapped:
+            waits.settle(4, ready=waits.u2_ready(d, {"textContains": "original audio"}),
+                         logger=logger, what="original-audio sheet")
+        if tapped and waits.any_exists(d, {"textContains": "original audio"}):
+            _emit(logger, "info", "u2: answering the 'original audio' sheet with Share for %s", target)
+            _u2_click(d, list(self._SHARE_SELECTORS), logger=logger,
+                      purpose="Share on the original-audio sheet")
+        return tapped
 
     def _tap_home_u2(self, d, logger=None) -> bool:
         return _u2_click(

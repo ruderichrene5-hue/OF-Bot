@@ -969,10 +969,21 @@ def _section_failures(failures) -> str:
 # Written for somebody with the MultiLogin app open and no interest in the code.
 ISSUE_GUIDE = {
     "Human Verification Required": (
-        "Instagram stopped the account and is asking a human to prove it is real — "
-        "a code by email or SMS, a photo, or a \u201cwas this you?\u201d prompt.",
-        "Open this profile\u2019s phone in MultiLogin, open Instagram, and complete "
-        "whatever it asks. When the feed loads normally again, the account is fixed."),
+        "This label is a catch-all, not a diagnosis: past sweeps found most flagged "
+        "profiles were not mid-challenge at all. It can mean Instagram is asking a "
+        "human to prove it is real — a code by email or SMS, a photo, or a "
+        "\u201cwas this you?\u201d prompt — but just as often the phone is simply "
+        "signed out (Instagram\u2019s logged-out landing page, which just wants a "
+        "password) or the account is outright disabled behind what looks like the "
+        "same logged-out screen.",
+        "Open this profile\u2019s phone in MultiLogin and read what is actually on "
+        "screen before doing anything. Logged-out landing page: sign back in with "
+        "the account\u2019s password — this is a credentials job, not a challenge "
+        "to solve. \u201cAccount disabled\u201d or similar: treat it as Banned / "
+        "Blocked instead, do not keep retrying. Only if Instagram is actually "
+        "showing a code/photo/\u201cwas this you\u201d prompt should you complete "
+        "it by hand. Check Issue Notes first — a probe run may have already "
+        "written down exactly which of these it is."),
     "Banned / Blocked": (
         "Instagram has banned the account, or blocked it from posting. The bot "
         "cannot undo either, and trying again can make it worse.",

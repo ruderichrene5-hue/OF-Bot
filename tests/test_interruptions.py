@@ -110,3 +110,43 @@ class CheckAndHandleOutcomeTest(TestCase):
              patch("adb_bot.automation.flows.interruptions.time.sleep"):
             outcome = interruptions.check_and_handle("dev", Mock())
         self.assertEqual(outcome, interruptions.OUTCOME_RESTART)
+
+
+class UnreadableScreenTest(TestCase):
+    """A UI dump the device killed must not read as "the screen is clear".
+
+    `Nikki 28`, 2026-08-28: `uiautomator` was SIGKILLed (exit 137), so the dump
+    came back empty, `handle_blocking_prompts` logged "nothing to clear", and
+    Meta's ads-consent gate stayed up behind every posting attempt until the
+    row hit `Retries Exhausted`.
+    """
+
+    CONSENT = """<hierarchy>
+      <node text="Choose if we process your data for ads"/>
+      <node text="Get started" clickable="true" bounds="[156,1707][924,1767]"/>
+    </hierarchy>"""
+
+    def test_a_failed_dump_is_re_read_and_the_gate_is_cleared(self):
+        clean = _dump("<hierarchy><node text='Username'/></hierarchy>")
+        # First dump fails outright; the retry sees the consent gate.
+        dumps = [None, _dump(self.CONSENT), clean]
+        taps = []
+        with patch("adb_bot.automation.flows.instagram._adb_capture_ui_dump", side_effect=dumps), \
+             patch("adb_bot.automation.flows.instagram._adb_tap",
+                   side_effect=lambda t, x, y, *a, **k: taps.append((x, y))), \
+             patch("adb_bot.automation.flows.interruptions.time.sleep"):
+            handled = interruptions.handle_blocking_prompts("dev", Mock())
+
+        self.assertTrue(handled)
+        self.assertEqual(taps, [(540, 1737)])  # "Get started"
+
+    def test_a_screen_that_never_reads_is_reported_as_unread_not_clear(self):
+        logger = Mock()
+        with patch("adb_bot.automation.flows.instagram._adb_capture_ui_dump", return_value=None), \
+             patch("adb_bot.automation.flows.interruptions.time.sleep"):
+            handled = interruptions.handle_blocking_prompts("dev", Mock(), logger=logger)
+
+        self.assertFalse(handled)
+        said = " ".join(str(c) for c in logger.mock_calls).lower()
+        self.assertIn("could not read the screen", said)
+        self.assertNotIn("nothing to clear", said)

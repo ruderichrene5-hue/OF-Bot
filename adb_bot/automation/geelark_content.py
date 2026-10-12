@@ -34,6 +34,8 @@ from adb_bot.automation.spoof_pipeline import (
     RawVideo,
     _seed_for,
     build_cli_spoofer,
+    cap_file_size,
+    normalize_for_upload,
     finalize_variant,
     next_run_dir,
 )
@@ -134,7 +136,19 @@ def spoof_for_handle(video: RawVideo, handle: str, client: DriveClient,
     phone (see geelark_lifecycle.run_active_posting_cycle) -- this function
     only ever creates it.
     """
-    dest = Path("/tmp/geelark_raw_downloads") / video.model / video.name
+    # Per-call unique path, not shared by video name -- this function's own
+    # `finally` unlinks whatever it downloads right after spoofing it (no
+    # cross-call reuse is actually implemented despite the docstring above),
+    # so two handles spoofing the same day's video concurrently (normal once
+    # concurrency rose past ~1) previously both wrote straight to the same
+    # `video.model / video.name` path: one's partial/interleaved bytes could
+    # land in a file the other was mid-read on, and ffmpeg would then fail
+    # with "Invalid data found when processing input" -- silently misread as
+    # "no content for this handle today" by the caller's already_shared loop
+    # rather than a corrupted download. Found live 2026-09-09 running a
+    # 28-way concurrent catch-up posting pass across 4 models at once.
+    dest = (Path("/tmp/geelark_raw_downloads") / video.model
+           / f"{os.getpid()}.{id(video)}.{handle}.{video.name}")
     try:
         local_raw = client.download(video.source_id, str(dest))
     except Exception as exc:
@@ -144,7 +158,13 @@ def spoof_for_handle(video: RawVideo, handle: str, client: DriveClient,
         return None
 
     try:
-        spoof_fn = build_cli_spoofer(spoofer_python, spoofer_root)
+        # "normal" (the underlying CLI's own default), not build_cli_spoofer's
+        # low_bandwidth default -- that was chosen 2026-08-24 to shrink files
+        # for MultiLogin specifically. GeeLark doesn't share that constraint,
+        # and low_bandwidth's fixed 1200kbps was visibly degrading quality on
+        # every post. Instruction 2026-09-06: upload at full/near-source
+        # quality regardless of file size for GeeLark content.
+        spoof_fn = build_cli_spoofer(spoofer_python, spoofer_root, preset="normal")
         out_dir = next_run_dir(out_root, video.model)
         seed = _seed_for(video.name, handle)
         produced = spoof_fn(local_raw, str(out_dir), seed, logger=logger)
@@ -154,6 +174,7 @@ def spoof_for_handle(video: RawVideo, handle: str, client: DriveClient,
                                video.name, handle)
             return None
         final_path = finalize_variant(produced, video.name, handle)
+        normalize_for_upload(str(final_path), logger=logger)   # replaced cap_file_size 2026-10-03
         return SpoofedContent(path=str(final_path), raw_video=video, handle=handle)
     finally:
         try:
@@ -219,6 +240,8 @@ def get_post_media(model: str, handle: str, client: DriveClient | None = None,
             except OSError:
                 pass
             continue
+        if logger:
+            logger.info("geelark_content: picked %s for %s", video.name, handle)
         return spoofed
 
     if logger:

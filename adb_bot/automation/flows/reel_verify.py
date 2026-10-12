@@ -94,6 +94,7 @@ STATE_CONFIRMED = "confirmed"
 STATE_ERROR = "error"
 STATE_DRAFT = "draft"
 STATE_COMPOSER = "composer"
+STATE_UPLOADING = "uploading"
 STATE_UNKNOWN = "unknown"
 
 # Banner/toast wording that means the reel went out. Kept reel-specific and
@@ -113,6 +114,18 @@ ERROR_PHRASES = (
 
 # IG offers to keep a draft when a post is abandoned -- means it did not go out.
 DRAFT_PHRASES = ("keep draft", "discard draft", "save draft", "discard post", "discard reel")
+
+# Instagram's in-app upload banner on the feed ("Keep Instagram open to finish
+# posting…" with a progress bar, then "Posting to <handle>…"). Seen 2026-09-27
+# on a slow phone where a 3 MB reel took 5+ minutes: the flow closed the phone
+# after 45s, which froze the upload, and the recheck then "disproved" a post
+# that went out the next time the phone was opened.
+UPLOADING_PHRASES = ("keep instagram open to finish", "finish posting", "posting to ")
+
+# While that banner is up, keep verifying past the normal budget -- but never
+# longer than this in total, so a hung upload can't hold a phone forever.
+UPLOAD_MAX_SECONDS = 600
+UPLOAD_PROGRESS_GRACE_SECONDS = 60
 
 # Still on the caption/share screen => the Share tap never registered.
 COMPOSER_PHRASES = ("write a caption", "add a caption", "share to", "also share to", "cover photo")
@@ -229,6 +242,8 @@ def classify_post_screen(text) -> str:
         return STATE_ERROR
     if any(p in low for p in DRAFT_PHRASES):
         return STATE_DRAFT
+    if any(p in low for p in UPLOADING_PHRASES):
+        return STATE_UPLOADING
     if any(p in low for p in COMPOSER_PHRASES):
         return STATE_COMPOSER
     return STATE_UNKNOWN
@@ -285,6 +300,7 @@ def verify_reel_posted(
 
     last_negative = None
     saw_upload_in_flight = False
+    saw_upload_banner = False
     upload_finished = False
 
     # A rounded counter ("1.2K") can never show a +1, so the strongest signal is
@@ -324,12 +340,22 @@ def verify_reel_posted(
             return VerifyResult(False, FAIL_DRAFT, "a draft prompt appeared -- the post was not shared", now() - started)
         if state == STATE_COMPOSER:
             last_negative = FAIL_COMPOSER   # not conclusive yet: the banner may still be pending
+        if state == STATE_UPLOADING:
+            # Upload visibly in flight: wait for it rather than walking away,
+            # up to UPLOAD_MAX_SECONDS in total.
+            saw_upload_in_flight = True
+            saw_upload_banner = True
+            deadline = max(deadline, min(now() + UPLOAD_PROGRESS_GRACE_SECONDS,
+                                         started + UPLOAD_MAX_SECONDS))
+        elif saw_upload_banner and state not in (STATE_COMPOSER, STATE_ERROR, STATE_DRAFT):
+            # The banner was up and has gone, with no error or draft: done.
+            upload_finished = True
 
         # --- the profile's post count went up ---------------------------------
         # Only start this if there is room to finish it (see
         # POST_COUNT_MIN_REMAINING_SECONDS) -- it is the one probe that can
         # overrun the whole budget on its own.
-        if callable(get_post_count) and baseline_count is not None:
+        if callable(get_post_count) and baseline_count is not None and state != STATE_UPLOADING:
             remaining = deadline - now()
             if remaining < post_count_min_remaining:
                 log("info", "Skipping the post-count probe: only %.0fs left of the "
@@ -380,7 +406,7 @@ def verify_reel_posted(
                                 now() - started)
 
         elapsed = now() - started
-        if elapsed >= timeout or now() >= deadline:
+        if now() >= deadline:
             break
         # Past the floor with the composer still up and nothing uploading: the
         # Share tap never registered, so stop early instead of waiting it out.

@@ -42,6 +42,7 @@ from adb_bot.clients.sms.base import (
     InsufficientBalance,
     NoNumbersAvailable,
     NumberOrder,
+    SERVICE_GOOGLE,
     SERVICE_INSTAGRAM,
     SmsProviderError,
     digits_only,
@@ -55,6 +56,8 @@ HTTP_TIMEOUT = 30
 # /service/retrieve_all and /country/retrieve_all on 2026-08-11.
 _SERVICE_IDS = {
     SERVICE_INSTAGRAM: 457,       # "Instagram / Threads"
+    SERVICE_GOOGLE: 395,          # "Google/Gmail" -- confirmed live 2026-10-03
+                                  # against /service/retrieve_all.
 }
 _COUNTRY_IDS = {
     COUNTRY_US: 1,                # "United States". 22 is "United States (Virtual)";

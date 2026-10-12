@@ -54,7 +54,11 @@ NOT_POSTING = ("link",)
 
 # Tags a person (or an earlier pass) already put a diagnosis on. Reading them
 # is free; launching the phone to rediscover what the tag says is two minutes.
-DIAGNOSED = ("logged out", "unable to verify", "banned / dead", "banned/dead")
+# `unable to verify` retired 2026-09-24 -- folded into `Human Verification`,
+# which is not diagnosed-elsewhere (it is exactly this flow's own population).
+# `logged out` renamed `Locked Out`, both kept so an unrelabelled phone still
+# counts.
+DIAGNOSED = ("logged out", "locked out", "unable to verify", "banned / dead", "banned/dead")
 
 # What each screen means for the flag.
 CLEARS_THE_FLAG = (verification.CHALLENGE_NONE,)
@@ -163,7 +167,8 @@ def _look(profile_item, clients, adb_client, args, logger) -> dict:
             profile_id, clients.api, clients.adb_enable, logger,
             max_attempts=args.readiness_attempts,
             wait_seconds=args.readiness_wait,
-            launcher_client=clients.launcher)
+            launcher_client=clients.launcher,
+            status_client=clients.status)
         if not profile:
             out["verdict"] = "phone-never-ready"
             return out
@@ -246,6 +251,12 @@ def main(argv=None) -> int:
                              "the account is broken.")
     parser.add_argument("--readiness-attempts", type=int, default=8)
     parser.add_argument("--readiness-wait", type=int, default=15)
+    # Never actually reach the real Airtable API (see _airtable in run_loop.py --
+    # it's a local file-backed store since 2026-09-17), but `cmd_run` calls it
+    # positionally and these were missing entirely, so every invocation hit
+    # `Namespace has no attribute 'base_id'` and silently cleared nothing.
+    parser.add_argument("--base-id", dest="base_id", default=None)
+    parser.add_argument("--airtable-token", dest="airtable_token", default=None)
     args = parser.parse_args(argv)
 
     logger = get_logger("adb_bot")
