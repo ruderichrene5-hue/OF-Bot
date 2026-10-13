@@ -35,6 +35,7 @@ from typing import Protocol, runtime_checkable
 
 from adb_bot.automation import ban_detection
 from adb_bot.automation.flows.verification import looks_like_launcher, screen_is_healthy
+from adb_bot.clients.sms.router import AllProvidersFailed
 
 # --- what a screen can be -----------------------------------------------------
 SCREEN_ENTRY = "entry"                  # "Join Instagram" -- the start
@@ -1246,21 +1247,9 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 sleep(8)
 
             elif screen == SCREEN_PHONE:
-                if identity.email:
-                    # Signup is phone-first; email is one tap away on this same
-                    # screen. Taking it before a number is leased is the whole
-                    # point -- an SMS run spends money here.
-                    log("info", "taking the email escape hatch")
-                    if not driver.tap_label(("Sign up with email address",
-                                             "Sign up with email")):
-                        return finish(
-                            RESULT_STUCK,
-                            "no 'Sign up with email address' on the mobile "
-                            "number screen, and this run has no number to fall "
-                            "back on")
-                    sleep(6)
-                    continue
-
+                # 13.10, Rene (standing rule): always go through the number first, even when an
+                # alias is already linked -- the email shortcut above used to skip SMS-Pool
+                # entirely whenever identity.email was set, which was every iCloud-alias row.
                 if lease is not None and any(marker in text.lower()
                                              for marker in
                                              _PHONE_INVALID_MARKERS):
@@ -1277,14 +1266,30 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                         lease.e164)
                     release(False)
                 if lease is None:
-                    if numbers_used >= MAX_NUMBER_ATTEMPTS:
+                    exhausted = router is None or numbers_used >= MAX_NUMBER_ATTEMPTS
+                    if not exhausted:
+                        try:
+                            lease = (router.lease(country=country) if country
+                                     else router.lease())
+                        except AllProvidersFailed:
+                            exhausted = True
+                        else:
+                            numbers_used += 1
+                            log("info", "number %d: %s (%s)", numbers_used,
+                                lease.e164, country or PICKER_COUNTRY)
+                    if exhausted:
+                        # 13.10, Rene (standing rule): the number is tried first, but once it is
+                        # genuinely unavailable, fall back to the already-claimed email rather than
+                        # ending the run -- a half-finished signup is worse for the account's standing
+                        # with Instagram than one that completes, however it gets there.
+                        if identity.email and driver.tap_label(
+                                ("Sign up with email address", "Sign up with email")):
+                            log("info", "no number available (%s); falling back to email",
+                                "no provider" if router is None else f"{numbers_used} tried")
+                            sleep(6)
+                            continue
                         return finish(RESULT_NO_NUMBER,
                                       f"{numbers_used} numbers, none delivered")
-                    lease = (router.lease(country=country) if country
-                             else router.lease())
-                    numbers_used += 1
-                    log("info", "number %d: %s (%s)", numbers_used, lease.e164,
-                        country or PICKER_COUNTRY)
                 # The national part only while the number matches the picker,
                 # which these phones open on because their proxy and locale are
                 # German. A number from anywhere else must go in whole, with
@@ -1437,7 +1442,14 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                     steps.pop()
                     sleep(LOADING_WAIT_SECONDS)
                     continue
-                if identity.email:
+                # 13.10 live (iPhone I, I5): the identity had an alias AND a rented US number; Instagram
+                # sent the code "via SMS to +19382917552", but this branch only looked at identity.email
+                # and sat 210 s on the mailbox while the SMS lease was never polled -> "no Instagram code
+                # reached <alias>". Decide by what the screen says, not by what the identity has.
+                code_by_phone = lease is not None and (
+                    any(w in text.lower() for w in ("sms", "text message", "whatsapp"))
+                    or any(d in text.replace(" ", "").replace("-", "") for d in (lease.e164[-7:],)))
+                if identity.email and not code_by_phone:
                     # The code is in the mailbox on this phone. Reading it means
                     # leaving Instagram in the background -- which the signup
                     # survives, as long as nothing force-stops it.
