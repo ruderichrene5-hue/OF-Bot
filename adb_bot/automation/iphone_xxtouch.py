@@ -54,8 +54,8 @@ _lock = threading.Lock()
 SCREEN_PX = (1125, 2436)
 
 
-def _clamp_xy(x: float, y: float) -> tuple[float, float]:
-    return (min(max(x, 1), SCREEN_PX[0] - 1), min(max(y, 1), SCREEN_PX[1] - 1))
+def _clamp_xy(x: float, y: float, screen: tuple = SCREEN_PX) -> tuple[float, float]:
+    return (min(max(x, 1), screen[0] - 1), min(max(y, 1), screen[1] - 1))
 
 
 class XXError(RuntimeError):
@@ -211,7 +211,7 @@ def _tunnel(ref: str) -> int:
              "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
              *iphone_farm_config.lan_ssh_opts(dest), "-L", f"127.0.0.1:{port}:127.0.0.1:{API_PORT}", dest],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(60):
+        for _ in range(150):                     # 13.10: slow farm WLAN -- SSH via the Mac took 10-12 s to connect
             try:
                 socket.create_connection(("127.0.0.1", port), 0.3).close()
                 break
@@ -234,16 +234,13 @@ class Touch:
 
     def __init__(self, ref: str, scale: float = 3.0):
         self.ref, self.scale = ref, scale
-        # 13.10 (Rene): the farm now mixes iPhone X (1125x2436, scale 3) with iPhone 7/8 (750x1334,
-        # scale 2). Every flow and gesture library here was recorded on an X; replaying it on a 7/8
-        # would tap the wrong places. Each phone carries its model in /etc/adbbot/iphone_farm.json --
-        # refuse loudly instead of copying between models.
+        # 13.10 (Rene): the farm mixes iPhone X (1125x2436, scale 3) with iPhone 7/8 (750x1334, scale 2).
+        # Flows work in WDA points and divide OCR pixels by the scale, so a phone's own scale/screen size
+        # from /etc/adbbot/iphone_farm.json (model, scale, screen_px) is all that differs between models.
         from adb_bot.automation.iphone_farm_wda import resolve
         _rec, phone = resolve(ref)
-        px = tuple(phone.get("screen_px") or SCREEN_PX)
-        if px != SCREEN_PX:
-            raise XXError(f"{ref}: {phone.get('model', '?')} is {px[0]}x{px[1]} px, the XXTouch flows are recorded for "
-                          f"iPhone X {SCREEN_PX[0]}x{SCREEN_PX[1]} -- this model needs its own recordings first")
+        self.scale = float(phone.get("scale") or scale)
+        self.screen_px = tuple(phone.get("screen_px") or SCREEN_PX)
         self.taps, self.swipes = library_for(ref)
         self.base = f"http://127.0.0.1:{_tunnel(ref)}"
         self.http = requests.Session()
@@ -293,8 +290,8 @@ class Touch:
         """Press, hold, then move slowly to (x2,y2) and lift -- dragging a sticker or a slider."""
         s = self.scale
         x1, y1, x2, y2 = x1 * s, y1 * s, x2 * s, y2 * s
-        x1, y1 = _clamp_xy(x1, y1)
-        x2, y2 = _clamp_xy(x2, y2)
+        x1, y1 = _clamp_xy(x1, y1, self.screen_px)
+        x2, y2 = _clamp_xy(x2, y2, self.screen_px)
         pr = int(random.uniform(400, 900))
         lines = [f"touch.on(7,{round(x1)},{round(y1)})", f"sys.msleep({int(hold * 1000)})"]
         n = max(6, int(seconds / 0.04))
@@ -309,7 +306,7 @@ class Touch:
     def hold(self, x: float, y: float, seconds: float = 0.8):
         """Long press: touch down, a real finger's pressure while holding, lift."""
         s = self.scale
-        x, y = _clamp_xy(x * s, y * s)
+        x, y = _clamp_xy(x * s, y * s, self.screen_px)
         n = max(4, int(seconds / 0.05))
         lines = [f"touch.on(7,{round(x)},{round(y)})"]
         base = random.uniform(700, 1300)
