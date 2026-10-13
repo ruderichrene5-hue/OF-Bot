@@ -78,6 +78,13 @@ SCREEN_UNKNOWN = "unknown"              # stop -- never act on this
 _CHECKPOINT_MARKERS = (
     "confirm you're human to use your account",
     "confirm you are human to use your account",
+    # 12.10, C14 live: same checkpoint, "profile" instead of "account" -- Instagram
+    # worded it differently from C13's run moments earlier on the same phone/model,
+    # which only matched "...account" and fell through to unknown_screen, hiding
+    # another real, already-created account the same way the video-selfie wording
+    # did below before it was added.
+    "confirm you're human to use your profile",
+    "confirm you are human to use your profile",
     # Same checkpoint, video-selfie wording -- seen on the `nikkis.koenig`
     # batch, 2026-09-25: "confirm you're a real person with a video selfie /
     # we need more info to make sure you're human." Read as `unknown_screen`
@@ -179,6 +186,10 @@ def looks_like_another_app(text: str | None) -> bool:
 _HANDLE_PHRASES = (
     "to use your account, ",
     "confirm you're human to use your account, ",
+    # 12.10, C14: same checkpoint wording "to use your profile, " instead of
+    # "...account, " -- see _CHECKPOINT_MARKERS above.
+    "to use your profile, ",
+    "confirm you're human to use your profile, ",
 )
 
 # Instagram handles: letters, digits, dots, underscores, up to 30.
@@ -1477,8 +1488,18 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                         sleep(4)
                         continue
                 log("info", "code arrived")
-                driver.fill(("code",), code, "confirmation code",
-                            submits_itself=True)
+                # 12.10, A10/B9 live: this used to set code_submitted regardless of what
+                # fill() reported, so a code that never actually landed (OCR field_holds
+                # found nothing, same shape of miss SCREEN_EMAIL already guards against
+                # above) still walked into the "wait for the screen to move on" loop below
+                # -- four waits of nothing happening, then pressing Next on a field
+                # Instagram itself then called empty ("Code is required"), misread as
+                # "the screen just didn't advance" when the real cause was the code never
+                # being typed in. Only proceed into that wait when fill() actually confirms
+                # the code is there.
+                if not driver.fill(("code",), code, "confirmation code", submits_itself=True):
+                    return finish(RESULT_STUCK,
+                                  f"could not get the code into the confirmation-code field")
                 code_submitted = True
                 progressed = True
                 release(False)
