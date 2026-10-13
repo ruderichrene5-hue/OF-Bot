@@ -41,7 +41,7 @@ import uuid as uuidlib
 from dataclasses import dataclass
 from pathlib import Path
 
-SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=8"]
+SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=30"]
 
 
 @dataclass

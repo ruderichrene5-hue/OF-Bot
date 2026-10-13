@@ -53,7 +53,7 @@ APPSYNC_PKG = "ai.akemi.appsyncunified"
 BASE_PORT = 8100
 
 SSH_KEY = iphone_farm_config.SSH_KEY
-SSH_OPTS = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=8"]
+SSH_OPTS = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=30"]
 
 
 class WDAError(RuntimeError):

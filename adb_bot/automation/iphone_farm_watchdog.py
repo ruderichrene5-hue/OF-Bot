@@ -91,7 +91,7 @@ def _relay_ssh(cmd: str, timeout: int = 30) -> str | None:
     import subprocess
     r = iphone_farm_config.relay()
     try:
-        out = subprocess.run(["ssh", "-n", "-i", iphone_farm_config.SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+        out = subprocess.run(["ssh", "-n", "-i", iphone_farm_config.SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=30",
                               r["ssh"], cmd], capture_output=True, text=True, timeout=timeout)
     except Exception:
         return None
