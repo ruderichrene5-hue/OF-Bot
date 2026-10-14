@@ -378,8 +378,8 @@ def open_container_cli(rec_id: str, name: str, log=None) -> tuple[bool, str]:
     if not ok:
         return False, f"{name}: container/VPN switch failed: {msg}"
     # 2. the queued "Open in Shadowrocket?" sheets
+    from adb_bot.automation.iphone_farm_wda import connect
     try:
-        from adb_bot.automation.iphone_farm_wda import connect
         p = connect(rec_id, timeout=30)
         deadline = _time.monotonic() + 25
         n = 0
@@ -407,6 +407,26 @@ def open_container_cli(rec_id: str, name: str, log=None) -> tuple[bool, str]:
     out = _ssh_out(rec_id, probe, timeout=120)          # _ssh() only says "done", the probe's text is needed
     m = re.search(r"ip=(\S*) dns=(.*)", out or "")
     ip_now, dns = (m.group(1), m.group(2).strip()) if m else ("?", "?")
+    if ip_now != host:
+        # A2 live (14.10): three queued sheets answered late left the tunnel OFF (exit = Thai line); one
+        # more connect + sheet, then the probe again -- the second run came up in 63 s
+        log(f"{name}: exit {ip_now}, tunnel not up yet -- connecting once more")
+        _ssh(rec_id, "uiopen 'shadowrocket://connect?autoclose=true'; echo ok", timeout=60)
+        try:
+            p = connect(rec_id, timeout=30)
+            for _ in range(12):
+                txt = p.alert_text() or ""
+                if "Shadowrocket" in txt or "Open in" in txt:
+                    try:
+                        p.alert_accept("Open")
+                    except Exception:  # noqa: BLE001
+                        p.alert_accept()
+                _time.sleep(1)
+        except Exception:  # noqa: BLE001
+            pass
+        out = _ssh_out(rec_id, probe, timeout=120)
+        m = re.search(r"ip=(\S*) dns=(.*)", out or "")
+        ip_now, dns = (m.group(1), m.group(2).strip()) if m else ("?", "?")
     if ip_now != host:
         return False, f"{name}: exit IP {ip_now} is not the container's proxy {host} -- Instagram not opened"
     if "unitedstates" not in dns.lower().replace(" ", ""):    # the probe strips blanks
