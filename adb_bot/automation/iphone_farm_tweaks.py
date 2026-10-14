@@ -317,6 +317,31 @@ def verify(ref: str, wait: int = 25) -> tuple[bool, str]:
                   f"crash logs {before}->{after}, ruleset says ssh is {rule.strip() or '?'}")
 
 
+# ---------------------------------------------------------------- probe (A/B: with vs without the stack)
+
+def probe(ref: str) -> dict:
+    """What a phone exposes right now, through whatever container/tunnel is active: exit IP + its
+    country/city/time zone (ip-api), the resolver's country (edns.ip-api), the phone's own time zone,
+    Shadow on/off for Instagram, LocSim running or not. Read-only."""
+    rec_id, p, dest = _resolve(ref)
+    name = p.get("stream") or ref
+    # one "key=value" line per item, so a missing command cannot shift the others
+    raw = _ssh(dest, "echo ip=$(curl -s -m 8 -4 'http://ip-api.com/line/?fields=countryCode,city,timezone,query' 2>/dev/null | tr '\\n' '|'); "
+                     "echo dns=$(curl -s -L -m 12 -4 'http://edns.ip-api.com/json' 2>/dev/null | tr -d '\\n ' | grep -o '\"geo\":\"[^\"]*' | cut -d'\"' -f4); "
+                     "echo tz=$(ls -l /var/db/timezone/localtime | sed 's|.*/zoneinfo/||'); "
+                     "echo locsim=$(ps ax | grep -c '[l]ocsim start'); "
+                     "echo ig=$(cranectl --list com.burbn.instagram 2>/dev/null | grep -i -m1 active | tr -s ' ')",
+               timeout=90, check=False).decode(errors="replace")
+    kv = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+    cc, city, iptz, ip = (kv.get("ip", "").strip("|").split("|") + ["", "", "", ""])[:4]
+    out = ["", kv.get("dns", ""), kv.get("tz", ""), kv.get("locsim", ""), kv.get("ig", "")[:60]]
+    prefs = _shadow_prefs(dest)
+    return {"phone": name, "exit_ip": ip, "country": cc, "city": city, "ip_tz": iptz,
+            "dns": out[1].strip(), "phone_tz": out[2].strip(), "locsim": out[3].strip() == "1",
+            "shadow_ig": bool(prefs.get(IG, {}).get("App_Enabled")), "ig_container": out[4].strip(),
+            "stack": "me.jjolano.shadow" in _dpkg_versions(dest)}
+
+
 # ---------------------------------------------------------------- CLI
 
 def main(argv=None) -> int:
@@ -329,6 +354,8 @@ def main(argv=None) -> int:
     s.add_argument("phone")
     s.add_argument("--password", help="default: $IPHONE_SUDO_PASSWORD or asked interactively")
     s.add_argument("--no-verify", action="store_true")
+    s = sub.add_parser("probe", help="A/B table: exit IP, DNS country, time zones, Shadow, LocSim per phone")
+    s.add_argument("phone", nargs="?")
     s = sub.add_parser("verify", help="start Instagram under Shadow, confirm it survives")
     s.add_argument("phone")
     s.add_argument("--wait", type=int, default=25)
@@ -354,6 +381,21 @@ def main(argv=None) -> int:
             ok, msg = verify(a.phone)
             print(("ok  " if ok else "!!  ") + msg)
             return 0 if ok else 1
+        return 0
+    if a.cmd == "probe":
+        from concurrent.futures import ThreadPoolExecutor
+        from adb_bot.automation.iphone_farm_wda import phones
+        refs = [a.phone] if a.phone else list(phones())
+        def one(r):
+            try:
+                return probe(r)
+            except Exception as exc:
+                return {"phone": r, "exit_ip": f"ERR {exc}"[:40]}
+        rows = list(ThreadPoolExecutor(8).map(one, refs))
+        cols = ["phone", "stack", "shadow_ig", "locsim", "exit_ip", "country", "city", "ip_tz", "dns", "phone_tz", "ig_container"]
+        print("  ".join(c.ljust(w) for c, w in zip(cols, [8, 5, 9, 6, 16, 7, 14, 20, 14, 18, 20])))
+        for r in rows:
+            print("  ".join(str(r.get(c, "")).ljust(w)[:w] for c, w in zip(cols, [8, 5, 9, 6, 16, 7, 14, 20, 14, 18, 20])))
         return 0
     if a.cmd == "verify":
         ok, msg = verify(a.phone, a.wait)
