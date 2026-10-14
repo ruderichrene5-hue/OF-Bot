@@ -193,9 +193,52 @@ def _cf_access_ok(token: str) -> str | None:
         return None
 
 
+# Model logins (Rene 14.10): a model signs in through the same Cloudflare Access e-mail login and
+# sees only her own accounts. /etc/adbbot/creators.json = {"emails": {"lea@example.com": "Lea"}} --
+# the value is the model name exactly as in Airtable "Model (auto)". Anyone not listed is staff.
+CREATORS_PATH = os.environ.get("CREATORS_PATH", "/etc/adbbot/creators.json")
+_crm_data = {"at": 0.0, "data": None}
+_crm_data_lock = threading.Lock()
+
+
+def _creators() -> dict:
+    try:
+        return {k.strip().lower(): v for k, v in (json.loads(Path(CREATORS_PATH).read_text()).get("emails") or {}).items()}
+    except Exception:
+        return {}
+
+
+def _crm_dataset() -> dict:
+    """crm.data() (one Airtable round trip), refreshed at most every REBUILD_SECONDS."""
+    with _crm_data_lock:
+        if _crm_data["data"] is None or time.time() - _crm_data["at"] > REBUILD_SECONDS:
+            from adb_bot.automation import crm
+            _crm_data["data"], _crm_data["at"] = crm.data(), time.time()
+        return _crm_data["data"]
+
+
+def _creator_page(model: str) -> bytes:
+    from adb_bot.automation import crm
+    html = crm.render(crm.creator_view(_crm_dataset(), model)).encode("utf-8")
+    logo = _LOGO.replace('width="300" height="72"', 'height="38" width="158"')
+    badge = (f'<span style="margin-left:auto;display:flex;align-items:center;gap:10px;color:#9aa3b2;font-weight:500">'
+             f'<span style="font-size:11px;padding:4px 9px;border-radius:999px;background:#161a22;border:1px solid #262c38">Creator view · only your accounts</span>'
+             f'<b style="color:#e6e8ee">{model}</b><span style="width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#4f8cff,#9b5cff);'
+             f'display:grid;place-items:center;color:#fff;font-weight:700;font-size:13px">{model[:1].upper()}</span></span>')
+    bar = f'{_NAV_CSS}<nav class="pf-nav"><a class="pf-logo" href="/" title="RNX Viewer">{logo}</a>{badge}</nav>'.encode("utf-8")
+    h = html.find(b"</head>")
+    if h >= 0:
+        html = html[:h] + _FAVICON.encode() + html[h:]
+    i = html.find(b"<body"); j = html.find(b">", i) if i >= 0 else -1
+    return html[:j + 1] + bar + html[j + 1:] if j >= 0 else bar + html
+
+
 class Handler(BaseHTTPRequestHandler):
+    identity: str | None = None                  # e-mail from Cloudflare Access, None for the password login
+
     def _authorized(self) -> bool:
         pw = os.environ.get("PLATFORM_PASSWORD", "")
+        self.identity = None
         if not pw:
             return True
         if self.client_address[0] in ("127.0.0.1", "::1"):
@@ -205,7 +248,9 @@ class Handler(BaseHTTPRequestHandler):
                     k, _, v = part.strip().partition("=")
                     if k == "CF_Authorization":
                         tok = v
-            if _cf_access_ok(tok):
+            who = _cf_access_ok(tok)
+            if who:
+                self.identity = who
                 return True
         hdr = self.headers.get("Authorization", "")
         if not hdr.startswith("Basic "):
@@ -462,6 +507,28 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         route = self.path.split("?")[0]
+        creator = _creators().get((self.identity or "").lower())
+        if creator:                                   # model login: her page and nothing else
+            if route not in ("/", "/accounts", "/health"):
+                self.send_response(302); self.send_header("Location", "/"); self.end_headers(); return
+            body = _creator_page(creator)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if route == "/creator":                       # staff preview: /creator?model=Nikki
+            model = (parse_qs(urlsplit(self.path).query).get("model") or [""])[0].strip()
+            body = _creator_page(model) if model else b"<pre>/creator?model=&lt;Model name&gt;</pre>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if route == "/phones/lines":
             from adb_bot.automation import iphone_farm_config
             body = json.dumps(iphone_farm_config.lines_status()).encode()
