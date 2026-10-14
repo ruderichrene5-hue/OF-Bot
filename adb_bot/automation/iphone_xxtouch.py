@@ -199,6 +199,14 @@ def _free_port() -> int:
     return port
 
 
+def _die_with_parent():
+    """14.10: every run that was stopped (kill/TERM, so atexit never ran) left its ssh -N tunnels behind -- 37 of
+    them by morning, the Mac jump host's sshd then refused every new connection ("Connection reset"), which read
+    as a slow WLAN all evening. The kernel now sends the tunnel SIGTERM when the Python process that opened it ends."""
+    import ctypes, signal as _signal
+    ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, _signal.SIGTERM)    # PR_SET_PDEATHSIG
+
+
 def _tunnel(ref: str) -> int:
     with _lock:
         t = _tunnels.get(ref)
@@ -210,7 +218,7 @@ def _tunnel(ref: str) -> int:
             ["ssh", "-N", "-i", iphone_farm_config.SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
              "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
              *iphone_farm_config.lan_ssh_opts(dest), "-L", f"127.0.0.1:{port}:127.0.0.1:{API_PORT}", dest],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=_die_with_parent)
         for _ in range(150):                     # 13.10: slow farm WLAN -- SSH via the Mac took 10-12 s to connect
             try:
                 socket.create_connection(("127.0.0.1", port), 0.3).close()

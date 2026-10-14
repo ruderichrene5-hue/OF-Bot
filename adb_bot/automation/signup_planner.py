@@ -344,6 +344,13 @@ def outcome(row: str, code: int, tail: str) -> tuple[str, str]:
     if status == "Instagram Created":
         return "done", f"✅ @{user}"
     if status == "Stuck / Needs Human":
+        # 14.10: a run that never got a phone number ("no_number -- 0 numbers") also lands here and was shown as
+        # "Verifizierung lösen" -- there was no verification at all. Say what the Notes say.
+        note = _text(f.get(A.get("notes", ""), "")) if A.get("notes") else ""
+        if "limit how often" in tail or "Try Again Later" in tail:
+            return "failed", "❌ Instagram: 'Try Again Later' -- Handy/Proxy für heute gesperrt"
+        if "0 numbers" in (note + tail) or "no_number" in (note + tail):
+            return "failed", "❌ keine Nummer (SMS-Pool leer) und kein iCloud-Fallback"
         return "done", f"🔐 @{user} Verifizierung lösen"
     return "failed", f"❌ {tail or f'Exit {code}'}"
 

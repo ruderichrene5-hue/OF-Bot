@@ -175,6 +175,20 @@ class SmsPoolProvider:
 
         body = self._post("/purchase/sms", country=country_id, service=service_id)
         if not _truthy(body.get("success")):
+            # 13.10 E20/E22 live: SMSPool's own pick only ever tried pools Foxtrot + Sierra (both empty) while
+            # pool Mike still had US Instagram numbers (Rene saw them on the site). Ask each priced pool by name.
+            try:
+                pools = self._session.post(f"{self.api_base}/request/pricing", timeout=self.timeout,   # a list, not a dict
+                                           data={"key": self.api_key, "country": country_id, "service": service_id}).json()
+                pool_ids = [p.get("pool") for p in pools if isinstance(p, dict) and p.get("pool")] if isinstance(pools, list) else []
+            except Exception:  # noqa: BLE001
+                pool_ids = []
+            for pool in pool_ids:
+                retry = self._post("/purchase/sms", country=country_id, service=service_id, pool=pool)
+                if _truthy(retry.get("success")):
+                    body = retry
+                    break
+        if not _truthy(body.get("success")):
             message = self._message(body) or "purchase refused"
             lowered = message.lower()
             if any(marker in lowered for marker in _BALANCE_MARKERS):
