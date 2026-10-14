@@ -435,9 +435,12 @@ def open_container_cli(rec_id: str, name: str, log=None) -> tuple[bool, str]:
     # 3b. 14.10 Rene ("LocSim aktivieren, es geht um den Container"): where locsim is installed, the phone's GPS
     # goes to the exit IP's city (ip-api lat/lon) once the IP gate passed. locsim is device-wide, so every app
     # opened in this container sees that location. Phones without locsim skip this.
+    # NB: mobile's login shell is zsh, which does NOT word-split an unquoted $var -- `set -- $ll` put both
+    # coords in $1 and left $2 empty, so the step silently never ran (14.10). Read lat/lon as separate lines.
     loc = _ssh_out(rec_id, "command -v locsim >/dev/null 2>&1 || exit 0; "
-                           "ll=$(curl -s -m 8 -4 'http://ip-api.com/line/?fields=lat,lon' 2>/dev/null | tr '\\n' ' '); "
-                           "set -- $ll; [ -n \"$2\" ] && locsim start -x $1 -y $2 -h 25 >/dev/null 2>&1 && echo \"locsim $1 $2\"", timeout=60)
+                           "ll=$(curl -s -m 8 -4 'http://ip-api.com/line/?fields=lat,lon' 2>/dev/null); "
+                           "lat=$(echo \"$ll\" | sed -n 1p); lon=$(echo \"$ll\" | sed -n 2p); "
+                           "[ -n \"$lon\" ] && locsim start -x $lat -y $lon -h 25 >/dev/null 2>&1 && echo \"locsim $lat $lon\"", timeout=60)
     if loc.strip():
         log(f"{name}: {loc.strip()}")
     # 4. Instagram in its container
