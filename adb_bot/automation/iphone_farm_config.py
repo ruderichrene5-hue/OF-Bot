@@ -432,6 +432,13 @@ def open_container_cli(rec_id: str, name: str, log=None) -> tuple[bool, str]:
     if "unitedstates" not in dns.lower().replace(" ", ""):    # the probe strips blanks
         return False, f"{name}: resolver not in the US ({dns!r}) -- Instagram not opened"
     log(f"{name}: VPN up, exit {ip_now}, DNS {dns}")
+    # 3b. 14.10 (Rene: "LocSim, Standort passend zum Proxy"): where locsim is installed, put the phone's GPS
+    # on the exit IP's city (ip-api lat/lon) before Instagram starts. Phones without locsim just skip this.
+    loc = _ssh_out(rec_id, "command -v locsim >/dev/null 2>&1 || exit 0; "
+                           "ll=$(curl -s -m 8 -4 'http://ip-api.com/line/?fields=lat,lon' 2>/dev/null | tr '\\n' ' '); "
+                           "set -- $ll; [ -n \"$2\" ] && locsim start -x $1 -y $2 >/dev/null 2>&1 && echo \"locsim $1 $2\"", timeout=60)
+    if loc.strip():
+        log(f"{name}: {loc.strip()}")
     # 4. Instagram in its container
     ok, msg = _ssh(rec_id, f"{ctl} --switch com.burbn.instagram 'name:{name} IG' && uiopen --bundleid com.burbn.instagram && echo ok", timeout=60)
     if not ok:
