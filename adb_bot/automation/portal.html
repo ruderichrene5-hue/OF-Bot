@@ -65,6 +65,7 @@
   .acc{display:grid;grid-template-columns:44px minmax(150px,1.5fr) 120px 120px 1fr;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin-bottom:8px}
   .acc .lbl{color:var(--muted);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase} .acc .val{font-weight:650;font-variant-numeric:tabular-nums}
   .av{width:40px;height:40px;border-radius:50%;object-fit:cover;background:#232938;display:grid;place-items:center;color:var(--muted);font-weight:700;font-size:13px}
+  @media(max-width:700px){.acc{grid-template-columns:44px 1fr 1fr}.acc>div:nth-child(2){grid-column:2/4}.acc>div:last-child{display:none}.acc .val{font-size:15px}}
   .week{display:grid;grid-template-columns:repeat(7,1fr);gap:8px} @media(max-width:900px){.week{grid-template-columns:repeat(2,1fr)}}
   .day{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px;min-height:120px}
   .day.today{border-color:var(--pink);box-shadow:0 0 0 1px rgba(255,92,154,.35) inset}
@@ -178,7 +179,7 @@ const isDone = x => x.status === "Published" || x.status === "Done" || x.status 
 const DONE = new Set(JSON.parse(localStorage.getItem("nf_done") || "[]"));
 const toRecreate = p => p.reference && !isDone(p) && !DONE.has(p.id) && p.status !== "Shot" && p.status !== "Edited";
 
-function avatar(a){ return a.avatar ? `<img class="av" src="${esc(a.avatar)}" alt="">` : `<div class="av">${esc(a.handle.slice(0,2).toUpperCase())}</div>`; }
+function avatar(a){ const ini = esc(a.handle.slice(0,2).toUpperCase()); return a.avatar ? `<img class="av" src="${esc(a.avatar)}" alt="" onerror="this.outerHTML='<div class=&quot;av&quot;>${ini}</div>'">` : `<div class="av">${ini}</div>`; }
 function folOn(a, d){ let v = null; for (const k of Object.keys(a.followersDaily).sort()) if (k <= d) v = a.followersDaily[k]; return v; }
 function gain(a, n){ const ks = Object.keys(a.followersDaily).sort(); if (ks.length < 2) return null; const last = ks[ks.length-1], s = addDays(last, -n);
   const older = ks.filter(k => k <= s); return older.length ? a.followersDaily[last] - a.followersDaily[older[older.length-1]] : null; }
