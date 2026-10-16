@@ -52,6 +52,8 @@
   .reel .ov b{display:block;font-size:13.5px;margin-bottom:4px;line-height:1.25} .reel .ov span{margin-right:9px;color:#d9dde6}
   .reel .tag{position:absolute;top:10px;left:10px} .reel .play{position:absolute;top:50%;left:50%;width:46px;height:46px;margin:-23px 0 0 -23px;border-radius:50%;background:rgba(11,13,18,.6);border:1px solid rgba(255,255,255,.25);display:grid;place-items:center;backdrop-filter:blur(6px)}
   .reel .play svg{width:18px;height:18px;fill:#fff;margin-left:3px}
+  .recreate{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:14px} @media(max-width:700px){.recreate{grid-template-columns:1fr}}
+  .rc{display:grid;grid-template-columns:150px 1fr;gap:16px;cursor:pointer;padding:14px} .rc-media{position:relative;aspect-ratio:9/16;border-radius:12px;overflow:hidden;background:#000;border:1px solid var(--line)} .rc-media iframe{width:100%;height:100%;border:0;transform:scale(1.02)}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px} @media(max-width:1000px){.grid2{grid-template-columns:1fr}}
   .chart{position:relative} .chart svg{width:100%;height:220px;display:block}
   .tip{position:absolute;pointer-events:none;background:#0f1219;border:1px solid var(--line);border-radius:9px;padding:7px 10px;font-size:12.5px;display:none;white-space:nowrap}
@@ -70,7 +72,7 @@
   .modal{position:fixed;inset:0;background:rgba(0,0,0,.75);display:none;place-items:center;z-index:50;padding:20px} .modal.on{display:grid}
   .modal .box{background:var(--bg2);border:1px solid var(--line2);border-radius:20px;max-width:900px;width:100%;max-height:92vh;overflow:auto;display:grid;grid-template-columns:minmax(260px,360px) 1fr}
   @media(max-width:800px){.modal .box{grid-template-columns:1fr}}
-  .modal .media{background:#000;aspect-ratio:9/16;display:grid;place-items:center} .modal .media video,.modal .media img,.modal .media iframe{width:100%;height:100%;object-fit:cover;border:0}
+  .modal .media{position:relative;background:#000;aspect-ratio:9/16;display:grid;place-items:center} .modal .media video,.modal .media img,.modal .media iframe{width:100%;height:100%;object-fit:cover;border:0}
   .modal .body{padding:22px 24px} .modal .body h3{font-family:var(--display);font-weight:500;font-size:24px;margin:6px 0 4px} .modal .k{color:var(--muted);font-size:12px;letter-spacing:.08em;text-transform:uppercase;margin-top:16px}
   .modal .x{position:absolute;top:18px;right:22px;background:var(--panel);border:1px solid var(--line2);color:var(--fg);width:38px;height:38px;border-radius:50%;cursor:pointer;font-size:18px}
   .btn{display:inline-flex;align-items:center;gap:8px;padding:9px 16px;border-radius:999px;border:1px solid var(--line2);background:var(--panel);font-weight:600;font-size:13.5px;cursor:pointer;color:var(--fg)}
@@ -162,15 +164,20 @@ function home(){
       <div class="list">${td.map(itemHtml).join("") || `<div class="empty">Nothing scheduled for today.</div>`}</div></section>
     <section class="sec"><div class="sec-head"><div><h2>This <em>week</em></h2><div class="cs">Deadlines and open points until ${nice(weekEnd)}</div></div><a class="btn" href="#plan">Full plan →</a></div>
       <div class="list">${wk.map(itemHtml).join("") || `<div class="empty">Nothing else this week.</div>`}</div></section>
+    ${recreate().length ? `<section class="sec"><div class="sec-head"><div><h2>Reels to <em>recreate</em></h2><div class="cs">Watch the original, then shoot your version. Hook and outfit are in the card.</div></div></div>
+      <div class="recreate">${recreate().map(p => `<div class="card rc" data-open="${p.id}"><div class="rc-media">${refThumb(p)}</div><div><span class="pill ${pf(p.platform)}">${esc(p.platform)}</span> <span class="pill ${stCls(p.status)}">${esc(p.status)}</span><div class="t" style="font-weight:600;font-size:16px;margin-top:8px">${esc(p.title)}</div>
+        ${p.hook ? `<div class="s" style="color:var(--muted);margin-top:4px">${esc(p.hook)}</div>` : ""}${p.outfit ? `<div class="s" style="color:var(--dim);margin-top:4px">${esc(p.outfit)}</div>` : ""}<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"><span class="btn primary">▶ Watch original</span><span class="when" style="align-self:center">${p.date ? nice(p.date) : ""}</span></div></div></div>`).join("")}</div></section>` : ""}
     <section class="sec"><div class="sec-head"><div><h2>Your <em>reels</em></h2><div class="cs">Latest first. Tap to watch here.</div></div><a class="btn" href="#reels">All reels →</a></div>
       <div class="reels">${reelCards().slice(0, 5).join("") || `<div class="empty">No reels yet.</div>`}</div></section>`;
   wireTicks(); wireReels();
 }
 
+function recreate(){ return P.filter(p => p.reference && !isDone(p) && !DONE.has(p.id) && p.status !== "Shot" && p.status !== "Edited").sort((a, b) => (a.date || "9").localeCompare(b.date || "9")); }
+function refThumb(p){ const m = (p.reference || "").match(/\/(?:reel|p)\/([A-Za-z0-9_-]+)/); return m ? `<iframe src="https://www.instagram.com/reel/${m[1]}/embed/" loading="lazy" style="pointer-events:none"></iframe>` : `<div class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>`; }
 function reelCards(){
   const out = [];
   for (const p of P.filter(p => p.type === "Reel" || p.file)) out.push({ k: p.date || "", html: `<a class="reel" data-plan="${p.id}">${p.file?.thumb ? `<img src="${esc(p.file.thumb)}" alt="">` : p.file?.type?.startsWith("video") ? `<video src="${esc(p.file.url)}" muted playsinline preload="metadata"></video>` : ""}
-      <span class="pill ${stCls(p.status)} tag">${esc(p.status)}</span><div class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>
+      <span class="pill ${stCls(p.status)} tag">${esc(p.status)}</span>${p.reference && !isDone(p) && p.status !== "Shot" && p.status !== "Edited" ? `<span class="pill tag" style="left:auto;right:10px">recreate</span>` : ""}<div class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>
       <div class="ov"><b>${esc(p.title)}</b><span>${esc(p.platform)}</span><span>${p.date ? nice(p.date) : ""}</span></div></a>` });
   for (const a of A) for (const r of a.reels) out.push({ k: "0", views: r.views, html: `<a class="reel" data-ig="${esc(r.code)}">${r.thumb ? `<img src="${esc(r.thumb)}" alt="" loading="lazy">` : ""}
       <span class="pill ok tag">live</span><div class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>
@@ -186,7 +193,7 @@ function media(p){
   if (p.file?.type?.startsWith("video")) return `<video src="${esc(p.file.url)}" controls autoplay playsinline></video>`;
   if (p.file?.url) return `<img src="${esc(p.file.url)}" alt="">`;
   const code = (p.published || p.reference || "").match(/\/(?:reel|p)\/([A-Za-z0-9_-]+)/);
-  if (code) return `<iframe src="https://www.instagram.com/reel/${code[1]}/embed/" allowfullscreen></iframe>`;
+  if (code) return `<iframe src="https://www.instagram.com/reel/${code[1]}/embed/" allowfullscreen></iframe>${p.published ? "" : `<span class="pill" style="position:absolute;top:12px;left:12px">original to recreate</span>`}`;
   return `<div style="color:var(--muted);padding:20px;text-align:center">No file yet.<br>Upload it after the shoot and it plays here.</div>`;
 }
 function openPlan(id){ const p = P.find(x => x.id === id); if (!p) return;
