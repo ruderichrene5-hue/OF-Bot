@@ -296,6 +296,15 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             upstream.close()
 
+    def _portal_ref(self, route: str):
+        from adb_bot.automation import portal
+        f = portal.ref_file(route.rsplit("/", 1)[-1])
+        if not f:
+            self.send_response(404); self.end_headers(); return
+        data = f.read_bytes()
+        self.send_response(200); self.send_header("Content-Type", "video/mp4"); self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "private, max-age=86400"); self.end_headers(); self.wfile.write(data)
+
     def do_POST(self):
         if self.path.split("?")[0] == "/portal/done":
             # model ticks an item in the portal -> status written to the Northfeed Portal base
@@ -531,6 +540,8 @@ class Handler(BaseHTTPRequestHandler):
         route = self.path.split("?")[0]
         creator = _creators().get((self.identity or "").lower())
         if creator:                                   # model login: her page and nothing else
+            if route.startswith("/portal/ref/"):
+                return self._portal_ref(route)
             if route not in ("/", "/accounts", "/health", "/portal"):
                 self.send_response(302); self.send_header("Location", "/"); self.end_headers(); return
             body = _portal_page(creator) if route == "/portal" else _creator_page(creator)
@@ -544,6 +555,8 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/whoami":                        # debug: who does the server think you are?
             body = json.dumps({"identity": self.identity, "creator": creator, "creators_file": sorted(_creators().keys())}).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if route.startswith("/portal/ref/"):          # reference video cached on this server (see portal.fetch_references)
+            return self._portal_ref(route)
         if route == "/portal":                        # staff preview of the model portal: /portal?model=Lea
             model = (parse_qs(urlsplit(self.path).query).get("model") or [""])[0].strip()
             body = _portal_page(model) if model else b"<pre>/portal?model=&lt;Model name&gt;</pre>"

@@ -10,6 +10,8 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
+import threading
 from pathlib import Path
 
 import requests
@@ -18,6 +20,45 @@ from . import crm
 
 BASE = "appkNZyYhlmvqD84H"                      # Northfeed Portal
 T_MODELS, T_PLAN, T_TASKS = "tblBJFZwfPONZrlD1", "tblhMYxVVowzGnScU", "tbljnBF6t5MtyeUoT"
+REF_DIR = Path(os.environ.get("PORTAL_REF_DIR", "/opt/northfeed-portal/refs"))   # reference videos, downloaded once
+COOKIES = Path("/root/reel_pipeline/cookies.txt")
+_fetching: set = set()
+
+
+def ref_file(name: str) -> Path | None:
+    """'recXXXX.mp4' -> cached file or None (no path tricks)."""
+    if not re.fullmatch(r"rec[A-Za-z0-9]{14}\.mp4", name):
+        return None
+    f = REF_DIR / name
+    return f if f.exists() and f.stat().st_size > 0 else None
+
+
+def _download_ref(rec_id: str, url: str) -> None:
+    try:
+        import yt_dlp
+        REF_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = REF_DIR / f"{rec_id}.part.%(ext)s"
+        opts = {"outtmpl": str(tmp), "format": "mp4/bestvideo[ext=mp4]+bestaudio/best", "merge_output_format": "mp4",
+                "quiet": True, "no_warnings": True, "max_filesize": 150 * 1024 * 1024}
+        if COOKIES.exists():
+            opts["cookiefile"] = str(COOKIES)
+        with yt_dlp.YoutubeDL(opts) as y:
+            info = y.extract_info(url, download=True)
+            got = Path(y.prepare_filename(info))
+        if got.exists():
+            got.rename(REF_DIR / f"{rec_id}.mp4")
+    except Exception as e:  # noqa: BLE001
+        print(f"portal ref {rec_id}: {e}")
+    finally:
+        _fetching.discard(rec_id)
+
+
+def fetch_references(plan: list) -> None:
+    """Background: download every reference video that is not cached yet (so it plays inside the portal)."""
+    for p in plan:
+        if p.get("reference") and not ref_file(f"{p['id']}.mp4") and p["id"] not in _fetching:
+            _fetching.add(p["id"])
+            threading.Thread(target=_download_ref, args=(p["id"], p["reference"]), daemon=True).start()
 
 
 def _fetch(table: str, formula: str | None = None) -> list:
@@ -58,6 +99,12 @@ def portal_data(model: str, crm_dataset: dict | None = None) -> dict:
               "priority": f.get("Priority", ""), "assigned": f.get("Assigned to", "Model"), "desc": f.get("Description", ""),
               "file": _att(f.get("Files"))}
              for r in _fetch(T_TASKS) for f in [r["fields"]] if mid and mid in (f.get("Model") or []) and f.get("Visible to model")]
+    for p in plan:
+        p["refVideo"] = f"/portal/ref/{p['id']}.mp4" if ref_file(f"{p['id']}.mp4") else None
+    fetch_references(plan)
+    # 16.10 Rene: no fleet reels, no view counts, no account health in the portal -- followers and growth only
+    base["accounts"] = [{k: v for k, v in a.items() if k in ("id", "handle", "avatar", "followers", "followersDaily", "posts", "link")}
+                        for a in base["accounts"]]
     plan.sort(key=lambda x: (x["date"] or "9999", x["title"]))
     tasks.sort(key=lambda x: (x["due"] or "9999", x["title"]))
     f = me.get("fields", {})
@@ -85,9 +132,14 @@ def mark_done(rec_id: str, done: bool, creator: str | None = None) -> bool:
     return False
 
 
+LOGO = Path(__file__).with_name("portal_logo.png")
+
+
 def render(d: dict) -> str:
+    import base64
     tpl = Path(__file__).with_name("portal.html").read_text(encoding="utf-8")
-    return tpl.replace("__DATA__", json.dumps(d, ensure_ascii=False).replace("</", "<\\/"))
+    logo = "data:image/png;base64," + base64.b64encode(LOGO.read_bytes()).decode() if LOGO.exists() else ""
+    return tpl.replace("__LOGO__", logo).replace("__DATA__", json.dumps(d, ensure_ascii=False).replace("</", "<\\/"))
 
 
 def build(model: str, crm_dataset: dict | None = None) -> str:
