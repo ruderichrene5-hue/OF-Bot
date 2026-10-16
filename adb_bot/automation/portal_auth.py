@@ -120,7 +120,7 @@ def login_page(lang: str = "en", step: str = "email", email: str = "", error: st
     err = {"wrong": L["wrong"], "unknown": L["unknown"]}.get(error, "")
     if step == "email":
         form = f'''<form method="post" action="/portal/login"><label>{L["email"]}<input name="email" type="email" required autocomplete="email" value="{email}"></label>
-          <button class="btn primary" type="submit">{L["next"]}</button></form>'''
+          <button class="btn primary" type="submit">{L["login"]}</button></form>'''
     else:
         field = f'<label>{L["code"]}<input name="secret" type="text" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>' if mode == "code" \
             else f'<label>{L["pw"]}<input name="secret" type="password" required autofocus autocomplete="current-password"></label>'
@@ -133,11 +133,11 @@ def login_page(lang: str = "en", step: str = "email", email: str = "", error: st
 *{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);font:15px/1.5 "Bricolage Grotesque","Noto Sans Thai",sans-serif;
 background-image:radial-gradient(900px 500px at 85% -10%,rgba(255,92,154,.18),transparent 60%),radial-gradient(700px 400px at -10% 30%,rgba(255,158,196,.08),transparent 60%);padding:20px}}
 .box{{width:100%;max-width:400px;background:linear-gradient(180deg,rgba(26,23,38,.75),rgba(18,16,28,.85));border:1px solid var(--line2);border-radius:20px;padding:30px 28px;box-shadow:0 20px 60px rgba(0,0,0,.35)}}
-.logo img{{height:28px;display:block;margin-bottom:26px}}h1{{font-family:Fraunces,"Noto Sans Thai",serif;font-weight:500;font-size:34px;margin:0 0 4px;letter-spacing:-.01em}}h1 em{{font-style:italic;color:var(--pink2)}}
+.logo img{{height:30px;display:block;margin-bottom:28px}}h1{{font-family:Fraunces,"Noto Sans Thai",serif;font-weight:500;font-size:34px;margin:0 0 4px;letter-spacing:-.01em}}h1 em{{font-style:italic;color:var(--pink2)}}
 .lead{{color:var(--muted);margin:0 0 22px}}label{{display:block;font-size:13px;color:var(--muted);margin-bottom:14px}}
 input{{display:block;width:100%;margin-top:6px;background:var(--panel);color:var(--fg);border:1px solid var(--line2);border-radius:12px;padding:12px 14px;font:inherit;font-size:16px}}
 input:focus{{outline:2px solid var(--pink);border-color:transparent}}.btn{{width:100%;border:0;border-radius:999px;padding:13px 18px;font:inherit;font-weight:700;font-size:15px;cursor:pointer;color:#fff;background:linear-gradient(135deg,var(--pink),#e03d7e);box-shadow:0 10px 30px rgba(255,92,154,.3)}}
 .err{{color:#ff9b9b;font-size:13.5px;margin:0 0 14px}}.hint{{color:var(--muted);font-size:13.5px;margin:0 0 16px}}.back{{display:block;text-align:center;color:var(--muted);font-size:13px;margin-top:16px;text-decoration:none}}
 .foot{{color:#6b7486;font-size:12px;text-align:center;margin-top:22px}}</style></head>
-<body><div class="box"><a class="logo" href="/"><img src="{logo}" alt="Northfeed"></a><h1>{L["title"]}<em>.</em></h1><p class="lead">{L["lead"]}</p>
+<body><div class="box"><a class="logo" href="/"><img src="{logo}" alt="Northfeed"></a><h1>Northfeed <em>Portal</em></h1><p class="lead">{L["lead"]}</p>
 {f'<p class="err">{err}</p>' if err else ''}{form}<div class="foot">Northfeed · OnlyFans Management</div></div></body></html>'''
