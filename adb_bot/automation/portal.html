@@ -224,7 +224,7 @@ function home(){
 }
 
 function reelCards(){
-  return P.filter(p => p.type === "Reel" || p.file || p.reference).sort((a, b) => (b.date || "").localeCompare(a.date || "")).map(p => `<a class="reel" data-plan="${p.id}">
+  return P.filter(p => (p.type === "Reel" || p.file || p.reference) && !isDone(p) && !DONE.has(p.id)).sort((a, b) => (b.date || "").localeCompare(a.date || "")).map(p => `<a class="reel" data-plan="${p.id}">
       ${p.file?.thumb ? `<img src="${esc(p.file.thumb)}" alt="">` : p.file?.type?.startsWith("video") ? `<video src="${esc(p.file.url)}" muted playsinline preload="metadata"></video>` : p.refVideo ? `<video src="${esc(p.refVideo)}" muted playsinline preload="metadata"></video>` : ""}
       <span class="pill ${stCls(p.status)} tag">${esc(tr("status", p.status))}</span>${toRecreate(p) ? `<span class="pill tag r">${L.recreate}</span>` : ""}<div class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>
       <div class="ov"><b>${esc(p.title)}</b><span>${esc(p.platform)}</span><span>${p.date ? nice(p.date) : ""}</span></div></a>`);
