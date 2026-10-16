@@ -139,7 +139,7 @@ def render(d: dict) -> str:
     import base64
     tpl = Path(__file__).with_name("portal.html").read_text(encoding="utf-8")
     uri = lambda f: "data:image/png;base64," + base64.b64encode(f.read_bytes()).decode() if f.exists() else ""
-    return tpl.replace("__LOGO__", uri(LOGO)).replace("__LOGO_N__", uri(LOGO.with_name("portal_logo_n.png"))).replace("__DATA__", json.dumps(d, ensure_ascii=False).replace("</", "<\\/"))
+    return tpl.replace("__HEARTS__", Path(__file__).with_name("portal_hearts.js").read_text(encoding="utf-8")).replace("__LOGO__", uri(LOGO)).replace("__LOGO_N__", uri(LOGO.with_name("portal_logo_n.png"))).replace("__DATA__", json.dumps(d, ensure_ascii=False).replace("</", "<\\/"))
 
 
 def build(model: str, crm_dataset: dict | None = None) -> str:

@@ -20,6 +20,7 @@ import requests
 
 from . import portal
 
+HEARTS = Path(__file__).with_name("portal_hearts.js").read_text(encoding="utf-8")
 SECRET_FILE = Path(os.environ.get("PORTAL_SECRET_FILE", "/etc/adbbot/portal_secret"))
 SESSION_DAYS = 30
 CODE_TTL = 600
@@ -132,7 +133,7 @@ def login_page(lang: str = "en", step: str = "email", email: str = "", error: st
 <style>:root{{color-scheme:dark;--bg:#0b0d12;--panel:#161a22;--line2:#343c4d;--fg:#e6e8ee;--muted:#9aa3b2;--pink:#ff5c9a;--pink2:#ff9ec4}}
 *{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);font:15px/1.5 "Bricolage Grotesque","Noto Sans Thai",sans-serif;
 background-image:radial-gradient(900px 500px at 85% -10%,rgba(255,92,154,.18),transparent 60%),radial-gradient(700px 400px at -10% 30%,rgba(255,158,196,.08),transparent 60%);padding:20px}}
-.box{{width:100%;max-width:400px;background:linear-gradient(180deg,rgba(26,23,38,.75),rgba(18,16,28,.85));border:1px solid var(--line2);border-radius:20px;padding:30px 28px;box-shadow:0 20px 60px rgba(0,0,0,.35)}}
+.box{{position:relative;z-index:1;width:100%;max-width:400px;background:linear-gradient(180deg,rgba(26,23,38,.75),rgba(18,16,28,.85));border:1px solid var(--line2);border-radius:20px;padding:30px 28px;box-shadow:0 20px 60px rgba(0,0,0,.35)}}
 .logo img{{height:30px;display:block;margin-bottom:28px}}h1{{font-family:Fraunces,"Noto Sans Thai",serif;font-weight:500;font-size:34px;margin:0 0 4px;letter-spacing:-.01em}}h1 em{{font-style:italic;color:var(--pink2)}}
 .lead{{color:var(--muted);margin:0 0 22px}}label{{display:block;font-size:13px;color:var(--muted);margin-bottom:14px}}
 input{{display:block;width:100%;margin-top:6px;background:var(--panel);color:var(--fg);border:1px solid var(--line2);border-radius:12px;padding:12px 14px;font:inherit;font-size:16px}}
@@ -140,4 +141,4 @@ input:focus{{outline:2px solid var(--pink);border-color:transparent}}.btn{{width
 .err{{color:#ff9b9b;font-size:13.5px;margin:0 0 14px}}.hint{{color:var(--muted);font-size:13.5px;margin:0 0 16px}}.back{{display:block;text-align:center;color:var(--muted);font-size:13px;margin-top:16px;text-decoration:none}}
 .foot{{color:#6b7486;font-size:12px;text-align:center;margin-top:22px}}</style></head>
 <body><div class="box"><a class="logo" href="/"><img src="{logo}" alt="Northfeed"></a><h1>Northfeed <em>Portal</em></h1><p class="lead">{L["lead"]}</p>
-{f'<p class="err">{err}</p>' if err else ''}{form}<div class="foot">Northfeed · OnlyFans Management</div></div></body></html>'''
+{f'<p class="err">{err}</p>' if err else ''}{form}<div class="foot">Northfeed · OnlyFans Management</div></div><script>{HEARTS}</script></body></html>'''
