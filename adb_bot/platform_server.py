@@ -217,6 +217,12 @@ def _crm_dataset() -> dict:
         return _crm_data["data"]
 
 
+def _portal_page(model: str) -> bytes:
+    """Northfeed model portal (16.10): today/week/reels/tasks/accounts in the website's look."""
+    from adb_bot.automation import portal
+    return portal.build(model, _crm_dataset()).encode("utf-8")
+
+
 def _creator_page(model: str) -> bytes:
     from adb_bot.automation import crm
     html = crm.render(crm.creator_view(_crm_dataset(), model)).encode("utf-8")
@@ -291,6 +297,22 @@ class Handler(BaseHTTPRequestHandler):
             upstream.close()
 
     def do_POST(self):
+        if self.path.split("?")[0] == "/portal/done":
+            # model ticks an item in the portal -> status written to the Northfeed Portal base
+            if not self._authorized():
+                self.send_response(401); self.end_headers(); return
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                data = json.loads(self.rfile.read(min(length, 4096)).decode("utf-8"))
+                from adb_bot.automation import portal
+                creator = _creators().get((self.identity or "").lower())
+                ok = portal.mark_done(str(data.get("id", "")), bool(data.get("done")), creator)
+            except Exception as e:  # noqa: BLE001
+                ok = False
+                print("portal/done:", e)
+            body = json.dumps({"ok": ok}).encode()
+            self.send_response(200 if ok else 400); self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.split("?")[0] == "/northfeed/apply":
             # 2026-10-12: application funnel of the new agency site (public, no auth). Stores one JSON per
             # application under /opt/northfeed-applications; photos arrive base64 inside the JSON.
@@ -509,9 +531,22 @@ class Handler(BaseHTTPRequestHandler):
         route = self.path.split("?")[0]
         creator = _creators().get((self.identity or "").lower())
         if creator:                                   # model login: her page and nothing else
-            if route not in ("/", "/accounts", "/health"):
+            if route not in ("/", "/accounts", "/health", "/portal"):
                 self.send_response(302); self.send_header("Location", "/"); self.end_headers(); return
-            body = _creator_page(creator)
+            body = _portal_page(creator) if route == "/portal" else _creator_page(creator)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if route == "/whoami":                        # debug: who does the server think you are?
+            body = json.dumps({"identity": self.identity, "creator": creator, "creators_file": sorted(_creators().keys())}).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if route == "/portal":                        # staff preview of the model portal: /portal?model=Lea
+            model = (parse_qs(urlsplit(self.path).query).get("model") or [""])[0].strip()
+            body = _portal_page(model) if model else b"<pre>/portal?model=&lt;Model name&gt;</pre>"
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
