@@ -539,6 +539,22 @@ class Handler(BaseHTTPRequestHandler):
             return
         route = self.path.split("?")[0]
         creator = _creators().get((self.identity or "").lower())
+        host = (self.headers.get("Host") or "").split(":")[0].lower()
+        if host.startswith("portal."):                # portal.northfeed-management.com: the model portal IS the site
+            if route.startswith("/portal/ref/"):
+                return self._portal_ref(route)
+            if route in ("/", "/portal", "/index.html"):
+                model = creator or (parse_qs(urlsplit(self.path).query).get("model") or [""])[0].strip()
+                body = _portal_page(model) if model else b"<!doctype html><meta charset=utf-8><body style='background:#0b0d12;color:#e6e8ee;font-family:sans-serif;padding:40px'>Northfeed Portal: this e-mail has no model yet. Staff: add ?model=Name.</body>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if route != "/health":
+                self.send_response(302); self.send_header("Location", "/"); self.end_headers(); return
         if creator:                                   # model login: her page and nothing else
             if route.startswith("/portal/ref/"):
                 return self._portal_ref(route)
