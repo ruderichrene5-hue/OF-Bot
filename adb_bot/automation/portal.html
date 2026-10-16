@@ -89,6 +89,7 @@
   .modal .box{background:var(--bg2);border:1px solid var(--line2);border-radius:20px;max-width:900px;width:100%;max-height:92vh;overflow:auto;display:grid;grid-template-columns:minmax(260px,360px) 1fr}
   @media(max-width:800px){.modal .box{grid-template-columns:1fr}}
   .modal .media{position:relative;background:#000;aspect-ratio:9/16;display:grid;place-items:center} .modal .media video,.modal .media img,.modal .media iframe{width:100%;height:100%;object-fit:contain;border:0}
+  .modal .box.nomedia{grid-template-columns:1fr;max-width:560px}
   .modal .body{padding:22px 24px} .modal .body h3{font-family:var(--display);font-weight:500;font-size:24px;margin:6px 0 4px} .modal .k{color:var(--muted);font-size:12px;letter-spacing:.08em;text-transform:uppercase;margin-top:16px}
   .modal .x{position:absolute;top:18px;right:22px;background:var(--panel);border:1px solid var(--line2);color:var(--fg);width:38px;height:38px;border-radius:50%;cursor:pointer;font-size:18px;z-index:2}
   .btn{display:inline-flex;align-items:center;gap:8px;padding:9px 16px;border-radius:999px;border:1px solid var(--line2);background:var(--panel);font-weight:600;font-size:13.5px;cursor:pointer;color:var(--fg)}
@@ -252,8 +253,10 @@ function media(p){
   if (code) return `<iframe src="https://www.instagram.com/reel/${code[1]}/embed/" allowfullscreen></iframe>${p.reference && !p.published ? `<span class="pill" style="position:absolute;top:12px;left:12px">${L.loadingRef}</span>` : ""}`;
   return `<div style="color:var(--muted);padding:20px;text-align:center">${L.noFile}</div>`;
 }
+const hasMedia = p => !!(p.file?.url || p.refVideo || (p.published || p.reference || "").match(/\/(?:reel|p)\/[A-Za-z0-9_-]+/));
 function openPlan(id){ const p = P.find(x => x.id === id); if (!p) return;
-  $("#modalBox").innerHTML = `<div class="media">${media(p)}</div><div class="body"><span class="pill ${pf(p.platform)}">${esc(p.platform)}</span> <span class="pill ${stCls(p.status)}">${esc(tr("status", p.status))}</span>
+  $("#modalBox").className = "box" + (hasMedia(p) ? "" : " nomedia");
+  $("#modalBox").innerHTML = `${hasMedia(p) ? `<div class="media">${media(p)}</div>` : ""}<div class="body"><span class="pill ${pf(p.platform)}">${esc(p.platform)}</span> <span class="pill ${stCls(p.status)}">${esc(tr("status", p.status))}</span>
     <h3>${esc(p.title)}</h3><div style="color:var(--muted)">${esc(tr("type", p.type))}${p.date ? " · " + nice(p.date) : ""}</div>
     ${p.hook ? `<div class="k">${L.hook}</div><div>${esc(p.hook)}</div>` : ""}${p.outfit ? `<div class="k">${L.outfit}</div><div>${esc(p.outfit)}</div>` : ""}
     ${p.caption ? `<div class="k">${L.caption}</div><div style="white-space:pre-wrap">${esc(p.caption)}</div>` : ""}${p.notes ? `<div class="k">${L.notes}</div><div>${esc(p.notes)}</div>` : ""}
