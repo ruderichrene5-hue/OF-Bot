@@ -70,6 +70,17 @@
   .day .e{font-size:12.5px;padding:6px 8px;border-radius:8px;background:var(--panel2);margin-bottom:6px;line-height:1.3;border-left:3px solid var(--pink);cursor:pointer}
   .day .e.of{border-left-color:#4f8cff} .day .e.tt{border-left-color:#cfd3dc} .day .e.task{border-left-color:var(--warn)} .day .e.done{opacity:.45;text-decoration:line-through}
   .day .shoot{display:inline-block;font-size:11px;color:var(--pink2);margin-top:4px}
+  .agenda{display:flex;flex-direction:column;gap:6px}
+  .drow{display:grid;grid-template-columns:120px 1fr;gap:14px;align-items:start;padding:12px 14px;border-radius:14px;background:var(--panel);border:1px solid var(--line)}
+  .drow.today{border-color:var(--pink);box-shadow:0 0 0 1px rgba(255,92,154,.35) inset} .drow.past{opacity:.55}
+  .dlab .dn{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;font-weight:600} .dlab .dd{font-family:var(--display);font-size:26px;line-height:1;margin-top:2px}
+  .dlab .shoot{display:block;font-size:11px;color:var(--pink2);margin-top:4px}
+  .dchips{display:flex;flex-wrap:wrap;gap:6px;padding-top:4px}
+  .chip{display:inline-flex;align-items:center;gap:6px;padding:7px 11px;border-radius:10px;background:var(--panel2);border-left:3px solid var(--pink);font-size:13px;line-height:1.25;max-width:100%}
+  .chip small{color:var(--dim);font-size:11px} .chip.of{border-left-color:#4f8cff} .chip.tt{border-left-color:#cfd3dc} .chip.task{border-left-color:var(--warn)} .chip.done{opacity:.45;text-decoration:line-through}
+  .chip:hover{background:#222838} .dfree{color:var(--dim);font-size:13px;padding:7px 0}
+  .item.flash{border-color:var(--pink);box-shadow:0 0 0 2px rgba(255,92,154,.35)}
+  @media(max-width:700px){.drow{grid-template-columns:72px 1fr}.dlab .dd{font-size:22px}}
   .empty{color:var(--muted);padding:22px;text-align:center;border:1px dashed var(--line2);border-radius:14px}
   .modal{position:fixed;inset:0;background:rgba(0,0,0,.78);display:none;place-items:center;z-index:50;padding:20px} .modal.on{display:grid}
   .modal .box{background:var(--bg2);border:1px solid var(--line2);border-radius:20px;max-width:900px;width:100%;max-height:92vh;overflow:auto;display:grid;grid-template-columns:minmax(260px,360px) 1fr}
@@ -97,39 +108,39 @@ const D = __DATA__;
 const A = D.accounts, P = D.plan, T = D.tasks, M = D.model;
 // ---------- language: from the model's row in Airtable, switchable in the nav ----------
 const I18N = {
- en: { today:"Today", plan:"Plan", reels:"Reels", tasks:"Tasks", accounts:"Accounts", morning:"Good morning", afternoon:"Good afternoon", evening:"Good evening",
+ en: { free:"nothing planned", today:"Today", plan:"Plan", reels:"Reels", tasks:"Tasks", accounts:"Accounts", morning:"Good morning", afternoon:"Good afternoon", evening:"Good evening",
        shootDay:"shoot day", noShoot:"no shoot today", thingsToday:(n, late) => n === 0 ? "Nothing left for today." : `${n} thing${n === 1 ? "" : "s"} for today${late ? `, <b style="color:var(--bad)">${late} overdue</b>` : ""}.`,
        moreWeek:n => `${n} more this week.`, followers:"Followers, all accounts", growth7:"last 7 days", growthSoon:"growth shows from day 2", thisWeek:"This week", pubPlanned:"published / planned",
        openTasks:"Open tasks", highPrio:n => `${n} high priority`, todayH:"Today", todaySub:"Tick it off when it's done. Your team sees it right away.", weekH:"This <em>week</em>", weekSub:d => `Deadlines and open points until ${d}`,
        fullPlan:"Full plan →", nothingToday:"Nothing scheduled for today.", nothingWeek:"Nothing else this week.", recreateH:"Reels to <em>recreate</em>", recreateSub:"Watch the original, then shoot your version. Hook and outfit are in the card.",
        watch:"▶ Watch original", yourReels:"Your <em>reels</em>", yourReelsSub:"Planned and finished. Tap to watch here.", allReels:"All reels →", noReels:"No reels yet.", overdue:"overdue", high:"high", by:"by", week:"this week",
-       planEyebrow:"Content plan", planH:"What's <em>coming up.</em>", planSub:"Your week at a glance, then everything in the plan.", thisW:"This <em>week</em>", nextW:"Next <em>week</em>", bThis:"This week", bNext:"Next week",
+       planEyebrow:"Content plan", planH:"What's <em>coming up.</em>", planSub:"One row per day. Tap an entry to jump to its details below.", thisW:"This <em>week</em>", nextW:"Next <em>week</em>", bThis:"This week", bNext:"Next week",
        everything:"Everything", entries:n => `${n} entries`, noEntries:"No entries yet.", reelsEyebrow:"Reels", reelsH:"Watch, <em>don't switch apps.</em>", reelsSub:"Your planned and finished reels, and the originals you recreate. Everything plays right here.",
        tasksEyebrow:"Tasks", tasksH:"Small things, <em>big difference.</em>", tasksSub:"Everything your team asked for that isn't a piece of content.", allDone:"All done.", done:"Done",
        accEyebrow:"Accounts", accH:"Your <em>numbers.</em>", accSub:"Every account your team runs for you. Updated daily, no screenshots needed.", folChart:"Followers", folChartSub:"All accounts, last 30 days", curve:"The curve appears after the second day of data.",
        posts:"posts", d7:"7 days", noAcc:"No accounts yet.", hook:"Hook / idea", outfit:"Outfit / location", caption:"Caption", notes:"Notes", openOn:p => `Open on ${p} ↗`, original:"original to recreate", noFile:"No file yet.<br>Upload it after the shoot and it plays here.",
        recreate:"recreate", loadingRef:"Original is loading…", video:"Video", status:{ Idea:"Idea", Planned:"Planned", "To shoot":"To shoot", Shot:"Shot", Edited:"Edited", Scheduled:"Scheduled", Published:"Published", Dropped:"Dropped", Open:"Open", "In progress":"In progress", Waiting:"Waiting", Done:"Done" },
        cat:{ Content:"Content", Shooting:"Shooting", Account:"Account", Chat:"Chat", Admin:"Admin", Other:"Other" }, type:{ Reel:"Reel", Story:"Story", Post:"Post", Carousel:"Carousel", Set:"Set", Custom:"Custom", PPV:"PPV", Live:"Live" }, locale:"en-GB" },
- de: { today:"Heute", plan:"Plan", reels:"Reels", tasks:"Aufgaben", accounts:"Accounts", morning:"Guten Morgen", afternoon:"Hallo", evening:"Guten Abend",
+ de: { free:"nichts geplant", today:"Heute", plan:"Plan", reels:"Reels", tasks:"Aufgaben", accounts:"Accounts", morning:"Guten Morgen", afternoon:"Hallo", evening:"Guten Abend",
        shootDay:"Drehtag", noShoot:"heute kein Dreh", thingsToday:(n, late) => n === 0 ? "Für heute ist alles erledigt." : `${n} ${n === 1 ? "Sache" : "Sachen"} für heute${late ? `, <b style="color:var(--bad)">${late} überfällig</b>` : ""}.`,
        moreWeek:n => `${n} weitere diese Woche.`, followers:"Follower, alle Accounts", growth7:"letzte 7 Tage", growthSoon:"Wachstum ab Tag 2 sichtbar", thisWeek:"Diese Woche", pubPlanned:"veröffentlicht / geplant",
        openTasks:"Offene Aufgaben", highPrio:n => `${n} mit hoher Priorität`, todayH:"Heute", todaySub:"Abhaken, wenn erledigt. Dein Team sieht es sofort.", weekH:"Diese <em>Woche</em>", weekSub:d => `Fristen und offene Punkte bis ${d}`,
        fullPlan:"Ganzer Plan →", nothingToday:"Heute steht nichts an.", nothingWeek:"Sonst nichts diese Woche.", recreateH:"Reels zum <em>Nachdrehen</em>", recreateSub:"Original ansehen, dann deine Version drehen. Hook und Outfit stehen in der Karte.",
        watch:"▶ Original ansehen", yourReels:"Deine <em>Reels</em>", yourReelsSub:"Geplant und fertig. Antippen zum Ansehen.", allReels:"Alle Reels →", noReels:"Noch keine Reels.", overdue:"überfällig", high:"wichtig", by:"bis", week:"diese Woche",
-       planEyebrow:"Contentplan", planH:"Was <em>ansteht.</em>", planSub:"Deine Woche auf einen Blick, darunter der ganze Plan.", thisW:"Diese <em>Woche</em>", nextW:"Nächste <em>Woche</em>", bThis:"Diese Woche", bNext:"Nächste Woche",
+       planEyebrow:"Contentplan", planH:"Was <em>ansteht.</em>", planSub:"Ein Tag pro Zeile. Eintrag antippen, um unten zu den Details zu springen.", thisW:"Diese <em>Woche</em>", nextW:"Nächste <em>Woche</em>", bThis:"Diese Woche", bNext:"Nächste Woche",
        everything:"Alles", entries:n => `${n} Einträge`, noEntries:"Noch keine Einträge.", reelsEyebrow:"Reels", reelsH:"Ansehen, <em>ohne App-Wechsel.</em>", reelsSub:"Deine geplanten und fertigen Reels und die Originale zum Nachdrehen. Alles läuft direkt hier.",
        tasksEyebrow:"Aufgaben", tasksH:"Kleine Dinge, <em>große Wirkung.</em>", tasksSub:"Alles, was dein Team von dir braucht und kein Content ist.", allDone:"Alles erledigt.", done:"Erledigt",
        accEyebrow:"Accounts", accH:"Deine <em>Zahlen.</em>", accSub:"Jeder Account, den dein Team für dich führt. Täglich aktualisiert, keine Screenshots nötig.", folChart:"Follower", folChartSub:"Alle Accounts, letzte 30 Tage", curve:"Die Kurve erscheint ab dem zweiten Tag mit Daten.",
        posts:"Beiträge", d7:"7 Tage", noAcc:"Noch keine Accounts.", hook:"Hook / Idee", outfit:"Outfit / Ort", caption:"Caption", notes:"Notizen", openOn:p => `Auf ${p} öffnen ↗`, original:"Original zum Nachdrehen", noFile:"Noch keine Datei.<br>Nach dem Dreh hochladen, dann läuft es hier.",
        recreate:"nachdrehen", loadingRef:"Original wird geladen…", video:"Video", status:{ Idea:"Idee", Planned:"Geplant", "To shoot":"Zu drehen", Shot:"Gedreht", Edited:"Geschnitten", Scheduled:"Eingeplant", Published:"Veröffentlicht", Dropped:"Verworfen", Open:"Offen", "In progress":"In Arbeit", Waiting:"Wartet", Done:"Erledigt" },
        cat:{ Content:"Content", Shooting:"Dreh", Account:"Account", Chat:"Chat", Admin:"Orga", Other:"Sonstiges" }, type:{ Reel:"Reel", Story:"Story", Post:"Post", Carousel:"Karussell", Set:"Set", Custom:"Custom", PPV:"PPV", Live:"Live" }, locale:"de-DE" },
- th: { today:"วันนี้", plan:"แผน", reels:"รีล", tasks:"งาน", accounts:"บัญชี", morning:"อรุณสวัสดิ์", afternoon:"สวัสดี", evening:"สวัสดีตอนเย็น",
+ th: { free:"ไม่มีแผน", today:"วันนี้", plan:"แผน", reels:"รีล", tasks:"งาน", accounts:"บัญชี", morning:"อรุณสวัสดิ์", afternoon:"สวัสดี", evening:"สวัสดีตอนเย็น",
        shootDay:"วันถ่าย", noShoot:"วันนี้ไม่มีถ่าย", thingsToday:(n, late) => n === 0 ? "วันนี้เสร็จหมดแล้ว" : `วันนี้มี ${n} รายการ${late ? ` <b style="color:var(--bad)">เลยกำหนด ${late}</b>` : ""}`,
        moreWeek:n => `อีก ${n} รายการสัปดาห์นี้`, followers:"ผู้ติดตาม ทุกบัญชี", growth7:"7 วันล่าสุด", growthSoon:"การเติบโตแสดงตั้งแต่วันที่ 2", thisWeek:"สัปดาห์นี้", pubPlanned:"เผยแพร่แล้ว / วางแผน",
        openTasks:"งานที่ค้าง", highPrio:n => `${n} รายการสำคัญ`, todayH:"วันนี้", todaySub:"ติ๊กเมื่อเสร็จ ทีมของคุณเห็นทันที", weekH:"<em>สัปดาห์นี้</em>", weekSub:d => `กำหนดส่งและรายการค้างถึง ${d}`,
        fullPlan:"แผนทั้งหมด →", nothingToday:"วันนี้ไม่มีรายการ", nothingWeek:"สัปดาห์นี้ไม่มีอย่างอื่น", recreateH:"รีลที่ต้อง<em>ถ่ายตาม</em>", recreateSub:"ดูต้นฉบับ แล้วถ่ายเวอร์ชันของคุณ Hook และชุดอยู่ในการ์ด",
        watch:"▶ ดูต้นฉบับ", yourReels:"รีล<em>ของคุณ</em>", yourReelsSub:"ที่วางแผนและเสร็จแล้ว แตะเพื่อดูที่นี่", allReels:"รีลทั้งหมด →", noReels:"ยังไม่มีรีล", overdue:"เลยกำหนด", high:"สำคัญ", by:"ภายใน", week:"สัปดาห์นี้",
-       planEyebrow:"แผนคอนเทนต์", planH:"อะไร<em>กำลังจะมา</em>", planSub:"สัปดาห์ของคุณในหน้าเดียว ด้านล่างคือแผนทั้งหมด", thisW:"<em>สัปดาห์นี้</em>", nextW:"<em>สัปดาห์หน้า</em>", bThis:"สัปดาห์นี้", bNext:"สัปดาห์หน้า",
+       planEyebrow:"แผนคอนเทนต์", planH:"อะไร<em>กำลังจะมา</em>", planSub:"หนึ่งแถวต่อวัน แตะรายการเพื่อไปที่รายละเอียดด้านล่าง", thisW:"<em>สัปดาห์นี้</em>", nextW:"<em>สัปดาห์หน้า</em>", bThis:"สัปดาห์นี้", bNext:"สัปดาห์หน้า",
        everything:"ทั้งหมด", entries:n => `${n} รายการ`, noEntries:"ยังไม่มีรายการ", reelsEyebrow:"รีล", reelsH:"ดูได้เลย <em>ไม่ต้องสลับแอป</em>", reelsSub:"รีลที่วางแผนและเสร็จแล้ว รวมถึงต้นฉบับที่ต้องถ่ายตาม เล่นได้ที่นี่ทั้งหมด",
        tasksEyebrow:"งาน", tasksH:"เรื่องเล็ก <em>ผลใหญ่</em>", tasksSub:"ทุกอย่างที่ทีมต้องการจากคุณที่ไม่ใช่คอนเทนต์", allDone:"เสร็จหมดแล้ว", done:"เสร็จแล้ว",
        accEyebrow:"บัญชี", accH:"ตัวเลข<em>ของคุณ</em>", accSub:"ทุกบัญชีที่ทีมดูแลให้คุณ อัปเดตทุกวัน ไม่ต้องขอสกรีนช็อต", folChart:"ผู้ติดตาม", folChartSub:"ทุกบัญชี 30 วันล่าสุด", curve:"กราฟจะแสดงหลังจากมีข้อมูลวันที่สอง",
@@ -255,18 +266,25 @@ $("#modal").onclick = e => { if (e.target.id === "modal") closeModal(); };
 let planView = "week";
 function plan(){
   const ws = planView === "week" ? weekStart : addDays(weekStart, 7);
-  const dayCols = [...Array(7)].map((_, i) => addDays(ws, i));
-  const cell = k => { const ev = entries().filter(e => e.date === k && (e.fixed || e.by)); return `<div class="day ${k === TODAY ? "today" : ""}"><div class="dn">${dowL(k)}</div><div class="dd">${k.slice(8)}</div>
-      ${ev.map(e => `<div class="e ${e.kind === "task" ? "task" : pf(e.platform)} ${e.done ? "done" : ""}" ${e.kind === "plan" ? `data-open="${e.id}"` : ""}>${esc(e.title)}</div>`).join("")}${M.shootDays.includes(dow(k)) ? `<span class="shoot">● ${L.shootDay}</span>` : ""}</div>`; };
-  const rows = entries().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const daysOf = [...Array(7)].map((_, i) => addDays(ws, i));
+  const all = entries();
+  const row = k => { const ev = all.filter(e => e.date === k && (e.fixed || e.by)).sort((a, b) => (a.done - b.done) || (a.kind === "task") - (b.kind === "task"));
+    return `<div class="drow ${k === TODAY ? "today" : ""} ${k < TODAY ? "past" : ""}">
+      <div class="dlab"><div class="dn">${dowL(k)}</div><div class="dd">${k.slice(8)}</div>${M.shootDays.includes(dow(k)) ? `<span class="shoot">● ${L.shootDay}</span>` : ""}</div>
+      <div class="dchips">${ev.map(e => `<a class="chip ${e.kind === "task" ? "task" : pf(e.platform)} ${e.done ? "done" : ""}" href="#plan/${e.id}" data-jump="${e.id}">${e.kind === "task" ? "☐ " : ""}${esc(e.title)}${e.by ? ` <small>${L.by}</small>` : ""}</a>`).join("") || `<span class="dfree">${L.free}</span>`}</div></div>`; };
+  const open = all.filter(e => !e.fixed && !e.by);
+  const rows = all.sort((a, b) => (a.date || "9").localeCompare(b.date || "9"));
   $("#main").innerHTML = `<span class="eyebrow">${L.planEyebrow}</span><h1>${L.planH}</h1><p class="lead">${L.planSub}</p>
     <div class="sec-head"><h2>${planView === "week" ? L.thisW : L.nextW}</h2><div class="seg"><button class="${planView === "week" ? "on" : ""}" data-v="week">${L.bThis}</button><button class="${planView === "next" ? "on" : ""}" data-v="next">${L.bNext}</button></div></div>
-    <div class="week">${dayCols.map(cell).join("")}</div>
+    <div class="agenda">${daysOf.map(row).join("")}${open.length ? `<div class="drow"><div class="dlab"><div class="dn">${L.week}</div></div><div class="dchips">${open.map(e => `<a class="chip task ${e.done ? "done" : ""}" href="#plan/${e.id}" data-jump="${e.id}">☐ ${esc(e.title)}</a>`).join("")}</div></div>` : ""}</div>
     <section class="sec"><div class="sec-head"><div><h2>${L.everything}</h2><div class="cs">${L.entries(rows.length)}</div></div></div>
-      <div class="list">${rows.map(itemHtml).join("") || `<div class="empty">${L.noEntries}</div>`}</div></section>`;
-  wireTicks(); document.querySelectorAll(".e[data-open]").forEach(el => el.onclick = () => openPlan(el.dataset.open));
+      <div class="list">${rows.map(e => itemHtml(e).replace('<div class="item', `<div id="it-${e.id}" class="item`)).join("") || `<div class="empty">${L.noEntries}</div>`}</div></section>`;
+  wireTicks();
   document.querySelectorAll(".seg button").forEach(b => b.onclick = () => { planView = b.dataset.v; plan(); });
+  document.querySelectorAll("[data-jump]").forEach(c => c.onclick = ev => { ev.preventDefault(); jump(c.dataset.jump); });
+  const want = (location.hash.split("/")[1] || ""); if (want) setTimeout(() => jump(want), 50);
 }
+function jump(id){ const el = document.getElementById("it-" + id); if (!el) return; el.scrollIntoView({ behavior:"smooth", block:"center" }); el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 1600); }
 
 function tasks(){
   const row = t => itemHtml({ kind:"task", id:t.id, date:t.due, title:t.title, sub:t.desc, platform:t.category, status:t.status, done:t.status === "Done" || DONE.has(t.id), fixed:t.dueType === "Fixed day", by:t.dueType === "By", priority:t.priority });
