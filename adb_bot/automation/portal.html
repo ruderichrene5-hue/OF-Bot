@@ -221,7 +221,6 @@ function home(){
   const fNow = A.reduce((s, a) => s + (a.followers || 0), 0); const g = A.map(a => gain(a, 7)).filter(v => v != null); const fg = g.length ? g.reduce((s, v) => s + v, 0) : null;
   const published = P.filter(p => p.status === "Published" && p.date >= weekStart).length, planned = P.filter(p => p.date >= weekStart && p.date <= weekEnd).length;
   const hour = new Date().getHours(), greet = hour < 12 ? L.morning : hour < 18 ? L.afternoon : L.evening;
-  const rc = P.filter(toRecreate).sort((a, b) => (a.date || "9").localeCompare(b.date || "9"));
   $("#main").innerHTML = `
     <span class="eyebrow">${nice(TODAY)} · ${M.shootDays.includes(dow(TODAY)) ? L.shootDay : L.noShoot}</span>
     <h1>${greet}, <em>${esc(M.name)}.</em></h1>
@@ -230,13 +229,8 @@ function home(){
       <div class="list">${td.map(itemHtml).join("") || `<div class="empty">${L.nothingToday}</div>`}</div></section>
     <section class="sec"><div class="sec-head"><div><h2>${L.weekH}</h2><div class="cs">${L.weekSub(nice(weekEnd))}</div></div><a class="btn" href="#plan">${L.fullPlan}</a></div>
       ${weekGrouped(wk)}</section>
-    ${rc.length ? `<section class="sec"><div class="sec-head"><div><h2>${L.recreateH}</h2><div class="cs">${L.recreateSub}</div></div></div>
-      <div class="recreate">${rc.map(p => `<div class="card rc" data-open="${p.id}"><div class="rc-media">${p.refVideo ? `<video src="${esc(p.refVideo)}" muted playsinline preload="metadata"></video>` : ""}<div class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div></div>
-        <div><span class="pill ${pf(p.platform)}">${esc(p.platform)}</span> <span class="pill ${stCls(p.status)}">${esc(tr("status", p.status))}</span><div style="font-weight:600;font-size:16px;margin-top:8px">${esc(p.title)}</div>
-        ${p.hook ? `<div style="color:var(--muted);margin-top:4px;font-size:13.5px">${esc(p.hook)}</div>` : ""}${p.outfit ? `<div style="color:var(--dim);margin-top:4px;font-size:13px">${esc(p.outfit)}</div>` : ""}
-        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center"><span class="btn primary">${L.watch}</span><span style="color:var(--dim);font-size:12px">${p.date ? nice(p.date) : ""}</span></div></div></div>`).join("")}</div></section>` : ""}
 `;
-  wireTicks(); document.querySelectorAll(".rc[data-open]").forEach(el => el.onclick = () => openPlan(el.dataset.open));
+  wireTicks();
 }
 
 function reelCards(){
