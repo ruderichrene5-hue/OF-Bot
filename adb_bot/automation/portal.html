@@ -229,7 +229,7 @@ function home(){
         <div><span class="pill ${pf(p.platform)}">${esc(p.platform)}</span> <span class="pill ${stCls(p.status)}">${esc(tr("status", p.status))}</span><div style="font-weight:600;font-size:16px;margin-top:8px">${esc(p.title)}</div>
         ${p.hook ? `<div style="color:var(--muted);margin-top:4px;font-size:13.5px">${esc(p.hook)}</div>` : ""}${p.outfit ? `<div style="color:var(--dim);margin-top:4px;font-size:13px">${esc(p.outfit)}</div>` : ""}
         <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center"><span class="btn primary">${L.watch}</span><span style="color:var(--dim);font-size:12px">${p.date ? nice(p.date) : ""}</span></div></div></div>`).join("")}</div></section>` : ""}
-    <section class="sec"><div class="sec-head"><div><h2>${L.yourReels}</h2><div class="cs">${L.yourReelsSub}</div></div><a class="btn" href="#reels">${L.allReels}</a></div>
+    <section class="sec"><div class="sec-head"><div><h2>${L.yourReels}</h2><div class="cs">${L.yourReelsSub}</div></div><a class="btn" href="#plan">${L.fullPlan}</a></div>
       <div class="reels">${reelCards().slice(0, 5).join("") || `<div class="empty">${L.noReels}</div>`}</div></section>`;
   wireTicks(); wireReels(); document.querySelectorAll(".rc[data-open]").forEach(el => el.onclick = () => openPlan(el.dataset.open));
 }
@@ -319,7 +319,7 @@ function accounts(){
   chart($("#cF"), fS, "#ff5c9a");
 }
 
-const pages = { home, plan, reels, tasks, accounts };
+const pages = { home, plan, accounts };
 const KEY = { home:"today", plan:"plan", reels:"reels", tasks:"tasks", accounts:"accounts" };
 function route(){ const p = (location.hash.slice(1) || "home").split("/")[0]; L = I18N[LANG]; document.documentElement.lang = LANG; (pages[p] || home)();
   $("#tabs").innerHTML = Object.keys(pages).map(k => `<a href="#${k}" class="${k === p ? "on" : ""}">${L[KEY[k]]}</a>`).join("");
