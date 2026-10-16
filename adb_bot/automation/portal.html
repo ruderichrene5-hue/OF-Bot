@@ -65,7 +65,7 @@
   .acc{display:grid;grid-template-columns:44px minmax(150px,1.5fr) 120px 120px 1fr;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin-bottom:8px}
   .acc .lbl{color:var(--muted);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase} .acc .val{font-weight:650;font-variant-numeric:tabular-nums}
   .av{width:40px;height:40px;border-radius:50%;object-fit:cover;background:#232938;display:grid;place-items:center;color:var(--muted);font-weight:700;font-size:13px}
-  @media(max-width:700px){.acc{grid-template-columns:44px 1fr 1fr}.acc>div:nth-child(2){grid-column:2/4}.acc>div:last-child{display:none}.acc .val{font-size:15px}}
+  @media(max-width:700px){.acc{grid-template-columns:44px minmax(0,1fr) minmax(0,1fr);column-gap:16px}.acc>div:nth-child(2){grid-column:2/4}.acc>div:last-child{display:none}.acc .val{font-size:15px}.chart svg{height:auto;aspect-ratio:900/300}}
   .week{display:grid;grid-template-columns:repeat(7,1fr);gap:8px} @media(max-width:900px){.week{grid-template-columns:repeat(2,1fr)}}
   .day{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px;min-height:120px}
   .day.today{border-color:var(--pink);box-shadow:0 0 0 1px rgba(255,92,154,.35) inset}
@@ -300,7 +300,7 @@ function tasks(){
 }
 
 function chart(el, series, color){
-  const W = 900, H = 220, Pd = { l:52, r:14, t:14, b:26 }; const pts = series.filter(p => p.v != null);
+  const W = 900, H = innerWidth < 700 ? 300 : 220, Pd = { l:52, r:14, t:14, b:26 }; const pts = series.filter(p => p.v != null);
   if (pts.length < 2){ el.innerHTML = `<div class="empty">${L.curve}</div>`; return; }
   const xs = series.map((_, i) => Pd.l + i * (W - Pd.l - Pd.r) / (series.length - 1)); const vs = pts.map(p => p.v); let lo = Math.min(...vs), hi = Math.max(...vs); if (hi === lo){ hi += 1; lo -= 1; }
   const y = v => Pd.t + (H - Pd.t - Pd.b) * (1 - (v - lo) / (hi - lo));
