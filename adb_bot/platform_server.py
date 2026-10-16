@@ -242,9 +242,73 @@ def _creator_page(model: str) -> bytes:
 class Handler(BaseHTTPRequestHandler):
     identity: str | None = None                  # e-mail from Cloudflare Access, None for the password login
 
+    def _portal_session(self) -> str | None:
+        """portal.* only: e-mail from the nf_session cookie, or None."""
+        from adb_bot.automation import portal_auth
+        for part in self.headers.get("Cookie", "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "nf_session":
+                return portal_auth.read(v)
+        return None
+
+    def _portal_site(self, route: str):
+        from adb_bot.automation import portal_auth
+        lang = (self.headers.get("Accept-Language") or "en")[:2].lower()
+        lang = lang if lang in ("de", "en", "th") else "en"
+        if route.startswith("/portal/ref/"):
+            if self._portal_session() or self._basic_ok():
+                return self._portal_ref(route)
+            self.send_response(401); self.end_headers(); return
+        if route == "/logout":
+            self.send_response(302); self.send_header("Set-Cookie", "nf_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax")
+            self.send_header("Location", "/"); self.end_headers(); return
+        email = self._portal_session()
+        if email:
+            model = portal_auth.models_by_email().get(email, {}).get("name")
+            if model:
+                self.identity = email
+                return self._send_html(_portal_page(model))
+        q = parse_qs(urlsplit(self.path).query)
+        if q.get("model") and self._basic_ok():            # staff preview: ?model=Lea with the platform password
+            return self._send_html(_portal_page(q["model"][0].strip()))
+        if route != "/":
+            self.send_response(302); self.send_header("Location", "/"); self.end_headers(); return
+        return self._send_html(portal_auth.login_page(lang).encode("utf-8"))
+
+    def _send_html(self, body: bytes, extra: list | None = None):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        for k, v in extra or []:
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _basic_ok(self) -> bool:
+        pw = os.environ.get("PLATFORM_PASSWORD", "")
+        hdr = self.headers.get("Authorization", "")
+        if not pw or not hdr.startswith("Basic "):
+            if not pw:
+                return True
+            self.send_response(401); self.send_header("WWW-Authenticate", 'Basic realm="Northfeed staff"'); self.end_headers()
+            return False
+        try:
+            _, given = base64.b64decode(hdr[6:]).decode().split(":", 1)
+        except Exception:
+            return False
+        return hmac.compare_digest(given, pw)
+
     def _authorized(self) -> bool:
         pw = os.environ.get("PLATFORM_PASSWORD", "")
         self.identity = None
+        host = (self.headers.get("Host") or "").split(":")[0].lower()
+        if host.startswith("portal."):
+            email = self._portal_session()
+            if email:
+                self.identity = email
+                return True
+            return self._basic_ok() if self.headers.get("Authorization", "").startswith("Basic ") else True
         if not pw:
             return True
         if self.client_address[0] in ("127.0.0.1", "::1"):
@@ -306,15 +370,41 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "private, max-age=86400"); self.end_headers(); self.wfile.write(data)
 
     def do_POST(self):
-        if self.path.split("?")[0] == "/portal/done":
+        route = self.path.split("?")[0]
+        if route in ("/portal/login", "/portal/verify"):
+            from adb_bot.automation import portal_auth
+            length = int(self.headers.get("Content-Length") or 0)
+            form = {k: v[0] for k, v in parse_qs(self.rfile.read(min(length, 4096)).decode("utf-8", "replace")).items()}
+            lang = (self.headers.get("Accept-Language") or "en")[:2].lower(); lang = lang if lang in ("de", "en", "th") else "en"
+            email = form.get("email", "").strip().lower()
+            if route == "/portal/login":
+                m = portal_auth.models_by_email().get(email)
+                if not m:
+                    return self._send_html(portal_auth.login_page(lang, "email", email, "unknown").encode("utf-8"))
+                mode = "code" if portal_auth.smtp_ready() else "password"
+                if mode == "code":
+                    try:
+                        portal_auth.send_code(email)
+                    except Exception as e:  # noqa: BLE001
+                        print("portal send_code:", e); mode = "password"
+                return self._send_html(portal_auth.login_page(lang, "secret", email, "", mode).encode("utf-8"))
+            m = portal_auth.check(email, form.get("secret", ""))
+            if not m:
+                mode = "code" if portal_auth.smtp_ready() else "password"
+                return self._send_html(portal_auth.login_page(lang, "secret", email, "wrong", mode).encode("utf-8"))
+            tok = portal_auth.issue(email)
+            self.send_response(302)
+            self.send_header("Set-Cookie", f"nf_session={tok}; Path=/; Max-Age={30*86400}; Secure; HttpOnly; SameSite=Lax")
+            self.send_header("Location", "/"); self.end_headers(); return
+        if route == "/portal/done":
             # model ticks an item in the portal -> status written to the Northfeed Portal base
             if not self._authorized():
                 self.send_response(401); self.end_headers(); return
             length = int(self.headers.get("Content-Length") or 0)
             try:
                 data = json.loads(self.rfile.read(min(length, 4096)).decode("utf-8"))
-                from adb_bot.automation import portal
-                creator = _creators().get((self.identity or "").lower())
+                from adb_bot.automation import portal, portal_auth
+                creator = _creators().get((self.identity or "").lower()) or portal_auth.models_by_email().get((self.identity or "").lower(), {}).get("name")
                 ok = portal.mark_done(str(data.get("id", "")), bool(data.get("done")), creator)
             except Exception as e:  # noqa: BLE001
                 ok = False
@@ -540,21 +630,8 @@ class Handler(BaseHTTPRequestHandler):
         route = self.path.split("?")[0]
         creator = _creators().get((self.identity or "").lower())
         host = (self.headers.get("Host") or "").split(":")[0].lower()
-        if host.startswith("portal."):                # portal.northfeed-management.com: the model portal IS the site
-            if route.startswith("/portal/ref/"):
-                return self._portal_ref(route)
-            if route in ("/", "/portal", "/index.html"):
-                model = creator or (parse_qs(urlsplit(self.path).query).get("model") or [""])[0].strip()
-                body = _portal_page(model) if model else b"<!doctype html><meta charset=utf-8><body style='background:#0b0d12;color:#e6e8ee;font-family:sans-serif;padding:40px'>Northfeed Portal: this e-mail has no model yet. Staff: add ?model=Name.</body>"
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if route != "/health":
-                self.send_response(302); self.send_header("Location", "/"); self.end_headers(); return
+        if host.startswith("portal."):                # portal.northfeed-management.com: own login, the model portal IS the site
+            return self._portal_site(route)
         if creator:                                   # model login: her page and nothing else
             if route.startswith("/portal/ref/"):
                 return self._portal_ref(route)
