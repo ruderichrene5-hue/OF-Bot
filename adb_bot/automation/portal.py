@@ -92,16 +92,18 @@ def portal_data(model: str, crm_dataset: dict | None = None) -> dict:
     plan = [{"id": r["id"], "title": f.get("Title", ""), "date": f.get("Date"), "platform": f.get("Platform", ""),
              "type": f.get("Type", ""), "status": f.get("Status", ""), "hook": f.get("Hook / idea", ""),
              "caption": f.get("Caption", ""), "outfit": f.get("Outfit / location", ""), "reference": f.get("Reference"),
-             "published": f.get("Published link"), "file": _att(f.get("Files")), "notes": f.get("Notes", "")}
+             "published": f.get("Published link"), "file": _att(f.get("Files")), "notes": f.get("Notes", ""), "drive": f.get("Drive folder")}
             for r in _fetch(T_PLAN) for f in [r["fields"]] if mid and mid in (f.get("Model") or [])]
     tasks = [{"id": r["id"], "title": f.get("Task", ""), "category": f.get("Category", ""), "due": f.get("Due"),
               "dueType": f.get("Due type", "Fixed day" if f.get("Due") else "This week"), "status": f.get("Status", "Open"),
               "priority": f.get("Priority", ""), "assigned": f.get("Assigned to", "Model"), "desc": f.get("Description", ""),
-              "file": _att(f.get("Files"))}
+              "file": _att(f.get("Files")), "drive": f.get("Drive folder")}
              for r in _fetch(T_TASKS) for f in [r["fields"]] if mid and mid in (f.get("Model") or []) and f.get("Visible to model")]
     for p in plan:
         p["refVideo"] = f"/portal/ref/{p['id']}.mp4" if ref_file(f"{p['id']}.mp4") else None
     fetch_references(plan)
+    from . import portal_drive
+    portal_drive.sync_async(f.get("Name", model) if (f := me.get("fields", {})) else model, me, plan)
     # 16.10 Rene: no fleet reels, no view counts, no account health in the portal -- followers and growth only
     base["accounts"] = [{k: v for k, v in a.items() if k in ("id", "handle", "avatar", "followers", "followersDaily", "posts", "link")}
                         for a in base["accounts"]]
@@ -109,7 +111,7 @@ def portal_data(model: str, crm_dataset: dict | None = None) -> dict:
     tasks.sort(key=lambda x: (x["due"] or "9999", x["title"]))
     f = me.get("fields", {})
     return {**base, "model": {"name": f.get("Name", model), "language": f.get("Language", "EN"), "shootDays": f.get("Shoot days") or [],
-                              "onlyfans": f.get("OnlyFans link")}, "plan": plan, "tasks": tasks,
+                              "onlyfans": f.get("OnlyFans link"), "drive": f.get("Drive folder")}, "plan": plan, "tasks": tasks,
             "today": dt.date.today().isoformat()}
 
 

@@ -49,6 +49,7 @@
   .item .t{font-weight:600;font-size:15px} .item .s{color:var(--muted);font-size:13px;margin-top:2px;line-height:1.45}
   .item .meta{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:center}
   .item .when{color:var(--dim);font-size:12px;white-space:nowrap}
+  .item .up{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;background:linear-gradient(135deg,var(--pink),#e03d7e);color:#fff;font-size:12px;font-weight:700;white-space:nowrap} .item .up svg{width:12px;height:12px;stroke:#fff;stroke-width:2.4;fill:none}
   .item .vid{display:inline-flex;align-items:center;gap:5px;color:var(--pink2);font-size:12px;font-weight:600;margin-left:6px} .item .vid svg{width:12px;height:12px;fill:currentColor}
   .reels{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px}
   .reel{position:relative;aspect-ratio:9/15;border-radius:16px;overflow:hidden;background:linear-gradient(160deg,#2a2033,#141821);border:1px solid var(--line);cursor:pointer;display:block}
@@ -116,7 +117,7 @@ const D = __DATA__;
 const A = D.accounts, P = D.plan, T = D.tasks, M = D.model;
 // ---------- language: from the model's row in Airtable, switchable in the nav ----------
 const I18N = {
- en: { more:n => `${n} more in the full plan →`, free:"nothing planned", today:"Today", plan:"Plan", reels:"Reels", tasks:"Tasks", accounts:"Accounts", morning:"Good morning", afternoon:"Good afternoon", evening:"Good evening",
+ en: { upload:"Upload", uploadLong:"Upload to Drive ↗", more:n => `${n} more in the full plan →`, free:"nothing planned", today:"Today", plan:"Plan", reels:"Reels", tasks:"Tasks", accounts:"Accounts", morning:"Good morning", afternoon:"Good afternoon", evening:"Good evening",
        shootDay:"shoot day", noShoot:"no shoot today", thingsToday:(n, late) => n === 0 ? "Nothing left for today." : `${n} thing${n === 1 ? "" : "s"} for today${late ? `, <b style="color:var(--bad)">${late} overdue</b>` : ""}.`,
        moreWeek:n => `${n} more this week.`, followers:"Followers, all accounts", growth7:"last 7 days", growthSoon:"growth shows from day 2", thisWeek:"This week", pubPlanned:"published / planned",
        openTasks:"Open tasks", highPrio:n => `${n} high priority`, todayH:"Today", todaySub:"Tick it off when it's done. Your team sees it right away.", weekH:"This <em>week</em>", weekSub:d => `Deadlines and open points until ${d}`,
@@ -129,7 +130,7 @@ const I18N = {
        posts:"posts", d7:"7 days", noAcc:"No accounts yet.", hook:"Hook / idea", outfit:"Outfit / location", caption:"Caption", notes:"Notes", openOn:p => `Open on ${p} ↗`, original:"original to recreate", noFile:"No file yet.<br>Upload it after the shoot and it plays here.",
        recreate:"recreate", loadingRef:"Original is loading…", video:"Video", status:{ Idea:"Idea", Planned:"Planned", "To shoot":"To shoot", Shot:"Shot", Edited:"Edited", Scheduled:"Scheduled", Published:"Published", Dropped:"Dropped", Open:"Open", "In progress":"In progress", Waiting:"Waiting", Done:"Done" },
        cat:{ Content:"Content", Shooting:"Shooting", Account:"Account", Chat:"Chat", Admin:"Admin", Other:"Other" }, type:{ Reel:"Reel", Story:"Story", Post:"Post", Carousel:"Carousel", Set:"Set", Custom:"Custom", PPV:"PPV", Live:"Live" }, locale:"en-GB" },
- de: { more:n => `${n} weitere im ganzen Plan →`, free:"nichts geplant", today:"Heute", plan:"Plan", reels:"Reels", tasks:"Aufgaben", accounts:"Accounts", morning:"Guten Morgen", afternoon:"Hallo", evening:"Guten Abend",
+ de: { upload:"Hochladen", uploadLong:"In Drive hochladen ↗", more:n => `${n} weitere im ganzen Plan →`, free:"nichts geplant", today:"Heute", plan:"Plan", reels:"Reels", tasks:"Aufgaben", accounts:"Accounts", morning:"Guten Morgen", afternoon:"Hallo", evening:"Guten Abend",
        shootDay:"Drehtag", noShoot:"heute kein Dreh", thingsToday:(n, late) => n === 0 ? "Für heute ist alles erledigt." : `${n} ${n === 1 ? "Sache" : "Sachen"} für heute${late ? `, <b style="color:var(--bad)">${late} überfällig</b>` : ""}.`,
        moreWeek:n => `${n} weitere diese Woche.`, followers:"Follower, alle Accounts", growth7:"letzte 7 Tage", growthSoon:"Wachstum ab Tag 2 sichtbar", thisWeek:"Diese Woche", pubPlanned:"veröffentlicht / geplant",
        openTasks:"Offene Aufgaben", highPrio:n => `${n} mit hoher Priorität`, todayH:"Heute", todaySub:"Abhaken, wenn erledigt. Dein Team sieht es sofort.", weekH:"Diese <em>Woche</em>", weekSub:d => `Fristen und offene Punkte bis ${d}`,
@@ -142,7 +143,7 @@ const I18N = {
        posts:"Beiträge", d7:"7 Tage", noAcc:"Noch keine Accounts.", hook:"Hook / Idee", outfit:"Outfit / Ort", caption:"Caption", notes:"Notizen", openOn:p => `Auf ${p} öffnen ↗`, original:"Original zum Nachdrehen", noFile:"Noch keine Datei.<br>Nach dem Dreh hochladen, dann läuft es hier.",
        recreate:"nachdrehen", loadingRef:"Original wird geladen…", video:"Video", status:{ Idea:"Idee", Planned:"Geplant", "To shoot":"Zu drehen", Shot:"Gedreht", Edited:"Geschnitten", Scheduled:"Eingeplant", Published:"Veröffentlicht", Dropped:"Verworfen", Open:"Offen", "In progress":"In Arbeit", Waiting:"Wartet", Done:"Erledigt" },
        cat:{ Content:"Content", Shooting:"Dreh", Account:"Account", Chat:"Chat", Admin:"Orga", Other:"Sonstiges" }, type:{ Reel:"Reel", Story:"Story", Post:"Post", Carousel:"Karussell", Set:"Set", Custom:"Custom", PPV:"PPV", Live:"Live" }, locale:"de-DE" },
- th: { more:n => `อีก ${n} รายการในแผนทั้งหมด →`, free:"ไม่มีแผน", today:"วันนี้", plan:"แผน", reels:"รีล", tasks:"งาน", accounts:"บัญชี", morning:"อรุณสวัสดิ์", afternoon:"สวัสดี", evening:"สวัสดีตอนเย็น",
+ th: { upload:"อัปโหลด", uploadLong:"อัปโหลดไป Drive ↗", more:n => `อีก ${n} รายการในแผนทั้งหมด →`, free:"ไม่มีแผน", today:"วันนี้", plan:"แผน", reels:"รีล", tasks:"งาน", accounts:"บัญชี", morning:"อรุณสวัสดิ์", afternoon:"สวัสดี", evening:"สวัสดีตอนเย็น",
        shootDay:"วันถ่าย", noShoot:"วันนี้ไม่มีถ่าย", thingsToday:(n, late) => n === 0 ? "วันนี้เสร็จหมดแล้ว" : `วันนี้มี ${n} รายการ${late ? ` <b style="color:var(--bad)">เลยกำหนด ${late}</b>` : ""}`,
        moreWeek:n => `อีก ${n} รายการสัปดาห์นี้`, followers:"ผู้ติดตาม ทุกบัญชี", growth7:"7 วันล่าสุด", growthSoon:"การเติบโตแสดงตั้งแต่วันที่ 2", thisWeek:"สัปดาห์นี้", pubPlanned:"เผยแพร่แล้ว / วางแผน",
        openTasks:"งานที่ค้าง", highPrio:n => `${n} รายการสำคัญ`, todayH:"วันนี้", todaySub:"ติ๊กเมื่อเสร็จ ทีมของคุณเห็นทันที", weekH:"<em>สัปดาห์นี้</em>", weekSub:d => `กำหนดส่งและรายการค้างถึง ${d}`,
@@ -189,8 +190,8 @@ function days(n){ const out = []; for (let i = n - 1; i >= 0; i--) out.push(addD
 // ---------- plan + tasks in one list ----------
 function entries(){
   const out = [];
-  for (const p of P) out.push({ kind:"plan", id:p.id, date:p.date, title:p.title, sub:[tr("type", p.type), p.outfit].filter(Boolean).join(" · "), platform:p.platform, status:p.status, done:isDone(p) || DONE.has(p.id), fixed:true, video:!!(p.refVideo || p.file || p.reference) });
-  for (const t of T) out.push({ kind:"task", id:t.id, date:t.due, title:t.title, sub:t.desc, platform:t.category, status:t.status, done:t.status === "Done" || DONE.has(t.id), fixed:t.dueType === "Fixed day", by:t.dueType === "By", priority:t.priority });
+  for (const p of P) out.push({ kind:"plan", id:p.id, date:p.date, title:p.title, sub:[tr("type", p.type), p.outfit].filter(Boolean).join(" · "), platform:p.platform, status:p.status, done:isDone(p) || DONE.has(p.id), fixed:true, video:!!(p.refVideo || p.file || p.reference), drive:p.drive || M.drive });
+  for (const t of T) out.push({ kind:"task", id:t.id, date:t.due, title:t.title, sub:t.desc, platform:t.category, status:t.status, done:t.status === "Done" || DONE.has(t.id), fixed:t.dueType === "Fixed day", by:t.dueType === "By", priority:t.priority, drive:t.drive || M.drive });
   return out;
 }
 function todayList(){ return entries().filter(e => (e.fixed && e.date === TODAY) || (e.by && e.date === TODAY) || (!e.done && e.date && e.date < TODAY)).sort((a, b) => (a.done - b.done) || (a.date || "").localeCompare(b.date || "")); }
@@ -205,7 +206,7 @@ function itemHtml(e){
     <div><div class="t">${esc(e.title)}${e.video ? `<span class="vid"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>${L.video}</span>` : ""}</div>${e.sub ? `<div class="s">${esc(e.sub)}</div>` : ""}</div>
     <div class="meta">${late ? `<span class="pill bad">${L.overdue}</span>` : ""}${e.priority === "High" ? `<span class="pill bad">${L.high}</span>` : ""}
       <span class="pill ${e.kind === "task" ? "gray" : pf(e.platform)}">${esc(e.kind === "task" ? tr("cat", e.platform) : e.platform)}</span>
-      <span class="pill ${stCls(e.status)}">${esc(tr("status", e.status))}</span><span class="when">${when}</span></div></div>`;
+      <span class="pill ${stCls(e.status)}">${esc(tr("status", e.status))}</span>${e.drive ? `<a class="up" href="${esc(e.drive)}" target="_blank" rel="noopener" onclick="event.stopPropagation()"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16"/></svg>${L.upload}</a>` : ""}<span class="when">${when}</span></div></div>`;
 }
 function weekGrouped(wk){
   const MAX = 6, shown = wk.filter(e => !e.done).slice(0, MAX), rest = wk.filter(e => !e.done).length - shown.length;
@@ -264,7 +265,7 @@ function openPlan(id){ const p = P.find(x => x.id === id); if (!p) return;
     <h3>${esc(p.title)}</h3><div style="color:var(--muted)">${esc(tr("type", p.type))}${p.date ? " · " + nice(p.date) : ""}</div>
     ${p.hook ? `<div class="k">${L.hook}</div><div>${esc(p.hook)}</div>` : ""}${p.outfit ? `<div class="k">${L.outfit}</div><div>${esc(p.outfit)}</div>` : ""}
     ${p.caption ? `<div class="k">${L.caption}</div><div style="white-space:pre-wrap">${esc(p.caption)}</div>` : ""}${p.notes ? `<div class="k">${L.notes}</div><div>${esc(p.notes)}</div>` : ""}
-    ${p.published ? `<div style="margin-top:20px"><a class="btn" href="${esc(p.published)}" target="_blank" rel="noopener">${L.openOn(p.platform)}</a></div>` : ""}</div>`;
+    <div style="display:flex;gap:8px;margin-top:20px;flex-wrap:wrap">${(p.drive || M.drive) ? `<a class="btn primary" href="${esc(p.drive || M.drive)}" target="_blank" rel="noopener">${L.uploadLong}</a>` : ""}${p.published ? `<a class="btn" href="${esc(p.published)}" target="_blank" rel="noopener">${L.openOn(p.platform)}</a>` : ""}</div></div>`;
   $("#modal").classList.add("on"); }
 function closeModal(){ $("#modal").classList.remove("on"); $("#modalBox").innerHTML = ""; }
 $("#modal").onclick = e => { if (e.target.id === "modal") closeModal(); };
