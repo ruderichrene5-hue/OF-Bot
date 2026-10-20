@@ -47,10 +47,30 @@ def _download_ref(rec_id: str, url: str) -> None:
             got = Path(y.prepare_filename(info))
         if got.exists():
             got.rename(REF_DIR / f"{rec_id}.mp4")
+            transcribe_ref(rec_id)
     except Exception as e:  # noqa: BLE001
         print(f"portal ref {rec_id}: {e}")
     finally:
         _fetching.discard(rec_id)
+
+
+def transcribe_ref(rec_id: str) -> None:
+    """20.10 (Rene): the reference reel's spoken text, translated to German, into Content Plan "Transcript" / "Transcript DE".
+    Runs reel_pipeline/portal_transcribe.py in its own venv (faster-whisper + argostranslate, CPU, offline)."""
+    import subprocess
+    f = REF_DIR / f"{rec_id}.mp4"
+    if not f.exists():
+        return
+    try:
+        out = subprocess.run(["/root/reel_pipeline/.venv/bin/python3", "/root/reel_pipeline/portal_transcribe.py", str(f)],
+                             capture_output=True, text=True, timeout=600, cwd="/root/reel_pipeline").stdout.strip().splitlines()
+        r = json.loads(out[-1]) if out else {}
+        if r.get("text"):
+            requests.patch(f"https://api.airtable.com/v0/{BASE}/{T_PLAN}/{rec_id}", timeout=20,
+                           headers={"Authorization": f"Bearer {os.environ.get('AIRTABLE_TOKEN', '')}", "Content-Type": "application/json"},
+                           json={"fields": {"Transcript": f"[{r.get('lang', '')}] {r['text']}", "Transcript DE": r.get("de", "")}})
+    except Exception as e:  # noqa: BLE001
+        print(f"portal transcribe {rec_id}: {e}")
 
 
 def fetch_references(plan: list) -> None:
@@ -92,7 +112,8 @@ def portal_data(model: str, crm_dataset: dict | None = None) -> dict:
     plan = [{"id": r["id"], "title": f.get("Title", ""), "date": f.get("Date"), "platform": f.get("Platform", ""),
              "type": f.get("Type", ""), "status": f.get("Status", ""), "hook": f.get("Hook / idea", ""),
              "caption": f.get("Caption", ""), "outfit": f.get("Outfit / location", ""), "reference": f.get("Reference"),
-             "published": f.get("Published link"), "file": _att(f.get("Files")), "notes": f.get("Notes", ""), "drive": f.get("Drive folder")}
+             "published": f.get("Published link"), "file": _att(f.get("Files")), "notes": f.get("Notes", ""), "drive": f.get("Drive folder"),
+             "transcript": f.get("Transcript", ""), "transcriptDe": f.get("Transcript DE", "")}
             for r in _fetch(T_PLAN) for f in [r["fields"]] if mid and mid in (f.get("Model") or [])]
     tasks = [{"id": r["id"], "title": f.get("Task", ""), "category": f.get("Category", ""), "due": f.get("Due"),
               "dueType": f.get("Due type", "Fixed day" if f.get("Due") else "This week"), "status": f.get("Status", "Open"),
@@ -102,6 +123,10 @@ def portal_data(model: str, crm_dataset: dict | None = None) -> dict:
     for p in plan:
         p["refVideo"] = f"/portal/ref/{p['id']}.mp4" if ref_file(f"{p['id']}.mp4") else None
     fetch_references(plan)
+    for p in plan:                                  # reference cached but not transcribed yet (e.g. downloaded before 20.10)
+        if p["refVideo"] and p.get("reference") and not p.get("transcript") and p["id"] not in _fetching:
+            _fetching.add(p["id"])
+            threading.Thread(target=lambda rid=p["id"]: (transcribe_ref(rid), _fetching.discard(rid)), daemon=True).start()
     from . import portal_drive
     portal_drive.sync_async(f.get("Name", model) if (f := me.get("fields", {})) else model, me, plan)
     # 16.10 Rene: no fleet reels, no view counts, no account health in the portal -- followers and growth only
