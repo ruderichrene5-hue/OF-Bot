@@ -440,7 +440,10 @@ def run_wlan(now: float, state: dict, phones: dict) -> dict:
     hosts = {k: p.get("host") for k, p in phones.items() if p.get("host")}
     # one ssh round-trip for all names: "<name> <ip-or-empty>" per line
     # mDNS lookups of names that are NOT on the WLAN take ~5 s each -> run them in parallel, generous timeout
-    cmd = " ".join(f"(echo \"{h} $(dscacheutil -q host -a name {h} 2>/dev/null | sed -n 's/^ip_address: //p' | grep -v 169.254 | head -1)\") &"
+    # a phone on the USB hub also answers with its 169.254.x USB address -- prefer the WLAN one, accept either (22.10:
+    # B and G resolved to the USB address only for a moment and must not read as "off the WLAN")
+    cmd = " ".join(f"(echo \"{h} $(dscacheutil -q host -a name {h} 2>/dev/null | sed -n 's/^ip_address: //p' | sort | grep -v 169.254 | head -1) "
+                   f"$(dscacheutil -q host -a name {h} 2>/dev/null | sed -n 's/^ip_address: //p' | grep 169.254 | head -1)\") &"
                    for h in sorted(set(hosts.values()))) + " wait"
     out = _relay_ssh(cmd, timeout=90)
     if out is None:
