@@ -413,10 +413,85 @@ def run_usb(now: float, state: dict, phones: dict) -> dict:
     return state
 
 
+WLAN_RETRY = 120             # seconds between WDA agent restarts per phone (WDA needs ~20 s to come up)
+
+
+def run_wlan(now: float, state: dict, phones: dict) -> dict:
+    """22.10 (Rene: alles ueber WLAN, auch das Video): no USB bus, no captures. Every phone is reached by its
+    Bonjour name (phone["host"], Farm-iPhone-0N.local) through adbbot-vnc-tunnel: WDA 810N, WDA-MJPEG 910N,
+    CatVNC 1590N. Per phone: name not resolving on the Mac mini -> "off the WLAN" alert after OFFLINE_AFTER runs
+    (asleep, off, out of power -- or jailbreak gone when only lockdown answers); WDA down -> kickstart its
+    com.veralta.wdaN agent, spaced WLAN_RETRY apart, alert after RESTART_TRIES failures; one alert when back."""
+    names = _names()
+    relay = state.setdefault("_relay", {"down_runs": 0, "alerted": False})
+    hosts = {k: p.get("host") for k, p in phones.items() if p.get("host")}
+    # one ssh round-trip for all names: "<name> <ip-or-empty>" per line
+    # mDNS lookups of names that are NOT on the WLAN take ~5 s each -> run them in parallel, generous timeout
+    cmd = " ".join(f"(echo \"{h} $(dscacheutil -q host -a name {h} 2>/dev/null | sed -n 's/^ip_address: //p' | grep -v 169.254 | head -1)\") &"
+                   for h in sorted(set(hosts.values()))) + " wait"
+    out = _relay_ssh(cmd, timeout=90)
+    if out is None:
+        relay["down_runs"] += 1
+        if relay["down_runs"] >= OFFLINE_AFTER and not relay["alerted"]:
+            _alert("The Mac mini (farm relay) is not answering -- every phone is offline in the dashboard.")
+            relay["alerted"] = True
+        _save_state(state)
+        return state
+    if relay["alerted"]:
+        _alert("The Mac mini is answering again.")
+    relay.update(down_runs=0, alerted=False)
+    resolved = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if parts:
+            resolved[parts[0]] = parts[1] if len(parts) > 1 else ""
+    uid = None
+    for rec_id, phone in phones.items():
+        if iphone_farm_config.is_off(rec_id):
+            continue
+        name = names.get(rec_id) or phone.get("name") or phone.get("stream", rec_id)
+        host = hosts.get(rec_id)
+        n = str(phone.get("stream", "")).removeprefix("iphone")
+        st = state.setdefault(rec_id, {"down_runs": 0, "offline_alerted": False, "fails": 0, "fail_alerted": False, "last_try": 0})
+        if not host or not resolved.get(host):
+            st["down_runs"] += 1
+            if st["down_runs"] >= OFFLINE_AFTER and not st["offline_alerted"]:
+                _alert(f"<b>{name}</b> is not on the WLAN any more (~{st['down_runs']*20//60} min, name {host or '?'} does not "
+                       f"resolve on the Mac mini). Asleep, off, out of power -- or rebooted (jailbreak gone)?")
+                st["offline_alerted"] = True
+            continue
+        if st["offline_alerted"]:
+            _alert(f"<b>{name}</b> is back on the WLAN ({resolved[host]}).")
+        st.update(down_runs=0, offline_alerted=False)
+        if not (iphone_farm_config.wda_enabled() and phone.get("wda_port") and n.isdigit()):
+            continue
+        if _wda_up(phone["wda_port"]):
+            if st["fail_alerted"]:
+                _alert(f"<b>{name}</b>: WDA (control + live picture) is back.")
+            st.update(fails=0, fail_alerted=False)
+            continue
+        if now - st.get("last_try", 0) < (WLAN_RETRY * 5 if st["fail_alerted"] else WLAN_RETRY):
+            continue
+        st["last_try"] = now
+        if uid is None:
+            uid = (_relay_ssh("id -u") or "501").strip()
+        _relay_ssh(f"launchctl kickstart -k gui/{uid}/com.veralta.wda{n}")
+        st["fails"] += 1
+        log.info("%s: WDA down -> kickstart com.veralta.wda%s (try %d)", name, n, st["fails"])
+        if st["fails"] >= RESTART_TRIES and not st["fail_alerted"]:
+            _alert(f"<b>{name}</b>: WDA restarted {st['fails']}x without success -- no control and no live picture. "
+                   f"Phone on the WLAN ({resolved[host]}) but WDA will not start: locked screen? DDI? XCTest runner?")
+            st["fail_alerted"] = True
+    _save_state(state)
+    return state
+
+
 def run(now: float | None = None) -> dict:
     now = now or time.time()
     state = _load_state()
     phones = iphone_farm_config.load()
+    if iphone_farm_config.relay().get("video") == "wda":
+        return run_wlan(now, state, phones)
     if iphone_farm_config.relay().get("video") == "usb":
         return run_usb(now, state, phones)
     status = iphone_farm_config.video_status()

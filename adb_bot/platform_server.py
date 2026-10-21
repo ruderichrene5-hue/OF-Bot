@@ -371,6 +371,65 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         route = self.path.split("?")[0]
+        # 20.10 (Rene): forward tap/swipe/type from the /mjpeg page to WDA so the dashboard is
+        # interactive. Simple session-caching proxy -- one WDA session per phone, reused across taps.
+        # POST /phones/wda/<letter>/<action> with JSON body {x,y} or {x1,y1,x2,y2} or {text}.
+        if route.startswith("/phones/wda/"):
+            if not self._authorized():
+                self.send_response(401); self.send_header("WWW-Authenticate", 'Basic realm="Platform"'); self.end_headers(); return
+            parts = route[len("/phones/wda/"):].split("/")
+            if len(parts) != 2:
+                self.send_response(404); self.end_headers(); return
+            letter, action = parts[0].upper(), parts[1]
+            port_map = {"A": 8101, "B": 8102, "C": 8103, "D": 8104, "E": 8105,
+                        "I": 8106, "G": 8107, "H": 8108, "F": 8109, "J": 8111, "K": 8112, "L": 8113}
+            port = port_map.get(letter)
+            if not port:
+                self.send_response(404); self.end_headers(); return
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(min(length, 4096))
+            import urllib.request, urllib.error
+            # cache WDA sessions in a module global
+            global _wda_sessions
+            if "_wda_sessions" not in globals():
+                _wda_sessions = {}
+            def wda_post(path, data):
+                req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
+                    data=data if isinstance(data, bytes) else json.dumps(data).encode(),
+                    headers={"Content-Type": "application/json"}, method="POST")
+                return urllib.request.urlopen(req, timeout=5).read()
+            def ensure_sid():
+                sid = _wda_sessions.get(letter)
+                if sid:
+                    try:
+                        urllib.request.urlopen(f"http://127.0.0.1:{port}/session/{sid}", timeout=3).read()
+                        return sid
+                    except Exception:
+                        pass
+                r = wda_post("/session", {"capabilities": {"alwaysMatch": {"platformName": "iOS"}}})
+                sid = json.loads(r)["value"]["sessionId"]
+                _wda_sessions[letter] = sid
+                return sid
+            try:
+                sid = ensure_sid()
+                if action == "tap":
+                    wda_post(f"/session/{sid}/wda/tap", body)
+                elif action == "swipe":
+                    wda_post(f"/session/{sid}/wda/dragfromtoforduration", body)
+                elif action == "type":
+                    wda_post(f"/session/{sid}/wda/keys", body)
+                elif action == "home":
+                    wda_post(f"/session/{sid}/wda/pressButton", {"name": "home"})
+                else:
+                    self.send_response(400); self.end_headers(); return
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+            except Exception as exc:
+                import logging
+                logging.getLogger("wda-proxy").warning("wda %s %s: %s", letter, action, exc)
+                self.send_response(502); self.send_header("Content-Type", "application/json"); self.end_headers()
+                self.wfile.write(json.dumps({"ok": False, "error": str(exc)}).encode())
+            return
         if route in ("/portal/login", "/portal/verify"):
             from adb_bot.automation import portal_auth
             length = int(self.headers.get("Content-Length") or 0)
@@ -565,6 +624,141 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._splice_vnc()
             return
+        # 20.10 (Rene): MJPEG stream per phone from WDA's own :9100 (SSH-forwarded 127.0.0.1:910N).
+        # /phones/mjpeg/<letter> opens a persistent multipart/x-mixed-replace response that the
+        # browser renders in a plain <img src>. 15-25 fps, 720p, no decoding on the server side.
+        # 21.10 (Rene: "fullscreen zum richtigen Steuern mit flüssigen FPS"): one-phone noVNC page.
+        # /phones/<letter>/screen -> HTML with embedded noVNC client that opens a WebSocket back to
+        # /vnc?token=<rec_id>&t=<ticket>, so this page uses the same websockify bridge the /live grid
+        # already uses, just targeted at the picked phone. 25-30 fps real-time via CatVNC + input.
+        if self.path.startswith("/phones/") and self.path.split("?")[0].endswith("/screen"):
+            if not self._authorized():
+                self.send_response(401); self.send_header("WWW-Authenticate", 'Basic realm="Platform"'); self.end_headers(); return
+            letter = self.path.split("?")[0].removeprefix("/phones/").removesuffix("/screen").upper()
+            # letter -> record id. Most phones don't carry "name" or "ssh_usb_backup" -- but every phone
+            # has stream=iphoneN. The N<->letter mapping on this farm (not sequential, grew over time):
+            LETTER_TO_STREAM = {"A":"iphone1","B":"iphone2","C":"iphone3","D":"iphone4","E":"iphone5",
+                                "I":"iphone6","G":"iphone7","H":"iphone8",
+                                "F":"iphone10","J":"iphone11","K":"iphone12","L":"iphone13"}
+            from adb_bot.automation import iphone_farm_config
+            rec_id = None; vnc_pw = "123"
+            want_stream = LETTER_TO_STREAM.get(letter)
+            for rid, ph in iphone_farm_config.load().items():
+                if (ph.get("name", "") or "").endswith(f" {letter}") \
+                   or (ph.get("ssh_usb_backup", "") or "").endswith(f"-{letter.lower()}") \
+                   or (want_stream and ph.get("stream") == want_stream):
+                    rec_id = rid
+                    vnc_pw = ph.get("vnc_password") or "123"
+                    break
+            if not rec_id:
+                self.send_response(404); self.end_headers(); self.wfile.write(f"no iPhone {letter}".encode()); return
+            # 21.10 Rene: CatVNC on the phones is too fragile (daemon dies, kickstart doesn't help)
+            # -> fullscreen uses the already-running MJPEG+WDA stack instead: ~15-20 fps, click/swipe/
+            # type via /phones/wda/<L>/... (same handlers the /mjpeg grid uses). Works on every phone
+            # that has WDA alive. No CatVNC dependency.
+            page = (
+                "<!doctype html><html><head><meta charset=utf-8>"
+                f"<title>iPhone {letter} — Live</title>"
+                "<meta name=viewport content='width=device-width,initial-scale=1'>"
+                "<style>html,body{margin:0;padding:0;background:#000;color:#eee;font-family:system-ui;height:100%;overflow:hidden}"
+                "#bar{position:fixed;top:0;left:0;right:0;background:rgba(0,0,0,.75);padding:6px 12px;z-index:10;display:flex;gap:10px;align-items:center}"
+                "#bar a,#bar button{color:#4af;background:transparent;border:1px solid #4af;padding:3px 10px;border-radius:4px;text-decoration:none;cursor:pointer;font:inherit}"
+                "#bar button:hover,#bar a:hover{background:#4af;color:#000}"
+                "#scr{position:fixed;top:36px;left:0;right:0;bottom:0;background:#111;display:flex;align-items:center;justify-content:center;cursor:crosshair}"
+                "#scr img{max-height:100%;max-width:100%;height:auto;width:auto;aspect-ratio:9/16;background:#222;pointer-events:none;display:block;object-fit:contain}"
+                "</style></head><body>"
+                f"<div id=bar><strong>iPhone {letter}</strong>"
+                "<a href=/mjpeg>⟵ Übersicht</a>"
+                f"<button onclick=\"fetch('/phones/wda/{letter.lower()}/home',{{method:'POST'}})\">Home</button>"
+                f"<button onclick=\"document.querySelector('#scr img').src='/phones/mjpeg/{letter.lower()}?r='+Date.now()\">Reload</button>"
+                "<span style='margin-left:auto;font-size:12px;color:#888'>Klick = Tap · Drag = Swipe · Keyboard tippt</span></div>"
+                f'<div id=scr data-p="{letter.lower()}"><img src="/phones/mjpeg/{letter.lower()}" alt="iPhone {letter} offline"></div>'
+                "<script>"
+                "const scr=document.getElementById('scr'), p=scr.dataset.p;"
+                "let start=null;"
+                "scr.addEventListener('mousedown',e=>{if(e.target.tagName==='BUTTON'||e.target.tagName==='A')return;start={x:e.offsetX,y:e.offsetY,t:Date.now()};});"
+                "scr.addEventListener('mouseup',e=>{"
+                "  if(!start)return;"
+                "  const img=scr.querySelector('img');const r=img.getBoundingClientRect();"
+                "  const sx=375/r.width, sy=812/r.height;"
+                "  const dur=Date.now()-start.t;"
+                "  const dx=Math.abs(e.offsetX-start.x), dy=Math.abs(e.offsetY-start.y);"
+                "  if(dx>12||dy>12){"
+                "    fetch('/phones/wda/'+p+'/swipe',{method:'POST',headers:{'Content-Type':'application/json'},"
+                "      body:JSON.stringify({fromX:start.x*sx,fromY:start.y*sy,toX:e.offsetX*sx,toY:e.offsetY*sy,duration:dur/1000})});"
+                "  } else {"
+                "    fetch('/phones/wda/'+p+'/tap',{method:'POST',headers:{'Content-Type':'application/json'},"
+                "      body:JSON.stringify({x:e.offsetX*sx,y:e.offsetY*sy})});"
+                "  }"
+                "  start=null;"
+                "});"
+                "document.addEventListener('keydown',e=>{"
+                "  if(e.target.tagName==='INPUT'||e.target.tagName==='BUTTON')return;"
+                "  if(e.key.length==1||['Backspace','Enter'].includes(e.key)){"
+                "    e.preventDefault();"
+                "    const k=e.key==='Backspace'?'\\uE003':(e.key==='Enter'?'\\n':e.key);"
+                "    fetch('/phones/wda/'+p+'/type',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:[k]})});"
+                "  }"
+                "});"
+                "</script></body></html>"
+            )
+            body = page.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/phones/mjpeg/"):
+            letter = self.path.split("?")[0].removeprefix("/phones/mjpeg/").upper()
+            port_map = {"A": 9101, "B": 9102, "C": 9103, "D": 9104, "E": 9105,
+                        "I": 9106, "G": 9107, "H": 9108,
+                        "F": 9109, "J": 9111, "K": 9112, "L": 9113}     # 22.10: F = stream 9 (Renes-iPhone.local)
+            port = port_map.get(letter)
+            if not port:
+                self.send_response(404); self.end_headers(); return
+            try:
+                upstream = socket.create_connection(("127.0.0.1", port), timeout=5)
+            except OSError:
+                self.send_response(502); self.end_headers(); return
+            upstream.settimeout(None)
+            try:
+                upstream.sendall(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                buf = b""
+                while b"\r\n\r\n" not in buf:
+                    chunk = upstream.recv(4096)
+                    if not chunk:
+                        self.send_response(502); self.end_headers(); return
+                    buf += chunk
+                head_bytes, _, rest = buf.partition(b"\r\n\r\n")
+                # extract Content-Type from WDA's response headers so we can set the right one
+                # on our own response -- the browser needs "multipart/x-mixed-replace; boundary=..."
+                ctype = "multipart/x-mixed-replace; boundary=--BoundaryString"
+                for line in head_bytes.decode("latin-1", "ignore").splitlines()[1:]:
+                    if line.lower().startswith("content-type:"):
+                        ctype = line.split(":", 1)[1].strip()
+                        break
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                if rest:
+                    self.wfile.write(rest)
+                    self.wfile.flush()
+                self.close_connection = True
+                while True:
+                    data = upstream.recv(65536)
+                    if not data:
+                        break
+                    self.wfile.write(data)
+                    self.wfile.flush()
+            except Exception as exc:
+                import logging, traceback
+                logging.getLogger("mjpeg").warning("mjpeg %s: %s\n%s", letter, exc, traceback.format_exc())
+            finally:
+                try: upstream.close()
+                except Exception: pass
+            return
         _public = {"/favicon.ico": "favicon.ico", "/apple-touch-icon.png": "rnx-viewer-icon-180.png",
                    "/brand/icon.png": "rnx-viewer-icon-512.png", "/brand/logo.png": "rnx-viewer-logo.png"}  # also for the Cloudflare login page
         if self.path.split("?")[0].startswith("/northfeed"):
@@ -689,14 +883,75 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if route in ("/", "/accounts", "/phones", "/live"):
+        if route in ("/", "/accounts", "/phones", "/live", "/live-vnc", "/mjpeg"):
             if route == "/phones":                       # old Proxies & Containers page: gone, send people to Phones
                 self.send_response(302)
                 self.send_header("Location", "/live")
                 self.end_headers()
                 return
-            elif route == "/live":
+            elif route == "/live-vnc":
+                # the old VNC/WebRTC grid (USB era); kept reachable for comparison, not linked in the nav
                 body = _with_nav(_live_page().replace(b"__VNC_TICKET__", vnc_ticket().encode()), "/live")
+            elif route in ("/live", "/mjpeg"):
+                # 22.10 (Rene: alles ueber WLAN, auch das Video): /live IS the WDA grid now -- picture from WDA's
+                # MJPEG (:9100 via tunnel 910N), taps/swipes/keys to WDA (:8100 via 810N); works through Cloudflare.
+                # 20.10 (Rene): Live-view at 15-25 fps via WDA MJPEG. 7/8 iPhones (A/B/C/E/G/H/I),
+                # D is out while XXTouch license is expired. <img> auto-reconnects on each navigation.
+                body = _with_nav((
+                    "<style>body{background:#000;color:#eee;font-family:system-ui;margin:0;padding:12px}"
+                    ".g{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}"
+                    ".t{position:relative;background:#111;border-radius:8px;overflow:hidden;cursor:crosshair}"
+                    ".t img{width:100%;height:auto;display:block;aspect-ratio:9/16;background:#222;pointer-events:none}"
+                    ".l{position:absolute;top:6px;left:8px;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:4px;font-size:13px;z-index:2}"
+                    ".h{position:absolute;top:6px;right:8px;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:4px;font-size:11px;z-index:2;cursor:pointer}"
+                    "</style>"
+                    "<div class=g>"
+                    + "".join(f'<div class=t data-p="{L.lower()}">'
+                             f'<div class=l>iPhone {L}</div>'
+                             f'<div class=h style="right:48px" onclick="event.stopPropagation();window.open(\'/phones/{L.lower()}/screen\',\'_blank\')" title="Fullscreen (noVNC)">⛶</div>'
+                             f'<div class=h onclick="event.stopPropagation();fetch(\'/phones/wda/{L.lower()}/home\',{{method:\"POST\"}})" title="Home">⏺</div>'
+                             f'<img src="/phones/mjpeg/{L.lower()}" alt="iPhone {L} offline" '
+                             f'onerror="const i=this;setTimeout(()=>{{i.src=\'/phones/mjpeg/{L.lower()}?r=\'+Date.now()}},4000)">'
+                             f'</div>'
+                             for L in ("A","B","C","D","E","F","G","H","I","J","K","L"))
+                    + "</div>"
+                    # click handler: translate browser click coords -> iPhone pt coords (375x812 for 7/8, 375x812 for X -- same pt)
+                    "<script>"
+                    "document.querySelectorAll('.t').forEach(t=>{"
+                    "  let start=null;"
+                    "  t.addEventListener('mousedown',e=>{start={x:e.offsetX,y:e.offsetY,t:Date.now()};});"
+                    "  t.addEventListener('mouseup',e=>{"
+                    "    if(!start)return;"
+                    "    const r=t.querySelector('img').getBoundingClientRect();"
+                    "    const sx=375/r.width, sy=812/r.height;"
+                    "    const p=t.dataset.p;"
+                    "    const dur=Date.now()-start.t;"
+                    "    const dx=Math.abs(e.offsetX-start.x), dy=Math.abs(e.offsetY-start.y);"
+                    "    if(dx>12||dy>12){"
+                    "      fetch('/phones/wda/'+p+'/swipe',{method:'POST',headers:{'Content-Type':'application/json'},"
+                    "        body:JSON.stringify({fromX:start.x*sx,fromY:start.y*sy,toX:e.offsetX*sx,toY:e.offsetY*sy,duration:dur/1000})});"
+                    "    } else {"
+                    "      fetch('/phones/wda/'+p+'/tap',{method:'POST',headers:{'Content-Type':'application/json'},"
+                    "        body:JSON.stringify({x:e.offsetX*sx,y:e.offsetY*sy})});"
+                    "    }"
+                    "    start=null;"
+                    "  });"
+                    "});"
+                    "// 22.10: a stream that ended (WDA restart) leaves a frozen <img> without an error event -> re-open it"
+                    "setInterval(()=>{document.querySelectorAll('.t img').forEach(i=>{if(!i.complete||i.naturalWidth==0){i.src='/phones/mjpeg/'+i.closest('.t').dataset.p+'?r='+Date.now();}});},15000);"
+                    "// keyboard: focus a tile first, then type"
+                    "let focused=null;"
+                    "document.querySelectorAll('.t').forEach(t=>t.addEventListener('click',e=>{focused=t.dataset.p;t.style.outline='2px solid #4af';setTimeout(()=>t.style.outline='',2000);}));"
+                    "document.addEventListener('keydown',e=>{"
+                    "  if(!focused||e.target.tagName=='INPUT')return;"
+                    "  if(e.key.length==1||['Backspace','Enter'].includes(e.key)){"
+                    "    e.preventDefault();"
+                    "    const k=e.key=='Backspace'?'\\uE003':(e.key=='Enter'?'\\n':e.key);"
+                    "    fetch('/phones/wda/'+focused+'/type',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:[k]})});"
+                    "  }"
+                    "});"
+                    "</script>"
+                ).encode("utf-8"), "/live")
             else:
                 body = _with_nav(_page(), "/")
             self.send_response(200)

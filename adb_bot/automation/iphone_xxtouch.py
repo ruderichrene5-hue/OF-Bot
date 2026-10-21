@@ -231,6 +231,17 @@ def _tunnel(ref: str) -> int:
         return port
 
 
+def _drop_tunnel(ref: str) -> None:
+    with _lock:
+        t = _tunnels.pop(ref, None)
+    if t and t[0].poll() is None:
+        t[0].terminate()
+        try:
+            t[0].wait(3)
+        except Exception:                                   # noqa: BLE001
+            t[0].kill()
+
+
 @atexit.register
 def _close_tunnels():
     for proc, _ in _tunnels.values():
@@ -257,7 +268,12 @@ class Touch:
         try:
             r = self.http.post(self.base + path, data=data, timeout=15)
         except requests.RequestException:
-            self.base = f"http://127.0.0.1:{_tunnel(self.ref)}"       # tunnel died -> reopen once
+            # tunnel died -> reopen once. 22.10 (Rene: "wenn der Proxy an geht, bricht XXTouch ab"): when the
+            # phone toggles its VPN, iOS resets the phone-side sockets while our ssh -N stays alive -- _tunnel()
+            # would hand back the same dead forward. Drop the tunnel first so it is really rebuilt.
+            _drop_tunnel(self.ref)
+            self.base = f"http://127.0.0.1:{_tunnel(self.ref)}"
+            self.http = requests.Session()
             r = self.http.post(self.base + path, data=data, timeout=15)
         try:
             return r.json()
@@ -272,6 +288,24 @@ class Touch:
             time.sleep(0.05)
         raise XXError(f"{self.ref}: XXTouch script still running after {timeout:.0f} s")
 
+    def _heal_licence(self) -> bool:
+        """22.10 (Rene: "manchmal sagt XXTouch, ich habe keine Lizenz"): ngserviced forgets the licence after a
+        respring although XXTExplorer still has it cached (deadline 06.11.2026 on B). Opening the app once hands
+        it back -- the signup has done this since 09.10, the posting batch never did. Once per Touch instance."""
+        if getattr(self, "_lic_healed", False):
+            return False
+        self._lic_healed = True
+        dest = _ssh_dest(self.ref)
+        try:
+            subprocess.run(["ssh", "-n", "-i", iphone_farm_config.SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                            "-o", "ConnectTimeout=20", *iphone_farm_config.lan_ssh_opts(dest), dest,
+                            "uiopen --bundleid ch.xxtou.XXTExplorer; sleep 8; uiopen --bundleid com.burbn.instagram"],
+                           capture_output=True, timeout=60)
+        except Exception:                                   # noqa: BLE001
+            return False
+        time.sleep(3)
+        return True
+
     def run(self, lua: str, wait: bool = True):
         """Run one Lua script and (by default) wait until it finished."""
         for attempt in range(4):
@@ -279,6 +313,8 @@ class Touch:
             res = self._post("/spawn", ("touch.init(0)\n" + lua).encode())
             if res.get("code") == 0:
                 break
+            if res.get("code") == 403 and self._heal_licence():      # "requires a valid license" -> re-sync once
+                continue
             if res.get("code") != 3 or attempt == 3:      # 3 = another script still running: wait, try again
                 raise XXError(f"{self.ref}: XXTouch refused the script: {res}")
             time.sleep(1.5)

@@ -428,6 +428,48 @@ def open_container_cli(rec_id: str, name: str, log=None) -> tuple[bool, str]:
         m = re.search(r"ip=(\S*) dns=(.*)", out or "")
         ip_now, dns = (m.group(1), m.group(2).strip()) if m else ("?", "?")
     if ip_now != host:
+        # 20.10 fleet: `uiopen shadowrocket://connect` silently did nothing on 5 phones -- SR stayed OFF
+        # ("Not Connected" / value="0" on the Home switch). Retrying the URL scheme kept failing. The
+        # thing that actually worked (C/E/G/H/I all recovered end-to-end): kill SR+neagent, WDA-launch
+        # SR fresh, read the Home switch out of the UI tree, tap its center -- SR then connects for real
+        # and the label flips to "<proxy-ip>:<port>". Keep this as the last-resort fallback; the URL
+        # scheme is still tried first because it skips the full SR restart on the normal path.
+        log(f"{name}: still {ip_now}, URL scheme ineffective -- WDA toggle fallback")
+        _ssh(rec_id, "echo 123 | sudo -S -p '' killall -9 Shadowrocket neagent 2>/dev/null; echo ok", timeout=20)
+        _time.sleep(3)
+        try:
+            p = connect(rec_id, timeout=30)
+            try: p.terminate("com.liguangming.Shadowrocket")
+            except Exception: pass  # noqa: BLE001
+            _time.sleep(2)
+            p.launch("com.liguangming.Shadowrocket")
+            _time.sleep(10)
+            # swallow the one-time "find and connect" dialog (new Crane container case)
+            try:
+                btns = p.alert_buttons()
+                if btns:
+                    p.alert_accept()
+                    _time.sleep(2)
+            except Exception:  # noqa: BLE001
+                pass
+            src = p.source() or ""
+            sm = re.search(r'<XCUIElementTypeSwitch[^/>]*?value="(\d)"[^/>]*?label="([^"]+)"'
+                           r'[^/>]*?x="(\d+)"[^/>]*?y="(\d+)"[^/>]*?width="(\d+)"[^/>]*?height="(\d+)"', src)
+            if sm:
+                val, lab, sx, sy, sw, sh = sm.groups()
+                cx, cy = int(sx) + int(sw) // 2, int(sy) + int(sh) // 2
+                log(f"{name}: SR switch val={val} label={lab!r} @ ({cx},{cy})")
+                if val == "0":
+                    p.tap(cx, cy)
+                    _time.sleep(12)
+            else:
+                log(f"{name}: SR home switch not found in UI tree")
+        except Exception as exc:  # noqa: BLE001
+            log(f"{name}: WDA toggle fallback failed: {exc}")
+        out = _ssh_out(rec_id, probe, timeout=120)
+        m = re.search(r"ip=(\S*) dns=(.*)", out or "")
+        ip_now, dns = (m.group(1), m.group(2).strip()) if m else ("?", "?")
+    if ip_now != host:
         return False, f"{name}: exit IP {ip_now} is not the container's proxy {host} -- Instagram not opened"
     if "unitedstates" not in dns.lower().replace(" ", ""):    # the probe strips blanks
         return False, f"{name}: resolver not in the US ({dns!r}) -- Instagram not opened"
@@ -830,8 +872,11 @@ def write_tokens(path: str) -> None:
             # Before 2026-10-09 this wrote the LAN ip and only A/B had one -> no touch input on C/D/E via https.
             vnc = phone.get("vnc") or ""
             n = str(phone.get("stream", "")).removeprefix("iphone")
-            if relay().get("video") == "usb" and n.isdigit():          # same N as the relay's vnc-fwdN
-                f.write(f"{rec_id}: 127.0.0.1:1590{n}\n")
+            # 22.10 (Rene: alles ueber WLAN): adbbot-vnc-tunnel forwards 127.0.0.1:1590N -> <Bonjour name>:5900
+            # for every phone, whatever the video mode -- the token always points at the tunnel.
+            if n.isdigit():
+                # 21.10: 2-digit N made the port a 6-digit nonsense ("159010"); use integer math.
+                f.write(f"{rec_id}: 127.0.0.1:{15900+int(n)}\n")
             elif vnc or phone.get("ip"):
                 f.write(f"{rec_id}: {vnc or phone['ip'] + ':5900'}\n")
 
