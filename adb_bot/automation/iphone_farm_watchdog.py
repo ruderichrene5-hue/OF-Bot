@@ -414,6 +414,19 @@ def run_usb(now: float, state: dict, phones: dict) -> dict:
 
 
 WLAN_RETRY = 120             # seconds between WDA agent restarts per phone (WDA needs ~20 s to come up)
+LICENCE_EVERY = 3600         # seconds between XXTouch licence probes per phone
+
+
+def _xx_licence(ref: str) -> int | None:
+    """0 = XXTouch runs scripts, 403 = Havoc licence invalid, None = phone/tunnel not reachable."""
+    try:
+        from adb_bot.automation import iphone_xxtouch
+        t = iphone_xxtouch.Touch(ref)
+        res = t._post("/spawn", b"sys.msleep(1)\n")
+        return res.get("code")
+    except Exception as exc:                                # noqa: BLE001
+        log.info("%s: licence probe skipped (%s)", ref, str(exc)[:80])
+        return None
 
 
 def run_wlan(now: float, state: dict, phones: dict) -> dict:
@@ -465,6 +478,18 @@ def run_wlan(now: float, state: dict, phones: dict) -> dict:
         st.update(down_runs=0, offline_alerted=False)
         if not (iphone_farm_config.wda_enabled() and phone.get("wda_port") and n.isdigit()):
             continue
+        # 22.10 (Rene: Havoc "unregistered" on B/C/D, XXTouch 403 on A/B/C the same evening): probe the XXTouch licence
+        # once an hour per phone and say which phone needs the Havoc login in Sileo -- before a posting run finds out.
+        if now - st.get("lic_check", 0) > LICENCE_EVERY:
+            st["lic_check"] = now
+            code = _xx_licence(phone.get("ssh") or rec_id)
+            if code == 403 and not st.get("lic_alerted"):
+                _alert(f"<b>{name}</b>: XXTouch says 'requires a valid license' (403). Havoc login in Sileo needed on this "
+                       f"phone -- posting and signup touches fail until then.")
+                st["lic_alerted"] = True
+            elif code == 0 and st.get("lic_alerted"):
+                _alert(f"<b>{name}</b>: XXTouch licence is valid again.")
+                st["lic_alerted"] = False
         if _wda_up(phone["wda_port"]):
             if st["fail_alerted"]:
                 _alert(f"<b>{name}</b>: WDA (control + live picture) is back.")
