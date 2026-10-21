@@ -205,9 +205,11 @@ def is_current(actions: list) -> bool:
     # 20.10 bug, or a blank one) passed as "current" before and was never rebuilt -> the Shortcut ended in
     # "Open App" without an app. Any such action forces a rebuild; rebuild() constructs a fresh Instagram openapp.
     for a in actions:
-        if (a.get("WFWorkflowActionIdentifier") == "is.workflow.actions.openapp"
-                and a.get("WFWorkflowActionParameters", {}).get("WFAppIdentifier") != "com.burbn.instagram"):
-            return False
+        if a.get("WFWorkflowActionIdentifier") == "is.workflow.actions.openapp":
+            prm = a.get("WFWorkflowActionParameters", {})
+            if prm.get("WFAppIdentifier") != "com.burbn.instagram" \
+               or (prm.get("WFSelectedApp") or {}).get("BundleIdentifier") != "com.burbn.instagram":
+                return False
     if not any(a.get("WFWorkflowActionIdentifier") == "is.workflow.actions.openapp" for a in actions):
         return False                                        # no openapp at all -> never opens Instagram
     return (bool(ids) and ids[0] == "is.workflow.actions.runsshscript" and "is.workflow.actions.getipaddress" not in ids
@@ -285,11 +287,14 @@ def rebuild(actions: list, name: str, host: str) -> list:
     # Instagram's openapp, construct a fresh one from scratch.
     open_ig_matches = [a for a in actions if a["WFWorkflowActionIdentifier"] == "is.workflow.actions.openapp"
                        and a.get("WFWorkflowActionParameters", {}).get("WFAppIdentifier") == "com.burbn.instagram"]
-    if open_ig_matches:
-        open_ig = open_ig_matches[0]
-    else:
-        open_ig = {"WFWorkflowActionIdentifier": "is.workflow.actions.openapp",
-                   "WFWorkflowActionParameters": {"WFAppIdentifier": "com.burbn.instagram"}}
+    # 22.10 (Rene: the editor shows "Open App" with NO app and the run fails): since iOS 15 the Shortcuts app
+    # keeps the chosen app in WFSelectedApp {BundleIdentifier, Name}; a bare WFAppIdentifier (all our rebuilt
+    # shortcuts, 13/13 on B, 25/25 on H) renders blank. Always write both.
+    open_ig = {"WFWorkflowActionIdentifier": "is.workflow.actions.openapp",
+               "WFWorkflowActionParameters": {"WFAppIdentifier": "com.burbn.instagram",
+                                              "WFSelectedApp": {"BundleIdentifier": "com.burbn.instagram", "Name": "Instagram"}}}
+    if open_ig_matches and open_ig_matches[0].get("WFWorkflowActionParameters", {}).get("UUID"):
+        open_ig["WFWorkflowActionParameters"]["UUID"] = open_ig_matches[0]["WFWorkflowActionParameters"]["UUID"]
     gc = _u()
     cu, close = _close_instagram()
     out = [close, _if_is(cu, "OK", gc, SSH_OUTPUT), _flow(gc, 1),
