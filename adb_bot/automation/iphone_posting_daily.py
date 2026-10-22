@@ -90,7 +90,7 @@ def main(argv=None) -> int:
     ap.add_argument("--date", default=None)
     ap.add_argument("--phones", default="", help="only these letters, e.g. D or D,E (own state tag)")
     ap.add_argument("--reels", type=int, default=0, help="reels per account today (default: every clip)")
-    ap.add_argument("--window", default="9-23")
+    ap.add_argument("--window", default="0-24")   # 22.10 Rene: "es gibt kein 23-Uhr-Dings" -- post around the clock
     ap.add_argument("--dry", action="store_true")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
