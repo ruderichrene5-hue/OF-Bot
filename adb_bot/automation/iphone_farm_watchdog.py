@@ -521,7 +521,7 @@ def run_wlan(now: float, state: dict, phones: dict) -> dict:
         if _wda_up(phone["wda_port"]):
             if st["fail_alerted"]:
                 _alert(f"<b>{name}</b>: WDA (control + live picture) is back.")
-            st.update(fails=0, fail_alerted=False)
+            st.update(fails=0, fail_alerted=False, dead_runs=0)
             # 22.10 (A live at 19 % unplugged, D vanished from the WLAN the same evening): once every BATTERY_EVERY
             # read the battery through WDA and say so when a phone is NOT charging below BATTERY_WARN
             if now - st.get("bat_check", 0) > BATTERY_EVERY and not _busy(rec_id, phone):
@@ -551,8 +551,11 @@ def run_wlan(now: float, state: dict, phones: dict) -> dict:
             continue
         # 22.10: never restart WDA under a running flow (warm-up/setup/signup mark the phone off, posting holds the
         # lock) -- a slow /status while Instagram is being driven is not a dead WDA, and a kick would kill the run
-        if _busy(rec_id, phone):
-            log.info("%s: WDA not answering but a flow has the phone -- not restarting now", name)
+        st["dead_runs"] = st.get("dead_runs", 0) + 1
+        if _busy(rec_id, phone) and st["dead_runs"] < 3:
+            # a slow /status under load is not a dead WDA -- but three cycles (~1 min) without an answer while a flow
+            # holds the phone IS one (B live 23:46: posting's scroll failed on a dead WDA the watchdog left alone)
+            log.info("%s: WDA not answering but a flow has the phone -- waiting (%d/3)", name, st["dead_runs"])
             continue
         st["last_try"] = now
         if uid is None:
