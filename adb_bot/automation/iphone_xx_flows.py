@@ -659,6 +659,14 @@ def scroll_feed(x: XX, seconds: float) -> None:
     If a username / own-reel tap accidentally lands us in a nested view, the top-left back arrow is
     tapped before falling back to the Reels tab (same recovery pattern as post_reel's no_new_reel
     handler, 17.10 Rene). Everything goes via XXTouch (XX.tap / XX.swipe / Touch.run)."""
+    # 22.10 live (A6): Instagram sat on the account switcher; blind taps/swipes then hit "Create new account" and
+    # the run ended in "Do you want to stop creating your account?". Never scroll blind on an unknown screen.
+    if x.find(r"^Use another profile$", 0) and x.find(r"^Continue$", 0):
+        x.log("account switcher in front -- tapping Continue")
+        x.tap_text(r"^Continue$", 2); x.pause(6, 9)
+    if x.find(r"^Create new account$|^Log in$|^Get started$|creating your account", 0):
+        _keep_screen(x, "scroll_unknown_screen")
+        raise FlowError("scroll_feed: Instagram is on a login/signup screen -- not scrolling here")
     x.tap(112, 752)                                       # Reels tab (bottom, 2nd icon)
     x.pause(2, 3)
     # 2026-10-19 Rene: "immer scannen ob wirklich im Reels-Tab" -- wenn Tap auf (112,752) in einem
@@ -695,7 +703,12 @@ def scroll_feed(x: XX, seconds: float) -> None:
         _W._session(h, plan, x.log, stats, ref=x.ref, container=getattr(x, "container", "?"))
         x.log(f"scroll_feed: {stats['reels_watched']} reels, rhythm {stats['rhythm']}, {len(stats['errors'])} hiccups")
         return
-    except Exception as _exc:                             # noqa: BLE001 -- fall through to synthetic
+    except Exception as _exc:                             # noqa: BLE001
+        # 22.10: no blind synthetic scrolling when the engine could not even find the Reels tab -- the screen is
+        # not the feed then (switcher, dialog, signup), and blind swipes/taps did real damage on A6.
+        if "tab reels not found" in str(_exc) or "not in front" in str(_exc):
+            _keep_screen(x, "scroll_no_reels_tab")
+            raise FlowError(f"scroll_feed: {str(_exc)[:80]}")
         x.log(f"scroll_feed: warm-up engine failed ({str(_exc)[:80]}), falling back to synthetic")
 
     # Per-session "personality" -- caps on heavier actions, so most sessions never like, some like 1-2x
