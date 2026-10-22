@@ -179,11 +179,14 @@ class Human:
             time.sleep(random.uniform(0.2, 0.6))
 
     def reel_hold(self, seconds: float) -> None:
-        """Finger resting on the reel (pauses playback) -- middle of the screen, away from the right-hand
-        buttons and the caption at the bottom."""
+        """Pause the reel for a moment, then let it play on. 22.10 live (A10): a real long press opens Instagram's
+        reel options sheet (playback speed / fullscreen / auto scroll) on this build, and the run then swiped on
+        the sheet for minutes (2 of 3 follows missed). A single tap on the video toggles pause -- tap, wait, tap."""
         w, h = self.p.size()
         x, y = w * random.uniform(0.25, 0.6), h * random.uniform(0.3, 0.55)
-        self.hold(x, y, seconds)
+        self.tap_xy(x, y)
+        self.pause(max(0.6, seconds * 0.6), seconds)
+        self.tap_xy(x + random.uniform(-15, 15), y + random.uniform(-15, 15))
 
     def scroll_feed(self, strength: float = 1.0):
         """One flick up through a feed, start/end points wandering a little."""
@@ -293,6 +296,12 @@ def dismiss_popups(h: Human) -> str | None:
         if hits:
             h.tap(hits[0])
             return f"sheet -> {label}"
+    # 22.10 (A10 live): a reel options / comments sheet left open has a literal "Dismiss" button -- close it,
+    # otherwise the loop keeps swiping on the sheet and never sees a follow button again
+    sheet = h.p.find("predicate string", "type == 'XCUIElementTypeButton' AND label == 'Dismiss' AND visible == 1")
+    if sheet:
+        h.tap(sheet)
+        return "sheet -> Dismiss"
     return None
 
 
