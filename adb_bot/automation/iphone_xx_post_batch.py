@@ -110,20 +110,27 @@ def variant_for(model: str, container: str, limit: int) -> int:
         except (OSError, ValueError):
             m = {}
         own = m.setdefault(model, {})
-        # 22.10 live (A3 posted B1's exact files x06): an own number handed out on an earlier day collided with a
-        # FIXED table number -- 20 of 33 stale entries did. Fixed numbers are reserved for everyone, always; an own
-        # number that sits on one is reassigned above the table.
-        fixed_all = set(VARIANT.values()) if model == "Nikki" else set()
-        if container in own and container not in VARIANT and own[container] in fixed_all:
-            log.warning("%s: own variant x%d collides with the fixed table -- reassigning", container, own.pop(container))
+        # 22.10 live (A3 posted B1's exact files x06): an own number handed out on an earlier day collided with the
+        # FIXED number of a container active today. 00:24 the same night: reserving ALL fixed numbers for everyone ran
+        # the 50 variants out at C24 (phone C's thread died). So: a number is taken when a container posting TODAY
+        # owns it -- its fixed table number or its own one; stale own entries of containers not posting today are
+        # ignored (and evicted when their number is needed). Checked on every call, also for an existing own number.
+        fixed_active = {VARIANT[c] for c in ACTIVE if c in VARIANT} if model == "Nikki" else set()
+        own_active = {k: v for k, v in own.items() if k in ACTIVE and k != container}
+        taken = fixed_active | set(own_active.values())
+        if container in own and container not in VARIANT and own[container] in taken:
+            log.warning("%s: own variant x%d collides with a container posting today -- reassigning", container, own.pop(container))
         if container not in own:
             # 13.10: all 40 Nikki numbers were "taken" by the fixed table incl. accounts that no longer post
             # (A7, B8, D2, D4 ...) -- D12 found none and phone D's whole thread died. Reserve only the numbers
             # of accounts actually posting today; a parked account's number is free again.
-            taken = set(own.values()) | fixed_all
-            free = [v for v in range(1, limit + 1) if v not in taken]
+            free = [v for v in range(1, limit + 1) if v not in taken and v not in own.values()]
+            if not free:                                  # evict stale own numbers of containers not posting today
+                for k in [k for k in own if k not in ACTIVE]:
+                    own.pop(k)
+                free = [v for v in range(1, limit + 1) if v not in taken and v not in own.values()]
             if not free:
-                raise RuntimeError(f"no free {model} spoof variant left for {container} (limit {limit})")
+                raise RuntimeError(f"no free {model} spoof variant left for {container} (limit {limit}, {len(ACTIVE)} active)")
             own[container] = free[0]
             VARIANT_FILE.write_text(json.dumps(m, indent=1))
         return own[container]
