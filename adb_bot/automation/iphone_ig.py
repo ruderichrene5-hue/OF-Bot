@@ -303,7 +303,8 @@ def dismiss_popups(h: Human) -> str | None:
     text = h.p.alert_text()
     if text:
         buttons = h.p.alert_buttons()
-        for pref in ("Don't Allow", "Ask App Not to Track", "Not Now", "Cancel"):
+        # 22.10 (A live): iOS "Low Battery" (Close) and plain OK alerts sat over Instagram for a whole run
+        for pref in ("Don't Allow", "Ask App Not to Track", "Not Now", "Cancel", "Close", "OK"):
             if pref in buttons:
                 h.p.alert_dismiss(pref) if pref != "Ask App Not to Track" else h.p.alert_accept(pref)
                 return f"alert: {text[:60]} -> {pref}"

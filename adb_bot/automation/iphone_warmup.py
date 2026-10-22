@@ -173,6 +173,12 @@ def _session(h: Human, plan: Plan, log_fn, stats: dict, ref: str = "?", containe
                 if pop:
                     stats["popups"].append(pop)
                     log_fn(pop)
+                # 22.10 (A12 live, 0 of 7 follows): an extra had left a pushed reel viewer open (back arrow top-left,
+                # "Add comment..." bar) -- it scrolls like Reels but is not the Reels tab. Walk back out.
+                if h.p.find("predicate string", "name == 'BackButton' AND visible == 1") or not h.p.find("predicate string", "name == 'reels-tab'"):
+                    log_fn("not on the Reels tab -- going back")
+                    go_tab(h, "reels")
+                    stats["popups"].append("back-to-reels")
             if slots and time.monotonic() - start >= slots[0]:
                 if _follow_one(h, stats, log_fn):
                     slots.pop(0)
