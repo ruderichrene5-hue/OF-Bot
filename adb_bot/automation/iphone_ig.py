@@ -1142,12 +1142,20 @@ def save_to_photos(p: Phone, name: str, log=print):
 
 
 def media_to_photos(p: Phone, device: str, local_path: str, log=print) -> str:
-    name = f"{time.strftime('%m%d%H%M%S')}_{os.path.basename(local_path)}"
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(local_path)) or "media"     # 22.10: ASCII-only on the phone
+    name = f"{time.strftime('%m%d%H%M%S')}_{base}"
     push_media(device, local_path, name)
     save_to_photos(p, name, log)
-    # the copy in Files was only a vehicle; ours (timestamped name) goes again
-    _phone_ssh(device, "rm -f /var/mobile/Containers/Shared/AppGroup/*/'File Provider Storage'/"
-                       f"'{UPLOAD_DIR_NAME}'/{json.dumps(name)}")
+    # the copy in Files was only a vehicle; ours (timestamped name) goes again.
+    # 22.10 live (D7): json.dumps escaped a non-ASCII filename ("3 · 0.84.jpg" -> \u00b7), zsh said "no matches
+    # found" and the WHOLE profile-picture step failed although the photo was already in Photos. shlex-quote
+    # it, and never let a cleanup fail the step.
+    import shlex
+    try:
+        _phone_ssh(device, "setopt +o nomatch 2>/dev/null; rm -f /var/mobile/Containers/Shared/AppGroup/*/'File Provider Storage'/"
+                           f"'{UPLOAD_DIR_NAME}'/{shlex.quote(name)}; true")
+    except FlowError as exc:
+        log(f"cleanup of {name} in Files skipped: {str(exc)[:80]}")
     back_to_instagram(p)
     time.sleep(random.uniform(2.0, 3.5))
     return name
