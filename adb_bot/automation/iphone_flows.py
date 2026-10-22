@@ -1,14 +1,16 @@
 """iPhone farm -- THE flow file (Rene, 22.10: "Ich will sauber die ganzen Flows in einer Datei haben. Ich will
 sauber, dass man die immer checkt, was man braucht.").
 
-Six flows. Three run today, three are planned and already have their place and their checks:
+Seven flows. Six run today, one is planned and already has its place and its checks:
 
   signup     create an Instagram account in a container        iphone_signup.run_row            ready
   warmup     four warm-up days, one script per day             iphone_warmup.run_one / tick     ready
   posting    today's spoofed reels, batches per account        iphone_xx_post_batch.run_phone   ready
-  story      post a story (with the funnel link sticker)       iphone_ig.create_story           planned
-  bio        fill the bio + link from Airtable                 iphone_ig.set_bio                planned
-  highlight  story -> save it into a highlight                 iphone_ig.save_story_to_highlight planned
+  picture    profile picture from the Airtable attachment     iphone_setup.run_step            ready
+  bio        bio text from the linked Bio POOL row             iphone_setup.run_step            ready
+  highlight  story with the OF link, saved into a highlight    iphone_setup.run_step            ready
+  story      a plain story post                                iphone_ig.create_story           planned
+Setup steps are driven by material + checkbox in Airtable, not by a warm-up day (iphone_setup tick).
 
 Every flow lists what it NEEDS. `check` runs those needs against a real phone/container before anything
 touches Instagram, and prints one line per need. Nothing here implements a flow -- the logic stays in the
@@ -252,6 +254,18 @@ def chk_warmup_due(ctx) -> Result:
     return Result("warmup-due", OK if day else WARN, f"day {day} due -- {why}" if day else why)
 
 
+def chk_setup_due(ctx) -> Result:
+    acc = ctx.get("account")
+    if acc is None:
+        return Result("setup-due", INFO, "no account row loaded")
+    from adb_bot.automation.iphone_setup import needed, next_step
+    step, why = next_step(acc, ctx.get("row") or "")
+    need = needed(acc)
+    if not need:
+        return Result("setup-due", OK, "nothing left to set up (or no material attached)")
+    return Result("setup-due", OK if step else WARN, f"next: {step} -- {why}" if step else why)
+
+
 def chk_planned(ctx) -> Result:
     return Result("planned", INFO, "flow not built yet -- the building blocks exist in iphone_ig (see FLOWS entry)")
 
@@ -259,7 +273,7 @@ def chk_planned(ctx) -> Result:
 CHECKS: dict[str, Callable] = {
     "config": chk_config, "ssh": chk_ssh, "wda": chk_wda, "xxtouch": chk_xxtouch, "free": chk_free, "vpn": chk_vpn,
     "shortcut": chk_shortcut, "airtable": chk_airtable, "account": chk_account_live, "clips": chk_clips,
-    "signup-budget": chk_signup_budget, "warmup-due": chk_warmup_due, "planned": chk_planned,
+    "signup-budget": chk_signup_budget, "warmup-due": chk_warmup_due, "setup-due": chk_setup_due, "planned": chk_planned,
 }
 PHONE_NEEDS = ["config", "ssh", "wda", "xxtouch", "free", "vpn"]
 
@@ -281,21 +295,26 @@ FLOWS: dict[str, Flow] = {
                     ".venv/bin/python -m adb_bot.automation.iphone_xx_post_batch <YYYY-MM-DD> A1,A2 B1,B2 [--model Nikki] [--window 9-23]",
                     PHONE_NEEDS + ["shortcut", "airtable", "account", "clips"],
                     ["Username"]),
-    "story": Flow("story", "Post a story with the funnel link sticker", "planned", "adb_bot.automation.iphone_ig",
-                  "create_story(p, link=...) + media_to_photos()",
-                  "(planned) .venv/bin/python -m adb_bot.automation.iphone_flows run story <device> <container>",
-                  PHONE_NEEDS + ["shortcut", "airtable", "account", "planned"],
-                  ["Username", "Story Link pic", "Funnel Link"]),
-    "bio": Flow("bio", "Fill bio text + link from Airtable", "planned", "adb_bot.automation.iphone_ig",
-                "set_bio(p, text) / open_edit_profile()",
-                "(planned) .venv/bin/python -m adb_bot.automation.iphone_flows run bio <device> <container>",
-                PHONE_NEEDS + ["shortcut", "airtable", "account", "planned"],
+    "picture": Flow("picture", "Profile picture from the Airtable attachment", "ready", "adb_bot.automation.iphone_setup",
+                    "run_step(device, container, 'picture') / tick()",
+                    ".venv/bin/python -m adb_bot.automation.iphone_setup due | run <device> <container> --step picture --row <rec> | tick",
+                    PHONE_NEEDS + ["shortcut", "airtable", "account", "setup-due"],
+                    ["Username", "Profile Picture"]),
+    "bio": Flow("bio", "Bio text from the linked Bio POOL row", "ready", "adb_bot.automation.iphone_setup",
+                "run_step(device, container, 'bio')",
+                ".venv/bin/python -m adb_bot.automation.iphone_setup run <device> <container> --step bio --row <rec>",
+                PHONE_NEEDS + ["shortcut", "airtable", "account", "setup-due"],
                 ["Username", "Bio"]),
-    "highlight": Flow("highlight", "Story -> saved into a highlight (runs after story)", "planned", "adb_bot.automation.iphone_ig",
-                      "save_story_to_highlight(p, name) / delete_first_highlight()",
-                      "(planned) .venv/bin/python -m adb_bot.automation.iphone_flows run highlight <device> <container>",
-                      PHONE_NEEDS + ["shortcut", "airtable", "account", "planned"],
+    "highlight": Flow("highlight", "Story with the OF link sticker, saved into a highlight", "ready", "adb_bot.automation.iphone_setup",
+                      "run_step(device, container, 'highlight')",
+                      ".venv/bin/python -m adb_bot.automation.iphone_setup run <device> <container> --step highlight --row <rec>",
+                      PHONE_NEEDS + ["shortcut", "airtable", "account", "setup-due"],
                       ["Username", "Story Highlight Picture", "Funnel Link"]),
+    "story": Flow("story", "A plain story post (no highlight) -- not built yet", "planned", "adb_bot.automation.iphone_ig",
+                  "create_story(p, link=...) + media_to_photos()",
+                  "(planned)",
+                  PHONE_NEEDS + ["shortcut", "airtable", "account", "planned"],
+                  ["Username"]),
 }
 
 
