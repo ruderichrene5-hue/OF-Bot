@@ -99,8 +99,16 @@ def _relay_ssh(cmd: str, timeout: int = 30) -> str | None:
 
 
 def _wda_up(port: int) -> bool:
+    """WDA answers /status -- not just 'the port accepts a connection'. 22.10 (C, first automatic warm-up tick):
+    the server-side ssh tunnel port is ALWAYS listening, so the old TCP probe said 'up' for 20 h while WDA on
+    the phone was dead and the go-ios agent never noticed. Only an HTTP answer counts."""
     from adb_bot.automation.iphone_farm_wda import _relay_host
-    return _reachable(_relay_host(), port)
+    try:
+        import requests
+        r = requests.get(f"http://{_relay_host()}:{port}/status", timeout=6)
+        return r.status_code == 200 and "sessionId" in r.text
+    except Exception:                                       # noqa: BLE001
+        return False
 
 
 FLAP_WINDOW = 600            # a capture that loses its phone more than FLAP_MAX times in this window is parked
