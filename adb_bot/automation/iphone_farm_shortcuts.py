@@ -518,7 +518,13 @@ def sync_shadowrocket(dry_run: bool = False) -> dict:
             crane = os.path.join(wd, "crane.plist")
             if not _scp(f"{_host(ip)}:{CRANE_PREFS}", crane):
                 continue
-            containers = plistlib.load(open(crane, "rb"))["appSettings_com.liguangming.Shadowrocket"]["Containers"]
+            prefs = plistlib.load(open(crane, "rb"))
+            if "appSettings_com.liguangming.Shadowrocket" not in prefs:
+                # 22.10: reserve phones (J/K/L, F) have Crane but no Shadowrocket containers -- this KeyError killed
+                # the whole unit for hours, so sync() (the Shortcut rewrite) never ran and D stayed on the old build
+                log.warning("%s: no Shadowrocket containers in Crane prefs, skipped", ip)
+                continue
+            containers = prefs["appSettings_com.liguangming.Shadowrocket"]["Containers"]
             todo = []
             for c in containers:
                 name = c["name"].strip()
@@ -681,7 +687,14 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     dry = "--dry-run" in sys.argv
     # Shadowrocket first: the Shortcut's IP check should only change once the proxy it checks for is in place
-    print("shadowrocket:", sync_shadowrocket(dry_run=dry))
-    # a container whose Shadowrocket was opened for the first time starts on the stock rule list
-    print("rule lists:", secure_rules(dry_run=dry))
-    print("shortcuts:", sync(dry_run=dry))
+    # 22.10: one step's crash must not stop the others (a KeyError in step 1 silently stopped the Shortcut
+    # rewrite for hours) -- each step runs, the unit fails at the end if any did
+    failed = []
+    for label, fn in (("shadowrocket", sync_shadowrocket), ("rule lists", secure_rules), ("shortcuts", sync)):
+        try:
+            print(f"{label}:", fn(dry_run=dry))
+        except Exception as exc:                            # noqa: BLE001
+            log.exception("%s step failed: %s", label, exc)
+            failed.append(label)
+    if failed:
+        sys.exit(f"steps failed: {', '.join(failed)}")
