@@ -405,11 +405,16 @@ def _warmup_step(h: Human, n: int, where: str, slots: list, start: float, stats:
     return where
 
 
-def _random_extra(h: Human, where: str, log) -> str | None:
-    """One small human detour; always ends back on a tab (go_tab walks back out of anything)."""
+EXTRA_WEIGHTS = {"like": 4, "story": 1, "explore": 1, "scroll-back": 3, "comments": 2, "profile-visit": 2, "linger": 3}
+
+
+def _random_extra(h: Human, where: str, log, choices: dict | None = None) -> str | None:
+    """One small human detour; always ends back on a tab (go_tab walks back out of anything).
+    `choices` (22.10, iphone_warmup day scripts): a {name: weight} subset of EXTRA_WEIGHTS -- day 1 only
+    likes/lingers, day 4 has the whole repertoire."""
     p = h.p
-    choice = random.choices(["like", "story", "explore", "scroll-back", "comments", "profile-visit", "linger"],
-                            weights=[4, 1, 1, 3, 2, 2, 3])[0]
+    pool = choices or EXTRA_WEIGHTS
+    choice = random.choices(list(pool), weights=list(pool.values()))[0]
     try:
         if choice == "like":
             likes = [e for e, r in visible(p, "like-button") if (e.attr("label") or "") == "Like"]
