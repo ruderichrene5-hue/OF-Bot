@@ -148,6 +148,20 @@ class Human:
         acts.append({"type": "pointerUp"})
         self._actions(acts)
 
+    def reel_next(self) -> None:
+        """Advance one reel. XXTouch: one of Rene's recorded flicks as recorded (own length, own tempo);
+        WDA phones (7/8): the eased swipe, but short and quick like a real flick, not half the screen."""
+        if self.xx:
+            try:
+                self.xx.flick(up=True)
+                return
+            except Exception as exc:                          # noqa: BLE001 -- no clean recordings: fall through
+                self.log(f"flick fallback: {str(exc)[:60]}")
+        w, h = self.p.size()
+        y1 = h * random.uniform(0.6, 0.75)
+        self.swipe(w * random.uniform(0.4, 0.65), y1, w * random.uniform(0.4, 0.65), y1 - h * random.uniform(0.15, 0.3),
+                   random.uniform(0.1, 0.25))
+
     def scroll_feed(self, strength: float = 1.0):
         """One flick up through a feed, start/end points wandering a little."""
         w, h = self.p.size()
@@ -397,8 +411,7 @@ def _warmup_step(h: Human, n: int, where: str, slots: list, start: float, stats:
         # most posts get a glance, some get a real look
         h.pause(1.0, 3.5) if random.random() < 0.8 else h.pause(5, 14)
     else:
-        h.swipe(0.5 + random.uniform(-0.1, 0.1), 0.78, 0.5 + random.uniform(-0.1, 0.1), 0.25,
-                random.uniform(0.18, 0.32))
+        h.reel_next()                                     # 22.10: a recorded flick as recorded, not a fixed half-screen drag
         stats["swipes"] += 1
         stats["reels_watched"] += 1
         h.pause(3, 16) if random.random() < 0.85 else h.pause(18, 35)

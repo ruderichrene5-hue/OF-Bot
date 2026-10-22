@@ -33,7 +33,7 @@ from adb_bot.automation import iphone_diag, iphone_farm_config
 from adb_bot.automation import iphone_phone_lock as phone_lock
 from adb_bot.automation.iphone_farm_wda import Phone, WDAError, resolve
 from adb_bot.automation.iphone_ig import (FlowError, Human, _follow_one, _random_extra, dismiss_popups, go_tab,
-                                          open_account, visible)
+                                          open_account)
 
 log = logging.getLogger("iphone_warmup")
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -64,99 +64,112 @@ class Plan:
 
 
 PLANS = {
-    1: Plan(1, "look around", (8, 10), (0, 1), {"like": 3, "linger": 4, "scroll-back": 2}, 0.10, (0, 0), (0, 0),
-            "Reels only, 8-10 min, slow. 1-2 likes at most, at most one follow near the end. No stories, no explore, "
-            "no comments -- a person who just installed the app."),
-    2: Plan(2, "first interest", (10, 14), (2, 3), {"like": 4, "linger": 3, "scroll-back": 3, "story": 2}, 0.15, (1, 1), (0, 0),
-            "Reels 10-14 min with 2-3 follows spread over the session, one visit to the story tray, a few more "
-            "likes. Still no comments or profile visits."),
-    3: Plan(3, "settling in", (14, 18), (4, 6), {"like": 4, "linger": 2, "scroll-back": 3, "story": 2, "explore": 2, "profile-visit": 2}, 0.18, (1, 2), (1, 1),
-            "Reels 14-18 min, 4-6 follows, stories once or twice, one explore detour, first profile visits of "
-            "creators. Comments are only read, never written."),
-    4: Plan(4, "regular user", (18, 22), (5, 8), {"like": 4, "linger": 2, "scroll-back": 3, "story": 2, "explore": 2, "profile-visit": 2, "comments": 2}, 0.20, (2, 3), (1, 2),
-            "Reels 18-22 min, 5-8 follows, the whole repertoire (stories, explore, comments opened, profile visits). "
-            "After this day the account is Healthy and may post."),
+    # Rene 22.10: always 6-10 min at random, never longer; follows day 1: 1-3, from day 2: 3-7. Always the Reels
+    # tab. Profile/explore detours are allowed but risky ("dann spackt der wieder rum"), so they stay rare.
+    1: Plan(1, "look around", (6, 10), (1, 3), {"like": 3, "linger": 4, "scroll-back": 2}, 0.10, (0, 0), (0, 0),
+            "Reels only, 6-10 min, slow. A few likes, 1-3 follows. No stories, no explore, no comments."),
+    2: Plan(2, "first interest", (6, 10), (3, 7), {"like": 4, "linger": 3, "scroll-back": 3, "story": 1}, 0.14, (0, 1), (0, 0),
+            "Reels 6-10 min, 3-7 follows, more likes, maybe one story-tray visit."),
+    3: Plan(3, "settling in", (6, 10), (3, 7), {"like": 4, "linger": 2, "scroll-back": 3, "story": 1, "profile-visit": 1}, 0.16, (0, 1), (0, 1),
+            "Reels 6-10 min, 3-7 follows, maybe a story round or an explore detour, a rare creator profile visit."),
+    4: Plan(4, "regular user", (6, 10), (3, 7), {"like": 4, "linger": 2, "scroll-back": 3, "story": 1, "profile-visit": 1, "comments": 1}, 0.18, (0, 1), (0, 1),
+            "Reels 6-10 min, 3-7 follows, the whole (rare) repertoire. After this day the account is Healthy."),
 }
+MAX_CONSECUTIVE_ERRORS = 8
 
 
-def _session(h: Human, plan: Plan, log_fn, stats: dict) -> None:
+def _recover(h: Human, log_fn, stats: dict, exc: Exception, ref: str, container: str) -> None:
+    """Something went wrong mid-session (popup, sheet, WDA hiccup): keep a screenshot the first two times,
+    tell Rene once, go back to the Reels tab and carry on. Never abort for one bad step (Rene 22.10)."""
+    stats["errors"].append(f"{type(exc).__name__}: {str(exc)[:80]}")
+    n = len(stats["errors"])
+    log_fn(f"step failed ({n}): {str(exc)[:120]} -- back to Reels")
+    if n <= 2:
+        shot = iphone_diag.keep_screen(ref, f"warmup-recover{n}", f"{type(exc).__name__}: {exc}", container=container,
+                                       wda=h.p, xx=h.xx, log_fn=log_fn)
+        if n == 1:
+            iphone_diag.notify(f"warm-up {container}: hiccup, going back to Reels and continuing: {str(exc)[:160]}\n{shot or ''}")
+    for attempt in range(3):
+        try:
+            if isinstance(exc, WDAError):
+                h.p.sid = None
+                time.sleep(5 + 5 * attempt)
+            dismiss_popups(h)
+            go_tab(h, "reels")
+            return
+        except Exception as exc2:                             # noqa: BLE001
+            log_fn(f"back-to-Reels attempt {attempt + 1} failed: {str(exc2)[:80]}")
+            time.sleep(3)
+
+
+def _session(h: Human, plan: Plan, log_fn, stats: dict, ref: str = "?", container: str = "?") -> None:
     """The shared engine: reels loop with the day's follows spread out and the day's extras at its rate.
-    Story/explore rounds happen at fixed fractions of the session so every day has its own rhythm."""
+    Story/explore rounds happen at fixed fractions of the session so every day has its own rhythm. Every
+    step is guarded: a failure means screenshot, back to Reels, go on."""
     minutes = random.uniform(*plan.minutes)
     follows = random.randint(*plan.follows)
     start, end = time.monotonic(), time.monotonic() + minutes * 60
-    slots = sorted(random.uniform(0.15, 0.9) * minutes * 60 for _ in range(follows))
-    # 22.10: the extras that happen "at a fixed point" of the day, not at random
+    slots = sorted(random.uniform(0.1, 0.9) * minutes * 60 for _ in range(follows))
     story_at = sorted(random.uniform(0.2, 0.85) for _ in range(random.randint(*plan.story_rounds)))
     explore_at = sorted(random.uniform(0.3, 0.8) for _ in range(random.randint(*plan.explore_rounds)))
     log_fn(f"day {plan.day} '{plan.title}': {minutes:.1f} min, {follows} follows, {len(story_at)} story rounds, "
            f"{len(explore_at)} explore rounds")
     go_tab(h, "reels")
-    n = 0
+    n = streak = 0
     while time.monotonic() < end:
         n += 1
         frac = (time.monotonic() - start) / (minutes * 60)
-        if n % 5 == 1:
-            pop = dismiss_popups(h)
-            if pop:
-                stats["popups"].append(pop)
-                log_fn(pop)
-        if slots and time.monotonic() - start >= slots[0]:
-            if _follow_one(h, stats, log_fn):
-                slots.pop(0)
-        elif story_at and frac >= story_at[0]:
-            story_at.pop(0)
-            name = _random_extra(h, "reels", log_fn, {"story": 1})
-            stats["extras"].append(name or "story-skipped")
-        elif explore_at and frac >= explore_at[0]:
-            explore_at.pop(0)
-            name = _random_extra(h, "reels", log_fn, {"explore": 1})
-            stats["extras"].append(name or "explore-skipped")
-        elif plan.extras and n > 2 and random.random() < plan.extra_rate:
-            name = _random_extra(h, "reels", log_fn, plan.extras)
-            if name:
-                stats["extras"].append(name)
-        # one reel: swipe up, watch
-        h.swipe(0.5 + random.uniform(-0.1, 0.1), 0.78, 0.5 + random.uniform(-0.1, 0.1), 0.25, random.uniform(0.18, 0.32))
-        stats["swipes"] += 1
-        stats["reels_watched"] += 1
-        slow = plan.day == 1                                  # day 1 watches longer, swipes less
-        h.pause(4, 18) if (random.random() < 0.85 or not slow) else h.pause(18, 40)
+        try:
+            if n % 5 == 1:
+                pop = dismiss_popups(h)
+                if pop:
+                    stats["popups"].append(pop)
+                    log_fn(pop)
+            if slots and time.monotonic() - start >= slots[0]:
+                if _follow_one(h, stats, log_fn):
+                    slots.pop(0)
+            elif story_at and frac >= story_at[0]:
+                story_at.pop(0)
+                stats["extras"].append(_random_extra(h, "reels", log_fn, {"story": 1}) or "story-skipped")
+            elif explore_at and frac >= explore_at[0]:
+                explore_at.pop(0)
+                stats["extras"].append(_random_extra(h, "reels", log_fn, {"explore": 1}) or "explore-skipped")
+            elif plan.extras and n > 2 and random.random() < plan.extra_rate:
+                name = _random_extra(h, "reels", log_fn, plan.extras)
+                if name:
+                    stats["extras"].append(name)
+            h.reel_next()                                     # one of Rene's recorded flicks, as recorded
+            stats["swipes"] += 1
+            stats["reels_watched"] += 1
+            h.pause(3, 14) if random.random() < 0.85 else h.pause(15, 35)
+            streak = 0
+        except Exception as exc:                              # noqa: BLE001
+            streak += 1
+            if streak >= MAX_CONSECUTIVE_ERRORS:
+                raise FlowError(f"{streak} steps in a row failed, last: {exc}") from exc
+            _recover(h, log_fn, stats, exc, ref, container)
     stats["follows_missed"] = len(slots)
     stats["minutes"] = round((time.monotonic() - start) / 60, 1)
 
 
-def day1(h: Human, log_fn, stats: dict) -> None:
-    """Day 1 -- look around. Reels only, slow, a like or two, one follow at most and only near the end."""
-    _session(h, PLANS[1], log_fn, stats)
+def day1(h: Human, log_fn, stats: dict, **ctx) -> None:
+    """Day 1 -- look around. Reels only, slow, a few likes, 1-3 follows."""
+    _session(h, PLANS[1], log_fn, stats, **ctx)
 
 
-def day2(h: Human, log_fn, stats: dict) -> None:
-    """Day 2 -- first interest. A story round, 2-3 follows, more likes."""
-    _session(h, PLANS[2], log_fn, stats)
+def day2(h: Human, log_fn, stats: dict, **ctx) -> None:
+    """Day 2 -- first interest. 3-7 follows, more likes, maybe one story round."""
+    _session(h, PLANS[2], log_fn, stats, **ctx)
 
 
-def day3(h: Human, log_fn, stats: dict) -> None:
-    """Day 3 -- settling in. Explore once, first profile visits, 4-6 follows."""
-    _session(h, PLANS[3], log_fn, stats)
-    # end of day 3: look at the own profile once, like a person checking what their page looks like
-    try:
-        go_tab(h, "profile")
-        h.pause(3, 7)
-        go_tab(h, "reels")
-    except (FlowError, WDAError) as exc:
-        log_fn(f"own-profile look skipped: {str(exc)[:80]}")
+def day3(h: Human, log_fn, stats: dict, **ctx) -> None:
+    """Day 3 -- settling in. 3-7 follows, rare story/explore/profile detours."""
+    _session(h, PLANS[3], log_fn, stats, **ctx)
 
 
-def day4(h: Human, log_fn, stats: dict) -> None:
-    """Day 4 -- regular user. The whole repertoire incl. opening comments; afterwards the account is Healthy."""
-    _session(h, PLANS[4], log_fn, stats)
-    try:                                                      # a quick look at the inbox, then back
-        go_tab(h, "direct-inbox")
-        h.pause(3, 6)
-        go_tab(h, "reels")
-    except (FlowError, WDAError) as exc:
-        log_fn(f"inbox look skipped: {str(exc)[:80]}")
+def day4(h: Human, log_fn, stats: dict, **ctx) -> None:
+    """Day 4 -- regular user. 3-7 follows, the whole (rare) repertoire; afterwards the account is Healthy."""
+    _session(h, PLANS[4], log_fn, stats, **ctx)
 
 
 DAY_SCRIPTS = {1: day1, 2: day2, 3: day3, 4: day4}
@@ -296,7 +309,7 @@ def run_one(device: str, container: str, day: int, row: str | None = None, expec
     {"ok": False, "error": ..., "screen": path} and leaves Airtable's day field untouched."""
     say = log_fn or (lambda m: log.info("%s/%s: %s", _letter(device), container, m))
     plan, script = PLANS[day], DAY_SCRIPTS[day]
-    stats = {"day": day, "follows": [], "extras": [], "popups": [], "swipes": 0, "reels_watched": 0}
+    stats = {"day": day, "follows": [], "extras": [], "popups": [], "errors": [], "swipes": 0, "reels_watched": 0}
     if dry:
         say(f"DRY: would run day {day} '{plan.title}' ({plan.words})")
         return {"ok": True, "dry": True, **stats}
@@ -313,9 +326,10 @@ def run_one(device: str, container: str, day: int, row: str | None = None, expec
             _patch(row, fields)
         p = open_account(device, container, expect, log=say)
         h = Human(p, say)
-        script(h, say, stats)
+        script(h, say, stats, ref=device, container=container)
         say(f"day {day} done: {stats['reels_watched']} reels, {len(stats['follows'])} follows "
-            f"({stats.get('follows_missed', 0)} missed), extras {stats['extras']}, popups {stats['popups']}")
+            f"({stats.get('follows_missed', 0)} missed), extras {stats['extras']}, popups {stats['popups']}, "
+            f"{len(stats['errors'])} hiccups")
         if row:
             fields = {F_DONE[day]: dt.datetime.now(BERLIN).isoformat()}
             if day == 4:

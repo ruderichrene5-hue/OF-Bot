@@ -183,6 +183,43 @@ def _swipe_lua(x1: float, y1: float, x2: float, y2: float, seconds: float | None
     return "\n".join(lines)
 
 
+def clean_swipes(swipes: list, up: bool = True) -> list:
+    """Recordings that are real finger flicks: >= 5 samples, 60 ms-2.5 s, and (up=True) going upward.
+    22.10: the libraries hold 2-sample 0-7 ms 'swipes' (touch on/off that drifted) -- replayed those are
+    teleports, not flicks."""
+    out = []
+    for s in swipes:
+        if len(s) < 5 or not 60 <= s[-1][0] <= 2500:
+            continue
+        if up and not (s[0][2] - s[-1][2] > 150 and abs(s[-1][1] - s[0][1]) < s[0][2] - s[-1][2]):
+            continue
+        out.append(s)
+    return out
+
+
+def _flick_lua(rec: list, jitter_px: float = 60.0) -> str:
+    """One recorded swipe replayed as recorded: same start area (+- jitter), same length, same wobble and
+    pressure, tempo 0.9-1.1x. This is Rene's own thumb -- the warm-up's reel scrolling uses this (22.10,
+    Rene: the rescaled version felt 'stumpf')."""
+    sx, sy = rec[0][1], rec[0][2]
+    ox, oy = random.gauss(0, jitter_px / 2), random.gauss(0, jitter_px / 2)
+    tk, pk = random.uniform(0.9, 1.1), random.uniform(*PRESSURE)
+    x0, y0 = _clamp_xy(sx + ox, sy + oy)
+    lines = [f"touch.on(7,{round(x0)},{round(y0)})"]
+    prev = 0
+    pts = rec[1:]
+    for i, (t, rx, ry, pr) in enumerate(pts):
+        t = int(t * tk)
+        lines.append(f"sys.msleep({max(1, t - prev)})")
+        prev = t
+        px, py = _clamp_xy(rx + ox + random.gauss(0, 0.5), ry + oy + random.gauss(0, 0.5))
+        if i == len(pts) - 1:
+            lines.append(f"touch.off(7,{round(px)},{round(py)})")
+        else:
+            lines.append(f"touch.move(7,{round(px)},{round(py)},{max(1, int(pr * pk)) if pr else 1},50)")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------- transport
 
 def _ssh_dest(ref: str) -> str:
@@ -335,6 +372,15 @@ class Touch:
     def swipe(self, x1: float, y1: float, x2: float, y2: float, seconds: float | None = None):
         s = self.scale
         self.run(_swipe_lua(x1 * s, y1 * s, x2 * s, y2 * s, seconds, self.swipes))
+
+    def flick(self, up: bool = True) -> dict:
+        """A recorded flick replayed 1:1 (see _flick_lua). Returns what was replayed (ms, px) for the log."""
+        pool = clean_swipes(self.swipes, up=up)
+        if not pool:
+            raise XXError(f"{self.ref}: no clean recorded {'upward' if up else ''} flicks in the library")
+        rec = random.choice(pool)
+        self.run(_flick_lua(rec))
+        return {"ms": rec[-1][0], "px": round(rec[0][2] - rec[-1][2]), "samples": len(rec)}
 
     def drag(self, x1: float, y1: float, x2: float, y2: float, hold: float = 0.35, seconds: float = 0.6):
         """Press, hold, then move slowly to (x2,y2) and lift -- dragging a sticker or a slider."""
