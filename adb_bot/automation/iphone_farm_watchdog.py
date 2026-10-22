@@ -508,6 +508,21 @@ def run_wlan(now: float, state: dict, phones: dict) -> dict:
             continue
         if now - st.get("last_try", 0) < (WLAN_RETRY * 5 if st["fail_alerted"] else WLAN_RETRY):
             continue
+        # 22.10: never restart WDA under a running flow (warm-up/setup/signup mark the phone off, posting holds the
+        # lock) -- a slow /status while Instagram is being driven is not a dead WDA, and a kick would kill the run
+        try:
+            from adb_bot.automation import iphone_phone_lock as _pl
+            from adb_bot.automation.iphone_diag import _LETTER
+            letter = _LETTER.get(str(phone.get("stream")), "")
+            held = _pl.try_hold(letter) if letter else None
+            busy = iphone_farm_config.is_off(rec_id) or (letter and held is None)
+            if held:
+                held.release()
+        except Exception:                                   # noqa: BLE001
+            busy = False
+        if busy:
+            log.info("%s: WDA not answering but a flow has the phone -- not restarting now", name)
+            continue
         st["last_try"] = now
         if uid is None:
             uid = (_relay_ssh("id -u") or "501").strip()
