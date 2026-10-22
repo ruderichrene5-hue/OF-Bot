@@ -94,12 +94,48 @@ def _recover(h: Human, log_fn, stats: dict, exc: Exception, ref: str, container:
             if isinstance(exc, WDAError):
                 h.p.sid = None
                 time.sleep(5 + 5 * attempt)
+            _instagram_in_front(h, log_fn, ref, container)
             dismiss_popups(h)
             go_tab(h, "reels")
             return
         except Exception as exc2:                             # noqa: BLE001
             log_fn(f"back-to-Reels attempt {attempt + 1} failed: {str(exc2)[:80]}")
             time.sleep(3)
+
+
+def _instagram_in_front(h: Human, log_fn, ref: str, container: str) -> None:
+    """22.10 live (A8): the screen had locked itself (low battery) -- Instagram in the background, springboard in
+    front, and 'tab reels not found' three times in a row. Wake/unlock, bring Instagram back if it still runs,
+    otherwise reopen the container through its Shortcut (never launch Instagram directly)."""
+    from adb_bot.automation.iphone_ig import IG_BUNDLE, back_to_instagram
+    from adb_bot.automation.iphone_farm_wda import wait_for_foreground
+    p = h.p
+    try:
+        if p.active_app().get("bundleId") == IG_BUNDLE:
+            return
+    except WDAError:
+        pass
+    log_fn("Instagram not in front -- waking the screen")
+    try:
+        p._req("POST", "/wda/unlock")                     # no-op when already unlocked
+    except Exception:                                     # noqa: BLE001
+        pass
+    if h.xx:
+        try:
+            h.xx.run("if device.is_screen_locked() then device.unlock_screen() end")
+        except Exception:                                 # noqa: BLE001
+            pass
+    time.sleep(2)
+    try:
+        back_to_instagram(p)
+        time.sleep(2)
+        return
+    except Exception as exc:                              # noqa: BLE001
+        log_fn(f"Instagram not running ({str(exc)[:60]}) -- reopening {container} via its Shortcut")
+    rec_id, _ = resolve(ref)
+    ok, msg = iphone_farm_config.run_shortcut(rec_id, container)
+    if not ok or not wait_for_foreground(p, IG_BUNDLE, container, 300, log=log_fn):
+        raise FlowError(f"{container}: could not bring Instagram back ({msg[:80]})")
 
 
 # Rene 22.10: "nicht immer gleich langsam -- auch mal zurueck, auch mal den Finger drauf halten, auch mal richtig
