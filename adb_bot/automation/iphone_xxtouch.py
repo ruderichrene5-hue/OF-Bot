@@ -296,14 +296,20 @@ class Touch:
             return False
         self._lic_healed = True
         dest = _ssh_dest(self.ref)
+        # 22.10 (A, C after the Havoc login): opening the app alone did not bring the licence back, but a restart of
+        # the XXTouch daemons did (ngserviced re-reads XXTExplorer's cached licence on start). Do both.
+        cmd = ("uiopen --bundleid ch.xxtou.XXTExplorer; sleep 8; uiopen --bundleid com.burbn.instagram; sleep 2; "
+               "printf '123\\n' | /var/jb/usr/bin/sudo -S -p '' /var/jb/usr/bin/killall -9 ngserviced nguiserviced 2>/dev/null; sleep 6")
         try:
             subprocess.run(["ssh", "-n", "-i", iphone_farm_config.SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
-                            "-o", "ConnectTimeout=20", *iphone_farm_config.lan_ssh_opts(dest), dest,
-                            "uiopen --bundleid ch.xxtou.XXTExplorer; sleep 8; uiopen --bundleid com.burbn.instagram"],
-                           capture_output=True, timeout=60)
+                            "-o", "ConnectTimeout=20", *iphone_farm_config.lan_ssh_opts(dest), dest, cmd],
+                           capture_output=True, timeout=90)
         except Exception:                                   # noqa: BLE001
             return False
-        time.sleep(3)
+        _drop_tunnel(self.ref)                              # the daemon restart drops the API connection
+        self.base = f"http://127.0.0.1:{_tunnel(self.ref)}"
+        self.http = requests.Session()
+        time.sleep(2)
         return True
 
     def run(self, lua: str, wait: bool = True):
