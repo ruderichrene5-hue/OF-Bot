@@ -183,15 +183,41 @@ def _swipe_lua(x1: float, y1: float, x2: float, y2: float, seconds: float | None
     return "\n".join(lines)
 
 
-def clean_swipes(swipes: list, up: bool = True) -> list:
-    """Recordings that are real finger flicks: >= 5 samples, 60 ms-2.5 s, and (up=True) going upward.
-    22.10: the libraries hold 2-sample 0-7 ms 'swipes' (touch on/off that drifted) -- replayed those are
-    teleports, not flicks."""
+def _trim_settle(pts: list) -> list:
+    """Drop the trailing samples where the finger had already stopped before lifting (a real thumb often rests
+    1-300 ms at the end). Replayed 1:1 that release has ~zero velocity and a paging view (Reels) snaps BACK
+    instead of advancing -- seen live on B, 22.10: 4 of 5 flicks left the same reel on screen."""
+    out = list(pts)
+    while len(out) > 5:
+        (t1, x1, y1, _), (t2, x2, y2, _) = out[-2], out[-1]
+        if math.hypot(x2 - x1, y2 - y1) < 3 and t2 - t1 >= 0:
+            out.pop()
+        else:
+            break
+    return out
+
+
+def release_velocity(pts: list, window_ms: int = 80) -> float:
+    """px per ms over the last `window_ms` before the (trimmed) lift."""
+    t_end, x_end, y_end = pts[-1][0], pts[-1][1], pts[-1][2]
+    ref = next((q for q in reversed(pts) if t_end - q[0] >= window_ms), pts[0])
+    dt = max(1, t_end - ref[0])
+    return math.hypot(x_end - ref[1], y_end - ref[2]) / dt
+
+
+def clean_swipes(swipes: list, up: bool = True, min_px: float = 250, min_release: float = 0.6) -> list:
+    """Recordings that work as FLICKS: >= 5 samples, 60 ms-2.5 s, going upward (up=True), at least min_px long,
+    trailing settle trimmed, and still moving at >= min_release px/ms when the finger lifts. 22.10: the
+    libraries hold 2-sample 0-7 ms 'swipes' (teleports) and slow, settling drags that a paging view ignores."""
     out = []
     for s in swipes:
         if len(s) < 5 or not 60 <= s[-1][0] <= 2500:
             continue
-        if up and not (s[0][2] - s[-1][2] > 150 and abs(s[-1][1] - s[0][1]) < s[0][2] - s[-1][2]):
+        s = _trim_settle(s)
+        dy, dx = s[0][2] - s[-1][2], abs(s[-1][1] - s[0][1])
+        if up and not (dy > 150 and dx < dy):
+            continue
+        if math.hypot(dx, dy) < min_px or release_velocity(s) < min_release:
             continue
         out.append(s)
     return out

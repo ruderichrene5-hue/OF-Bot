@@ -149,19 +149,36 @@ class Human:
         acts.append({"type": "pointerUp"})
         self._actions(acts)
 
+    def reel_id(self) -> str | None:
+        """Something that names the reel on screen ("Reel by <handle>." / "Post by <handle>"), or None."""
+        try:
+            for e in self.p.find_all("predicate string", "visible == 1 AND (label BEGINSWITH 'Reel by' OR label BEGINSWITH 'Post by')")[:1]:
+                return e.attr("label")
+        except WDAError:
+            pass
+        return None
+
     def reel_next(self) -> None:
         """Advance one reel. XXTouch: one of Rene's recorded flicks as recorded (own length, own tempo);
-        WDA phones (7/8): the eased swipe, but short and quick like a real flick, not half the screen."""
+        WDA phones (7/8): the eased swipe, but short and quick like a real flick, not half the screen.
+        22.10 (B live): a replayed flick can leave the same reel on screen (paging view snapped back) -- check
+        the reel changed and, if not, flick once more with a long fast swipe."""
+        before = self.reel_id()
         if self.xx:
             try:
                 self.xx.flick(up=True)
-                return
             except Exception as exc:                          # noqa: BLE001 -- no clean recordings: fall through
                 self.log(f"flick fallback: {str(exc)[:60]}")
-        w, h = self.p.size()
-        y1 = h * random.uniform(0.6, 0.75)
-        self.swipe(w * random.uniform(0.4, 0.65), y1, w * random.uniform(0.4, 0.65), y1 - h * random.uniform(0.15, 0.3),
-                   random.uniform(0.1, 0.25))
+                self.swipe(0.5, 0.75, 0.5, 0.3, random.uniform(0.15, 0.25))
+        else:
+            w, h = self.p.size()
+            y1 = h * random.uniform(0.6, 0.75)
+            self.swipe(w * random.uniform(0.4, 0.65), y1, w * random.uniform(0.4, 0.65), y1 - h * random.uniform(0.15, 0.3),
+                       random.uniform(0.1, 0.25))
+        if before and self.reel_id() == before:
+            self.pause(0.4, 0.9)
+            self.swipe(0.5 + random.uniform(-0.08, 0.08), 0.75, 0.5 + random.uniform(-0.08, 0.08), 0.3, random.uniform(0.15, 0.25))
+            self.log("reel did not advance -- flicked again")
 
     def reel_burst(self, count: int) -> None:
         """Flick through `count` reels quickly (a person skimming), then the caller decides where to stop."""
