@@ -39,8 +39,16 @@ def _hdr() -> dict:
 def healthy_containers(model: str) -> dict[str, list[str]]:
     """{phone letter: [containers]} for every Healthy account of the model that has a container."""
     out: dict[str, list[str]] = {}
-    params = {"filterByFormula": f"AND({{Model (auto)}}='{model}',{{Status}}='Healthy',{{Container}}!='')",
+    # 22.10: Rene set 21 Nikki/Lea warm-up accounts to Healthy in one go, three of them with Creation Status
+    # "Stuck / Needs Human" -- a Healthy status alone is not enough, the account must exist and be usable
+    params = {"filterByFormula": f"AND({{Model (auto)}}='{model}',{{Status}}='Healthy',{{Container}}!='',"
+                                 f"{{Creation Status}}!='To Do',{{Creation Status}}!='Gmail Logged In',{{Creation Status}}!='Stuck / Needs Human')",
               "fields[]": ["Username", "Container"], "pageSize": 100}
+    try:                                                      # containers parked by the warm-up (handle mismatch, C21)
+        from adb_bot.automation.iphone_warmup import _skips
+        parked = set(_skips())
+    except Exception:                                         # noqa: BLE001
+        parked = set()
     offset = None
     while True:
         if offset:
@@ -52,6 +60,9 @@ def healthy_containers(model: str) -> dict[str, list[str]]:
             cid = rec["fields"]["Container"][0]
             c = requests.get(f"https://api.airtable.com/v0/{BASE}/{T_CONT}/{cid}", headers=_hdr(), timeout=30).json()["fields"]
             name = c.get("Container") or ""
+            if name in parked:
+                log.warning("%s: parked by the warm-up (account on the container differs from Airtable) -- not posting", name)
+                continue
             if name[:1].isalpha() and name[1:].isdigit():
                 out.setdefault(name[0], []).append(name)
         offset = j.get("offset")
