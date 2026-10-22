@@ -274,6 +274,39 @@ def _country_checks(name: str) -> list:
     return out[:6] + [dget] + out[6:]
 
 
+IOS15_SSH_SCRIPT = "open {name} {host}"
+
+
+def rebuild_ios15(name: str, host: str) -> list:
+    """22.10 (G, iPhone 7, iOS 15.8.8): Shadowrocket's App Intents are no-ops on iOS 15, so the iOS 16 layout
+    (StopVPN / GlobalRouting / StartVPN) never switched anything there. This variant is ONE "Run Script over
+    SSH" step: the phone-side /var/jb/var/mobile/bin/container-open.sh (via sc-dispatch.sh, the forced command
+    of the Shortcuts app's key) closes Instagram, switches the Crane container, toggles the VPN through XXTouch,
+    waits for the exit IP, checks country + resolver, switches Instagram's container and opens Instagram. The
+    Shortcut only shows the result. Same stable UUIDs as the iOS 16 layout -> no new "Allow" prompts."""
+    cu, ssh = _close_instagram()
+    ssh["WFWorkflowActionParameters"]["WFSSHScript"] = IOS15_SSH_SCRIPT.format(name=name, host=host)
+    g = _u()
+    out = [ssh, _if_is(cu, "OK", g, SSH_OUTPUT, COND_CONTAINS),          # If result contains OK
+           _notify(f"\u2705 {name}: Proxy aktiv", "", cu, SSH_OUTPUT),
+           _flow(g, 1),                                                   # Otherwise
+           _notify(f"\u274c {name}: NICHT gewechselt", "", cu, SSH_OUTPUT),
+           _flow(g, 2)]                                                   # End If
+    return _stable_uuids(out, name, [])
+
+
+def is_current_ios15(actions: list, name: str, host: str) -> bool:
+    ids = [a.get("WFWorkflowActionIdentifier") or "" for a in actions]
+    if not ids or ids[0] != "is.workflow.actions.runsshscript":
+        return False
+    return actions[0].get("WFWorkflowActionParameters", {}).get("WFSSHScript") == IOS15_SSH_SCRIPT.format(name=name, host=host)
+
+
+def _ios15(phone: dict) -> bool:
+    """A phone marked `"shortcuts": "ios15"` in /etc/adbbot/iphone_farm.json (G) gets the SSH-only layout."""
+    return phone.get("shortcuts") == "ios15"
+
+
 def rebuild(actions: list, name: str, host: str) -> list:
     """New action list for container Shortcut `name`, keeping its own Crane switches and
     Open-Instagram action (the parts that identify the container)."""
@@ -384,7 +417,10 @@ def sync(dry_run: bool = False) -> dict:
                 if not row or not row[0]:
                     continue
                 actions = plistlib.loads(row[0])
-                if expected_host(actions) != hosts[name] or not is_current(actions):
+                if _ios15(phone):
+                    if not is_current_ios15(actions, name, hosts[name]):
+                        todo.append((pk, name, actions))
+                elif expected_host(actions) != hosts[name] or not is_current(actions):
                     todo.append((pk, name, actions))
             if not todo:
                 con.close()
@@ -401,7 +437,7 @@ def sync(dry_run: bool = False) -> dict:
             con = sqlite3.connect(db)
             for pk, name, _ in todo:
                 actions = plistlib.loads(con.execute("select ZDATA from ZSHORTCUTACTIONS where ZSHORTCUT=?", (pk,)).fetchone()[0])
-                new = rebuild(actions, name, hosts[name])
+                new = rebuild_ios15(name, hosts[name]) if _ios15(phone) else rebuild(actions, name, hosts[name])
                 con.execute("update ZSHORTCUTACTIONS set ZDATA=? where ZSHORTCUT=?", (plistlib.dumps(new, fmt=plistlib.FMT_BINARY), pk))
                 con.execute("update ZSHORTCUT set ZACTIONCOUNT=?, ZMODIFICATIONDATE=? where Z_PK=?",
                             (len(new), time.time() - CORE_DATA_EPOCH, pk))
