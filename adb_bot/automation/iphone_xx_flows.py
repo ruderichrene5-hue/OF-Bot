@@ -511,6 +511,11 @@ def post_reel(x: XX, clip: str, log=print) -> None:
         for _ in range(4):                                # mode bar POST STORY INSTANTS REEL LIVE -- REEL may be off-screen
             if x.find(r"^New reel$", 1.5):
                 break
+            # 22.10 live (A4): REEL mode came up as the CAMERA ("Allow Instagram to access your camera and microphone",
+            # Open settings) instead of the gallery picker. The gallery thumbnail bottom-left opens the picker.
+            if x.find(r"access your camera", 0):
+                x.tap(27, 615); x.pause(2.5, 3.5)
+                continue
             line = x.find(r"POST|STORY|INSTANTS|REEL|LIVE", 0, region=(0, 700, 375, 800))
             if not line or len(line["box"]) != 4:
                 _dismiss_popups(x); x.pause(1.5, 2.5)        # sheet/intro over the camera -- look again
