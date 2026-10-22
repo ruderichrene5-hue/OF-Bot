@@ -580,15 +580,18 @@ def post_reel(x: XX, clip: str, log=print) -> None:
         raise FlowError(f"newest gallery item is {first and first[0]['text']!r}, expected ~{label} -- not ours, stopped")
     hit = first[0]
     x.tap(hit["x"] - 34, hit["y"] - 87); x.pause(2.5, 4)  # duration label sits bottom-right of its tile
-    if not x.tap_text(r"^Next", 40, region=(240, 700, 375, 790)):
+    # 22.10 live (B3): on this Instagram build the picker's bottom bar is taller ("First draft" + "Next ->" at ~y 608),
+    # outside the old search region (700-790) -- the clip was selected, Next never tapped, "editor did not open".
+    NEXT = (170, 540, 375, 800)
+    if not x.tap_text(r"^Next", 40, region=NEXT):
         if not x.find(r"^1$", 0):
             # 22.10 live (B9): the first tap on the tile did not register (picker still showed no selection).
             # One more tap on the tile centre before giving the whole account attempt up.
             x.log("gallery: tile tap did not select -- tapping once more")
             x.tap(hit["x"] - 50, hit["y"] - 110); x.pause(2.5, 4)
-            if not x.tap_text(r"^Next", 15, region=(240, 700, 375, 790)) and not x.find(r"^1$", 0):
+            if not x.tap_text(r"^Next", 15, region=NEXT) and not x.find(r"^1$", 0):
                 raise FlowError("gallery: clip not selected")
-        if not x.find(r"^Edit video$", 0):
+        if not x.find(r"^Edit video$", 0) and not x.tap_text(r"^Next", 5, region=NEXT):
             x.tap(327, 741)                               # OCR missed the button; the clip is selected ("1")
     end = time.monotonic() + 40                          # editor (maybe behind the Edits promo)
     while time.monotonic() < end:
