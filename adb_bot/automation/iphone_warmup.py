@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import logging
 import os
 import random
@@ -46,6 +47,22 @@ WINDOW = (9, 23)
 GAP_HOURS = float(os.environ.get("IPHONE_WARMUP_GAP_HOURS", "8"))
 SAME_DAY = os.environ.get("IPHONE_WARMUP_SAME_DAY") == "1"
 STATE_DIR = os.path.expanduser("~/.adb_bot")
+SKIP_PATH = os.path.join(STATE_DIR, "iphone_warmup_skip.json")   # {container: username that mismatched} -- until the row changes
+
+
+def _skips() -> dict:
+    try:
+        with open(SKIP_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _skip(container: str, username: str) -> None:
+    d = _skips(); d[container] = username
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(SKIP_PATH, "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=1)
 
 
 # ---------------------------------------------------------------- the four day scripts
@@ -369,12 +386,15 @@ def candidates() -> list[dict]:
         f = row["fields"]
         day, why = next_day(f)
         cont_id = (f.get("Container") or [None])[0]
+        uname = (f.get(F_USER) or "").lstrip("@")
         try:
             cont = _get(T_CONT, cont_id)["fields"] if cont_id else {}
         except requests.RequestException:
             cont = {}
         device = (cont.get("Device") or [None])[0]
-        out.append({"row": row["id"], "username": (f.get(F_USER) or "").lstrip("@"), "container": cont.get("Container"),
+        if day and _skips().get(cont.get("Container") or "") == uname:
+            day, why = None, f"container holds a different account than @{uname} (see Notes) -- fix the Username first"
+        out.append({"row": row["id"], "username": uname, "container": cont.get("Container"),
                     "device": device, "day": day, "why": why, "status": f.get(F_STATUS)})
     return out
 
@@ -441,6 +461,8 @@ def run_one(device: str, container: str, day: int, row: str | None = None, expec
                 _patch(row, {F_STATUS: "logged out"})
             elif "checkpoint" in str(exc):                    # 22.10: H4 "Confirm you're human" -- Rene solves it by hand
                 _patch(row, {F_STATUS: "Human Verification"})
+            elif ", expected @" in str(exc) and expect:       # 22.10: C21 -- wrong handle in Airtable; stop retrying
+                _skip(container, expect)                      # ...until the Username on the row changes
         iphone_diag.notify(f"warm-up day {day} on {letter}/{container} (@{expect or '?'}) stopped: {str(exc)[:200]}\n{shot or ''}")
         return {"ok": False, "error": str(exc), "screen": shot, **stats}
     finally:
