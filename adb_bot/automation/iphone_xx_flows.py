@@ -550,8 +550,10 @@ def post_reel(x: XX, clip: str, log=print) -> None:
     # gallery, confirming video_to_album worked and only this check kept rejecting them. Loosen to +-5 s
     # (next alternative tile would be another, clearly different clip, so false positives stay unlikely).
     def dur(t):
+        # 22.10 live (B4): OCR read the "0:07" tile label as "60:07" (the selection circle / tile edge glued a digit
+        # on). Our clips are shorter than 10 min, so only the LAST minute digit counts.
         m = re.search(r"(\d+):(\d\d)\s*$", t.strip())
-        return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+        return int(m.group(1)[-1]) * 60 + int(m.group(2)) if m else None
     labels = [(w, dur(w["text"])) for w in x.ocr() if w["y"] > 250 and dur(w["text"]) is not None]
     first = min(labels, key=lambda l: (round(l[0]["y"] / 60), l[0]["x"]), default=None)
     # If OCR missed the duration label entirely (first is None), give iOS one more beat to render it,
