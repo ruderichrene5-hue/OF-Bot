@@ -1,8 +1,8 @@
 """Account setup on the iPhone farm: profile picture, bio, story highlight with the OF link (Rene, 22.10).
 
 Not bound to a warm-up day -- bound to the material. Every tick looks at each account: a picture in
-`Profile Picture` and `Profile Picture done` unchecked -> upload it. A bio linked in `Bio` (Bio POOL) and
-`Bio done` unchecked -> type it. `Story Highlight Picture` + `Funnel Link` and `Story Highlight Set`
+`Profile Picture` and `Profile Picture done` unchecked -> upload it. A hand-written `Bio Text` and `Bio done`
+unchecked -> type it (Rene 22.10: no pre-made pool bios, he writes them himself). `Story Highlight Picture` + `Funnel Link` and `Story Highlight Set`
 unchecked -> story with link sticker, saved into a highlight. The bot ticks the checkbox when the step is
 verified on the phone; on failure it keeps a screenshot, writes a Notes line and leaves the box empty, so
 the next tick tries again. Two guards: warm-up day 1 must have run (or the account is Healthy), and one
@@ -36,9 +36,8 @@ from adb_bot.automation.iphone_warmup import (BASE, BERLIN, BLOCKED_STATUS, F_DO
                                               T_CONT, WARMUP_STATUS, WINDOW, _get, _hdr, _letter, _list, _note, _patch)
 
 log = logging.getLogger("iphone_setup")
-T_BIO = "tblOK0fZvjbYNX07s"
 F_PIC, F_PIC_DONE, F_PIC_SET = "Profile Picture", "Profile Picture done", "Profile Picture Set"
-F_BIO, F_BIO_DONE = "Bio", "Bio done"
+F_BIO, F_BIO_DONE = "Bio Text", "Bio done"           # 22.10 Rene: hand-written text on the row, not the Bio POOL link
 F_HL_PIC, F_HL_SET, F_LINK, F_LINK_TEXT = "Story Highlight Picture", "Story Highlight Set", "Funnel Link", "Story Link text"
 F_LINK_DONE, F_FUNNEL_DONE = "Link gesetzt (Story/Highlight)", "Story funnel done"
 HIGHLIGHT_NAME = os.environ.get("IPHONE_HIGHLIGHT_NAME", "Links")
@@ -70,7 +69,7 @@ def needed(f: dict) -> list[str]:
     out = []
     if f.get(F_PIC) and not f.get(F_PIC_DONE):
         out.append("picture")
-    if f.get(F_BIO) and not f.get(F_BIO_DONE):
+    if (f.get(F_BIO) or "").strip() and not f.get(F_BIO_DONE):
         out.append("bio")
     if f.get(F_HL_PIC) and f.get(F_LINK) and not f.get(F_HL_SET):
         out.append("highlight")
@@ -138,10 +137,11 @@ def step_picture(p: Phone, device: str, f: dict, say) -> dict:
 
 
 def step_bio(p: Phone, device: str, f: dict, say) -> dict:
-    bio_rec = _get(T_BIO, f[F_BIO][0])["fields"]
-    text = (bio_rec.get("Bio") or "").strip()
+    text = (f.get(F_BIO) or "").strip()
     if not text:
-        raise RuntimeError("linked Bio POOL row has no text")
+        raise RuntimeError("Bio Text is empty")
+    if len(text) > 150:
+        raise RuntimeError(f"Bio Text has {len(text)} chars, Instagram allows 150 -- shorten it in Airtable")
     res = set_bio(p, text, log=say)
     if not res.get("ok"):
         raise RuntimeError(f"bio read back differs: {res}")
