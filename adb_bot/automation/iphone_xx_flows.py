@@ -543,9 +543,16 @@ def post_reel(x: XX, clip: str, log=print) -> None:
                 # username/reel we land in a nested view with a back arrow top-left; tap that first (3x to unwind
                 # a chain) BEFORE 14.10's Home-tab jump, otherwise Home-tab leaves you on Home with the nested
                 # view still underneath after re-entering.
+                # 22.10 live (A9): the blind (37,67) tap sat right of the "<" chevron (it is at ~(14,65)) and the
+                # pushed "Posts" view of some creator stayed open -> stopped. Find the chevron, tap IT; fall back
+                # to its usual place, not to the title.
                 for _ in range(3):
-                    x.tap(37 + random.uniform(-5, 5), 67 + random.uniform(-5, 5))
-                    x.pause(0.6, 1.1)
+                    back = x.find(r"^[<‹〈]$", 0, region=(0, 40, 70, 120))
+                    if back:
+                        x.tap(back["x"], back["y"])
+                    else:
+                        x.tap(14 + random.uniform(-3, 3), 65 + random.uniform(-4, 4))
+                    x.pause(0.8, 1.3)
                 x.tap(37, 752); x.pause(1.5, 2.5)         # 14.10: Home tab (bottom left) -> redo from +
                 continue
             raise FlowError("did not reach 'New reel'")

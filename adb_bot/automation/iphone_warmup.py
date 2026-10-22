@@ -254,6 +254,11 @@ def _session(h: Human, plan: Plan, log_fn, stats: dict, ref: str = "?", containe
             _recover(h, log_fn, stats, exc, ref, container)
     stats["follows_missed"] = len(slots)
     stats["minutes"] = round((time.monotonic() - start) / 60, 1)
+    try:                                                      # 22.10 (A9 live): never leave a pushed view open at the end
+        if h.p.find("predicate string", "name == 'BackButton' AND visible == 1") or not h.p.find("predicate string", "name == 'reels-tab'"):
+            go_tab(h, "reels")
+    except Exception as exc:                                  # noqa: BLE001
+        log_fn(f"end-of-session back to Reels failed: {str(exc)[:60]}")
 
 
 def day1(h: Human, log_fn, stats: dict, **ctx) -> None:
