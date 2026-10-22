@@ -162,15 +162,13 @@ def _licence_back(letter: str) -> None:
 
 
 def _licence_heal(letter: str) -> None:
-    """Open XXTExplorer once (hands the cached licence back to the service) -- over SSH, no WDA needed."""
+    """Open XXTExplorer once + restart the XXTouch daemons (the heal that recovered A and C on 22.10) -- shared
+    implementation in iphone_xxtouch.Touch._heal_licence, over SSH, no WDA needed."""
     try:
-        import subprocess
-        from adb_bot.automation import iphone_farm_config as C
-        from adb_bot.automation.iphone_farm_wda import resolve
-        _rec, p = resolve(PHONE_REF[letter]); dest = p.get("ssh") or f"mobile@{p['ip']}"
-        subprocess.run(["ssh", "-n", "-i", C.SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=20",
-                        *C.lan_ssh_opts(dest), dest, "uiopen --bundleid ch.xxtou.XXTExplorer; sleep 8; uiopen --bundleid com.burbn.instagram"],
-                       capture_output=True, timeout=60)
+        from adb_bot.automation import iphone_xxtouch
+        t = iphone_xxtouch.Touch(PHONE_REF[letter])
+        t._lic_healed = False
+        t._heal_licence()
     except Exception as exc:                              # noqa: BLE001
         log.warning("%s: licence heal failed (%s)", letter, exc)
 
