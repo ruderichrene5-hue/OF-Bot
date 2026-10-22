@@ -309,7 +309,7 @@ FLOWS: dict[str, Flow] = {
                       "run_step(device, container, 'highlight')",
                       ".venv/bin/python -m adb_bot.automation.iphone_setup run <device> <container> --step highlight --row <rec>",
                       PHONE_NEEDS + ["shortcut", "airtable", "account", "setup-due"],
-                      ["Username", "Story Highlight Picture", "Funnel Link"]),
+                      ["Username", "Story Highlight Picture", "Funnel Link", "Story Link text"]),
     "story": Flow("story", "A plain story post (no highlight) -- not built yet", "planned", "adb_bot.automation.iphone_ig",
                   "create_story(p, link=...) + media_to_photos()",
                   "(planned)",

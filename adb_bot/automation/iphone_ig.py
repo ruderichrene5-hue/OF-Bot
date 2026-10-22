@@ -1200,10 +1200,12 @@ def add_link_sticker(h: Human, url: str, text: str | None = None):
     h.pause(0.6, 1.4)
     if text:
         custom = [e for e in p.by_text("Customize sticker text") if e.visible()]
-        if custom:
-            h.tap(custom[0])
-            h.pause(0.8, 1.4)
-            human_type(h, text)
+        if not custom:
+            # 22.10 Rene: a link sticker ALWAYS gets its text -- do not share a bare URL sticker silently
+            raise FlowError("link sticker: 'Customize sticker text' not offered, text could not be set")
+        h.tap(custom[0])
+        h.pause(0.8, 1.4)
+        human_type(h, text)
     h.tap(p.find("predicate string", "name == 'Done' AND type == 'XCUIElementTypeButton'"))
     h.pause(1.5, 2.5)
     st = _wait_for(p, "label BEGINSWITH 'Link Sticker'", 8)

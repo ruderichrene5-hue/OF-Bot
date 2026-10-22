@@ -64,6 +64,13 @@ def _mark_state(row: str) -> None:
         json.dump(s, f, indent=1)
 
 
+def missing_for_highlight(f: dict) -> list[str]:
+    """What the highlight step still lacks on the row (for `due` and the flow check)."""
+    if f.get(F_HL_SET):
+        return []
+    return [n for n, v in ((F_HL_PIC, f.get(F_HL_PIC)), (F_LINK, f.get(F_LINK)), (F_LINK_TEXT, (f.get(F_LINK_TEXT) or "").strip())) if not v]
+
+
 def needed(f: dict) -> list[str]:
     """The setup steps this row still needs, in order, judged by material present + checkbox empty."""
     out = []
@@ -71,7 +78,8 @@ def needed(f: dict) -> list[str]:
         out.append("picture")
     if (f.get(F_BIO) or "").strip() and not f.get(F_BIO_DONE):
         out.append("bio")
-    if f.get(F_HL_PIC) and f.get(F_LINK) and not f.get(F_HL_SET):
+    # 22.10 Rene: the link sticker ALWAYS carries a custom text -- without `Story Link text` the step is not due
+    if f.get(F_HL_PIC) and f.get(F_LINK) and (f.get(F_LINK_TEXT) or "").strip() and not f.get(F_HL_SET):
         out.append("highlight")
     return out
 
@@ -101,7 +109,14 @@ def candidates() -> list[dict]:
     out = []
     for row in rows:
         f = row["fields"]
+        lacking = missing_for_highlight(f)
         if not needed(f):
+            if f.get(F_HL_PIC) and lacking:                   # a highlight picture is there but the step can't run
+                cont_id = (f.get("Container") or [None])[0]
+                cont = _get(T_CONT, cont_id)["fields"] if cont_id else {}
+                out.append({"row": row["id"], "fields": f, "username": (f.get(F_USER) or "").lstrip("@"), "container": cont.get("Container"),
+                            "device": (cont.get("Device") or [None])[0], "step": None, "status": f.get(F_STATUS),
+                            "why": "highlight waits for: " + ", ".join(lacking)})
             continue
         step, why = next_step(f, row["id"])
         cont_id = (f.get("Container") or [None])[0]
@@ -152,7 +167,9 @@ def step_highlight(p: Phone, device: str, f: dict, say) -> dict:
     with tempfile.TemporaryDirectory() as wd:
         path = _download(f[F_HL_PIC][0], wd)
         media_to_photos(p, device, path, log=say)
-    link, text = f[F_LINK].strip(), (f.get(F_LINK_TEXT) or "").strip() or None
+    link, text = f[F_LINK].strip(), (f.get(F_LINK_TEXT) or "").strip()
+    if not text:
+        raise RuntimeError("Story Link text is empty -- the link sticker always needs a text (Rene 22.10)")
     story = create_story(p, grant_newest=1, log=say, link=link, link_text=text)
     if not story.get("shared"):
         raise RuntimeError(f"story not shared ({story})")
