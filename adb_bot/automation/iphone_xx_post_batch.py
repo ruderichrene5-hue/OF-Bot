@@ -110,11 +110,17 @@ def variant_for(model: str, container: str, limit: int) -> int:
         except (OSError, ValueError):
             m = {}
         own = m.setdefault(model, {})
+        # 22.10 live (A3 posted B1's exact files x06): an own number handed out on an earlier day collided with a
+        # FIXED table number -- 20 of 33 stale entries did. Fixed numbers are reserved for everyone, always; an own
+        # number that sits on one is reassigned above the table.
+        fixed_all = set(VARIANT.values()) if model == "Nikki" else set()
+        if container in own and container not in VARIANT and own[container] in fixed_all:
+            log.warning("%s: own variant x%d collides with the fixed table -- reassigning", container, own.pop(container))
         if container not in own:
             # 13.10: all 40 Nikki numbers were "taken" by the fixed table incl. accounts that no longer post
             # (A7, B8, D2, D4 ...) -- D12 found none and phone D's whole thread died. Reserve only the numbers
             # of accounts actually posting today; a parked account's number is free again.
-            taken = set(own.values()) | ({VARIANT[c] for c in ACTIVE if c in VARIANT} if model == "Nikki" else set())
+            taken = set(own.values()) | fixed_all
             free = [v for v in range(1, limit + 1) if v not in taken]
             if not free:
                 raise RuntimeError(f"no free {model} spoof variant left for {container} (limit {limit})")
