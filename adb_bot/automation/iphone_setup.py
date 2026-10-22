@@ -41,6 +41,15 @@ F_BIO, F_BIO_DONE = "Bio Text", "Bio done"           # 22.10 Rene: hand-written 
 F_HL_PIC, F_HL_SET, F_LINK, F_LINK_TEXT = "Story Highlight Picture", "Story Highlight Set", "Funnel Link", "Story Link text"
 F_LINK_DONE, F_FUNNEL_DONE = "Link gesetzt (Story/Highlight)", "Story funnel done"
 F_PIC_USED, F_HL_USED = "Profile Picture used", "Story Highlight Picture used"      # 22.10 Rene: which picture went up
+F_TRACK = "Tracking Link (auto)"                                                      # lookup from 'Link in Bio 2' -- the OF funnel link
+
+
+def funnel_link(f: dict) -> str:
+    """`Funnel Link` on the row, else the account's assigned tracking link (Link in Bio 2 -> URL)."""
+    if (f.get(F_LINK) or "").strip():
+        return f[F_LINK].strip()
+    t = f.get(F_TRACK) or []
+    return (t[0] if isinstance(t, list) and t else str(t or "")).strip()
 T_GEN = "tblJSsv7TvCinqcTn"                                                           # Generate Pictures
 GEN_KINDS = {"picture": ("Profilbild", "Profile Picture"), "highlight": ("Story",)}
 HIGHLIGHT_NAME = os.environ.get("IPHONE_HIGHLIGHT_NAME", "Links")
@@ -72,7 +81,7 @@ def missing_for_highlight(f: dict, row_id: str = "") -> list[str]:
     if f.get(F_HL_SET):
         return []
     pic = f.get(F_HL_PIC) or (row_id and generated_pictures(row_id).get("highlight"))
-    return [n for n, v in (("Story picture (row or Generate Pictures)", pic), (F_LINK, f.get(F_LINK)),
+    return [n for n, v in (("Story picture (row or Generate Pictures)", pic), ("Funnel Link / Tracking Link", funnel_link(f)),
                            (F_LINK_TEXT, (f.get(F_LINK_TEXT) or "").strip())) if not v]
 
 
@@ -141,7 +150,7 @@ def needed(f: dict, row_id: str = "") -> list[str]:
     if (f.get(F_BIO) or "").strip() and not f.get(F_BIO_DONE):
         out.append("bio")
     # 22.10 Rene: the link sticker ALWAYS carries a custom text -- without `Story Link text` the step is not due
-    if not f.get(F_HL_SET) and f.get(F_LINK) and (f.get(F_LINK_TEXT) or "").strip() and material(f, row_id, "highlight"):
+    if not f.get(F_HL_SET) and funnel_link(f) and (f.get(F_LINK_TEXT) or "").strip() and material(f, row_id, "highlight"):
         out.append("highlight")
     return out
 
@@ -235,7 +244,9 @@ def step_highlight(p: Phone, device: str, f: dict, say, row: str = "") -> dict:
     with tempfile.TemporaryDirectory() as wd:
         path = _download(att, wd)
         media_to_photos(p, device, path, log=say)
-    link, text = f[F_LINK].strip(), (f.get(F_LINK_TEXT) or "").strip()
+    link, text = funnel_link(f), (f.get(F_LINK_TEXT) or "").strip()
+    if not link:
+        raise RuntimeError("no Funnel Link and no Tracking Link on the row")
     if not text:
         raise RuntimeError("Story Link text is empty -- the link sticker always needs a text (Rene 22.10)")
     story = create_story(p, grant_newest=1, log=say, link=link, link_text=text)
