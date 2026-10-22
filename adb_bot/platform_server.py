@@ -911,7 +911,7 @@ class Handler(BaseHTTPRequestHandler):
                              f'<div class=h style="right:48px" onclick="event.stopPropagation();window.open(\'/phones/{L.lower()}/screen\',\'_blank\')" title="Fullscreen (noVNC)">⛶</div>'
                              f'<div class=h onclick="event.stopPropagation();fetch(\'/phones/wda/{L.lower()}/home\',{{method:\"POST\"}})" title="Home">⏺</div>'
                              f'<img src="/phones/mjpeg/{L.lower()}" alt="iPhone {L} offline" '
-                             f'onerror="const i=this;setTimeout(()=>{{i.src=\'/phones/mjpeg/{L.lower()}?r=\'+Date.now()}},4000)">'
+                             f'onerror="const i=this;setTimeout(()=>{{i.src=\'/phones/mjpeg/{L.lower()}?r=\'+Date.now()}},2000)">'
                              f'</div>'
                              for L in ("A","B","C","D","E","F","G","H","I","J","K","L"))
                     + "</div>"
@@ -938,7 +938,7 @@ class Handler(BaseHTTPRequestHandler):
                     "  });"
                     "});"
                     "// 22.10: a stream that ended (WDA restart) leaves a frozen <img> without an error event -> re-open it"
-                    "setInterval(()=>{document.querySelectorAll('.t img').forEach(i=>{if(!i.complete||i.naturalWidth==0){i.src='/phones/mjpeg/'+i.closest('.t').dataset.p+'?r='+Date.now();}});},15000);"
+                    "setInterval(()=>{document.querySelectorAll('.t img').forEach(i=>{if(!i.complete||i.naturalWidth==0){i.src='/phones/mjpeg/'+i.closest('.t').dataset.p+'?r='+Date.now();}});},4000);"
                     "// keyboard: focus a tile first, then type"
                     "let focused=null;"
                     "document.querySelectorAll('.t').forEach(t=>t.addEventListener('click',e=>{focused=t.dataset.p;t.style.outline='2px solid #4af';setTimeout(()=>t.style.outline='',2000);}));"
