@@ -193,6 +193,8 @@ def run_step(device: str, container: str, step: str, row: str | None = None, fie
         fields = _get(T_ACC, row)["fields"]
     rec_id, _ = resolve(device)
     letter = _letter(device)
+    if phone_lock.signup_wanted(letter):                        # signup first (Rene 22.10), see iphone_warmup.run_one
+        return {"ok": False, "step": step, "error": f"phone {letter}: a signup is waiting for it -- next tick"}
     hold = phone_lock.hold(letter, timeout_s=600)
     if hold is None:
         return {"ok": False, "step": step, "error": f"phone {letter} busy"}

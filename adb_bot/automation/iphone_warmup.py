@@ -360,6 +360,10 @@ def run_one(device: str, container: str, day: int, row: str | None = None, expec
         return {"ok": True, "dry": True, **stats}
     rec_id, _ = resolve(device)
     letter = _letter(device)
+    # 22.10 Rene: order on a phone is signup > warm-up/setup > posting. Posting already yields at its next post
+    # boundary to whoever holds the lock; a signup that announced itself (want) goes first, we wait for the next tick.
+    if phone_lock.signup_wanted(letter):
+        return {"ok": False, "error": f"phone {letter}: a signup is waiting for it -- warm-up next tick"}
     hold = phone_lock.hold(letter, timeout_s=600)
     if hold is None:
         return {"ok": False, "error": f"phone {letter} busy (posting/signup holds the lock)"}
