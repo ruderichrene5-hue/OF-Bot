@@ -168,7 +168,12 @@ def next_step(f: dict, row: str) -> tuple[str | None, str]:
     m = WARMUP_STATUS.search(status)
     warmed = bool(f.get(F_DONE[1])) or (m and int(m.group(1)) >= 2) or status == "Healthy"
     if not warmed:
-        return None, f"warm-up day 1 not run yet (status {status!r}) -- needs {', '.join(steps)}"
+        # 22.10 Rene ("Ja"): the bio may go in before warm-up day 1 (Kathi accounts on G/H); picture and highlight
+        # still wait for day 1
+        if "bio" in steps:
+            steps = ["bio"]
+        else:
+            return None, f"warm-up day 1 not run yet (status {status!r}) -- needs {', '.join(steps)}"
     today = dt.datetime.now(BERLIN).strftime("%Y-%m-%d")
     if not MULTI and _state().get(row) == today:
         return None, f"already one profile edit today -- {', '.join(steps)} tomorrow"
