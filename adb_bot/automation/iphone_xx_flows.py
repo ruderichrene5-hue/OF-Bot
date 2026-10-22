@@ -287,6 +287,11 @@ def _dismiss_popups(x: XX) -> bool:
         close = next((w for w in words if w["text"].strip() == "Close"), None)
         if close:
             x.tap(close["x"], close["y"]); return True
+    # 22.10: XXTouch's own "Runtime Error" dialog (a bad recording slice) sits over Instagram until dismissed
+    if any(w["text"].strip() == "Runtime Error" for w in words):
+        d = next((w for w in words if w["text"].strip() == "Dismiss"), None)
+        if d:
+            x.tap(d["x"], d["y"]); x.log("XXTouch Runtime Error dialog dismissed"); return True
     if any(re.search(r"to display notifications|wants to send you notifications", w["text"]) for w in words):
         allow = next((w for w in words if w["text"].strip() == "Allow" and w["y"] < 300), None)
         if allow:                                         # Shortcut's own one-time prompt, sits over the "+" button
@@ -663,7 +668,10 @@ def scroll_feed(x: XX, seconds: float) -> None:
             # 17.10 Rene asked for proof the finger-rec is actually being used (vs the synthetic
             # fallback). The log tells him: slice size (bytes = density proxy), target duration.
             x.log(f"scroll_feed: using Rene's finger-rec, {len(lua)//1024} KB slice for {seconds:.0f}s")
-            x.t.run(lua, wait=True)                       # blocks for ~seconds (recorded pace)
+            # 22.10 live (A2, 300 s lead scroll): run(wait=True) waits at most 90 s, then "script still running"
+            # killed the whole account attempt while the recording played on. Wait for the slice itself.
+            x.t.run(lua, wait=False)
+            x.t.wait_idle(timeout=seconds + 120)
             return
         x.log("scroll_feed: finger-rec unavailable, falling back to synthetic")
     except Exception as _exc:                             # noqa: BLE001 -- fall through to synthetic

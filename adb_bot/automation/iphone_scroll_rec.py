@@ -59,8 +59,13 @@ def _load() -> None:
 
     # Group by gesture: a touch.off (single-finger) or a touch.hand_end (multi-finger batch) is
     # the only safe place to cut. Everything between two safe cuts stays together.
+    # 22.10 live (C, E, A: XXTouch "Runtime Error: Finger #2 was not used" dialogs over Instagram, A2 stopped):
+    # a touch.hand_end is NOT a safe cut while a finger is still down -- the next slice then starts with
+    # touch.move for a finger that never got its touch.on. Track which fingers are down (touch.on/off, by id)
+    # and cut only where NO finger is down.
     groups: list[dict] = []
     cur: dict | None = None
+    down: set[str] = set()
     for L in lines[first_ra:last_ra + 1]:
         m = _RA_RE.match(L)
         if not m:                                              # blank / comment inside the body
@@ -68,11 +73,16 @@ def _load() -> None:
                 cur["lines"].append(L)
             continue
         ms, op = int(m.group(1)), m.group(2)
+        fid = re.match(r"^RA\(\d+,\s*touch\.(?:on|off),\s*(\d+)", L)
+        if op == "touch.on" and fid:
+            down.add(fid.group(1))
+        elif op == "touch.off" and fid:
+            down.discard(fid.group(1))
         if cur is None:
             cur = {"start_ms": ms, "end_ms": ms, "lines": []}
         cur["lines"].append(L)
         cur["end_ms"] = ms
-        if op == "touch.off" or op == "touch.hand_end":        # safe to cut here
+        if op in ("touch.off", "touch.hand_end") and not down:     # every finger lifted: safe to cut here
             groups.append(cur)
             cur = None
     if cur is not None:                                        # trailing partial group -- keep it
