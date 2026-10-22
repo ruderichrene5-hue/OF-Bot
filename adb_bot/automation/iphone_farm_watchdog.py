@@ -422,7 +422,9 @@ def run_usb(now: float, state: dict, phones: dict) -> dict:
 
 
 WLAN_RETRY = 120             # seconds between WDA agent restarts per phone (WDA needs ~20 s to come up)
-LICENCE_EVERY = 3600         # seconds between XXTouch licence probes per phone
+LICENCE_EVERY = 3600
+BATTERY_EVERY = 900          # 22.10: battery read through WDA every 15 min
+BATTERY_WARN = 40            # ChargeLimiter keeps phones between 40 and 80 % -- below 40 and not charging = cable problem         # seconds between XXTouch licence probes per phone
 
 
 def _xx_licence(ref: str) -> int | None:
@@ -505,6 +507,25 @@ def run_wlan(now: float, state: dict, phones: dict) -> dict:
             if st["fail_alerted"]:
                 _alert(f"<b>{name}</b>: WDA (control + live picture) is back.")
             st.update(fails=0, fail_alerted=False)
+            # 22.10 (A live at 19 % unplugged, D vanished from the WLAN the same evening): once every BATTERY_EVERY
+            # read the battery through WDA and say so when a phone is NOT charging below BATTERY_WARN
+            if now - st.get("bat_check", 0) > BATTERY_EVERY:
+                st["bat_check"] = now
+                try:
+                    import requests
+                    from adb_bot.automation.iphone_farm_wda import _relay_host
+                    sid = requests.post(f"http://{_relay_host()}:{phone['wda_port']}/session", json={"capabilities": {}}, timeout=10).json()["sessionId"]
+                    b = requests.get(f"http://{_relay_host()}:{phone['wda_port']}/session/{sid}/wda/batteryInfo", timeout=10).json()["value"]
+                    level, charging = int(round(b.get("level", 1) * 100)), b.get("state") in (2, 3)
+                    st["battery"] = {"level": level, "charging": charging, "t": now}
+                    if not charging and level <= BATTERY_WARN and not st.get("bat_alerted"):
+                        _alert(f"<b>{name}</b>: battery {level} % and NOT charging -- cable/charger? It will drop off the WLAN when empty.")
+                        st["bat_alerted"] = True
+                    elif (charging or level > BATTERY_WARN + 10) and st.get("bat_alerted"):
+                        _alert(f"<b>{name}</b>: charging again ({level} %).")
+                        st["bat_alerted"] = False
+                except Exception as exc:                        # noqa: BLE001
+                    log.info("%s: battery read skipped (%s)", name, str(exc)[:80])
             continue
         if now - st.get("last_try", 0) < (WLAN_RETRY * 5 if st["fail_alerted"] else WLAN_RETRY):
             continue

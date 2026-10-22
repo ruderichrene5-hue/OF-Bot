@@ -116,6 +116,18 @@ def chk_xxtouch(ctx) -> Result:
     return Result("xxtouch", WARN, f"code {code}")
 
 
+def chk_battery(ctx) -> Result:
+    try:
+        p = connect(ctx["rec"], timeout=12)
+        b = p._req("GET", p._s("/wda/batteryInfo"))
+        level, charging = int(round(b.get("level", 1) * 100)), b.get("state") in (2, 3)
+    except Exception as exc:                                   # noqa: BLE001
+        return Result("battery", WARN, f"could not read: {str(exc)[:80]}")
+    if not charging and level <= 40:
+        return Result("battery", FAIL if level <= 15 else WARN, f"{level} % and NOT charging -- cable/charger?")
+    return Result("battery", OK, f"{level} %, {'charging' if charging else 'not charging (above 40 %, ChargeLimiter)'}")
+
+
 def chk_free(ctx) -> Result:
     letter = ctx["letter"]
     if C.is_off(ctx["rec"]):
@@ -271,11 +283,11 @@ def chk_planned(ctx) -> Result:
 
 
 CHECKS: dict[str, Callable] = {
-    "config": chk_config, "ssh": chk_ssh, "wda": chk_wda, "xxtouch": chk_xxtouch, "free": chk_free, "vpn": chk_vpn,
+    "config": chk_config, "ssh": chk_ssh, "wda": chk_wda, "battery": chk_battery, "xxtouch": chk_xxtouch, "free": chk_free, "vpn": chk_vpn,
     "shortcut": chk_shortcut, "airtable": chk_airtable, "account": chk_account_live, "clips": chk_clips,
     "signup-budget": chk_signup_budget, "warmup-due": chk_warmup_due, "setup-due": chk_setup_due, "planned": chk_planned,
 }
-PHONE_NEEDS = ["config", "ssh", "wda", "xxtouch", "free", "vpn"]
+PHONE_NEEDS = ["config", "ssh", "wda", "battery", "xxtouch", "free", "vpn"]
 
 
 # ---------------------------------------------------------------- the registry
