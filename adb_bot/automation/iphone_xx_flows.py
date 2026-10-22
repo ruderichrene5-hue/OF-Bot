@@ -660,22 +660,27 @@ def scroll_feed(x: XX, seconds: float) -> None:
             else: break
         x.tap(112, 752); x.pause(2, 3)
 
-    # ── primary path: play a random slice of Rene's recording (17.10) ───────────────────────
+    # ── primary path (22.10, Rene: "wir brauchen die Aufnahme nicht roh, nur die Gesten daraus in unserem
+    # eigenen Flow"): the warm-up engine -- Rene's recorded flicks and taps as single gestures, our own rhythm
+    # (watch / skim / burst / pause / back), Reels-tab check, popup handling, recovery. The raw 60-300 s
+    # replay of the recording (17.10) threw "Finger #2 was not used" dialogs over Instagram and blocked
+    # XXTouch for minutes; it is gone.
     try:
-        from adb_bot.automation import iphone_scroll_rec as _rec
-        lua = _rec.build_scroll_lua(seconds)
-        if lua:
-            # 17.10 Rene asked for proof the finger-rec is actually being used (vs the synthetic
-            # fallback). The log tells him: slice size (bytes = density proxy), target duration.
-            x.log(f"scroll_feed: using Rene's finger-rec, {len(lua)//1024} KB slice for {seconds:.0f}s")
-            # 22.10 live (A2, 300 s lead scroll): run(wait=True) waits at most 90 s, then "script still running"
-            # killed the whole account attempt while the recording played on. Wait for the slice itself.
-            x.t.run(lua, wait=False)
-            x.t.wait_idle(timeout=seconds + 120)
-            return
-        x.log("scroll_feed: finger-rec unavailable, falling back to synthetic")
+        from adb_bot.automation.iphone_farm_wda import connect as _connect
+        from adb_bot.automation.iphone_ig import Human as _Human
+        from adb_bot.automation import iphone_warmup as _W
+        p = _connect(x.ref, timeout=60)
+        h = _Human(p, x.log)
+        minutes = max(0.5, seconds / 60)
+        plan = _W.Plan(0, "post-scroll", (minutes, minutes), (0, 0), {"like": 3, "linger": 4, "scroll-back": 2}, 0.08)
+        _W.RHYTHM.setdefault(0, _W.RHYTHM[2])
+        stats = {"follows": [], "extras": [], "popups": [], "errors": [], "rhythm": {}, "swipes": 0, "reels_watched": 0}
+        x.log(f"scroll_feed: warm-up engine for {seconds:.0f}s")
+        _W._session(h, plan, x.log, stats, ref=x.ref, container=getattr(x, "container", "?"))
+        x.log(f"scroll_feed: {stats['reels_watched']} reels, rhythm {stats['rhythm']}, {len(stats['errors'])} hiccups")
+        return
     except Exception as _exc:                             # noqa: BLE001 -- fall through to synthetic
-        x.log(f"scroll_feed: finger-rec failed ({str(_exc)[:60]}), falling back to synthetic")
+        x.log(f"scroll_feed: warm-up engine failed ({str(_exc)[:80]}), falling back to synthetic")
 
     # Per-session "personality" -- caps on heavier actions, so most sessions never like, some like 1-2x
     cap_like      = random.choice([0, 0, 0, 1, 1, 2])     # max likes per session (Rene: "1-2 mal max")
