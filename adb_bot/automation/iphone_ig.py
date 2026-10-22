@@ -407,6 +407,12 @@ def open_account(device: str, container: str, expect_handle: str | None = None, 
     # 22.10 live (A13, first automatic warm-up tick): Instagram was at its welcome screen ("Get started" /
     # "I already have a profile") -- nobody logged in -- and the flow happily started swiping on it. A logged-out
     # screen is a stop, and the caller marks the account (Status "logged out" in Airtable).
+    cont = p.find("predicate string", "label == 'Continue' AND type == 'XCUIElementTypeButton'")
+    if cont and p.find("predicate string", "label == 'Use another profile' AND type == 'XCUIElementTypeButton'"):
+        # 22.10 (C9 live): the account switcher with the saved session -- Continue is what a person taps
+        log(f"{container}: account switcher -- tapping Continue")
+        cont.click()
+        time.sleep(random.uniform(6, 9))
     for marker in LOGGED_OUT_TEXTS:
         hit = p.find("predicate string", f"label == {json.dumps(marker)} AND type == 'XCUIElementTypeButton'")
         if hit:

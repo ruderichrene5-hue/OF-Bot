@@ -499,6 +499,15 @@ def post_reel(x: XX, clip: str, log=print) -> None:
             if not back:
                 break
             x.tap(back["x"], back["y"]); x.pause(1.2, 2)
+        # 22.10 live (C9): after a restart Instagram sat on its account switcher ("<handle> / New notifications /
+        # Continue / Use another profile / Create new account") -- the saved session just needs its Continue tap.
+        # A real logged-out state (password asked afterwards) is left alone and reported.
+        if x.find(r"^Use another profile$", 0) and x.find(r"^Continue$", 0):
+            x.log("account switcher in front -- tapping Continue")
+            x.tap_text(r"^Continue$", 2); x.pause(6, 9)
+            if x.find(r"^Log in$|Password|^Use another profile$", 2):
+                _keep_screen(x, "logged_out")
+                raise FlowError("logged out -- Instagram asks for the password after Continue")
         x.tap(37, 752); x.pause(1.2, 2)                   # Home tab: back to the top, so the header with "+" shows
         x.tap(28, 69); x.pause(2.5, 3.5)                  # "+" top left of the home feed
         _answer_permission_prompts(x)                     # first time per container: camera/mic intro + iOS alerts
