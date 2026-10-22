@@ -273,7 +273,9 @@ def run_phone(letter: str, containers: list[str], clips: list[Path], n: int, sta
         c = min(open_, key=lambda k: due[k])
         # 22.10 (Rene: a spoofed clip goes out the same day; the daily launcher brings fresh clips at 09:05): once
         # the next possible start lies on another day, today's leftovers are dropped and the phone thread ends.
-        if dt.datetime.fromtimestamp(_window_next(window, max(due[c], time.time())), BERLIN).date() != day:
+        # (only with a real window -- 0-24 posts around the clock and a 2-4 h pause crossing midnight is no reason to stop;
+        # live 00:23 Berlin: phone B ended with 15 clips undone)
+        if window != (0, 24) and dt.datetime.fromtimestamp(_window_next(window, max(due[c], time.time())), BERLIN).date() != day:
             left = {k: len(queue[k]) for k in open_}
             log.info("phone %s: window closed for today -- %s clips left undone, ending (tomorrow's run brings new clips)", letter, left)
             return
