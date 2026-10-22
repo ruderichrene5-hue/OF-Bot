@@ -38,8 +38,11 @@ def _alive(pid: int) -> bool:
         return True
 
 
-def signup_wanted(letter: str) -> bool:
-    p = _path(letter, "signup-wanted")
+KINDS = ("signup", "warmup", "setup")    # 22.10: warm-up and setup announce themselves too, so posting yields to them
+
+
+def wanted(letter: str, kind: str = "signup") -> bool:
+    p = _path(letter, f"{kind}-wanted")
     try:
         pid = int(open(p).read().split()[0])
     except (OSError, ValueError, IndexError):
@@ -47,20 +50,32 @@ def signup_wanted(letter: str) -> bool:
     if _alive(pid):
         return True
     try:
-        os.remove(p)                       # left behind by a dead planner
+        os.remove(p)                       # left behind by a dead process
     except OSError:
         pass
     return False
 
 
-def want(letter: str, note: str = "") -> None:
-    with open(_path(letter, "signup-wanted"), "w") as f:
+def signup_wanted(letter: str) -> bool:
+    return wanted(letter, "signup")
+
+
+def any_wanted(letter: str) -> str | None:
+    """Which flow kind is waiting for the phone (signup first), or None."""
+    for k in KINDS:
+        if wanted(letter, k):
+            return k
+    return None
+
+
+def want(letter: str, note: str = "", kind: str = "signup") -> None:
+    with open(_path(letter, f"{kind}-wanted"), "w") as f:
         f.write(f"{os.getpid()} {note}\n")
 
 
-def unwant(letter: str) -> None:
+def unwant(letter: str, kind: str = "signup") -> None:
     try:
-        os.remove(_path(letter, "signup-wanted"))
+        os.remove(_path(letter, f"{kind}-wanted"))
     except OSError:
         pass
 
@@ -108,15 +123,16 @@ def hold(letter: str, timeout_s: float = 1800, poll_s: float = 5) -> Hold | None
 
 
 def wait_free(letter: str, log=None, poll_s: float = 15) -> float:
-    """Block while a signup wants or holds the phone. Returns the seconds waited."""
+    """Block while a signup / warm-up / setup wants or holds the phone. Returns the seconds waited."""
     t0, told = time.time(), False
     while True:
-        if not signup_wanted(letter):
+        k = any_wanted(letter)
+        if not k:
             h = try_hold(letter)
             if h:
                 h.release()
                 return time.time() - t0
         if log and not told:
-            log("waiting -- a signup has this phone first")
+            log(f"waiting -- a {k or 'flow'} has this phone first")
             told = True
         time.sleep(poll_s)

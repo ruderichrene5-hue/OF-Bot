@@ -274,8 +274,10 @@ def run_step(device: str, container: str, step: str, row: str | None = None, fie
     letter = _letter(device)
     if phone_lock.signup_wanted(letter):                        # signup first (Rene 22.10), see iphone_warmup.run_one
         return {"ok": False, "step": step, "error": f"phone {letter}: a signup is waiting for it -- next tick"}
+    phone_lock.want(letter, "setup", kind="setup")            # posting pauses at its next post boundary for us
     hold = phone_lock.hold(letter, timeout_s=600)
     if hold is None:
+        phone_lock.unwant(letter, kind="setup")
         return {"ok": False, "step": step, "error": f"phone {letter} busy"}
     p: Phone | None = None
     try:
@@ -311,6 +313,7 @@ def run_step(device: str, container: str, step: str, row: str | None = None, fie
         except Exception:                                     # noqa: BLE001
             pass
         hold.release()
+        phone_lock.unwant(letter, kind="setup")
 
 
 def tick(max_phones: int = 4) -> dict:

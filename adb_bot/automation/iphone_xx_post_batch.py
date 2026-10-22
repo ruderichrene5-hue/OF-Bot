@@ -294,9 +294,9 @@ def run_phone(letter: str, containers: list[str], clips: list[Path], n: int, sta
             yielded = False
             for i, f in enumerate(this):
                 # ...and between two posts: the current post (with its scroll) is always finished first
-                held = None if phone_lock.signup_wanted(letter) else phone_lock.try_hold(letter)
+                held = None if phone_lock.any_wanted(letter) else phone_lock.try_hold(letter)    # 22.10: warm-up/setup too
                 if held is None:
-                    log.info("%s: a signup wants phone %s -- batch paused after %d/%d, continues right after it", c, letter, i, len(this))
+                    log.info("%s: a %s wants phone %s -- batch paused after %d/%d, continues right after it", c, phone_lock.any_wanted(letter) or "flow", letter, i, len(this))
                     yielded = True
                     break
                 with held:

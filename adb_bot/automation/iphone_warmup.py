@@ -406,8 +406,10 @@ def run_one(device: str, container: str, day: int, row: str | None = None, expec
     # boundary to whoever holds the lock; a signup that announced itself (want) goes first, we wait for the next tick.
     if phone_lock.signup_wanted(letter):
         return {"ok": False, "error": f"phone {letter}: a signup is waiting for it -- warm-up next tick"}
+    phone_lock.want(letter, "warmup", kind="warmup")            # posting pauses at its next post boundary for us
     hold = phone_lock.hold(letter, timeout_s=600)
     if hold is None:
+        phone_lock.unwant(letter, kind="warmup")
         return {"ok": False, "error": f"phone {letter} busy (posting/signup holds the lock)"}
     p: Phone | None = None
     try:
@@ -450,6 +452,7 @@ def run_one(device: str, container: str, day: int, row: str | None = None, expec
         except Exception:                                     # noqa: BLE001
             pass
         hold.release()
+        phone_lock.unwant(letter, kind="warmup")
 
 
 # ---------------------------------------------------------------- the timer tick
