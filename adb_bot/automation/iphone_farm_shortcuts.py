@@ -454,6 +454,68 @@ def sync(dry_run: bool = False) -> dict:
     return changed
 
 
+# --------------------------------------------------------------------------- duplicate shortcuts
+
+_REF_TABLES = ("ZSHORTCUTACTIONS", "ZACCESSRESOURCEPERMISSION", "ZSHORTCUTRUNEVENT", "ZSMARTPROMPTPERMISSION", "ZTRIGGER", "ZTRUSTEDDOMAIN")
+
+
+def dedupe(ip: str, dry_run: bool = False) -> dict:
+    """Two Shortcuts with the same container name (A10/E3/E19/E22 on 22.10, D4/D6/D8/D11/D13 later the same
+    day: a second import next to the first). Keeps the copy that owns the granted permissions / run history
+    (ties: the older one), deletes the other with its rows in every referencing table. Core Data's
+    Z_DA_* triggers refuse plain DELETEs (they call NSCoreDataDATriggerUpdatedAffectedObjectValue), so
+    they are dropped for the edit and recreated from sqlite_master afterwards. Returns {name: deleted pk}."""
+    out: dict = {}
+    with tempfile.TemporaryDirectory() as wd:
+        if not dry_run:
+            _ssh(ip, f"{KILL}; sleep 1")
+        db = _pull(ip, wd)
+        con = sqlite3.connect(db)
+        dups = [n for (n,) in con.execute("select ZNAME from ZSHORTCUT where ZNAME is not null group by ZNAME having count(*) > 1")]
+        if not dups:
+            con.close()
+            return out
+        plan = []
+        for name in dups:
+            rows = con.execute("select Z_PK, ZICON from ZSHORTCUT where ZNAME=? order by Z_PK", (name,)).fetchall()
+            def weight(pk):
+                return sum(con.execute(f"select count(*) from {t} where ZSHORTCUT=?", (pk,)).fetchone()[0]
+                           for t in ("ZACCESSRESOURCEPERMISSION", "ZSHORTCUTRUNEVENT", "ZSMARTPROMPTPERMISSION", "ZTRUSTEDDOMAIN"))
+            keep = max(rows, key=lambda r: (weight(r[0]), -r[0]))
+            for pk, icon in rows:
+                if pk != keep[0]:
+                    plan.append((name, pk, icon, keep[0]))
+                    log.info("%s: %s -> delete pk %d (weight %d), keep pk %d (weight %d)", ip, name, pk, weight(pk), keep[0], weight(keep[0]))
+        if dry_run:
+            con.close()
+            return {n: pk for n, pk, _, _ in plan}
+        triggers = con.execute("select name, sql from sqlite_master where type='trigger'").fetchall()
+        for tname, _ in triggers:
+            con.execute(f'drop trigger "{tname}"')
+        for name, pk, icon, _ in plan:
+            for t in _REF_TABLES:
+                con.execute(f"delete from {t} where ZSHORTCUT=?", (pk,))
+            con.execute("delete from Z_4SHORTCUTS where Z_5SHORTCUTS=?", (pk,))
+            if icon and not con.execute("select 1 from ZSHORTCUT where ZICON=? and Z_PK!=?", (icon, pk)).fetchone():
+                con.execute("delete from ZSHORTCUTICON where Z_PK=?", (icon,))
+            con.execute("delete from ZSHORTCUT where Z_PK=?", (pk,))
+            out[name] = pk
+        for _, sql in triggers:
+            if sql:
+                con.execute(sql)
+        con.commit()
+        con.execute("pragma wal_checkpoint(TRUNCATE)")
+        ok = con.execute("pragma integrity_check").fetchone() == ("ok",)
+        left = con.execute("select count(*) from ZSHORTCUT where ZNAME in (%s) group by ZNAME" % ",".join("?" * len(dups)), dups).fetchall()
+        con.close()
+        if not ok or any(c != (1,) for c in left):
+            raise RuntimeError(f"{ip}: patched DB not ok (integrity {ok}, counts {left}) -- not pushed")
+        _ssh(ip, f"{KILL}; rm -f {DB_DIR}/Shortcuts.sqlite-wal {DB_DIR}/Shortcuts.sqlite-shm")
+        if not _scp(db, f"{_host(ip)}:{DB_DIR}/Shortcuts.sqlite"):
+            raise RuntimeError(f"{ip}: could not push the deduplicated DB")
+    return out
+
+
 # --------------------------------------------------------------------------- Shadowrocket itself
 
 SR_GROUP_ID = "group.com.liguangming.Shadowrocket"
