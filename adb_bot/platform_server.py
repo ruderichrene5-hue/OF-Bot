@@ -902,6 +902,8 @@ class Handler(BaseHTTPRequestHandler):
                     ".g{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}"
                     ".t{position:relative;background:#111;border-radius:8px;overflow:hidden;cursor:crosshair}"
                     ".t img{width:100%;height:auto;display:block;aspect-ratio:9/16;background:#222;pointer-events:none}"
+                    ".t canvas.hold{position:absolute;inset:0;width:100%;height:100%;display:none;pointer-events:none;z-index:1}"
+                    ".t .rc{position:absolute;bottom:6px;right:8px;width:8px;height:8px;border-radius:50%;background:#fa0;display:none;z-index:2}"
                     ".l{position:absolute;top:6px;left:8px;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:4px;font-size:13px;z-index:2}"
                     ".h{position:absolute;top:6px;right:8px;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:4px;font-size:11px;z-index:2;cursor:pointer}"
                     "</style>"
@@ -910,8 +912,8 @@ class Handler(BaseHTTPRequestHandler):
                              f'<div class=l>iPhone {L}</div>'
                              f'<div class=h style="right:48px" onclick="event.stopPropagation();window.open(\'/phones/{L.lower()}/screen\',\'_blank\')" title="Fullscreen (noVNC)">⛶</div>'
                              f'<div class=h onclick="event.stopPropagation();fetch(\'/phones/wda/{L.lower()}/home\',{{method:\"POST\"}})" title="Home">⏺</div>'
-                             f'<img src="/phones/mjpeg/{L.lower()}" alt="iPhone {L} offline" '
-                             f'onerror="const i=this;setTimeout(()=>{{i.src=\'/phones/mjpeg/{L.lower()}?r=\'+Date.now()}},2000)">'
+                             f'<img src="/phones/mjpeg/{L.lower()}" alt="iPhone {L} offline">'
+                             f'<div class=rc title="reconnecting"></div>'
                              f'</div>'
                              for L in ("A","B","C","D","E","F","G","H","I","J","K","L"))
                     + "</div>"
@@ -937,8 +939,21 @@ class Handler(BaseHTTPRequestHandler):
                     "    start=null;"
                     "  });"
                     "});"
-                    "// 22.10: a stream that ended (WDA restart) leaves a frozen <img> without an error event -> re-open it"
-                    "setInterval(()=>{document.querySelectorAll('.t img').forEach(i=>{if(!i.complete||i.naturalWidth==0){i.src='/phones/mjpeg/'+i.closest('.t').dataset.p+'?r='+Date.now();}});},4000);"
+                    "// 22.10 (Rene: 'fuer die VAs ist es nervig, wenn das Bild kurz weg ist'): WDA restarts every few"
+                    "// minutes per phone. When its stream breaks, copy the last frame onto a canvas over the <img>, reconnect"
+                    "// in the background and drop the canvas as soon as the new stream delivers a frame -> a short freeze"
+                    "// instead of a blank 'offline' tile."
+                    "function hold(t){const img=t.querySelector('img');let c=t.querySelector('canvas.hold');"
+                    "  if(!c){c=document.createElement('canvas');c.className='hold';t.appendChild(c);}"
+                    "  if(img.naturalWidth>0){c.width=img.naturalWidth;c.height=img.naturalHeight;try{c.getContext('2d').drawImage(img,0,0);c.style.display='block';}catch(e){}}"
+                    "  t.querySelector('.rc').style.display='block';}"
+                    "function release(t){const c=t.querySelector('canvas.hold');if(c)c.style.display='none';t.querySelector('.rc').style.display='none';}"
+                    "function reconnect(t){hold(t);const img=t.querySelector('img');setTimeout(()=>{img.src='/phones/mjpeg/'+t.dataset.p+'?r='+Date.now();},1500);}"
+                    "document.querySelectorAll('.t').forEach(t=>{const img=t.querySelector('img');let busy=false;"
+                    "  img.addEventListener('error',()=>{if(!busy){busy=true;reconnect(t);setTimeout(()=>busy=false,3000);}});"
+                    "  img.addEventListener('load',()=>{release(t);});"
+                    "  setInterval(()=>{if(busy)return;if(!img.complete||img.naturalWidth==0){busy=true;reconnect(t);setTimeout(()=>busy=false,3000);}},3000);"
+                    "});"
                     "// keyboard: focus a tile first, then type"
                     "let focused=null;"
                     "document.querySelectorAll('.t').forEach(t=>t.addEventListener('click',e=>{focused=t.dataset.p;t.style.outline='2px solid #4af';setTimeout(()=>t.style.outline='',2000);}));"
