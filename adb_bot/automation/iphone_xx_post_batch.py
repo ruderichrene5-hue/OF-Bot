@@ -265,11 +265,18 @@ def run_phone(letter: str, containers: list[str], clips: list[Path], n: int, sta
         log.info("%s: %d to post%s", c, len(queue[c]),
                  f", next batch {dt.datetime.fromtimestamp(due[c], BERLIN):%H:%M} Berlin" if due[c] > time.time() else "")
     batch_fd = None
+    day = dt.datetime.now(BERLIN).date()
     while True:
         open_ = [c for c in containers if queue[c]]
         if not open_:
             log.info("phone %s: everything posted", letter); return
         c = min(open_, key=lambda k: due[k])
+        # 22.10 (Rene: a spoofed clip goes out the same day; the daily launcher brings fresh clips at 09:05): once
+        # the next possible start lies on another day, today's leftovers are dropped and the phone thread ends.
+        if dt.datetime.fromtimestamp(_window_next(window, max(due[c], time.time())), BERLIN).date() != day:
+            left = {k: len(queue[k]) for k in open_}
+            log.info("phone %s: window closed for today -- %s clips left undone, ending (tomorrow's run brings new clips)", letter, left)
+            return
         wait = due[c] - time.time()
         if wait > 0:
             log.info("phone %s: next batch %s at %s Berlin", letter, c, dt.datetime.fromtimestamp(due[c], BERLIN).strftime("%H:%M"))
