@@ -272,7 +272,7 @@ def chk_setup_due(ctx) -> Result:
         return Result("setup-due", INFO, "no account row loaded")
     from adb_bot.automation.iphone_setup import needed, next_step
     step, why = next_step(acc, ctx.get("row") or "")
-    need = needed(acc)
+    need = needed(acc, ctx.get("row") or "")
     if not need:
         return Result("setup-due", OK, "nothing left to set up (or no material attached)")
     return Result("setup-due", OK if step else WARN, f"next: {step} -- {why}" if step else why)

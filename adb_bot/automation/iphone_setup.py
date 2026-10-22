@@ -40,6 +40,9 @@ F_PIC, F_PIC_DONE, F_PIC_SET = "Profile Picture", "Profile Picture done", "Profi
 F_BIO, F_BIO_DONE = "Bio Text", "Bio done"           # 22.10 Rene: hand-written text on the row, not the Bio POOL link
 F_HL_PIC, F_HL_SET, F_LINK, F_LINK_TEXT = "Story Highlight Picture", "Story Highlight Set", "Funnel Link", "Story Link text"
 F_LINK_DONE, F_FUNNEL_DONE = "Link gesetzt (Story/Highlight)", "Story funnel done"
+F_PIC_USED, F_HL_USED = "Profile Picture used", "Story Highlight Picture used"      # 22.10 Rene: which picture went up
+T_GEN = "tblJSsv7TvCinqcTn"                                                           # Generate Pictures
+GEN_KINDS = {"picture": ("Profilbild", "Profile Picture"), "highlight": ("Story",)}
 HIGHLIGHT_NAME = os.environ.get("IPHONE_HIGHLIGHT_NAME", "Links")
 MULTI = os.environ.get("IPHONE_SETUP_MULTI") == "1"
 STATE_PATH = os.path.expanduser("~/.adb_bot/iphone_setup_state.json")
@@ -64,22 +67,81 @@ def _mark_state(row: str) -> None:
         json.dump(s, f, indent=1)
 
 
-def missing_for_highlight(f: dict) -> list[str]:
+def missing_for_highlight(f: dict, row_id: str = "") -> list[str]:
     """What the highlight step still lacks on the row (for `due` and the flow check)."""
     if f.get(F_HL_SET):
         return []
-    return [n for n, v in ((F_HL_PIC, f.get(F_HL_PIC)), (F_LINK, f.get(F_LINK)), (F_LINK_TEXT, (f.get(F_LINK_TEXT) or "").strip())) if not v]
+    pic = f.get(F_HL_PIC) or (row_id and generated_pictures(row_id).get("highlight"))
+    return [n for n, v in (("Story picture (row or Generate Pictures)", pic), (F_LINK, f.get(F_LINK)),
+                           (F_LINK_TEXT, (f.get(F_LINK_TEXT) or "").strip())) if not v]
 
 
-def needed(f: dict) -> list[str]:
+_GEN_INDEX: dict | None = None
+_GEN_LOADED = 0.0
+
+
+def _gen_index() -> dict:
+    """{account row id: [Generate Pictures record, newest first]} -- one query per 10 min. (A FIND() on the linked
+    field in a formula sees display names, not record ids, so the match is done here on the API's id lists.)"""
+    global _GEN_INDEX, _GEN_LOADED
+    if _GEN_INDEX is not None and time.time() - _GEN_LOADED < 600:
+        return _GEN_INDEX
+    idx: dict = {}
+    try:
+        params = {"filterByFormula": "AND({Für Account (optional)} != '', {Picked Picture (auto)} != '')",
+                  "sort[0][field]": "Bild (auto, leer lassen)", "sort[0][direction]": "desc", "pageSize": 100}
+        offset = None
+        while True:
+            if offset:
+                params["offset"] = offset
+            r = requests.get(f"https://api.airtable.com/v0/{BASE}/{T_GEN}", headers=_hdr(), params=params, timeout=30)
+            r.raise_for_status()
+            j = r.json()
+            for rec in j.get("records", []):
+                for acc in rec["fields"].get("Für Account (optional)", []):
+                    idx.setdefault(acc, []).append(rec)
+            offset = j.get("offset")
+            if not offset:
+                break
+        _GEN_INDEX, _GEN_LOADED = idx, time.time()
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("Generate Pictures index failed: %s", exc)
+        _GEN_INDEX = _GEN_INDEX or {}
+    return _GEN_INDEX
+
+
+def generated_pictures(row_id: str) -> dict:
+    """{'picture': (attachment, label) | None, 'highlight': ...} from Generate Pictures rows linked to this account
+    ('Für Account (optional)') with the matching 'Verwendung' and a picked picture. Newest row wins. 22.10 Rene:
+    the bot picks the picture itself and writes down which one it used."""
+    out = {"picture": None, "highlight": None}
+    for rec in _gen_index().get(row_id, []):
+        f = rec["fields"]
+        use = f.get("Verwendung") or ""
+        for kind, names in GEN_KINDS.items():
+            if use in names and out[kind] is None:
+                att = f["Picked Picture (auto)"][0]
+                out[kind] = (att, f"{att.get('filename')} from Generate Pictures {rec['id']} ({(f.get('Bild (auto, leer lassen)') or '')[:40]})")
+    return out
+
+
+def material(f: dict, row_id: str, kind: str):
+    """(attachment, label) for the picture step: the row's own attachment first, else a generated picture."""
+    field = F_PIC if kind == "picture" else F_HL_PIC
+    if f.get(field):
+        return f[field][0], f"{f[field][0].get('filename')} (attachment on the row)"
+    return generated_pictures(row_id).get(kind)
+
+
+def needed(f: dict, row_id: str = "") -> list[str]:
     """The setup steps this row still needs, in order, judged by material present + checkbox empty."""
     out = []
-    if f.get(F_PIC) and not f.get(F_PIC_DONE):
+    if not f.get(F_PIC_DONE) and material(f, row_id, "picture"):
         out.append("picture")
     if (f.get(F_BIO) or "").strip() and not f.get(F_BIO_DONE):
         out.append("bio")
     # 22.10 Rene: the link sticker ALWAYS carries a custom text -- without `Story Link text` the step is not due
-    if f.get(F_HL_PIC) and f.get(F_LINK) and (f.get(F_LINK_TEXT) or "").strip() and not f.get(F_HL_SET):
+    if not f.get(F_HL_SET) and f.get(F_LINK) and (f.get(F_LINK_TEXT) or "").strip() and material(f, row_id, "highlight"):
         out.append("highlight")
     return out
 
@@ -87,7 +149,7 @@ def needed(f: dict) -> list[str]:
 def next_step(f: dict, row: str) -> tuple[str | None, str]:
     """(step to run now, reason)."""
     status = f.get(F_STATUS) or ""
-    steps = needed(f)
+    steps = needed(f, row)
     if not steps:
         return None, "nothing to do"
     if status in BLOCKED_STATUS:
@@ -105,13 +167,15 @@ def next_step(f: dict, row: str) -> tuple[str | None, str]:
 
 
 def candidates() -> list[dict]:
-    rows = _list(T_ACC, f"AND({{Container}} != '', OR({{{F_PIC}}} != '', {{{F_BIO}}} != '', {{{F_HL_PIC}}} != ''))")
+    rows = _list(T_ACC, f"AND({{Container}} != '', {{{F_USER}}} != '', OR({{{F_PIC_DONE}}} = 0, {{{F_BIO_DONE}}} = 0, {{{F_HL_SET}}} = 0))")
     out = []
     for row in rows:
         f = row["fields"]
-        lacking = missing_for_highlight(f)
-        if not needed(f):
-            if f.get(F_HL_PIC) and lacking:                   # a highlight picture is there but the step can't run
+        if (f.get(F_STATUS) or "") in BLOCKED_STATUS:
+            continue
+        lacking = missing_for_highlight(f, row["id"])
+        if not needed(f, row["id"]):
+            if lacking and len(lacking) < 3:                  # partly prepared highlight: say what is missing
                 cont_id = (f.get("Container") or [None])[0]
                 cont = _get(T_CONT, cont_id)["fields"] if cont_id else {}
                 out.append({"row": row["id"], "fields": f, "username": (f.get(F_USER) or "").lstrip("@"), "container": cont.get("Container"),
@@ -141,17 +205,19 @@ def _download(att: dict, workdir: str) -> str:
     return path
 
 
-def step_picture(p: Phone, device: str, f: dict, say) -> dict:
+def step_picture(p: Phone, device: str, f: dict, say, row: str = "") -> dict:
+    att, label = material(f, row, "picture")
+    say(f"profile picture: {label}")
     with tempfile.TemporaryDirectory() as wd:
-        path = _download(f[F_PIC][0], wd)
+        path = _download(att, wd)
         media_to_photos(p, device, path, log=say)
     res = set_profile_picture(p, 0, grant_newest=True, log=say)
     if not res.get("ok"):
         raise RuntimeError(f"profile picture upload did not finish ({res})")
-    return {F_PIC_DONE: True, F_PIC_SET: True}
+    return {F_PIC_DONE: True, F_PIC_SET: True, F_PIC_USED: label[:250]}
 
 
-def step_bio(p: Phone, device: str, f: dict, say) -> dict:
+def step_bio(p: Phone, device: str, f: dict, say, row: str = "") -> dict:
     text = (f.get(F_BIO) or "").strip()
     if not text:
         raise RuntimeError("Bio Text is empty")
@@ -163,9 +229,11 @@ def step_bio(p: Phone, device: str, f: dict, say) -> dict:
     return {F_BIO_DONE: True}
 
 
-def step_highlight(p: Phone, device: str, f: dict, say) -> dict:
+def step_highlight(p: Phone, device: str, f: dict, say, row: str = "") -> dict:
+    att, label = material(f, row, "highlight")
+    say(f"highlight picture: {label}")
     with tempfile.TemporaryDirectory() as wd:
-        path = _download(f[F_HL_PIC][0], wd)
+        path = _download(att, wd)
         media_to_photos(p, device, path, log=say)
     link, text = f[F_LINK].strip(), (f.get(F_LINK_TEXT) or "").strip()
     if not text:
@@ -176,7 +244,7 @@ def step_highlight(p: Phone, device: str, f: dict, say) -> dict:
     hl = save_story_to_highlight(p, HIGHLIGHT_NAME, log=say)
     if not hl.get("ok"):
         raise RuntimeError(f"story shared with link, but highlight not confirmed ({hl}) -- check the profile")
-    return {F_HL_SET: True, F_LINK_DONE: True, F_FUNNEL_DONE: True}
+    return {F_HL_SET: True, F_LINK_DONE: True, F_FUNNEL_DONE: True, F_HL_USED: label[:250]}
 
 
 STEP_FN = {"picture": step_picture, "bio": step_bio, "highlight": step_highlight}
@@ -204,7 +272,7 @@ def run_step(device: str, container: str, step: str, row: str | None = None, fie
         from adb_bot.automation.iphone_ig import open_account
         p = open_account(device, container, expect, log=say)
         say(f"setup step '{step}' starting")
-        boxes = STEP_FN[step](p, device, fields, say)
+        boxes = STEP_FN[step](p, device, fields, say, row or "")
         if row:
             _patch(row, boxes)
             _note(row, f"setup {step} ok")
