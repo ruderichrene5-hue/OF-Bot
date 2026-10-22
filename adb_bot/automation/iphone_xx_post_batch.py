@@ -136,19 +136,43 @@ def _mark(path: Path, container: str, clip: str):
         path.write_text(json.dumps(st, indent=1))
 
 
-def _licence_out(letter: str, containers: list, state: Path, why: str) -> None:
-    """22.10: XXTouch's Havoc licence on this phone is invalid -> every touch would fail. Skip all of the phone's
-    accounts for today, say which phone needs the Havoc login in Sileo (Telegram 'phones' + log), move on."""
-    for c in containers:
-        _skip(state, c, "XXTouch licence invalid -> Havoc login in Sileo")
-    msg = (f"iPhone {letter}: XXTouch licence invalid -- {len(containers)} account(s) skipped today "
-           f"({', '.join(containers)}). Fix: Sileo -> Havoc -> login on this phone, then re-run. ({why[:120]})")
-    log.error(msg)
+LICENCE_RETRY = 600          # seconds between licence re-checks while a phone's XXTouch says 403
+
+
+def _tg(msg: str) -> None:
     try:
         from adb_bot.clients.telegram import TelegramNotifier
         TelegramNotifier().send(f"📱 <b>iPhone farm</b>\n{msg}", logger=log, category="phones")
     except Exception as exc:                              # noqa: BLE001
         log.warning("telegram failed: %s", exc)
+
+
+def _licence_out(letter: str, containers: list, why: str) -> None:
+    """22.10: XXTouch's Havoc licence on this phone answers 403. Nothing is skipped (Rene: we must post): the phone
+    waits and retries every LICENCE_RETRY s; this just says once which phone it is and what usually fixes it."""
+    msg = (f"iPhone {letter}: XXTouch says 'no licence' (403) -- {len(containers)} account(s) waiting "
+           f"({', '.join(containers)}). Retrying every {LICENCE_RETRY // 60} min with XXTExplorer re-sync. If it stays: "
+           f"Sileo -> Havoc -> login on this phone, or the licence check is stuck behind the proxy. ({why[:100]})")
+    log.error(msg); _tg(msg)
+
+
+def _licence_back(letter: str) -> None:
+    msg = f"iPhone {letter}: XXTouch licence answers again -- posting continues."
+    log.info(msg); _tg(msg)
+
+
+def _licence_heal(letter: str) -> None:
+    """Open XXTExplorer once (hands the cached licence back to the service) -- over SSH, no WDA needed."""
+    try:
+        import subprocess
+        from adb_bot.automation import iphone_farm_config as C
+        from adb_bot.automation.iphone_farm_wda import resolve
+        _rec, p = resolve(PHONE_REF[letter]); dest = p.get("ssh") or f"mobile@{p['ip']}"
+        subprocess.run(["ssh", "-n", "-i", C.SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=20",
+                        *C.lan_ssh_opts(dest), dest, "uiopen --bundleid ch.xxtou.XXTExplorer; sleep 8; uiopen --bundleid com.burbn.instagram"],
+                       capture_output=True, timeout=60)
+    except Exception as exc:                              # noqa: BLE001
+        log.warning("%s: licence heal failed (%s)", letter, exc)
 
 
 def _skip(path: Path, container: str, why: str):
@@ -200,17 +224,26 @@ def run_phone(letter: str, containers: list[str], clips: list[Path], n: int, sta
               scroll: float, pause: tuple[float, float], window: tuple[int, int], model: str = "Nikki", limit: int = 40):
     # 14.10: with the Mac jump host refusing SSH for a while, XX() could not open its tunnel and the phone's whole
     # thread died at start (A, B, D, E did nothing all morning). Retry for ~30 min before giving the phone up.
-    for attempt in range(30):
+    # 22.10 (Rene: "ueberspringen ist Quatsch, wir wollen posten"): a dead XXTouch licence never parks the phone.
+    # Say it once (which phone, what to do), then keep healing + retrying every LICENCE_RETRY seconds until the
+    # licence answers again (Havoc login done, proxy routed around, ...) -- the day's posts still go out.
+    x, lic_said = None, False
+    for attempt in range(30 * 6):
         try:
             x = XX(PHONE_REF[letter], log=lambda m: log.info("%s %s", letter, m))
+            if lic_said:
+                _licence_back(letter)
             break
         except XXLicenceError as exc:
-            _licence_out(letter, containers, state, str(exc)); return
+            if not lic_said:
+                _licence_out(letter, containers, str(exc)); lic_said = True
+            _licence_heal(letter)
+            time.sleep(LICENCE_RETRY)
         except Exception as exc:                          # noqa: BLE001
             log.warning("phone %s: XXTouch not reachable yet (%s) -- retry in 60 s", letter, exc)
             time.sleep(60)
-    else:
-        log.error("phone %s: XXTouch unreachable for 30 min -- phone skipped", letter); return
+    if x is None:
+        log.error("phone %s: XXTouch unreachable/unlicensed all day -- phone given up", letter); return
     st = _state(state)
     queue, due, tries = {}, {}, {}
     lead_scroll_done = set()
@@ -289,10 +322,17 @@ def run_phone(letter: str, containers: list[str], clips: list[Path], n: int, sta
             # retry/skip logic below in charge instead.
             log.error("%s: STOPPED -- %s", c, exc)
             if "requires a valid license" in str(exc) or isinstance(exc, XXLicenceError):
-                # 22.10: licence gone mid-run -> no point in 3 tries per account; park the whole phone for today
-                _licence_out(letter, [k for k in containers if queue.get(k)], state, str(exc))
-                for k in containers:
-                    queue[k] = []
+                # 22.10: licence gone mid-run -> do NOT burn the account's 3 tries: say it once, heal, wait, retry
+                _licence_out(letter, [k for k in containers if queue.get(k)], str(exc))
+                while True:
+                    _licence_heal(letter)
+                    time.sleep(LICENCE_RETRY)
+                    try:
+                        if x.t._post("/spawn", b"sys.msleep(1)\n").get("code") == 0:
+                            _licence_back(letter); break
+                    except Exception:                     # noqa: BLE001
+                        pass
+                due[c] = time.time() + 30                 # same account again, nothing was counted against it
                 continue
             try:
                 # 2026-10-19 Rene: "Confirm you're human" / "Enter your mobile number" screens are
