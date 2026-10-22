@@ -107,6 +107,11 @@ def main(argv=None) -> int:
     if a.dry:
         return 0
     from adb_bot.automation.iphone_xx_post_batch import main as post_main
+    # 22.10 live: our basicConfig above made post_main's own basicConfig (stream + xx_post_<date>.log) a no-op,
+    # so the whole run logged to the journal only. Hand the root logger back before the batch sets it up.
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
     args = [date, *plan, "--model", a.model, "--window", a.window]
     if a.reels:
         args += ["--reels", str(a.reels)]
