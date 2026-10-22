@@ -1023,7 +1023,9 @@ def _phone_ssh(device: str, cmd: str, stdin: bytes | None = None, timeout: int =
     import subprocess
     from adb_bot.automation.iphone_farm_config import SSH_KEY, lan_ssh_opts
     _, ph = resolve(device)
-    dest = f"mobile@{ph['ip']}"
+    # 22.10 (WLAN switch): `ip` is now the phone's Bonjour name, which only the Mac resolves -- go through the
+    # ~/.ssh/config alias (ProxyCommand via the Mac) like iphone_farm_config._ssh does; raw ip stays the fallback
+    dest = ph.get("ssh") or f"mobile@{ph['ip']}"
     r = subprocess.run(["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
                         "-o", "ConnectTimeout=30", *lan_ssh_opts(dest), dest, cmd],
                        input=stdin, capture_output=True, timeout=timeout)
