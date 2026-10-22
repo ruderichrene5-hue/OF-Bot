@@ -401,6 +401,8 @@ def run_one(device: str, container: str, day: int, row: str | None = None, expec
             _note(row, f"day {day} failed: {str(exc)[:300]} | screen {shot or '-'}")
             if "logged out" in str(exc):                      # 22.10: A13 -- mark it so the tick stops picking it
                 _patch(row, {F_STATUS: "logged out"})
+            elif "checkpoint" in str(exc):                    # 22.10: H4 "Confirm you're human" -- Rene solves it by hand
+                _patch(row, {F_STATUS: "Human Verification"})
         iphone_diag.notify(f"warm-up day {day} on {letter}/{container} (@{expect or '?'}) stopped: {str(exc)[:200]}\n{shot or ''}")
         return {"ok": False, "error": str(exc), "screen": shot, **stats}
     finally:
