@@ -162,6 +162,28 @@ class Human:
         self.swipe(w * random.uniform(0.4, 0.65), y1, w * random.uniform(0.4, 0.65), y1 - h * random.uniform(0.15, 0.3),
                    random.uniform(0.1, 0.25))
 
+    def reel_burst(self, count: int) -> None:
+        """Flick through `count` reels quickly (a person skimming), then the caller decides where to stop."""
+        if self.xx:
+            try:
+                self.xx.flick_burst(count)
+                return
+            except Exception as exc:                          # noqa: BLE001
+                self.log(f"burst fallback: {str(exc)[:60]}")
+        for _ in range(count):
+            w, h = self.p.size()
+            y1 = h * random.uniform(0.6, 0.75)
+            self.swipe(w * random.uniform(0.4, 0.65), y1, w * random.uniform(0.4, 0.65), y1 - h * random.uniform(0.15, 0.3),
+                       random.uniform(0.08, 0.16))
+            time.sleep(random.uniform(0.2, 0.6))
+
+    def reel_hold(self, seconds: float) -> None:
+        """Finger resting on the reel (pauses playback) -- middle of the screen, away from the right-hand
+        buttons and the caption at the bottom."""
+        w, h = self.p.size()
+        x, y = w * random.uniform(0.25, 0.6), h * random.uniform(0.3, 0.55)
+        self.hold(x, y, seconds)
+
     def scroll_feed(self, strength: float = 1.0):
         """One flick up through a feed, start/end points wandering a little."""
         w, h = self.p.size()

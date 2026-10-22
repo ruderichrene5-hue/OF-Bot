@@ -382,6 +382,24 @@ class Touch:
         self.run(_flick_lua(rec))
         return {"ms": rec[-1][0], "px": round(rec[0][2] - rec[-1][2]), "samples": len(rec)}
 
+    def flick_burst(self, count: int, gap_ms: tuple[int, int] = (220, 700), fast: bool = True) -> dict:
+        """Several recorded flicks in ONE script (one XXTouch round trip is ~2 s, so a 3-reels-in-a-second
+        burst cannot be three calls). fast=True draws from the quickest third of the phone's own flicks --
+        Rene 22.10: 'auch mal so richtig schnell, 3 Reels in einer Sekunde, dann stopp'."""
+        pool = clean_swipes(self.swipes, up=True)
+        if not pool:
+            raise XXError(f"{self.ref}: no clean recorded flicks in the library")
+        if fast:
+            pool = sorted(pool, key=lambda s: s[-1][0])[:max(5, len(pool) // 3)]
+        recs = [random.choice(pool) for _ in range(count)]
+        parts = []
+        for i, rec in enumerate(recs):
+            if i:
+                parts.append(f"sys.msleep({random.randint(*gap_ms)})")
+            parts.append(_flick_lua(rec))
+        self.run("\n".join(parts))
+        return {"count": count, "ms": [r[-1][0] for r in recs], "px": [round(r[0][2] - r[-1][2]) for r in recs]}
+
     def drag(self, x1: float, y1: float, x2: float, y2: float, hold: float = 0.35, seconds: float = 0.6):
         """Press, hold, then move slowly to (x2,y2) and lift -- dragging a sticker or a slider."""
         s = self.scale

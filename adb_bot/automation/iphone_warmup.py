@@ -102,6 +102,54 @@ def _recover(h: Human, log_fn, stats: dict, exc: Exception, ref: str, container:
             time.sleep(3)
 
 
+# Rene 22.10: "nicht immer gleich langsam -- auch mal zurueck, auch mal den Finger drauf halten, auch mal richtig
+# schnell: 3 Reels in einer Sekunde und dann stopp." Per reel one of these rhythms is drawn (weights per day).
+RHYTHM = {
+    #        watch  skim  burst  hold  back
+    1: dict(watch=62, skim=14, burst=8, hold=10, back=6),
+    2: dict(watch=55, skim=16, burst=12, hold=10, back=7),
+    3: dict(watch=52, skim=16, burst=14, hold=10, back=8),
+    4: dict(watch=50, skim=16, burst=16, hold=10, back=8),
+}
+
+
+def _rhythm(h: Human, plan: Plan, stats: dict) -> None:
+    """Leave the current reel the way a person would right now: watch it out, skim, burst through a few and
+    stop, rest the finger on it, or go back one. Always ends with a new reel on screen and a pause."""
+    w = RHYTHM[plan.day]
+    mode = random.choices(list(w), weights=list(w.values()))[0]
+    stats["rhythm"][mode] = stats["rhythm"].get(mode, 0) + 1
+    if mode == "watch":                                       # the normal case: look, then one flick
+        h.pause(3, 14) if random.random() < 0.85 else h.pause(15, 35)
+        h.reel_next()
+        stats["reels_watched"] += 1
+    elif mode == "skim":                                      # a few reels at 1-3 s each, then one that gets watched
+        for _ in range(random.randint(2, 4)):
+            h.pause(0.9, 3.0)
+            h.reel_next()
+            stats["reels_watched"] += 1
+        h.pause(4, 12)
+    elif mode == "burst":                                     # 3-5 reels inside ~1-3 s, then stop on one
+        n = random.randint(3, 5)
+        h.pause(0.5, 2.0)
+        h.reel_burst(n)
+        stats["reels_watched"] += n
+        h.pause(5, 16)
+    elif mode == "hold":                                      # finger down on the reel (pauses it), lift, watch on
+        h.pause(2, 6)
+        h.reel_hold(random.uniform(1.2, 3.5))
+        h.pause(2, 8)
+        h.reel_next()
+        stats["reels_watched"] += 1
+    else:                                                     # back: the one before was better
+        h.pause(2, 6)
+        h.swipe(0.5 + random.uniform(-0.1, 0.1), 0.3, 0.5 + random.uniform(-0.1, 0.1), 0.8, random.uniform(0.15, 0.3))
+        h.pause(3, 10)
+        h.reel_next()
+        stats["reels_watched"] += 1
+    stats["swipes"] += 1
+
+
 def _session(h: Human, plan: Plan, log_fn, stats: dict, ref: str = "?", container: str = "?") -> None:
     """The shared engine: reels loop with the day's follows spread out and the day's extras at its rate.
     Story/explore rounds happen at fixed fractions of the session so every day has its own rhythm. Every
@@ -138,10 +186,7 @@ def _session(h: Human, plan: Plan, log_fn, stats: dict, ref: str = "?", containe
                 name = _random_extra(h, "reels", log_fn, plan.extras)
                 if name:
                     stats["extras"].append(name)
-            h.reel_next()                                     # one of Rene's recorded flicks, as recorded
-            stats["swipes"] += 1
-            stats["reels_watched"] += 1
-            h.pause(3, 14) if random.random() < 0.85 else h.pause(15, 35)
+            _rhythm(h, plan, stats)
             streak = 0
         except Exception as exc:                              # noqa: BLE001
             streak += 1
@@ -309,7 +354,7 @@ def run_one(device: str, container: str, day: int, row: str | None = None, expec
     {"ok": False, "error": ..., "screen": path} and leaves Airtable's day field untouched."""
     say = log_fn or (lambda m: log.info("%s/%s: %s", _letter(device), container, m))
     plan, script = PLANS[day], DAY_SCRIPTS[day]
-    stats = {"day": day, "follows": [], "extras": [], "popups": [], "errors": [], "swipes": 0, "reels_watched": 0}
+    stats = {"day": day, "follows": [], "extras": [], "popups": [], "errors": [], "rhythm": {}, "swipes": 0, "reels_watched": 0}
     if dry:
         say(f"DRY: would run day {day} '{plan.title}' ({plan.words})")
         return {"ok": True, "dry": True, **stats}
@@ -329,7 +374,7 @@ def run_one(device: str, container: str, day: int, row: str | None = None, expec
         script(h, say, stats, ref=device, container=container)
         say(f"day {day} done: {stats['reels_watched']} reels, {len(stats['follows'])} follows "
             f"({stats.get('follows_missed', 0)} missed), extras {stats['extras']}, popups {stats['popups']}, "
-            f"{len(stats['errors'])} hiccups")
+            f"{len(stats['errors'])} hiccups, rhythm {stats['rhythm']}")
         if row:
             fields = {F_DONE[day]: dt.datetime.now(BERLIN).isoformat()}
             if day == 4:
