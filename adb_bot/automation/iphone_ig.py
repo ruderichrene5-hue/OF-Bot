@@ -365,10 +365,22 @@ def open_account(device: str, container: str, expect_handle: str | None = None, 
         hit = p.find("predicate string", f"label == {json.dumps(marker)} AND type == 'XCUIElementTypeButton'")
         if hit:
             raise FlowError(f"{container}: logged out -- Instagram shows {marker!r}, no account on this container")
-    handle = current_handle(p)
-    if not handle:                                        # feed header not there: read the profile title instead
+    # 22.10 live (H4): the push-notification alert sat on a feed that was still loading, and the story bubble
+    # read "Instagram user" (the placeholder) -> "opened @Instagram user, expected @kathi89402". Clear popups and
+    # give the feed up to ~25 s to show the real handle before deciding anything.
+    hh = Human(p, log)
+    handle = None
+    for _ in range(6):
+        pop = dismiss_popups(hh)
+        if pop:
+            log(pop)
+        handle = current_handle(p)
+        if handle and handle.lower() not in ("instagram user", "user"):
+            break
+        time.sleep(4)
+    if not handle or handle.lower() in ("instagram user", "user"):   # feed header not there: read the profile title
         try:
-            go_tab(Human(p, log), "profile")
+            go_tab(hh, "profile")
             t = p.find("predicate string", "name == 'user-switch-title-button'")
             handle = (t.attr("label") if t else None) or None
         except (FlowError, WDAError):
