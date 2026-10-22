@@ -393,6 +393,8 @@ def run_one(device: str, container: str, day: int, row: str | None = None, expec
         say(f"day {day} FAILED: {exc} (screen: {shot or 'none'})")
         if row:
             _note(row, f"day {day} failed: {str(exc)[:300]} | screen {shot or '-'}")
+            if "logged out" in str(exc):                      # 22.10: A13 -- mark it so the tick stops picking it
+                _patch(row, {F_STATUS: "logged out"})
         iphone_diag.notify(f"warm-up day {day} on {letter}/{container} (@{expect or '?'}) stopped: {str(exc)[:200]}\n{shot or ''}")
         return {"ok": False, "error": str(exc), "screen": shot, **stats}
     finally:

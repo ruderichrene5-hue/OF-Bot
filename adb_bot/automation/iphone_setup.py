@@ -217,6 +217,8 @@ def run_step(device: str, container: str, step: str, row: str | None = None, fie
         if row:
             _note(row, f"setup {step} failed: {str(exc)[:300]} | screen {shot or '-'}")
             _mark_state(row)                                  # a half-done edit still counts as today's edit
+            if "logged out" in str(exc):
+                _patch(row, {F_STATUS: "logged out"})
         iphone_diag.notify(f"setup {step} on {letter}/{container} (@{expect or '?'}) failed: {str(exc)[:200]}\n{shot or ''}")
         return {"ok": False, "step": step, "error": str(exc), "screen": shot}
     finally:

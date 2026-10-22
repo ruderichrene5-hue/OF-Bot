@@ -45,6 +45,7 @@ class FlowError(RuntimeError):
 
 
 # screens Instagram shows instead of the app when an account is held; flows must stop, not click through
+LOGGED_OUT_TEXTS = ("I already have a profile", "Get started", "Create new account", "Use another profile", "Log in")
 CHECKPOINT_TEXTS = ("Confirm you're human", "Confirm it's you", "We suspended your account", "Your account has been disabled",
                     "Help us confirm", "Enter the code", "We've detected unusual activity", "Was this you")
 
@@ -348,6 +349,13 @@ def open_account(device: str, container: str, expect_handle: str | None = None, 
         hit = p.find("predicate string", f"label CONTAINS[c] {json.dumps(marker)}")
         if hit:
             raise FlowError(f"{container}: account is at a checkpoint ({(hit.attr('label') or marker)[:80]!r}) -- not touching it")
+    # 22.10 live (A13, first automatic warm-up tick): Instagram was at its welcome screen ("Get started" /
+    # "I already have a profile") -- nobody logged in -- and the flow happily started swiping on it. A logged-out
+    # screen is a stop, and the caller marks the account (Status "logged out" in Airtable).
+    for marker in LOGGED_OUT_TEXTS:
+        hit = p.find("predicate string", f"label == {json.dumps(marker)} AND type == 'XCUIElementTypeButton'")
+        if hit:
+            raise FlowError(f"{container}: logged out -- Instagram shows {marker!r}, no account on this container")
     handle = current_handle(p)
     if not handle:                                        # feed header not there: read the profile title instead
         try:
