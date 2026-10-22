@@ -1175,6 +1175,13 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 # `app_restarts` budget as those, and the unnamed text is
                 # still kept for a person if the restart does not help
                 # either.
+                keeper = getattr(driver, "keep_screen", None)
+                if callable(keeper):
+                    # 22.10 (Rene): the unknown screen itself is the evidence -- picture + text before any restart
+                    try:
+                        keeper("unknown-screen", (text or "")[:400])
+                    except Exception:                           # noqa: BLE001 -- diagnostics never break the run
+                        pass
                 starter = getattr(driver, "restart_app", None)
                 if app_restarts < MAX_APP_RESTARTS and callable(starter) and starter():
                     # Same reasoning as the SCREEN_LAUNCHER/SCREEN_NOT_INSTAGRAM

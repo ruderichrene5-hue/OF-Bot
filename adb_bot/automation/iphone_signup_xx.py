@@ -353,6 +353,12 @@ class IphoneSignupDriverXX:
         return False
 
     # -- recovery -----------------------------------------------------------------
+    def keep_screen(self, reason: str, detail: str = "") -> str | None:
+        """22.10 (Rene): picture + on-screen text of where the signup got stuck -> /opt/adbbot/logs/screens/."""
+        from adb_bot.automation import iphone_diag
+        return iphone_diag.keep_screen(self.x.ref, f"signup-{reason}", detail, container=self.container,
+                                       xx=self.x, log_fn=self.logger)
+
     def restart_app(self) -> bool:
         # Rene 2026-10-20: Nie Instagram killen wenn Terms grad akzeptiert wurden (= Account live).
         # Siehe iphone_signup.py restart_app() -- derselbe Guard.
@@ -362,6 +368,7 @@ class IphoneSignupDriverXX:
         if self.restarts >= 2:
             return False
         self.restarts += 1
+        self.keep_screen("restart-app", f"restart {self.restarts}")
         # 12.10 (Rene): Instagram is ONLY ever opened by the container Shortcut (it sets Shadowrocket to Proxy
         # and checks IP/country/DNS first). This used to app.run Instagram directly before the Shortcut.
         ok, msg = iphone_farm_config.run_shortcut(self.device_rec, self.container)

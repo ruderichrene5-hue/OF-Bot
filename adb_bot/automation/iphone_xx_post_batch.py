@@ -29,6 +29,7 @@ import requests
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from adb_bot.automation import iphone_diag
 from adb_bot.automation import iphone_phone_lock as phone_lock
 from adb_bot.automation.iphone_xx_flows import XXLicenceError, IG, XX, FlowError, post_reel, scroll_feed
 
@@ -318,7 +319,10 @@ def run_phone(letter: str, containers: list[str], clips: list[Path], n: int, sta
             # killed the whole phone thread outright -- every other account on that phone lost for
             # the rest of the day over one hiccup. Catching Exception broadly keeps the per-account
             # retry/skip logic below in charge instead.
-            log.error("%s: STOPPED -- %s", c, exc)
+            # 22.10 (Rene): every stop gets a screenshot first, so the real screen can be seen afterwards.
+            shot = iphone_diag.keep_screen(x.ref, "stopped", f"{type(exc).__name__}: {exc}", container=c, xx=x,
+                                           log_fn=lambda m: log.info("%s: %s", c, m))
+            log.error("%s: STOPPED -- %s (screen: %s)", c, exc, shot or "none")
             if "requires a valid license" in str(exc) or isinstance(exc, XXLicenceError):
                 # 22.10: licence gone mid-run -> do NOT burn the account's 3 tries: say it once, heal, wait, retry
                 _licence_out(letter, [k for k in containers if queue.get(k)], str(exc))

@@ -270,22 +270,12 @@ def _clip_seconds(path: str) -> int:
     return int(round(float(out or 0)))
 
 
-def _keep_screen(x: XX, why: str) -> None:
-    """Screenshot + OCR text of a screen the flow did not understand -> /opt/adbbot/logs/screens/ (14.10)."""
-    try:
-        import os
-        import subprocess as _sp
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        d = "/opt/adbbot/logs/screens"; os.makedirs(d, exist_ok=True)
-        remote = f"/var/mobile/Media/keep_{stamp}.png"
-        x.lua_out(f'screen.image():save_to_png_file("{remote}") os.execute("chmod 644 {remote}") OUT = "ok"')
-        png = _sp.run(["ssh", "-o", "BatchMode=yes", x.dest, f"cat {remote}; rm -f {remote}"], capture_output=True, timeout=60).stdout
-        base = f"{d}/{stamp}_{x.ref}_{why}"
-        open(base + ".png", "wb").write(png)
-        open(base + ".txt", "w").write("\n".join(w["text"] for w in x.ocr()))
-        x.log(f"screen kept: {base}.png")
-    except Exception as exc:                              # noqa: BLE001 -- diagnostics must never break a post
-        x.log(f"screen keep failed: {exc}")
+def _keep_screen(x: XX, why: str, detail: str = "", container: str = "") -> str | None:
+    """Screenshot + on-screen text of a screen the flow did not understand -> /opt/adbbot/logs/screens/<date>/.
+    22.10 (Rene: "ueberall, wenn der Bot nicht weiter weiss, brauche ich einen Screenshot"): shared module,
+    WDA picture first (works while XXTouch is 403/busy), XXTouch screen.image as fallback. Returns the path."""
+    from adb_bot.automation import iphone_diag
+    return iphone_diag.keep_screen(x.ref, why, detail, container=container, xx=x, log_fn=x.log)
 
 
 def _dismiss_popups(x: XX) -> bool:

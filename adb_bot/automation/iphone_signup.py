@@ -479,6 +479,13 @@ class IphoneSignupDriver:
         self._root = None
         return True
 
+    def keep_screen(self, reason: str, detail: str = "") -> str | None:
+        """22.10 (Rene): picture + on-screen text of where the signup got stuck -> /opt/adbbot/logs/screens/."""
+        from adb_bot.automation import iphone_diag
+        return iphone_diag.keep_screen(getattr(self.p, "ref", self.device_rec), f"signup-{reason}", detail,
+                                       container=self.container, wda=self.p, xx=self.touch,
+                                       log_fn=self.logger.info)
+
     def restart_app(self) -> bool:
         """Instagram vanished: re-run the container Shortcut (proxy + container + app).
 
@@ -494,6 +501,7 @@ class IphoneSignupDriver:
         if self.restarts >= 2:
             return False
         self.restarts += 1
+        self.keep_screen("restart-app", f"restart {self.restarts}")
         try:
             self.p.terminate(IG_BUNDLE)
         except WDAError:
@@ -676,6 +684,13 @@ def run_row(info: dict, dry_run: bool = False) -> dict:
         if res is not None and "limit how often" in str(getattr(res, "detail", "")):
             note_attempt(info, rate_limited=True)
         return out
+    except Exception as exc:                          # noqa: BLE001
+        # 22.10 (Rene): a crash outside the flow's own screen reading still leaves a picture behind
+        from adb_bot.automation import iphone_diag
+        shot = iphone_diag.keep_screen(info["device"], "signup-crash", f"{type(exc).__name__}: {exc}",
+                                       container=info.get("container") or "", log_fn=log.info)
+        log.error("%s/%s: signup crashed: %s (screen: %s)", info["device"], info.get("container"), exc, shot or "none")
+        raise
     finally:
         try:
             iphone_farm_config._set_off(info["device"], False)

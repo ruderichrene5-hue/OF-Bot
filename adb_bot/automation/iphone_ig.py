@@ -359,9 +359,18 @@ def warmup(p: Phone, minutes: float | None = None, follows: int | None = None, l
             errors += 1
             log(f"WDA error {errors}: {exc}")
             if errors >= 6:
+                from adb_bot.automation import iphone_diag
+                iphone_diag.keep_screen(getattr(p, "ref", "?"), "warmup-wda", str(exc), wda=None, xx=h.xx, log_fn=log)
                 raise
             time.sleep(10 * errors)
             p.sid = None
+        except Exception as exc:                          # noqa: BLE001
+            # 22.10 (Rene): a screen the warm-up does not understand -> screenshot + text first, then stop
+            from adb_bot.automation import iphone_diag
+            shot = iphone_diag.keep_screen(getattr(p, "ref", "?"), "warmup-stuck", f"{type(exc).__name__}: {exc}",
+                                           wda=p, xx=h.xx, log_fn=log)
+            log(f"warm-up stopped at step {n}: {exc} (screen: {shot or 'none'})")
+            raise
     stats["follows_missed"] = len(slots)
     return stats
 
