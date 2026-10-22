@@ -427,6 +427,21 @@ BATTERY_EVERY = 900          # 22.10: battery read through WDA every 15 min
 BATTERY_WARN = 40            # ChargeLimiter keeps phones between 40 and 80 % -- below 40 and not charging = cable problem         # seconds between XXTouch licence probes per phone
 
 
+def _busy(rec_id: str, phone: dict) -> bool:
+    """A flow has this phone: the off flag (warm-up/setup/signup) or the phone lock (posting) is set."""
+    try:
+        from adb_bot.automation import iphone_phone_lock as _pl
+        from adb_bot.automation.iphone_diag import _LETTER
+        letter = _LETTER.get(str(phone.get("stream")), "")
+        held = _pl.try_hold(letter) if letter else None
+        busy = iphone_farm_config.is_off(rec_id) or bool(letter and held is None)
+        if held:
+            held.release()
+        return busy
+    except Exception:                                       # noqa: BLE001
+        return False
+
+
 def _xx_licence(ref: str) -> int | None:
     """0 = XXTouch runs scripts, 403 = Havoc licence invalid, None = phone/tunnel not reachable."""
     try:
@@ -509,13 +524,18 @@ def run_wlan(now: float, state: dict, phones: dict) -> dict:
             st.update(fails=0, fail_alerted=False)
             # 22.10 (A live at 19 % unplugged, D vanished from the WLAN the same evening): once every BATTERY_EVERY
             # read the battery through WDA and say so when a phone is NOT charging below BATTERY_WARN
-            if now - st.get("bat_check", 0) > BATTERY_EVERY:
+            if now - st.get("bat_check", 0) > BATTERY_EVERY and not _busy(rec_id, phone):
+                # 22.10, 18 min after this went live: creating a NEW WDA session here invalidated the session of the
+                # warm-up running on A and I (every call "invalid session id", Instagram ended in the background).
+                # Only read when no flow has the phone, and reuse the session /status reports instead of making one.
                 st["bat_check"] = now
                 try:
                     import requests
                     from adb_bot.automation.iphone_farm_wda import _relay_host
-                    sid = requests.post(f"http://{_relay_host()}:{phone['wda_port']}/session", json={"capabilities": {}}, timeout=10).json()["sessionId"]
-                    b = requests.get(f"http://{_relay_host()}:{phone['wda_port']}/session/{sid}/wda/batteryInfo", timeout=10).json()["value"]
+                    base = f"http://{_relay_host()}:{phone['wda_port']}"
+                    sid = (requests.get(f"{base}/status", timeout=6).json().get("sessionId")
+                           or requests.post(f"{base}/session", json={"capabilities": {}}, timeout=10).json()["sessionId"])
+                    b = requests.get(f"{base}/session/{sid}/wda/batteryInfo", timeout=10).json()["value"]
                     level, charging = int(round(b.get("level", 1) * 100)), b.get("state") in (2, 3)
                     st["battery"] = {"level": level, "charging": charging, "t": now}
                     if not charging and level <= BATTERY_WARN and not st.get("bat_alerted"):
@@ -531,17 +551,7 @@ def run_wlan(now: float, state: dict, phones: dict) -> dict:
             continue
         # 22.10: never restart WDA under a running flow (warm-up/setup/signup mark the phone off, posting holds the
         # lock) -- a slow /status while Instagram is being driven is not a dead WDA, and a kick would kill the run
-        try:
-            from adb_bot.automation import iphone_phone_lock as _pl
-            from adb_bot.automation.iphone_diag import _LETTER
-            letter = _LETTER.get(str(phone.get("stream")), "")
-            held = _pl.try_hold(letter) if letter else None
-            busy = iphone_farm_config.is_off(rec_id) or (letter and held is None)
-            if held:
-                held.release()
-        except Exception:                                   # noqa: BLE001
-            busy = False
-        if busy:
+        if _busy(rec_id, phone):
             log.info("%s: WDA not answering but a flow has the phone -- not restarting now", name)
             continue
         st["last_try"] = now
