@@ -334,9 +334,38 @@ def back_to_instagram(p) -> None:
         raise FlowError("Instagram is not running -- reopen it only via the container Shortcut")
     p.activate(IG_BUNDLE)
 
+def finish_phone(p: Phone, log=print) -> None:
+    """Rene 22.10 ("man kann das nicht die ganze Nacht durchlaufen lassen -- danach Handy ausschalten"): a run ends
+    with Instagram closed and the screen locked, like a person putting the phone down. Never raises."""
+    try:
+        p.terminate(IG_BUNDLE)
+    except Exception as exc:                                  # noqa: BLE001
+        log(f"close Instagram skipped: {str(exc)[:60]}")
+    try:
+        p._req("POST", p._s("/wda/lock"))
+        log("Instagram closed, screen locked")
+    except Exception as exc:                                  # noqa: BLE001
+        log(f"screen lock skipped: {str(exc)[:60]}")
+
+
+def unlock_phone(p: Phone, log=print) -> None:
+    """Screen on and unlocked (no passcode on the farm phones) -- the counterpart of finish_phone()."""
+    try:
+        if p._req("GET", p._s("/wda/locked")):
+            p._req("POST", p._s("/wda/unlock"))
+            time.sleep(1.5)
+            log("screen unlocked")
+    except Exception as exc:                                  # noqa: BLE001
+        log(f"unlock skipped: {str(exc)[:60]}")
+
+
 def open_account(device: str, container: str, expect_handle: str | None = None, log=print) -> Phone:
     """Run the container's Shortcut and wait for Instagram with that container's proxy up."""
     rec_id, _ = resolve(device)
+    try:                                                      # 22.10: runs now end with a locked screen -- wake it first
+        unlock_phone(connect(device, timeout=30), log)
+    except Exception as exc:                                  # noqa: BLE001
+        log(f"pre-unlock skipped: {str(exc)[:60]}")
     # 11.10: was [ABC] only -- D and E are real farm phones too (iphone_signup.py has run dozens
     # of containers on both today), this just never got updated after they were added.
     # 20.10 (Rene): extended from A-E to A-L to cover G/H/I (fleet since 10-12) and new F/J/K/L.

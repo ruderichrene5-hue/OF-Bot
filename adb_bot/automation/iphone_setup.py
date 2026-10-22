@@ -224,6 +224,9 @@ def run_step(device: str, container: str, step: str, row: str | None = None, fie
         iphone_diag.notify(f"setup {step} on {letter}/{container} (@{expect or '?'}) failed: {str(exc)[:200]}\n{shot or ''}")
         return {"ok": False, "step": step, "error": str(exc), "screen": shot}
     finally:
+        if p is not None:
+            from adb_bot.automation.iphone_ig import finish_phone
+            finish_phone(p, say)                              # Instagram closed, screen locked (Rene 22.10)
         try:
             iphone_farm_config._set_off(rec_id, False)
         except Exception:                                     # noqa: BLE001

@@ -442,6 +442,9 @@ def run_one(device: str, container: str, day: int, row: str | None = None, expec
         iphone_diag.notify(f"warm-up day {day} on {letter}/{container} (@{expect or '?'}) stopped: {str(exc)[:200]}\n{shot or ''}")
         return {"ok": False, "error": str(exc), "screen": shot, **stats}
     finally:
+        if p is not None:
+            from adb_bot.automation.iphone_ig import finish_phone
+            finish_phone(p, say)                              # Instagram closed, screen locked (Rene 22.10)
         try:
             iphone_farm_config._set_off(rec_id, False)
         except Exception:                                     # noqa: BLE001
