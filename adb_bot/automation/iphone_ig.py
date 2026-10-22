@@ -151,12 +151,11 @@ class Human:
 
     def reel_id(self) -> str | None:
         """Something that names the reel on screen ("Reel by <handle>." / "Post by <handle>"), or None."""
-        try:
-            for e in self.p.find_all("predicate string", "visible == 1 AND (label BEGINSWITH 'Reel by' OR label BEGINSWITH 'Post by')")[:1]:
-                return e.attr("label")
+        try:                                                  # one plain find: 1.4 s on B; an OR find_all took 12 s
+            e = self.p.find("predicate string", "label BEGINSWITH 'Reel by'")
+            return e.attr("label") if e else None
         except WDAError:
-            pass
-        return None
+            return None
 
     def reel_next(self) -> None:
         """Advance one reel. XXTouch: one of Rene's recorded flicks as recorded (own length, own tempo);
