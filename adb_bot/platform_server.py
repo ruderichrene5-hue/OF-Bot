@@ -419,8 +419,19 @@ class Handler(BaseHTTPRequestHandler):
                 sid = json.loads(r)["value"]["sessionId"]
                 _wda_sessions[letter] = sid
                 return sid
-            try:
-                sid = ensure_sid()
+            global _wda_fast
+            if "_wda_fast" not in globals():
+                _wda_fast = set()
+            def run(sid):
+                # 23.10 (Rene: "5 Sekunden bis etwas ankommt"): WDA waits for the app to go idle before every action
+                # (~2 s per tap). Switch that off once per session -- a VA's tap should land like a finger.
+                if sid not in _wda_fast:
+                    try:
+                        wda_post(f"/session/{sid}/appium/settings", {"settings": {"waitForIdleTimeout": 0, "animationCoolOffTimeout": 0,
+                                                                               "shouldWaitForQuiescence": False, "snapshotMaxDepth": 1}})
+                    except Exception:
+                        pass
+                    _wda_fast.add(sid)
                 if action == "tap":
                     wda_post(f"/session/{sid}/wda/tap", body)
                 elif action == "swipe":
@@ -434,6 +445,20 @@ class Handler(BaseHTTPRequestHandler):
                 elif action == "lock":
                     wda_post(f"/session/{sid}/wda/lock", {})
                 else:
+                    raise ValueError("bad action")
+            try:
+                sid = _wda_sessions.get(letter)             # optimistic: no validation round trip per click
+                try:
+                    if not sid:
+                        raise urllib.error.HTTPError("", 404, "no session", {}, None)
+                    run(sid)
+                except urllib.error.HTTPError as e:
+                    if e.code != 404:
+                        raise
+                    _wda_sessions.pop(letter, None)           # session died -> pick up WDA's current one and retry once
+                    sid = ensure_sid()
+                    run(sid)
+                except ValueError:
                     self.send_response(400); self.end_headers(); return
                 self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
                 self.wfile.write(b'{"ok":true}')
@@ -915,7 +940,8 @@ class Handler(BaseHTTPRequestHandler):
                     # are hidden, the mouse wheel scrolls INSIDE the phone (swipe), a click on the name makes the tile big.
                     "<style>body{background:#000;color:#eee;font-family:system-ui;margin:0;padding:12px;overflow-y:auto}"
                     ".g{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;align-items:start}"
-                    ".t{position:relative;background:#111;border-radius:8px;overflow:hidden;cursor:crosshair;touch-action:none}"
+                    ".t{position:relative;background:#111;border-radius:8px;overflow:hidden;cursor:default;touch-action:none;user-select:none;-webkit-user-select:none}"
+                    ".t img{-webkit-user-drag:none;user-select:none}"
                     ".t.big{grid-column:1/-1;max-width:460px;margin:0 auto}"
                     ".t.off{display:none}"
                     ".bar{display:flex;gap:8px;align-items:center;margin:0 0 10px 0;font-size:13px;color:#9aa3b2}"
@@ -952,7 +978,7 @@ class Handler(BaseHTTPRequestHandler):
                     "document.getElementById('showall').addEventListener('click',e=>{document.querySelectorAll('.t.off').forEach(t=>t.classList.remove('off'));e.target.remove();});"
                     "document.querySelectorAll('.t').forEach(t=>{"
                     "  let start=null;"
-                    "  t.addEventListener('mousedown',e=>{start={x:e.offsetX,y:e.offsetY,t:Date.now()};});"
+                    "  t.addEventListener('mousedown',e=>{e.preventDefault();start={x:e.offsetX,y:e.offsetY,t:Date.now()};});"
                     "  t.addEventListener('mouseup',e=>{"
                     "    if(!start)return;"
                     "    const r=t.querySelector('img').getBoundingClientRect();"
@@ -964,10 +990,8 @@ class Handler(BaseHTTPRequestHandler):
                     "      fetch('/phones/wda/'+p+'/swipe',{method:'POST',headers:{'Content-Type':'application/json'},"
                     "        body:JSON.stringify({fromX:start.x*sx,fromY:start.y*sy,toX:e.offsetX*sx,toY:e.offsetY*sy,duration:Math.min(0.6,Math.max(0.08,dur/1000))})});"
                     "    } else {"
-                    "      /* a dark phone wakes on the first click (unlock is a no-op when it is already awake) */"
-                    "      fetch('/phones/wda/'+p+'/unlock',{method:'POST'}).then(()=>"
                     "      fetch('/phones/wda/'+p+'/tap',{method:'POST',headers:{'Content-Type':'application/json'},"
-                    "        body:JSON.stringify({x:e.offsetX*sx,y:e.offsetY*sy})}));"
+                    "        body:JSON.stringify({x:e.offsetX*sx,y:e.offsetY*sy})});"
                     "    }"
                     "    start=null;"
                     "  });"
