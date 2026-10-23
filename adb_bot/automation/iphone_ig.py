@@ -849,13 +849,18 @@ def get_bio(p: Phone, log=print) -> str:
     return bio
 
 
-def set_bio(p: Phone, bio: str, log=print) -> dict:
-    """Replace the bio (max 150 chars) and read it back from the profile."""
+def set_bio(p: Phone, bio: str, log=print, keep_existing: bool = False) -> dict:
+    """Replace the bio (max 150 chars) and read it back from the profile. keep_existing: leave a
+    non-empty bio alone (23.10: default texts must never overwrite a hand-made bio, e.g. Lea Main)."""
     if len(bio) > 150:
         raise FlowError(f"bio is {len(bio)} chars, Instagram allows 150")
     h = Human(p, log)
     open_edit_profile(h)
     before = _value(h.p, "name == 'profile-bio'")
+    if keep_existing and before.strip():
+        _back(h)
+        log(f"bio: kept existing {before!r} (default text not applied)")
+        return {"before": before, "after": before, "ok": True, "kept": True}
     h.tap(h.p.find("predicate string", "name == 'profile-bio'"))
     h.pause(1.5, 2.5)
     box = h.p.find("predicate string", "type == 'XCUIElementTypeTextView' AND label == 'Write a profile bio'")

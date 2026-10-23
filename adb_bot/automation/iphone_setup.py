@@ -460,12 +460,13 @@ def step_picture(p: Phone, device: str, f: dict, say, row: str = "") -> dict:
 
 def step_bio(p: Phone, device: str, f: dict, say, row: str = "") -> dict:
     text = bio_text(f, row)
+    default = not (f.get(F_BIO) or "").strip()
     if len(text) > 150:
         raise RuntimeError(f"Bio Text has {len(text)} chars, Instagram allows 150 -- shorten it in Airtable")
-    res = set_bio(p, text, log=say)
+    res = set_bio(p, text, log=say, keep_existing=default)        # a default text never overwrites a bio already on the phone
     if not res.get("ok"):
         raise RuntimeError(f"bio read back differs: {res}")
-    return {F_BIO_DONE: True, F_BIO: text}
+    return {F_BIO_DONE: True, F_BIO: res["after"].strip() if res.get("kept") else text}
 
 
 def step_highlight(p: Phone, device: str, f: dict, say, row: str = "") -> dict:
