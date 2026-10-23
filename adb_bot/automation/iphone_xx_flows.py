@@ -597,6 +597,10 @@ def post_reel(x: XX, clip: str, log=print) -> None:
             # One more tap on the tile centre before giving the whole account attempt up.
             x.log("gallery: tile tap did not select -- tapping once more")
             x.tap(hit["x"] - 50, hit["y"] - 110); x.pause(2.5, 4)
+            # 23.10 live (C23): the second tap read as a press-and-hold and opened the tile PREVIEW (big clip,
+            # "Select" button at the bottom) -- Select picks the clip and closes the preview.
+            if x.tap_text(r"^Select$", 2):
+                x.pause(2, 3)
             if not x.tap_text(r"^Next", 15, region=NEXT) and not x.find(r"^1$", 0):
                 raise FlowError("gallery: clip not selected")
         if not x.find(r"^Edit video$", 0) and not x.tap_text(r"^Next", 5, region=NEXT):
