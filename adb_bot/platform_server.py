@@ -927,15 +927,13 @@ class Handler(BaseHTTPRequestHandler):
                     ".h{position:absolute;top:6px;right:8px;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:4px;font-size:11px;z-index:2;cursor:pointer}"
                     "</style>"
                     "<div class=bar><span>⏻ wakes a dark phone (or just click it) · click a name = big view · mouse wheel = scroll in the phone · drag = swipe · click = tap · type after a click</span>"
-                    "<span style='flex:1'></span>"
-                    "<button onclick=\"document.querySelectorAll('.t:not(.off)').forEach(t=>fetch('/phones/wda/'+t.dataset.p+'/unlock',{method:'POST'}))\" title='Wake every phone'>⏻ wake all</button>"
-                    "<button onclick=\"document.querySelectorAll('.t.off').forEach(t=>t.classList.remove('off'));this.remove()\">show all phones</button></div>"
+                    "<span style='flex:1'></span><button id=wakeall title='Wake every phone'>⏻ wake all</button><button id=showall>show all phones</button></div>"
                     "<div class=g>"
                     + "".join(f'<div class="t{" off" if L in ("F","J","K","L") else ""}" data-p="{L.lower()}">'
-                             f'<div class=l onclick="event.stopPropagation();this.parentNode.classList.toggle(\'big\');this.parentNode.scrollIntoView({{behavior:\'smooth\',block:\'start\'}})" title="big view on/off" style="cursor:pointer">iPhone {L}</div>'
-                             f'<div class=h style="right:48px" onclick="event.stopPropagation();window.open(\'/phones/{L.lower()}/screen\',\'_blank\')" title="Fullscreen (noVNC)">⛶</div>'
-                             f'<div class=h onclick="event.stopPropagation();fetch(\'/phones/wda/{L.lower()}/home\',{{method:\"POST\"}})" title="Home">⏺</div>'
-                             f'<div class=h style="right:88px" onclick="event.stopPropagation();fetch(\'/phones/wda/{L.lower()}/unlock\',{{method:\"POST\"}})" title="Wake / unlock">⏻</div>'
+                             f'<div class=l data-act=big title="big view on/off" style="cursor:pointer">iPhone {L}</div>'
+                             f'<div class=h style="right:88px" data-act=unlock title="Wake / unlock">⏻</div>'
+                             f'<div class=h style="right:48px" data-act=fs title="Fullscreen (noVNC)">⛶</div>'
+                             f'<div class=h data-act=home title="Home">⏺</div>'
                              f'<img src="/phones/mjpeg/{L.lower()}" alt="iPhone {L} offline">'
                              f'<div class=rc title="reconnecting"></div>'
                              f'</div>'
@@ -943,6 +941,15 @@ class Handler(BaseHTTPRequestHandler):
                     + "</div>"
                     # click handler: translate browser click coords -> iPhone pt coords (375x812 for 7/8, 375x812 for X -- same pt)
                     "<script>"
+                    "const wda=(p,a,b)=>fetch('/phones/wda/'+p+'/'+a,{method:'POST',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});"
+                    "document.querySelectorAll('[data-act]').forEach(el=>el.addEventListener('mousedown',e=>e.stopPropagation()));"
+                    "document.querySelectorAll('[data-act]').forEach(el=>el.addEventListener('mouseup',e=>e.stopPropagation()));"
+                    "document.querySelectorAll('[data-act]').forEach(el=>el.addEventListener('click',e=>{e.stopPropagation();const t=el.closest('.t'),p=t.dataset.p,a=el.dataset.act;"
+                    "  if(a=='big'){t.classList.toggle('big');t.scrollIntoView({behavior:'smooth',block:'start'});}"
+                    "  else if(a=='fs'){window.open('/phones/'+p+'/screen','_blank');}"
+                    "  else wda(p,a);}));"
+                    "document.getElementById('wakeall').addEventListener('click',()=>document.querySelectorAll('.t:not(.off)').forEach(t=>wda(t.dataset.p,'unlock')));"
+                    "document.getElementById('showall').addEventListener('click',e=>{document.querySelectorAll('.t.off').forEach(t=>t.classList.remove('off'));e.target.remove();});"
                     "document.querySelectorAll('.t').forEach(t=>{"
                     "  let start=null;"
                     "  t.addEventListener('mousedown',e=>{start={x:e.offsetX,y:e.offsetY,t:Date.now()};});"

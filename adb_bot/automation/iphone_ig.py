@@ -343,6 +343,14 @@ def finish_phone(p: Phone, log=print) -> None:
         p.terminate(IG_BUNDLE)
     except Exception as exc:                                  # noqa: BLE001
         log(f"close Instagram skipped: {str(exc)[:60]}")
+    # 23.10 (Rene: VAs saw only black tiles in the dashboard): by day the screen stays on (home screen), the lock
+    # only applies at night (23-09 Berlin) -- "nicht die ganze Nacht durchlaufen" was the point, not dark phones
+    import datetime as _dt
+    from zoneinfo import ZoneInfo as _Z
+    hour = _dt.datetime.now(_Z("Europe/Berlin")).hour
+    if 9 <= hour < 23:
+        log("Instagram closed, screen stays on (daytime)")
+        return
     try:
         p._req("POST", p._s("/wda/lock"))
         log("Instagram closed, screen locked")
