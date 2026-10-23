@@ -446,6 +446,40 @@ class Handler(BaseHTTPRequestHandler):
                     wda_post(f"/session/{sid}/wda/lock", {})
                 else:
                     raise ValueError("bad action")
+            # 23.10: taps and swipes go through XXTouch when the phone has it (A-E, G-I): one HTTP call into the
+            # phone-side daemon, ~0.1 s, instead of WDA's XCTest round trip (~1 s). WDA stays the fallback and
+            # handles type/home/unlock/lock.
+            if action in ("tap", "swipe"):
+                try:
+                    b = json.loads(body or b"{}")
+                    from adb_bot.automation import iphone_xxtouch as _xx
+                    global _xx_touch
+                    if "_xx_touch" not in globals():
+                        _xx_touch = {}
+                    stream = {"A": "iphone1", "B": "iphone2", "C": "iphone3", "D": "iphone4", "E": "iphone5", "I": "iphone6",
+                              "G": "iphone7", "H": "iphone8", "F": "iphone9"}.get(letter)
+                    t = _xx_touch.get(letter) or _xx.Touch(stream)
+                    _xx_touch[letter] = t
+                    sc = t.scale
+                    if action == "tap":
+                        lua = f"touch.tap({int(b['x'] * sc)}, {int(b['y'] * sc)}, 60)"
+                    else:
+                        x1, y1, x2, y2 = (int(b[k] * sc) for k in ("fromX", "fromY", "toX", "toY"))
+                        ms = max(60, min(900, int(float(b.get("duration", 0.2)) * 1000)))
+                        steps = 8
+                        lua = f"touch.on(1,{x1},{y1}) sys.msleep(20) " + " ".join(
+                            f"touch.move(1,{x1 + (x2 - x1) * i // steps},{y1 + (y2 - y1) * i // steps}) sys.msleep({ms // steps})"
+                            for i in range(1, steps + 1)) + f" touch.off(1,{x2},{y2})"
+                    res = t._post("/spawn", lua.encode())
+                    if res.get("code") == 0:
+                        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+                        self.wfile.write(b'{"ok":true,"via":"xxtouch"}')
+                        return
+                    if res.get("code") == 403:
+                        raise RuntimeError("licence")
+                except Exception as exc:                  # noqa: BLE001 -- fall back to WDA below
+                    import logging
+                    logging.getLogger("wda-proxy").info("xxtouch %s %s unavailable (%s) -> WDA", letter, action, str(exc)[:60])
             try:
                 sid = _wda_sessions.get(letter)             # optimistic: no validation round trip per click
                 try:
