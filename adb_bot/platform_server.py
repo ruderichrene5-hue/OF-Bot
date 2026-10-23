@@ -449,7 +449,9 @@ class Handler(BaseHTTPRequestHandler):
             # 23.10: taps and swipes go through XXTouch when the phone has it (A-E, G-I): one HTTP call into the
             # phone-side daemon, ~0.1 s, instead of WDA's XCTest round trip (~1 s). WDA stays the fallback and
             # handles type/home/unlock/lock.
-            if action in ("tap", "swipe"):
+            if action in ("tap", "swipe") and os.environ.get("PLATFORM_TOUCH_VIA_XXTOUCH") == "1":
+                # measured 23.10: XXTouch's /spawn takes 4.5 s per script on E (process start on the phone) -- slower
+                # than WDA's ~1 s. Off by default, kept for phones where WDA is unusable.
                 try:
                     b = json.loads(body or b"{}")
                     from adb_bot.automation import iphone_xxtouch as _xx
