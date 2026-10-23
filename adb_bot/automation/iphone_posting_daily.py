@@ -14,6 +14,7 @@ import datetime as dt
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -108,8 +109,19 @@ def main(argv=None) -> int:
         plan.append(",".join(conts))
     log.info("%s %s: %d phones -> %s%s", a.model, date, len(plan), " ".join(plan), f"; skipped {skipped}" if skipped else "")
     if not clips.is_dir() or not any(clips.iterdir()):
-        iphone_diag.notify(f"posting {a.model} {date}: no spoofed variants in {clips} -- nothing started")
-        return 2
+        # 23.10: the spoof pipeline may finish after 09:05 -- wait for the day's variants (up to 8 h, every 10 min)
+        # instead of giving the whole day up
+        iphone_diag.notify(f"posting {a.model} {date}: no spoofed variants in {clips} yet -- waiting for them")
+        for _ in range(48):
+            if a.dry:
+                return 2
+            time.sleep(600)
+            if clips.is_dir() and any(clips.iterdir()):
+                log.info("%s: variants arrived in %s", a.model, clips)
+                break
+        else:
+            iphone_diag.notify(f"posting {a.model} {date}: still no variants in {clips} after 8 h -- nothing started")
+            return 2
     if not plan:
         iphone_diag.notify(f"posting {a.model} {date}: no phone with Healthy accounts answers -- nothing started ({skipped})")
         return 3
