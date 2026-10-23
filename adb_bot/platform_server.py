@@ -1056,7 +1056,7 @@ class Handler(BaseHTTPRequestHandler):
                     "},{passive:false});});"
                     "/* keyboard: focus a tile first, then type */"
                     "let focused=null;"
-                    "document.querySelectorAll('.t').forEach(t=>t.addEventListener('click',e=>{focused=t.dataset.p;t.style.outline='2px solid #4af';setTimeout(()=>t.style.outline='',2000);}));"
+                    "document.querySelectorAll('.t').forEach(t=>t.addEventListener('click',e=>{focused=t.dataset.p;document.querySelectorAll('.t .l').forEach(l=>l.style.background='rgba(0,0,0,.6)');t.querySelector('.l').style.background='rgba(70,140,255,.8)';}));"
                     "document.addEventListener('keydown',e=>{"
                     "  if(!focused||e.target.tagName=='INPUT')return;"
                     "  if(e.key.length==1||['Backspace','Enter'].includes(e.key)){"
