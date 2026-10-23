@@ -289,6 +289,13 @@ def set_licence_bypass(ref: str, log=print) -> list:
             tmp = f.name
         con = sqlite3.connect(tmp)
         changed = False
+        try:
+            con.execute("select 1 from config limit 1")
+        except sqlite3.OperationalError as exc:               # 23.10 (C live): one container had no `config` table
+            log(f"{ref}: {c['name']}: Shadowrocket DB has no config table ({exc}) -- skipped, needs a rebuild")
+            con.close()
+            os.unlink(tmp)
+            continue
         for key, extra in (("skip-proxy", LICENCE_SKIP_HOSTS), ("tun-excluded-routes", LICENCE_EXCLUDED_ROUTES)):
             row = con.execute("select rowid, value from config where section='general' and name=?", (key,)).fetchone()
             cur = [x.strip() for x in (row[1] if row else "").split(",") if x.strip()]
