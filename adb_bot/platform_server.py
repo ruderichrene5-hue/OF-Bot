@@ -406,6 +406,15 @@ class Handler(BaseHTTPRequestHandler):
                         return sid
                     except Exception:
                         pass
+                # 23.10: reuse the session WDA already has (a bot flow may own it) -- a NEW session here would
+                # invalidate the flow's session mid-run ("invalid session id"), seen with diagnostics on E7
+                try:
+                    cur = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/status", timeout=3).read()).get("sessionId")
+                    if cur:
+                        _wda_sessions[letter] = cur
+                        return cur
+                except Exception:
+                    pass
                 r = wda_post("/session", {"capabilities": {"alwaysMatch": {"platformName": "iOS"}}})
                 sid = json.loads(r)["value"]["sessionId"]
                 _wda_sessions[letter] = sid
@@ -420,6 +429,10 @@ class Handler(BaseHTTPRequestHandler):
                     wda_post(f"/session/{sid}/wda/keys", body)
                 elif action == "home":
                     wda_post(f"/session/{sid}/wda/pressButton", {"name": "home"})
+                elif action == "unlock":                  # 23.10 (Rene: "die meisten Handys sind aus, wie mache ich die an")
+                    wda_post(f"/session/{sid}/wda/unlock", {})
+                elif action == "lock":
+                    wda_post(f"/session/{sid}/wda/lock", {})
                 else:
                     self.send_response(400); self.end_headers(); return
                 self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
@@ -913,13 +926,16 @@ class Handler(BaseHTTPRequestHandler):
                     ".l{position:absolute;top:6px;left:8px;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:4px;font-size:13px;z-index:2}"
                     ".h{position:absolute;top:6px;right:8px;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:4px;font-size:11px;z-index:2;cursor:pointer}"
                     "</style>"
-                    "<div class=bar><span>Click a name = big view · mouse wheel = scroll in the phone · drag = swipe · click = tap · type after a click</span>"
-                    "<span style='flex:1'></span><button onclick=\"document.querySelectorAll('.t.off').forEach(t=>t.classList.remove('off'));this.remove()\">show all phones</button></div>"
+                    "<div class=bar><span>⏻ wakes a dark phone (or just click it) · click a name = big view · mouse wheel = scroll in the phone · drag = swipe · click = tap · type after a click</span>"
+                    "<span style='flex:1'></span>"
+                    "<button onclick=\"document.querySelectorAll('.t:not(.off)').forEach(t=>fetch('/phones/wda/'+t.dataset.p+'/unlock',{method:'POST'}))\" title='Wake every phone'>⏻ wake all</button>"
+                    "<button onclick=\"document.querySelectorAll('.t.off').forEach(t=>t.classList.remove('off'));this.remove()\">show all phones</button></div>"
                     "<div class=g>"
                     + "".join(f'<div class="t{" off" if L in ("F","J","K","L") else ""}" data-p="{L.lower()}">'
                              f'<div class=l onclick="event.stopPropagation();this.parentNode.classList.toggle(\'big\');this.parentNode.scrollIntoView({{behavior:\'smooth\',block:\'start\'}})" title="big view on/off" style="cursor:pointer">iPhone {L}</div>'
                              f'<div class=h style="right:48px" onclick="event.stopPropagation();window.open(\'/phones/{L.lower()}/screen\',\'_blank\')" title="Fullscreen (noVNC)">⛶</div>'
                              f'<div class=h onclick="event.stopPropagation();fetch(\'/phones/wda/{L.lower()}/home\',{{method:\"POST\"}})" title="Home">⏺</div>'
+                             f'<div class=h style="right:88px" onclick="event.stopPropagation();fetch(\'/phones/wda/{L.lower()}/unlock\',{{method:\"POST\"}})" title="Wake / unlock">⏻</div>'
                              f'<img src="/phones/mjpeg/{L.lower()}" alt="iPhone {L} offline">'
                              f'<div class=rc title="reconnecting"></div>'
                              f'</div>'
@@ -941,8 +957,10 @@ class Handler(BaseHTTPRequestHandler):
                     "      fetch('/phones/wda/'+p+'/swipe',{method:'POST',headers:{'Content-Type':'application/json'},"
                     "        body:JSON.stringify({fromX:start.x*sx,fromY:start.y*sy,toX:e.offsetX*sx,toY:e.offsetY*sy,duration:Math.min(0.6,Math.max(0.08,dur/1000))})});"
                     "    } else {"
+                    "      // a dark phone wakes on the first click (unlock is a no-op when it is already awake)"
+                    "      fetch('/phones/wda/'+p+'/unlock',{method:'POST'}).then(()=>"
                     "      fetch('/phones/wda/'+p+'/tap',{method:'POST',headers:{'Content-Type':'application/json'},"
-                    "        body:JSON.stringify({x:e.offsetX*sx,y:e.offsetY*sy})});"
+                    "        body:JSON.stringify({x:e.offsetX*sx,y:e.offsetY*sy})}));"
                     "    }"
                     "    start=null;"
                     "  });"
