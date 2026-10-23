@@ -355,6 +355,8 @@ def next_day(f: dict, now: dt.datetime | None = None) -> tuple[int | None, str]:
     status = f.get(F_STATUS) or ""
     if status in BLOCKED_STATUS:
         return None, f"status {status!r}"
+    if status == "Healthy":                                   # 23.10: Rene sets Healthy = warm-up over, whatever days are written
+        return None, "Healthy -- warm-up finished"
     if (f.get(F_CREATION) or "") in NOT_YET_CREATED:
         return None, f"creation status {f.get(F_CREATION)!r}"
     if not (f.get(F_USER) or "").strip():

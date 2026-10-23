@@ -314,11 +314,13 @@ def dismiss_popups(h: Human) -> str | None:
             h.tap(hits[0])
             return f"sheet -> {label}"
     # 22.10 (A10 live): a reel options / comments sheet left open has a literal "Dismiss" button -- close it,
-    # otherwise the loop keeps swiping on the sheet and never sees a follow button again
-    sheet = h.p.find("predicate string", "type == 'XCUIElementTypeButton' AND label == 'Dismiss' AND visible == 1")
-    if sheet:
-        h.tap(sheet)
-        return "sheet -> Dismiss"
+    # otherwise the loop keeps swiping on the sheet and never sees a follow button again.
+    # 23.10 (E7 live, Rene): Instagram's info sheets ("Interacting with content shared from Facebook") end in OK.
+    for label in ("Dismiss", "OK"):
+        sheet = h.p.find("predicate string", f"type == 'XCUIElementTypeButton' AND label == '{label}' AND visible == 1")
+        if sheet:
+            h.tap(sheet)
+            return f"sheet -> {label}"
     return None
 
 
