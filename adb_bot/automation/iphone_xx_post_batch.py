@@ -345,6 +345,22 @@ def run_phone(letter: str, containers: list[str], clips: list[Path], n: int, sta
             shot = iphone_diag.keep_screen(x.ref, "stopped", f"{type(exc).__name__}: {exc}", container=c, xx=x,
                                            log_fn=lambda m: log.info("%s: %s", c, m))
             log.error("%s: STOPPED -- %s (screen: %s)", c, exc, shot or "none")
+            # 22.10 (C13 live: SMS code screen): a checkpoint / logged-out account is marked in Airtable and dropped
+            # for today -- retrying would only knock on the same door three times
+            mark = "Human Verification" if "checkpoint" in str(exc) else ("logged out" if "logged out" in str(exc) else None)
+            if mark:
+                try:
+                    import requests as _rq
+                    row = _account_row_id(c)
+                    if row:
+                        _rq.patch(f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{T_ACC}/{row}",
+                                  headers={"Authorization": f"Bearer {os.environ['AIRTABLE_TOKEN']}", "Content-Type": "application/json"},
+                                  json={"fields": {"Status": mark}, "typecast": True}, timeout=30)
+                except Exception as _e:                   # noqa: BLE001
+                    log.warning("%s: could not mark %s in Airtable (%s)", c, mark, _e)
+                log.error("%s: marked '%s' in Airtable, no more attempts today", c, mark)
+                queue[c] = []
+                continue
             if "requires a valid license" in str(exc) or isinstance(exc, XXLicenceError):
                 # 22.10: licence gone mid-run -> do NOT burn the account's 3 tries: say it once, heal, wait, retry
                 _licence_out(letter, [k for k in containers if queue.get(k)], str(exc))
