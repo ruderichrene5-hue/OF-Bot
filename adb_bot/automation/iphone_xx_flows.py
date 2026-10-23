@@ -683,7 +683,15 @@ def scroll_feed(x: XX, seconds: float) -> None:
     if x.find(r"confirmation code|Confirm you|Help us confirm|suspended your account|has been disabled", 0):
         _keep_screen(x, "checkpoint")                     # 22.10 live (C13): "Enter confirmation code" (SMS)
         raise FlowError("checkpoint: Instagram asks for a verification -- not touching it")
-    if x.find(r"^Create new account$|^Log in$|^Get started$|creating your account", 0):
+    # 23.10 live (A10): a "Meta Verified" promo sheet ("Reels from profiles with a verified badge ...", Get started /
+    # Dismiss) looked like the signup screen. Promo sheets have a Dismiss -- close them, then judge the screen.
+    for _ in range(2):
+        if x.find(r"^Dismiss$|^Not now$", 0) and x.find(r"^Get started$|verified badge|Meta Verified|^Try it$", 0):
+            x.log("promo sheet in front -- dismissing")
+            x.tap_text(r"^Dismiss$|^Not now$", 2); x.pause(1.5, 2.5)
+        else:
+            break
+    if x.find(r"^Create new account$|^Log in$|creating your account", 0) or (x.find(r"^Get started$", 0) and x.find(r"already have a profile", 0)):
         _keep_screen(x, "scroll_unknown_screen")
         raise FlowError("logged out: Instagram is on a login/signup screen -- not scrolling here")
     x.tap(112, 752)                                       # Reels tab (bottom, 2nd icon)
