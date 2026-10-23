@@ -287,11 +287,12 @@ def _dismiss_popups(x: XX) -> bool:
         close = next((w for w in words if w["text"].strip() == "Close"), None)
         if close:
             x.tap(close["x"], close["y"]); return True
-    # 22.10: XXTouch's own "Runtime Error" dialog (a bad recording slice) sits over Instagram until dismissed
-    if any(w["text"].strip() == "Runtime Error" for w in words):
-        d = next((w for w in words if w["text"].strip() == "Dismiss"), None)
-        if d:
-            x.tap(d["x"], d["y"]); x.log("XXTouch Runtime Error dialog dismissed"); return True
+    # 22.10: XXTouch's own "Runtime Error" dialog (a bad recording slice) sits over Instagram until dismissed.
+    # 23.10 (A12 live): a Facebook cross-app sheet ("Get the app to see the full post" / GET / Dismiss) too, and
+    # Meta's promo sheets -- anything that offers a plain "Dismiss" is closed with it.
+    d = next((w for w in words if w["text"].strip() == "Dismiss"), None)
+    if d:
+        x.tap(d["x"], d["y"]); x.log("sheet with 'Dismiss' closed"); return True
     if any(re.search(r"to display notifications|wants to send you notifications", w["text"]) for w in words):
         allow = next((w for w in words if w["text"].strip() == "Allow" and w["y"] < 300), None)
         if allow:                                         # Shortcut's own one-time prompt, sits over the "+" button
