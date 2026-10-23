@@ -65,6 +65,13 @@ def keep_screen(ref: str, reason: str, detail: str = "", container: str = "", wd
             if p is None:
                 from adb_bot.automation.iphone_farm_wda import connect
                 p = connect(ref, timeout=15)
+                # 23.10 live (E7): a fresh WDA session from a diagnostic probe invalidated the running flow's session
+                # ("invalid session id"). Reuse the session WDA already has, never create one on a possibly busy phone.
+                try:
+                    import requests as _rq
+                    p.sid = _rq.get(f"{p.base}/status", timeout=6).json().get("sessionId") or p.sid
+                except Exception:                           # noqa: BLE001
+                    pass
             png = p.screenshot()
             try:
                 text = _wda_text(p.source("xml"))
