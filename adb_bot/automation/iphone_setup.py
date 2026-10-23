@@ -55,6 +55,21 @@ GEN_KINDS = {"picture": ("Profilbild", "Profile Picture"), "highlight": ("Story"
 HIGHLIGHT_NAME = os.environ.get("IPHONE_HIGHLIGHT_NAME", "Links")
 MULTI = os.environ.get("IPHONE_SETUP_MULTI") == "1"
 STATE_PATH = os.path.expanduser("~/.adb_bot/iphone_setup_state.json")
+F_REPLACE = "Account ersetzen"                                                        # 23.10 Rene: "mach da einen neuen Account"
+F_MODEL_LINK, F_CREATION, F_IGPW, F_EMAIL = "Model auswählen (Pflicht)", "Creation Status", "IG Password", "Email"
+RESET_ON_REPLACE = {F_USER: "", F_IGPW: "", F_CREATION: "To Do", F_STATUS: "setup", F_REPLACE: False,
+                    "Account created (tick when done)": False, F_PIC_DONE: False, F_PIC_SET: False, F_BIO_DONE: False,
+                    F_HL_SET: False, F_LINK_DONE: False, F_FUNNEL_DONE: False, "Warm-up Start": None,
+                    "Warm-up Day 1 done": None, "Warm-up Day 2 done": None, "Warm-up Day 3 done": None, "Warm-up Day 4 done": None,
+                    F_PIC_USED: "", F_HL_USED: ""}
+# 23.10 Rene: pictures are ordered by the bot itself -- profile picture = the model as she is, story/highlight =
+# "Zunge raus oder so, ein bisschen mehr in die Richtung". Prompts and pose photos come from the model's own
+# finished rows of the same Verwendung (what Rene already approved), picked at random.
+GEN_ORDER = {"picture": "Profilbild", "highlight": "Story"}
+MAX_ORDERS_PER_TICK = 6                                                               # ~18 pictures/h for the pipeline
+GEN_FIELDS = {"model": "Model (required)", "account": "Für Account (optional)", "use": "Verwendung",
+              "pose": "Pose Picture (required, mehrere = ein Job pro Bild)", "prompt": "Outfit & Scene (optional)",
+              "pick": "Pick (1-4)", "go": "Generate (tick to start)", "status": "Status (auto)", "picked": "Picked Picture (auto)"}
 STEPS = ("picture", "bio", "highlight")
 
 
@@ -97,7 +112,7 @@ def _gen_index() -> dict:
         return _GEN_INDEX
     idx: dict = {}
     try:
-        params = {"filterByFormula": "AND({Für Account (optional)} != '', {Picked Picture (auto)} != '')",
+        params = {"filterByFormula": "{Für Account (optional)} != ''",
                   "sort[0][field]": "Bild (auto, leer lassen)", "sort[0][direction]": "desc", "pageSize": 100}
         offset = None
         while True:
@@ -127,11 +142,101 @@ def generated_pictures(row_id: str) -> dict:
     for rec in _gen_index().get(row_id, []):
         f = rec["fields"]
         use = f.get("Verwendung") or ""
+        if not f.get("Picked Picture (auto)"):
+            continue                                          # ordered, not finished yet
         for kind, names in GEN_KINDS.items():
             if use in names and out[kind] is None:
                 att = f["Picked Picture (auto)"][0]
                 out[kind] = (att, f"{att.get('filename')} from Generate Pictures {rec['id']} ({(f.get('Bild (auto, leer lassen)') or '')[:40]})")
     return out
+
+
+_TEMPLATES: dict = {}
+
+
+def _templates(model_id: str, use: str) -> list[dict]:
+    """Finished Generate Pictures rows of this model and Verwendung -- the pool of approved prompts + pose photos."""
+    key = (model_id, use)
+    if key not in _TEMPLATES:
+        try:
+            r = requests.get(f"https://api.airtable.com/v0/{BASE}/{T_GEN}", headers=_hdr(), timeout=30,
+                             params={"filterByFormula": f"AND({{{GEN_FIELDS['use']}}}='{use}', {{{GEN_FIELDS['picked']}}} != '', {{{GEN_FIELDS['pose']}}} != '')",
+                                     "pageSize": 100})
+            r.raise_for_status()
+            _TEMPLATES[key] = [x["fields"] for x in r.json().get("records", []) if model_id in (x["fields"].get(GEN_FIELDS["model"]) or [])]
+        except Exception as exc:                              # noqa: BLE001
+            log.warning("templates %s/%s: %s", model_id, use, exc)
+            _TEMPLATES[key] = []
+    return _TEMPLATES[key]
+
+
+def pending_order(row_id: str, use: str) -> bool:
+    return any((rec["fields"].get("Verwendung") or "") == use for rec in _gen_index().get(row_id, []))
+
+
+def order_pictures(row_id: str, f: dict, dry: bool = False) -> list[str]:
+    """Create Generate Pictures rows for what this account lacks (profile picture, story picture). One order per
+    kind -- an existing row for the account and Verwendung (finished or not) means nothing is ordered."""
+    ordered = []
+    model = (f.get(F_MODEL_LINK) or [None])[0]
+    if not model:
+        return ordered
+    for kind, use in GEN_ORDER.items():
+        done = f.get(F_PIC_DONE) if kind == "picture" else f.get(F_HL_SET)
+        if done or material(f, row_id, kind) or pending_order(row_id, use):
+            continue
+        pool = _templates(model, use)
+        if not pool:
+            log.info("%s: no finished %s template for this model -- cannot order", f.get(F_USER), use)
+            continue
+        t = random.choice(pool)
+        fields = {GEN_FIELDS["model"]: [model], GEN_FIELDS["account"]: [row_id], GEN_FIELDS["use"]: use,
+                  GEN_FIELDS["pose"]: [{"url": a["url"], "filename": a.get("filename", "pose.jpg")} for a in t[GEN_FIELDS["pose"]][:1]],
+                  GEN_FIELDS["prompt"]: t.get(GEN_FIELDS["prompt"]) or "", GEN_FIELDS["pick"]: "auto (best face match)",
+                  GEN_FIELDS["go"]: True}
+        if dry:
+            ordered.append(f"{use} (dry) <- {(t.get(GEN_FIELDS['prompt']) or '')[:50]}")
+            continue
+        r = requests.post(f"https://api.airtable.com/v0/{BASE}/{T_GEN}", headers=_hdr(), json={"fields": fields, "typecast": True}, timeout=30)
+        if r.status_code < 300:
+            rec = r.json()
+            _gen_index().setdefault(row_id, []).insert(0, rec)
+            ordered.append(f"{use} -> {rec['id']}")
+            _note(row_id, f"ordered a {use} picture in Generate Pictures ({rec['id']}): {(t.get(GEN_FIELDS['prompt']) or '')[:80]}")
+        else:
+            log.warning("%s: order %s failed: %s %s", f.get(F_USER), use, r.status_code, r.text[:160])
+    return ordered
+
+
+def replace_account(device: str, container: str, row: str, f: dict, log_fn=None) -> dict:
+    """Rene 23.10: wipe the Instagram container on the phone (cranectl --wipe = fresh app, nothing logged in),
+    archive the old login into Notes, reset the row to a signup To Do on the same container and model."""
+    say = log_fn or (lambda m: log.info("%s/%s: %s", _letter(device), container, m))
+    from adb_bot.automation.iphone_ig import _phone_ssh
+    letter = _letter(device)
+    hold = phone_lock.hold(letter, timeout_s=600)
+    if hold is None:
+        return {"ok": False, "error": f"phone {letter} busy"}
+    try:
+        out = _phone_ssh(device, "/var/jb/var/mobile/bin/ig-close.sh >/dev/null 2>&1; "
+                                 f"/var/jb/usr/local/bin/cranectl --wipe com.burbn.instagram 'name:{container} IG' 2>&1; "
+                                 "/var/jb/usr/local/bin/cranectl --list com.burbn.instagram")
+        if f"{container} IG" not in out:
+            raise RuntimeError(f"container '{container} IG' not listed after the wipe: {out[:200]}")
+        say(f"container {container} wiped")
+        old = f"replaced {dt.datetime.now(BERLIN).strftime('%d.%m.%Y %H:%M')}: was @{f.get(F_USER, '')} / pw {f.get(F_IGPW, '')} / {f.get(F_EMAIL, '')} (status {f.get(F_STATUS, '-')})"
+        _note(row, old)
+        _patch(row, RESET_ON_REPLACE)
+        say("row reset to 'To Do' -- plan the new signup in Tagesplan")
+        iphone_diag.notify(f"{letter}/{container}: account @{f.get(F_USER, '?')} replaced -- container wiped, row reset to To Do. Plan the signup in Tagesplan.")
+        return {"ok": True}
+    except Exception as exc:                                  # noqa: BLE001
+        say(f"replace FAILED: {exc}")
+        _note(row, f"replace failed: {str(exc)[:300]}")
+        iphone_diag.notify(f"{letter}/{container}: replace of @{f.get(F_USER, '?')} failed: {str(exc)[:200]}")
+        return {"ok": False, "error": str(exc)}
+    finally:
+        hold.release()
 
 
 def material(f: dict, row_id: str, kind: str):
@@ -189,12 +294,15 @@ def candidates() -> list[dict]:
             continue
         lacking = missing_for_highlight(f, row["id"])
         if not needed(f, row["id"]):
-            if lacking and len(lacking) < 3:                  # partly prepared highlight: say what is missing
+            if lacking:                                       # nothing runnable: say what is missing (the tick orders pictures)
                 cont_id = (f.get("Container") or [None])[0]
                 cont = _get(T_CONT, cont_id)["fields"] if cont_id else {}
                 out.append({"row": row["id"], "fields": f, "username": (f.get(F_USER) or "").lstrip("@"), "container": cont.get("Container"),
                             "device": (cont.get("Device") or [None])[0], "step": None, "status": f.get(F_STATUS),
                             "why": "highlight waits for: " + ", ".join(lacking)})
+            elif not f.get(F_PIC_DONE):
+                out.append({"row": row["id"], "fields": f, "username": (f.get(F_USER) or "").lstrip("@"), "container": None,
+                            "device": None, "step": None, "status": f.get(F_STATUS), "why": "profile picture: no material yet"})
             continue
         step, why = next_step(f, row["id"])
         cont_id = (f.get("Container") or [None])[0]
@@ -326,7 +434,32 @@ def tick(max_phones: int = 4) -> dict:
     if not WINDOW[0] <= now.hour < WINDOW[1]:
         log.info("outside %02d-%02d Berlin", *WINDOW)
         return {"skipped": "window"}
-    due = [c for c in candidates() if c["step"] and c["device"] and c["container"]]
+    # 23.10: "Account ersetzen" ticks go first, then picture orders for everyone who lacks them
+    try:
+        for row in _list(T_ACC, f"AND({{{F_REPLACE}}} = 1, {{Container}} != '')"):
+            f = row["fields"]
+            cont_id = (f.get("Container") or [None])[0]
+            cont = _get(T_CONT, cont_id)["fields"] if cont_id else {}
+            device, name = (cont.get("Device") or [None])[0], cont.get("Container")
+            if device and name:
+                log.info("replace: %s @%s", name, f.get(F_USER))
+                replace_account(device, name, row["id"], f)
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("replace scan failed: %s", exc)
+    cands = candidates()
+    orders = 0
+    for c in cands:
+        if orders >= MAX_ORDERS_PER_TICK:
+            break                                             # the rest next tick -- do not flood the RunPod pipeline
+        if c["status"] not in BLOCKED_STATUS and c["username"]:
+            try:
+                o = order_pictures(c["row"], c["fields"])
+                if o:
+                    orders += len(o)
+                    log.info("%s @%s: ordered %s", c["container"], c["username"], o)
+            except Exception as exc:                          # noqa: BLE001
+                log.warning("%s: picture order failed: %s", c["container"], exc)
+    due = [c for c in cands if c["step"] and c["device"] and c["container"]]
     random.shuffle(due)
     by_phone: dict[str, dict] = {}
     for c in due:
@@ -361,6 +494,11 @@ def main(argv=None) -> int:
     s.add_argument("--expect")
     s = sub.add_parser("tick")
     s.add_argument("--max-phones", type=int, default=4)
+    s = sub.add_parser("order", help="order missing profile/story pictures in Generate Pictures")
+    s.add_argument("--username", help="only this account (default: everyone who lacks something)")
+    s.add_argument("--dry", action="store_true")
+    s = sub.add_parser("replace", help="wipe the container and reset the row to a signup To Do")
+    s.add_argument("device"); s.add_argument("container"); s.add_argument("--row", required=True)
     a = ap.parse_args(argv)
     os.makedirs("/opt/adbbot/logs", exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s",
@@ -375,6 +513,20 @@ def main(argv=None) -> int:
         res = run_step(a.device, a.container, a.step, row=a.row, expect=a.expect)
         print(res)
         return 0 if res.get("ok") else 1
+    if a.cmd == "order":
+        for c in candidates():
+            if a.username and c["username"].lower() != a.username.lower().lstrip("@"):
+                continue
+            if c["status"] in BLOCKED_STATUS or not c["username"]:
+                continue
+            o = order_pictures(c["row"], c["fields"], dry=a.dry)
+            if o:
+                print(f"{c['container'] or '?':4} @{c['username']:22} {o}")
+        return 0
+    if a.cmd == "replace":
+        f = _get(T_ACC, a.row)["fields"]
+        print(replace_account(a.device, a.container, a.row, f))
+        return 0
     res = tick(a.max_phones)
     log.info("tick: %s", res)
     return 0
