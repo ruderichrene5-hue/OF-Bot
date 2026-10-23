@@ -170,6 +170,95 @@ def _templates(model_id: str, use: str) -> list[dict]:
     return _TEMPLATES[key]
 
 
+_FREE: dict | None = None
+
+
+def _free_rows(refresh: bool = False) -> dict:
+    """{(model id, Verwendung): [finished Generate rows linked to NO account, newest first]} -- the stock.
+    23.10 Rene: "wenn bestehende frei sind, ziehst du die einfach rüber" -- a free finished picture is claimed
+    before anything new is ordered. Unlinked rows still generating count as pending stock."""
+    global _FREE
+    if _FREE is not None and not refresh:
+        return _FREE
+    free: dict = {"done": {}, "pending": {}}
+    try:
+        params = {"filterByFormula": f"AND({{{GEN_FIELDS['account']}}} = '', {{{GEN_FIELDS['use']}}} != '')",
+                  "sort[0][field]": "Bild (auto, leer lassen)", "sort[0][direction]": "desc", "pageSize": 100}
+        offset = None
+        while True:
+            if offset:
+                params["offset"] = offset
+            r = requests.get(f"https://api.airtable.com/v0/{BASE}/{T_GEN}", headers=_hdr(), params=params, timeout=30)
+            r.raise_for_status()
+            j = r.json()
+            for rec in j.get("records", []):
+                f = rec["fields"]
+                for m in f.get(GEN_FIELDS["model"]) or []:
+                    key = (m, f.get(GEN_FIELDS["use"]))
+                    bucket = "done" if f.get(GEN_FIELDS["picked"]) else ("pending" if f.get(GEN_FIELDS["go"]) and (f.get(GEN_FIELDS["status"]) or "") not in ("Failed", "Error") else None)
+                    if bucket:
+                        free[bucket].setdefault(key, []).append(rec)
+            offset = j.get("offset")
+            if not offset:
+                break
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("free pictures index failed: %s", exc)
+    _FREE = free
+    return free
+
+
+def claim_picture(row_id: str, f: dict, kind: str) -> str | None:
+    """Link the newest free finished picture of the right kind to this account. Returns the Generate row id."""
+    model = (f.get(F_MODEL_LINK) or [None])[0]
+    use = GEN_ORDER[kind]
+    pool = _free_rows()["done"].get((model, use), [])
+    if not model or not pool:
+        return None
+    rec = pool.pop(0)
+    r = requests.patch(f"https://api.airtable.com/v0/{BASE}/{T_GEN}/{rec['id']}", headers=_hdr(),
+                       json={"fields": {GEN_FIELDS["account"]: [row_id]}, "typecast": True}, timeout=30)
+    if r.status_code >= 300:
+        log.warning("%s: claim of %s failed: %s", f.get(F_USER), rec["id"], r.text[:120])
+        return None
+    rec["fields"][GEN_FIELDS["account"]] = [row_id]
+    _gen_index().setdefault(row_id, []).insert(0, rec)
+    _note(row_id, f"took the free {use} picture {rec['id']} from Generate Pictures")
+    return rec["id"]
+
+
+STOCK_MIN = 4                                                                         # free finished+pending pictures per model and kind
+
+
+def restock(models: set, budget: int) -> list[str]:
+    """Keep STOCK_MIN free pictures per (model, kind) in Generate Pictures: order unlinked rows from the
+    model's approved templates until free done + pending reaches the minimum. Returns what was ordered."""
+    ordered = []
+    free = _free_rows()
+    for model in models:
+        for kind, use in GEN_ORDER.items():
+            have = len(free["done"].get((model, use), [])) + len(free["pending"].get((model, use), []))
+            for _ in range(max(0, STOCK_MIN - have)):
+                if budget <= 0:
+                    return ordered
+                pool = _templates(model, use)
+                if not pool:
+                    break
+                t = random.choice(pool)
+                fields = {GEN_FIELDS["model"]: [model], GEN_FIELDS["use"]: use,
+                          GEN_FIELDS["pose"]: [{"url": a["url"], "filename": a.get("filename", "pose.jpg")} for a in t[GEN_FIELDS["pose"]][:1]],
+                          GEN_FIELDS["prompt"]: t.get(GEN_FIELDS["prompt"]) or "", GEN_FIELDS["pick"]: "auto (best face match)",
+                          GEN_FIELDS["go"]: True}
+                r = requests.post(f"https://api.airtable.com/v0/{BASE}/{T_GEN}", headers=_hdr(), json={"fields": fields, "typecast": True}, timeout=30)
+                if r.status_code < 300:
+                    free["pending"].setdefault((model, use), []).append(r.json())
+                    ordered.append(f"stock {use} for {model} -> {r.json()['id']}")
+                    budget -= 1
+                else:
+                    log.warning("restock %s/%s failed: %s", model, use, r.text[:120])
+                    break
+    return ordered
+
+
 def pending_order(row_id: str, use: str) -> bool:
     return any((rec["fields"].get("Verwendung") or "") == use for rec in _gen_index().get(row_id, []))
 
@@ -184,6 +273,14 @@ def order_pictures(row_id: str, f: dict, dry: bool = False) -> list[str]:
     for kind, use in GEN_ORDER.items():
         done = f.get(F_PIC_DONE) if kind == "picture" else f.get(F_HL_SET)
         if done or material(f, row_id, kind) or pending_order(row_id, use):
+            continue
+        if not dry:
+            got = claim_picture(row_id, f, kind)              # a free finished picture first
+            if got:
+                ordered.append(f"{use} <- free {got}")
+                continue
+        elif _free_rows()["done"].get((model, use)):
+            ordered.append(f"{use} (dry) <- free {_free_rows()['done'][(model, use)][0]['id']}")
             continue
         pool = _templates(model, use)
         if not pool:
@@ -459,6 +556,13 @@ def tick(max_phones: int = 4) -> dict:
                     log.info("%s @%s: ordered %s", c["container"], c["username"], o)
             except Exception as exc:                          # noqa: BLE001
                 log.warning("%s: picture order failed: %s", c["container"], exc)
+    try:                                                      # 23.10 Rene: "eine Regel, dass wir immer Bilder zur Verfügung haben"
+        models = {(c["fields"].get(F_MODEL_LINK) or [None])[0] for c in cands if c["status"] not in BLOCKED_STATUS} - {None}
+        o = restock(models, MAX_ORDERS_PER_TICK - orders)
+        if o:
+            log.info("restock: %s", o)
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("restock failed: %s", exc)
     due = [c for c in cands if c["step"] and c["device"] and c["container"]]
     random.shuffle(due)
     by_phone: dict[str, dict] = {}
