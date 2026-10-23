@@ -7,7 +7,7 @@ Seven flows. Six run today, one is planned and already has its place and its che
   warmup     four warm-up days, one script per day             iphone_warmup.run_one / tick     ready
   posting    today's spoofed reels, batches per account        iphone_xx_post_batch.run_phone   ready
   picture    profile picture from the Airtable attachment     iphone_setup.run_step            ready
-  bio        hand-written 'Bio Text' from the Accounts row     iphone_setup.run_step            ready
+  bio        'Bio Text' from the row, default text if empty     iphone_setup.run_step            ready
   highlight  story with the OF link, saved into a highlight    iphone_setup.run_step            ready
   story      a plain story post                                iphone_ig.create_story           planned
 Setup steps are driven by material + checkbox in Airtable, not by a warm-up day (iphone_setup tick).
@@ -312,16 +312,16 @@ FLOWS: dict[str, Flow] = {
                     ".venv/bin/python -m adb_bot.automation.iphone_setup due | run <device> <container> --step picture --row <rec> | tick",
                     PHONE_NEEDS + ["shortcut", "airtable", "account", "setup-due"],
                     ["Username", "Profile Picture"]),
-    "bio": Flow("bio", "Hand-written Bio Text from the Accounts row", "ready", "adb_bot.automation.iphone_setup",
+    "bio": Flow("bio", "Bio Text from the Accounts row (empty -> default 'schau mal da unten'-style text)", "ready", "adb_bot.automation.iphone_setup",
                 "run_step(device, container, 'bio')",
                 ".venv/bin/python -m adb_bot.automation.iphone_setup run <device> <container> --step bio --row <rec>",
                 PHONE_NEEDS + ["shortcut", "airtable", "account", "setup-due"],
-                ["Username", "Bio Text"]),
+                ["Username"]),
     "highlight": Flow("highlight", "Story with the OF link sticker, saved into a highlight", "ready", "adb_bot.automation.iphone_setup",
                       "run_step(device, container, 'highlight')",
                       ".venv/bin/python -m adb_bot.automation.iphone_setup run <device> <container> --step highlight --row <rec>",
                       PHONE_NEEDS + ["shortcut", "airtable", "account", "setup-due"],
-                      ["Username", "Story Highlight Picture", "Funnel Link", "Story Link text"]),
+                      ["Username", "Story Highlight Picture", "Funnel Link"]),
     "story": Flow("story", "A plain story post (no highlight) -- not built yet", "planned", "adb_bot.automation.iphone_ig",
                   "create_story(p, link=...) + media_to_photos()",
                   "(planned)",

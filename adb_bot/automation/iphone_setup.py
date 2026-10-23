@@ -55,6 +55,27 @@ GEN_KINDS = {"picture": ("Profilbild", "Profile Picture"), "highlight": ("Story"
 HIGHLIGHT_NAME = os.environ.get("IPHONE_HIGHLIGHT_NAME", "Links")
 MULTI = os.environ.get("IPHONE_SETUP_MULTI") == "1"
 STATE_PATH = os.path.expanduser("~/.adb_bot/iphone_setup_state.json")
+# 23.10 Rene (voice): don't wait for hand-written texts -- "schau mal da unten"-style bio, and the story link sticker
+# always with the linked funnel link and a "schreib mir"-style text. Empty field -> one of these (picked per row,
+# stable), written back into the field so the row shows what went on the phone. A filled field always wins.
+BIO_DEFAULTS = ["schau mal da unten 👇", "mehr von mir gibt's da unten 👇", "alles weitere findest du unten ⬇️",
+                "da unten gibt's mehr von mir 😏", "unten wartet noch mehr auf dich 👀"]
+LINK_TEXT_DEFAULTS = ["schreib mir hier 💌", "hier schreibst du mir 💌", "schreib mir 💬", "hier geht's zu mir 👀",
+                      "melde dich hier bei mir 💌"]
+
+
+def _pick(pool: list[str], row_id: str) -> str:
+    return pool[sum(row_id.encode()) % len(pool)]
+
+
+def bio_text(f: dict, row_id: str = "") -> str:
+    return (f.get(F_BIO) or "").strip() or _pick(BIO_DEFAULTS, row_id)
+
+
+def link_text(f: dict, row_id: str = "") -> str:
+    return (f.get(F_LINK_TEXT) or "").strip() or _pick(LINK_TEXT_DEFAULTS, row_id)
+
+
 F_REPLACE = "Account ersetzen"                                                        # 23.10 Rene: "mach da einen neuen Account"
 F_MODEL_LINK, F_CREATION, F_IGPW, F_EMAIL = "Model auswählen (Pflicht)", "Creation Status", "IG Password", "Email"
 RESET_ON_REPLACE = {F_USER: "", F_IGPW: "", F_CREATION: "To Do", F_STATUS: "setup", F_REPLACE: False,
@@ -96,8 +117,7 @@ def missing_for_highlight(f: dict, row_id: str = "") -> list[str]:
     if f.get(F_HL_SET):
         return []
     pic = f.get(F_HL_PIC) or (row_id and generated_pictures(row_id).get("highlight"))
-    return [n for n, v in (("Story picture (row or Generate Pictures)", pic), ("Funnel Link / Tracking Link", funnel_link(f)),
-                           (F_LINK_TEXT, (f.get(F_LINK_TEXT) or "").strip())) if not v]
+    return [n for n, v in (("Story picture (row or Generate Pictures)", pic), ("Funnel Link / Tracking Link", funnel_link(f))) if not v]
 
 
 _GEN_INDEX: dict | None = None
@@ -349,10 +369,10 @@ def needed(f: dict, row_id: str = "") -> list[str]:
     out = []
     if not f.get(F_PIC_DONE) and material(f, row_id, "picture"):
         out.append("picture")
-    if (f.get(F_BIO) or "").strip() and not f.get(F_BIO_DONE):
+    if not f.get(F_BIO_DONE):                                  # 23.10: empty Bio Text -> default text (bio_text)
         out.append("bio")
-    # 22.10 Rene: the link sticker ALWAYS carries a custom text -- without `Story Link text` the step is not due
-    if not f.get(F_HL_SET) and funnel_link(f) and (f.get(F_LINK_TEXT) or "").strip() and material(f, row_id, "highlight"):
+    # 22.10 Rene: the link sticker ALWAYS carries a text; 23.10: empty `Story Link text` -> default text (link_text)
+    if not f.get(F_HL_SET) and funnel_link(f) and material(f, row_id, "highlight"):
         out.append("highlight")
     return out
 
@@ -439,15 +459,13 @@ def step_picture(p: Phone, device: str, f: dict, say, row: str = "") -> dict:
 
 
 def step_bio(p: Phone, device: str, f: dict, say, row: str = "") -> dict:
-    text = (f.get(F_BIO) or "").strip()
-    if not text:
-        raise RuntimeError("Bio Text is empty")
+    text = bio_text(f, row)
     if len(text) > 150:
         raise RuntimeError(f"Bio Text has {len(text)} chars, Instagram allows 150 -- shorten it in Airtable")
     res = set_bio(p, text, log=say)
     if not res.get("ok"):
         raise RuntimeError(f"bio read back differs: {res}")
-    return {F_BIO_DONE: True}
+    return {F_BIO_DONE: True, F_BIO: text}
 
 
 def step_highlight(p: Phone, device: str, f: dict, say, row: str = "") -> dict:
@@ -456,18 +474,16 @@ def step_highlight(p: Phone, device: str, f: dict, say, row: str = "") -> dict:
     with tempfile.TemporaryDirectory() as wd:
         path = _download(att, wd)
         media_to_photos(p, device, path, log=say)
-    link, text = funnel_link(f), (f.get(F_LINK_TEXT) or "").strip()
+    link, text = funnel_link(f), link_text(f, row)
     if not link:
         raise RuntimeError("no Funnel Link and no Tracking Link on the row")
-    if not text:
-        raise RuntimeError("Story Link text is empty -- the link sticker always needs a text (Rene 22.10)")
     story = create_story(p, grant_newest=1, log=say, link=link, link_text=text)
     if not story.get("shared"):
         raise RuntimeError(f"story not shared ({story})")
     hl = save_story_to_highlight(p, HIGHLIGHT_NAME, log=say)
     if not hl.get("ok"):
         raise RuntimeError(f"story shared with link, but highlight not confirmed ({hl}) -- check the profile")
-    return {F_HL_SET: True, F_LINK_DONE: True, F_FUNNEL_DONE: True, F_HL_USED: label[:250]}
+    return {F_HL_SET: True, F_LINK_DONE: True, F_FUNNEL_DONE: True, F_HL_USED: label[:250], F_LINK_TEXT: text}
 
 
 STEP_FN = {"picture": step_picture, "bio": step_bio, "highlight": step_highlight}
