@@ -46,6 +46,7 @@ OK_CREATION = {"Instagram Created", "Verified"}
 WINDOW = (9, 23)
 GAP_HOURS = float(os.environ.get("IPHONE_WARMUP_GAP_HOURS", "8"))
 SAME_DAY = os.environ.get("IPHONE_WARMUP_SAME_DAY") == "1"
+WARMUP_DAYS = int(os.environ.get("IPHONE_WARMUP_DAYS", "1"))   # 23.10 Rene: one warm-up day, then post (was 4)
 STATE_DIR = os.path.expanduser("~/.adb_bot")
 SKIP_PATH = os.path.join(STATE_DIR, "iphone_warmup_skip.json")   # {container: username that mismatched} -- until the row changes
 
@@ -368,7 +369,7 @@ def next_day(f: dict, now: dt.datetime | None = None) -> tuple[int | None, str]:
     if not written and not m and status not in ("setup", "Instagram Created"):
         return None, f"status {status!r} is not a warm-up status and no day written -> not in warm-up"
     hand_done = int(m.group(1)) - 1 if m else 0                # "warmup day 2" by hand = day 1 happened already
-    for n in (1, 2, 3, 4):
+    for n in range(1, WARMUP_DAYS + 1):
         if f.get(F_DONE[n]) or n <= hand_done:
             continue
         if n == 1 or (n - 1 <= hand_done and not f.get(F_DONE[n - 1])):
@@ -382,12 +383,12 @@ def next_day(f: dict, now: dt.datetime | None = None) -> tuple[int | None, str]:
         if not SAME_DAY and prev.date() == now.date():
             return None, f"day {n - 1} finished today -> day {n} tomorrow"
         return n, f"day {n - 1} done {prev.strftime('%d.%m %H:%M')}"
-    return None, "all four days done"
+    return None, f"all {WARMUP_DAYS} warm-up day(s) done"
 
 
 def candidates() -> list[dict]:
     """Every account in warm-up with its phone/container resolved; `day` is None with a `why` when not due."""
-    rows = _list(T_ACC, f"AND({{{F_START}}} != '', {{{F_DONE[4]}}} = '', {{Container}} != '')")
+    rows = _list(T_ACC, f"AND({{{F_START}}} != '', {{{F_DONE[WARMUP_DAYS]}}} = '', {{Container}} != '')")
     out = []
     for row in rows:
         f = row["fields"]
@@ -452,8 +453,8 @@ def run_one(device: str, container: str, day: int, row: str | None = None, expec
             f"{len(stats['errors'])} hiccups, rhythm {stats['rhythm']}")
         if row:
             fields = {F_DONE[day]: dt.datetime.now(BERLIN).isoformat()}
-            if day == 4:
-                fields[F_STATUS] = "Healthy"
+            if day >= WARMUP_DAYS:
+                fields[F_STATUS] = "Healthy"                   # last warm-up day -> may post from tomorrow
             _patch(row, fields)
             _note(row, f"day {day} '{plan.title}' ok: {stats['reels_watched']} reels, {len(stats['follows'])} follows, "
                        f"{stats.get('minutes', '?')} min")

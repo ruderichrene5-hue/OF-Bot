@@ -372,8 +372,10 @@ def next_step(f: dict, row: str) -> tuple[str | None, str]:
     if not warmed:
         # 22.10 Rene ("Ja"): the bio may go in before warm-up day 1 (Kathi accounts on G/H); picture and highlight
         # still wait for day 1
-        if "bio" in steps:
-            steps = ["bio"]
+        # 23.10 Rene: profile picture + bio must be READY before the warm-up day; only the highlight waits
+        early = [x for x in steps if x in ("picture", "bio")]
+        if early:
+            steps = early
         else:
             return None, f"warm-up day 1 not run yet (status {status!r}) -- needs {', '.join(steps)}"
     today = dt.datetime.now(BERLIN).strftime("%Y-%m-%d")
