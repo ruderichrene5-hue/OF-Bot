@@ -232,6 +232,16 @@ def _window_next(window: tuple[int, int], t: float) -> float:
     return start.timestamp() + random.uniform(0, 900)
 
 
+def _sleep_phone(letter: str) -> None:
+    """Instagram closed, screen locked -- a phone nobody is using looks like one (Rene 22./23.10). Never raises."""
+    try:
+        from adb_bot.automation.iphone_farm_wda import connect
+        from adb_bot.automation.iphone_ig import finish_phone
+        finish_phone(connect(PHONE_REF[letter], timeout=30), lambda m: log.info("phone %s: %s", letter, m))
+    except Exception as exc:                              # noqa: BLE001
+        log.info("phone %s: could not lock the screen (%s)", letter, str(exc)[:60])
+
+
 def run_phone(letter: str, containers: list[str], clips: list[Path], n: int, state: Path, batch: int,
               scroll: float, pause: tuple[float, float], window: tuple[int, int], model: str = "Nikki", limit: int = 40):
     # 14.10: with the Mac jump host refusing SSH for a while, XX() could not open its tunnel and the phone's whole
@@ -276,7 +286,7 @@ def run_phone(letter: str, containers: list[str], clips: list[Path], n: int, sta
     while True:
         open_ = [c for c in containers if queue[c]]
         if not open_:
-            log.info("phone %s: everything posted", letter); return
+            log.info("phone %s: everything posted", letter); _sleep_phone(letter); return
         c = min(open_, key=lambda k: due[k])
         # 22.10 (Rene: a spoofed clip goes out the same day; the daily launcher brings fresh clips at 09:05): once
         # the next possible start lies on another day, today's leftovers are dropped and the phone thread ends.
@@ -287,6 +297,8 @@ def run_phone(letter: str, containers: list[str], clips: list[Path], n: int, sta
             log.info("phone %s: window closed for today -- %s clips left undone, ending (tomorrow's run brings new clips)", letter, left)
             return
         wait = due[c] - time.time()
+        if wait > 600:
+            _sleep_phone(letter)                          # 23.10 (Rene: "ein paar sind an"): dark between batches too
         if wait > 0:
             log.info("phone %s: next batch %s at %s Berlin", letter, c, dt.datetime.fromtimestamp(due[c], BERLIN).strftime("%H:%M"))
             time.sleep(wait)

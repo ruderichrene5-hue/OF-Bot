@@ -240,6 +240,12 @@ class XX:
         per_launch = max(timeout / 2, 180)
         end_all = time.monotonic() + max(timeout, per_launch)
         launches = 0
+        try:                                              # 23.10: posting locks the screen between batches -- wake it first
+            from adb_bot.automation.iphone_farm_wda import connect as _connect
+            from adb_bot.automation.iphone_ig import unlock_phone as _unlock
+            _unlock(_connect(self.ref, timeout=30), self.log)
+        except Exception as exc:                          # noqa: BLE001
+            self.log(f"pre-unlock skipped: {str(exc)[:60]}")
         while time.monotonic() < end_all:
             launches += 1
             for attempt in range(3):                      # same SSH path as XXTouch (the config's own path can lag)
