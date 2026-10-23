@@ -898,18 +898,26 @@ class Handler(BaseHTTPRequestHandler):
                 # 20.10 (Rene): Live-view at 15-25 fps via WDA MJPEG. 7/8 iPhones (A/B/C/E/G/H/I),
                 # D is out while XXTouch license is expired. <img> auto-reconnects on each navigation.
                 body = _with_nav((
-                    "<style>body{background:#000;color:#eee;font-family:system-ui;margin:0;padding:12px}"
-                    ".g{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}"
-                    ".t{position:relative;background:#111;border-radius:8px;overflow:hidden;cursor:crosshair}"
+                    # 23.10 (Rene: "komische Ansicht, man kann nicht richtig scrollen"): reserve phones without a picture
+                    # are hidden, the mouse wheel scrolls INSIDE the phone (swipe), a click on the name makes the tile big.
+                    "<style>body{background:#000;color:#eee;font-family:system-ui;margin:0;padding:12px;overflow-y:auto}"
+                    ".g{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;align-items:start}"
+                    ".t{position:relative;background:#111;border-radius:8px;overflow:hidden;cursor:crosshair;touch-action:none}"
+                    ".t.big{grid-column:1/-1;max-width:460px;margin:0 auto}"
+                    ".t.off{display:none}"
+                    ".bar{display:flex;gap:8px;align-items:center;margin:0 0 10px 0;font-size:13px;color:#9aa3b2}"
+                    ".bar button{background:#161a22;color:#e6e8ee;border:1px solid #262c38;border-radius:8px;padding:6px 10px;cursor:pointer}"
                     ".t img{width:100%;height:auto;display:block;aspect-ratio:9/16;background:#222;pointer-events:none}"
                     ".t canvas.hold{position:absolute;inset:0;width:100%;height:100%;display:none;pointer-events:none;z-index:1}"
                     ".t .rc{position:absolute;bottom:6px;right:8px;width:8px;height:8px;border-radius:50%;background:#fa0;display:none;z-index:2}"
                     ".l{position:absolute;top:6px;left:8px;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:4px;font-size:13px;z-index:2}"
                     ".h{position:absolute;top:6px;right:8px;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:4px;font-size:11px;z-index:2;cursor:pointer}"
                     "</style>"
+                    "<div class=bar><span>Click a name = big view · mouse wheel = scroll in the phone · drag = swipe · click = tap · type after a click</span>"
+                    "<span style='flex:1'></span><button onclick=\"document.querySelectorAll('.t.off').forEach(t=>t.classList.remove('off'));this.remove()\">show all phones</button></div>"
                     "<div class=g>"
-                    + "".join(f'<div class=t data-p="{L.lower()}">'
-                             f'<div class=l>iPhone {L}</div>'
+                    + "".join(f'<div class="t{" off" if L in ("F","J","K","L") else ""}" data-p="{L.lower()}">'
+                             f'<div class=l onclick="event.stopPropagation();this.parentNode.classList.toggle(\'big\');this.parentNode.scrollIntoView({{behavior:\'smooth\',block:\'start\'}})" title="big view on/off" style="cursor:pointer">iPhone {L}</div>'
                              f'<div class=h style="right:48px" onclick="event.stopPropagation();window.open(\'/phones/{L.lower()}/screen\',\'_blank\')" title="Fullscreen (noVNC)">⛶</div>'
                              f'<div class=h onclick="event.stopPropagation();fetch(\'/phones/wda/{L.lower()}/home\',{{method:\"POST\"}})" title="Home">⏺</div>'
                              f'<img src="/phones/mjpeg/{L.lower()}" alt="iPhone {L} offline">'
@@ -931,7 +939,7 @@ class Handler(BaseHTTPRequestHandler):
                     "    const dx=Math.abs(e.offsetX-start.x), dy=Math.abs(e.offsetY-start.y);"
                     "    if(dx>12||dy>12){"
                     "      fetch('/phones/wda/'+p+'/swipe',{method:'POST',headers:{'Content-Type':'application/json'},"
-                    "        body:JSON.stringify({fromX:start.x*sx,fromY:start.y*sy,toX:e.offsetX*sx,toY:e.offsetY*sy,duration:dur/1000})});"
+                    "        body:JSON.stringify({fromX:start.x*sx,fromY:start.y*sy,toX:e.offsetX*sx,toY:e.offsetY*sy,duration:Math.min(0.6,Math.max(0.08,dur/1000))})});"
                     "    } else {"
                     "      fetch('/phones/wda/'+p+'/tap',{method:'POST',headers:{'Content-Type':'application/json'},"
                     "        body:JSON.stringify({x:e.offsetX*sx,y:e.offsetY*sy})});"
@@ -954,6 +962,13 @@ class Handler(BaseHTTPRequestHandler):
                     "  img.addEventListener('load',()=>{release(t);});"
                     "  setInterval(()=>{if(busy)return;if(!img.complete||img.naturalWidth==0){busy=true;reconnect(t);setTimeout(()=>busy=false,3000);}},3000);"
                     "});"
+                    "// 23.10: mouse wheel over a tile scrolls the phone's content (one short swipe per wheel step, throttled)"
+                    "document.querySelectorAll('.t').forEach(t=>{let last=0;t.addEventListener('wheel',e=>{"
+                    "  e.preventDefault();const now=Date.now();if(now-last<350)return;last=now;"
+                    "  const up=e.deltaY>0;const p=t.dataset.p;"
+                    "  fetch('/phones/wda/'+p+'/swipe',{method:'POST',headers:{'Content-Type':'application/json'},"
+                    "    body:JSON.stringify({fromX:187,fromY:up?560:300,toX:187,toY:up?300:560,duration:0.18})});"
+                    "},{passive:false});});"
                     "// keyboard: focus a tile first, then type"
                     "let focused=null;"
                     "document.querySelectorAll('.t').forEach(t=>t.addEventListener('click',e=>{focused=t.dataset.p;t.style.outline='2px solid #4af';setTimeout(()=>t.style.outline='',2000);}));"
