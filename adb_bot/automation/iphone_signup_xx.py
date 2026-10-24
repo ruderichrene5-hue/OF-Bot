@@ -100,7 +100,21 @@ class IphoneSignupDriverXX:
                 self.logger("review-settings page -> Next")
                 self.x.pause(2, 3)
             else:
-                self.logger("review-settings page: no Next after scrolling")
+                # A8 live: the page is just a little taller than the screen, the Next button sits at y~833 and the
+                # swipes bounce back. WDA finds it in the element tree and click() scrolls it into view.
+                try:
+                    import requests as _rq
+                    from adb_bot.automation.iphone_farm_wda import connect as _connect
+                    p = _connect(self.x.ref if hasattr(self.x, "ref") else self.device_rec, timeout=20)
+                    p.sid = _rq.get(f"{p.base}/status", timeout=8).json().get("sessionId") or p.sid
+                    el = p.find("predicate string", "type == 'XCUIElementTypeButton' AND label == 'Next'")
+                    if el:
+                        el.click()
+                        nxt = [True]
+                        self.logger("review-settings page -> Next (via WDA element)")
+                        self.x.pause(2, 3)
+                except Exception as exc:                        # noqa: BLE001
+                    self.logger(f"review-settings page: no Next after scrolling, WDA fallback failed: {str(exc)[:80]}")
             self._words = []
             return self.read_screen() if nxt else "\n".join(w["text"] for w in words)
         for marker, button in (("please turn on notifications", "Not now"), ("add a profile picture", "Skip"),
