@@ -89,7 +89,7 @@ class IphoneSignupDriverXX:
             # NOT call tap_label() with empty words -- that re-enters read_screen() and recursed for 30 min on A8.
             nxt, words = [], []
             for _ in range(3):                                   # the page is long: the button needs 1-3 swipes
-                self.x.t.run("touch.on(1,560,2200):move(560,500):off()")
+                self.x.t.run("touch.on(1,560,2100):move(560,1500):move(560,900):off()")
                 self.x.pause(1.5, 2.5)
                 words = self.x.ocr()
                 nxt = [w for w in words if _norm(w["text"]) in ("next", "skip")]
