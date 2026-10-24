@@ -590,8 +590,9 @@ def classify_signup_screen(text: str | None) -> str:
     # Only once nothing asked us for anything: a working feed or profile means
     # the account exists. Checked last so a challenge can never be read as
     # success -- the same ordering rule verification uses.
-    if screen_is_healthy(haystack) or any(marker in haystack
+    if screen_is_healthy(haystack) or any(marker in haystack or marker in flat
                                           for marker in _ACCOUNT_EXISTS_MARKERS):
+        # (`flat` as well: 24.10 A6/B5, "Review the settings for / your new profile" comes OCR'd over two lines)
         return SCREEN_DONE
 
     # A screen caught mid-render is not an unrecognised screen. Replaying the
