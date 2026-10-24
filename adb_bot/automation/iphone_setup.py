@@ -584,7 +584,10 @@ def run_step(device: str, container: str, step: str, row: str | None = None, fie
         say(f"setup step '{step}' FAILED: {exc} (screen: {shot or 'none'})")
         if row:
             _note(row, f"setup {step} failed: {str(exc)[:300]} | screen {shot or '-'}")
-            _mark_state(row)                                  # a half-done edit still counts as today's edit
+            # a half-done edit still counts as today's edit -- but a step that never reached the editor did not edit
+            # anything (24.10 B6: "bio editor did not open" parked two fresh accounts for the whole day)
+            if not any(k in str(exc) for k in ("did not open", "not found", "busy", "not ready", "no Next")):
+                _mark_state(row)
             if "logged out" in str(exc):
                 _patch(row, {F_STATUS: "logged out"})
             elif "checkpoint" in str(exc):

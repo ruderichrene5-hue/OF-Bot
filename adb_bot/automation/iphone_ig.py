@@ -864,6 +864,14 @@ def set_bio(p: Phone, bio: str, log=print, keep_existing: bool = False) -> dict:
     h.tap(h.p.find("predicate string", "name == 'profile-bio'"))
     h.pause(1.5, 2.5)
     box = h.p.find("predicate string", "type == 'XCUIElementTypeTextView' AND label == 'Write a profile bio'")
+    if not box and h.p.find("predicate string", "label == 'Create avatar'"):
+        # 24.10 B6 live: a new account's first edit-profile visit shows "Create your avatar" over the bio editor
+        h.tap(h.p.find("predicate string", "type == 'XCUIElementTypeButton' AND label == 'Not now'"))
+        h.pause(1.5, 2.5)
+        if not h.p.find("predicate string", "type == 'XCUIElementTypeTextView' AND label == 'Write a profile bio'"):
+            h.tap(h.p.find("predicate string", "name == 'profile-bio'"))
+            h.pause(1.5, 2.5)
+        box = h.p.find("predicate string", "type == 'XCUIElementTypeTextView' AND label == 'Write a profile bio'")
     if not box:
         raise FlowError("bio editor did not open")
     box.clear()
