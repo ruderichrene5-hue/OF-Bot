@@ -87,6 +87,7 @@ class IphoneSignupDriverXX:
                                ("add a mobile number", "Skip"),          # 24.10 A6/B5: after the review-settings page
                                ("follow 5 or", "Skip"),                  # 24.10 A6/B5: "Follow 5 or more people" (two OCR lines)
                                ("pick what you want to", "Skip"),        # 24.10 A6/B5: interest picker, then the feed
+                               ("create a profile that", "Skip"),        # 24.10 B6: "Create a profile that shows your vibe"
                                ("allow instagram to use your contacts", "Not now"), ("turn on contacts", "Not now"),
                                ("turn on push notifications", "Not now")):
             if marker in low and self.tap_label((button,)):
