@@ -316,6 +316,13 @@ class IphoneSignupDriver:
             self.human.tap_xy(x, y)
         time.sleep(random.uniform(0.6, 1.3))
 
+    def clickable_labels(self) -> list[str]:
+        """Labels of the enabled buttons/cells on screen (24.10: required by flows.signup on chooser screens)."""
+        if not self._elems:
+            self.read_screen()
+        return [e["label"] for e in self._elems if e["type"] in ("XCUIElementTypeButton", "XCUIElementTypeCell", "XCUIElementTypeLink")
+                and e["label"] and e.get("enabled", True)]
+
     def tap_label(self, labels) -> bool:
         if self._root is None:
             self.read_screen()

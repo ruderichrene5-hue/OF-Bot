@@ -146,6 +146,14 @@ class IphoneSignupDriverXX:
         self.logger(f"none of {list(labels)} on screen")
         return False
 
+    def clickable_labels(self) -> list[str]:
+        """What the flow may report/tap on a chooser screen: every OCR'd text (no element tree here).
+        24.10: flows.signup calls this on method_chooser / call_confirm / send_sms -- it was never defined,
+        so the run died with AttributeError instead of a readable 'it offered: ...'."""
+        if not self._words:
+            self.read_screen()
+        return [w["text"].strip() for w in self._words if w["text"].strip()]
+
     # -- typing -----------------------------------------------------------------
     def _field_guess(self, hints) -> dict | None:
         """No element tree to ask 'is this a text field' -- find the hint label by OCR

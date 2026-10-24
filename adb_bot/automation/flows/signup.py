@@ -577,9 +577,12 @@ def classify_signup_screen(text: str | None) -> str:
     # and "...create an" / "account and to ..." over two lines, so no multi-word marker matched and the
     # Terms screen -- the tap that creates the account -- read as unknown four times in one evening.
     # Match markers against the text with all whitespace collapsed to single spaces as well.
+    # Only for the Terms screen: 24.10 11:30 live (A3/B3/C15), the collapsed text of the NUMBER screen
+    # ("China (+86) | Change | Mobile number") reads "change mobile number" = the method-chooser marker,
+    # which sorts before the number screen -- three runs died on it in one slot.
     flat = " ".join(haystack.split())
     for kind, markers in _ORDERED_MARKERS:
-        if any(marker in haystack or marker in flat for marker in markers):
+        if any(marker in haystack or (kind == SCREEN_TERMS and marker in flat) for marker in markers):
             return kind
 
     # Only once nothing asked us for anything: a working feed or profile means
