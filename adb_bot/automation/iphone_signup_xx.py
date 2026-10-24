@@ -90,6 +90,13 @@ class IphoneSignupDriverXX:
                 self.logger(f"post-signup prompt {marker!r} -> {button}")
                 self.x.pause(1.5, 2.5)
                 return self.read_screen()
+        if "posts" in low and "followers" in low and "following" in low and ("follow" in low or "message" in low) \
+                and self.tap_label(("Back",)):
+            # 24.10 A5 live: the new account's first "suggested" tap landed on a profile page (cristiano) --
+            # unknown to the flow although the account exists. Back to the feed and read again.
+            self.logger("profile page in front -> Back")
+            self.x.pause(1.5, 2.5)
+            return self.read_screen()
         if "make sure your device is nearby" in low and self.tap_label(("Continue",)):
             self.logger("device-nearby interstitial -> Continue")
             self.x.pause(1.5, 2.5)

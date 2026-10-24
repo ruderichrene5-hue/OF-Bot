@@ -410,6 +410,8 @@ _SAVE_PASSWORD_MARKERS = (
 # `@cici.aurainta` minutes after it was created. Whitelist, for the same reason
 # verification's is: the danger is always the screen nobody has seen.
 _ACCOUNT_EXISTS_MARKERS = (
+    # 24.10 B4 live, right after "I agree": iOS "quick permissions" page of a brand-new account
+    "review the settings for your new profile",
     "edit profile",
     "share profile",
     "add your bio",
@@ -1670,8 +1672,11 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
 
             elif screen == SCREEN_TERMS:
                 log("info", "agreeing -- this is the tap that creates the account")
-                driver.tap_label(("I agree",))
-                sleep(12)
+                if driver.tap_label(("I agree",)):
+                    driver.terms_agreed = True          # 24.10 B4: restart_app checks this; it was never set, so the
+                    sleep(12)                            # fresh account's "Review the settings" screen restarted Instagram twice
+                else:
+                    sleep(12)
 
             elif screen == SCREEN_SAVE_PASSWORD:
                 # Back, not a label: the button is "NOT NOW" the first time and
