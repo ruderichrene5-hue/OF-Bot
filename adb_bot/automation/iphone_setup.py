@@ -356,12 +356,63 @@ def replace_account(device: str, container: str, row: str, f: dict, log_fn=None)
         hold.release()
 
 
+_REUSE: dict = {}
+DRIVE_PICTURES = {"Mandy": "veralta:MODELS/Mandy OF/Bilder/2026-10", "Kathi": "veralta:MODELS/Kathi/Bilder",
+                  "Lea": "veralta:MODELS/Lea OF/Bilder"}
+MODEL_NAMES = {"rec3wB3RZZTP5V0Zn": "Nikki", "recKizuQjcTQ6ePXM": "Kathi", "recikj1PZtZSNrpJv": "Lea",
+               "recXuODWU9FETE6LD": "Luisa", "recXqY6RHUqQ0R8d1": "Mandy"}
+
+
+def reuse_picture(f: dict, row_id: str, kind: str):
+    """24.10 Rene: "Bilder können doppelt verwendet werden" -- with no own/free picture, take an already finished
+    Generate Pictures image of the same model and kind (any account's), picked stably per row; a model with none
+    at all (Mandy) takes a photo from her Drive picture folder. Never blocks on RunPod credit."""
+    model = (f.get(F_MODEL_LINK) or [None])[0]
+    if not model:
+        return None
+    use_names = GEN_KINDS[kind]
+    key = (model, kind)
+    if key not in _REUSE:
+        pool = []
+        try:
+            offset = None
+            while True:
+                params = {"filterByFormula": f"{{{GEN_FIELDS['picked']}}} != ''", "pageSize": 100}
+                if offset:
+                    params["offset"] = offset
+                r = requests.get(f"https://api.airtable.com/v0/{BASE}/{T_GEN}", headers=_hdr(), params=params, timeout=30)
+                r.raise_for_status()
+                j = r.json()
+                for x in j.get("records", []):
+                    xf = x["fields"]
+                    if model in (xf.get(GEN_FIELDS["model"]) or []) and (xf.get("Verwendung") or "") in use_names:
+                        att = xf[GEN_FIELDS["picked"]][0]
+                        pool.append((att, f"{att.get('filename')} (reused from Generate Pictures {x['id']})"))
+                offset = j.get("offset")
+                if not offset:
+                    break
+        except Exception as exc:                              # noqa: BLE001
+            log.warning("reuse pool %s/%s failed: %s", model, kind, exc)
+        if not pool and MODEL_NAMES.get(model) in DRIVE_PICTURES:
+            src = DRIVE_PICTURES[MODEL_NAMES[model]]
+            import subprocess
+            names = subprocess.run(["rclone", "lsf", "--files-only", src], capture_output=True, text=True, timeout=120).stdout.split()
+            pool = [({"drive": f"{src}/{n}", "filename": n}, f"{n} (Drive {src.split(':', 1)[-1]})")
+                    for n in names if n.lower().endswith((".jpg", ".jpeg", ".png", ".heic"))]
+        _REUSE[key] = pool
+    pool = _REUSE[key]
+    if not pool:
+        return None
+    return pool[(sum(row_id.encode()) + (7 if kind == "highlight" else 0)) % len(pool)]
+
+
 def material(f: dict, row_id: str, kind: str):
-    """(attachment, label) for the picture step: the row's own attachment first, else a generated picture."""
+    """(attachment, label) for the picture step: the row's own attachment first, else a generated picture,
+    else (24.10) a reused one."""
     field = F_PIC if kind == "picture" else F_HL_PIC
     if f.get(field):
         return f[field][0], f"{f[field][0].get('filename')} (attachment on the row)"
-    return generated_pictures(row_id).get(kind)
+    return generated_pictures(row_id).get(kind) or reuse_picture(f, row_id, kind)
 
 
 def needed(f: dict, row_id: str = "") -> list[str]:
@@ -439,6 +490,13 @@ def candidates() -> list[dict]:
 def _download(att: dict, workdir: str) -> str:
     name = att.get("filename") or "media.jpg"
     path = os.path.join(workdir, name.replace("/", "_"))
+    if att.get("drive"):                                      # 24.10: a photo from the model's Drive folder
+        import subprocess
+        subprocess.run(["rclone", "copyto", att["drive"], path], check=True, timeout=300)
+        if path.lower().endswith(".heic"):
+            subprocess.run(["convert", path, path[:-5] + ".jpg"], check=True, timeout=120)
+            path = path[:-5] + ".jpg"
+        return path
     r = requests.get(att["url"], timeout=120)
     r.raise_for_status()
     with open(path, "wb") as fh:
@@ -562,6 +620,19 @@ def tick(max_phones: int = 4) -> dict:
                 replace_account(device, name, row["id"], f)
     except Exception as exc:                                  # noqa: BLE001
         log.warning("replace scan failed: %s", exc)
+    try:                                                      # 24.10 Rene: "mach alles selbst" -- new accounts start warm-up by themselves
+        today = now.strftime("%Y-%m-%d")
+        for row in _list(T_ACC, "AND({Creation Status} = 'Instagram Created', {Warm-up Start} = '', {Container} != '', {Username} != '')"):
+            st = row["fields"].get(F_STATUS) or ""
+            if st in BLOCKED_STATUS or st == "Healthy":
+                continue
+            fields = {"Warm-up Start": today}
+            if not st:
+                fields[F_STATUS] = "setup"
+            _patch(T_ACC, row["id"], fields)
+            log.info("@%s: warm-up start set (new account)", row["fields"].get(F_USER))
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("auto warm-up start failed: %s", exc)
     cands = candidates()
     orders = 0
     for c in cands:

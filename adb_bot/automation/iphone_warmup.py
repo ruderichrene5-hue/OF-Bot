@@ -43,7 +43,7 @@ F_START, F_STATUS, F_CREATION, F_NOTES, F_USER = "Warm-up Start", "Status", "Cre
 F_DONE = {n: f"Warm-up Day {n} done" for n in (1, 2, 3, 4)}
 BLOCKED_STATUS = {"Human Verification", "Completely Banned", "Banned", "Review", "logged out", "Retired"}   # Retired: model dropped (Nikki 23.10)
 OK_CREATION = {"Instagram Created", "Verified"}
-WINDOW = (9, 23)
+WINDOW = (0, 24)   # 24.10 Rene: "durchgehend weiter machen" (was 9-23)
 GAP_HOURS = float(os.environ.get("IPHONE_WARMUP_GAP_HOURS", "8"))
 SAME_DAY = os.environ.get("IPHONE_WARMUP_SAME_DAY") == "1"
 WARMUP_DAYS = int(os.environ.get("IPHONE_WARMUP_DAYS", "1"))   # 23.10 Rene: one warm-up day, then post (was 4)
