@@ -374,13 +374,24 @@ def worker(plan_id: str, t: str, dev: str) -> int:
         set_slot(plan_id, t, dev, state="running", at=dt.datetime.now(BERLIN).strftime("%H:%M"))
         pause_watchdog()
         log.info("%s %s %s: signup %s in %s", plan_id, t, ph["name"], claim["row"], claim["container"])
-        try:
-            proc = subprocess.run([PYTHON, "-m", "adb_bot.automation.iphone_signup", "run", claim["row"]], cwd=ADB_BOT,
-                                  capture_output=True, text=True, timeout=SIGNUP_TIMEOUT_S)
-            out = (proc.stdout.strip() or proc.stderr.strip()).splitlines()
-            code, tail = proc.returncode, (out[-1] if out else "")[:200]
-        except subprocess.TimeoutExpired:
-            code, tail = 124, f"Signup nach {SIGNUP_TIMEOUT_S // 60} min abgebrochen"
+        # 24.10: the child's output used to live only in memory -- a timeout threw all of it away, six
+        # 45-minute runs on 23.10 left no trace at all. Stream it into a per-run file instead.
+        log_dir = os.path.join("/opt/adbbot/logs/signups", dt.datetime.now(BERLIN).strftime("%Y-%m-%d"))
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f"{dt.datetime.now(BERLIN).strftime('%H%M%S')}_{letter}_{claim['container']}_{claim['row']}.log")
+        log.info("run log: %s", log_path)
+        with open(log_path, "w", encoding="utf-8") as fh:
+            try:
+                proc = subprocess.run([PYTHON, "-m", "adb_bot.automation.iphone_signup", "run", claim["row"]], cwd=ADB_BOT,
+                                      stdout=fh, stderr=subprocess.STDOUT, text=True, timeout=SIGNUP_TIMEOUT_S)
+                code = proc.returncode
+            except subprocess.TimeoutExpired:
+                code = 124
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            out = [l for l in fh.read().strip().splitlines() if l.strip()]
+        tail = (out[-1] if out else "")[:200]
+        if code == 124:
+            tail = f"Signup nach {SIGNUP_TIMEOUT_S // 60} min abgebrochen (zuletzt: {tail[:120]})"
         st, text = outcome(claim["row"], code, tail)
         set_slot(plan_id, t, dev, state=st, text=text)
         log.info("%s %s %s: %s (exit %s)", plan_id, t, ph["name"], text, code)

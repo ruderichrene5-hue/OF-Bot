@@ -573,8 +573,13 @@ def classify_signup_screen(text: str | None) -> str:
     if looks_like_another_app(haystack):
         return SCREEN_NOT_INSTAGRAM
 
+    # 24.10 (A12/A13/C1/C13 live, iPhone OCR): the OCR breaks "Agree to Instagram's terms" / "and policies"
+    # and "...create an" / "account and to ..." over two lines, so no multi-word marker matched and the
+    # Terms screen -- the tap that creates the account -- read as unknown four times in one evening.
+    # Match markers against the text with all whitespace collapsed to single spaces as well.
+    flat = " ".join(haystack.split())
     for kind, markers in _ORDERED_MARKERS:
-        if any(marker in haystack for marker in markers):
+        if any(marker in haystack or marker in flat for marker in markers):
             return kind
 
     # Only once nothing asked us for anything: a working feed or profile means
@@ -1005,6 +1010,15 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
         code_submitted = False
 
     def finish(status, detail=""):
+        if status != RESULT_CREATED:
+            # 24.10 (Rene: "Screenshot wo er hängt"): 13 of 15 runs on 23.10 ended stuck with only a sentence in
+            # the Notes -- keep picture + screen text of the moment the run gives up, whatever the reason.
+            keeper = getattr(driver, "keep_screen", None)
+            if callable(keeper):
+                try:
+                    keeper(f"signup-{status}", (detail or "")[:400])
+                except Exception:                                   # noqa: BLE001 -- diagnostics never break the run
+                    pass
         release(status != RESULT_CREATED)
         return SignupResult(status=status, detail=detail,
                             username=identity.username, steps=steps,

@@ -269,7 +269,9 @@ class IphoneSignupDriverXX:
         confusion on these generated, random-looking local parts. Collapsing the usual
         look-alikes before comparing turns that into a pass instead of a false 'did not hold'
         that aborted a perfectly good signup."""
-        return _norm(s).replace("0", "o").replace("1", "l").replace("5", "s")
+        # 24.10 (A1/A11 live, "could not get monk.fleeced_7l@icloud.com into the email field"): OCR also drops or
+        # swaps the underscore/dot in these generated addresses -- compare letters and digits only.
+        return re.sub(r"[^a-z0-9@]", "", _norm(s).replace("0", "o").replace("1", "l").replace("i", "l").replace("5", "s"))
 
     def field_holds(self, hints, value: str) -> bool:
         self.read_screen()
@@ -280,6 +282,23 @@ class IphoneSignupDriverXX:
         fuzzy_value = self._ocr_fuzzy(value)
         for w in self._words:
             if fuzzy_value in self._ocr_fuzzy(w["text"]):
+                return True
+        if value.isdigit() and len(value) >= 4:
+            # 24.10 (B10 live, and A10/B9/B13 on 12.10): the confirmation code sits in 6 separate boxes, so the
+            # OCR returns six one-digit words -- the whole code never appears inside ONE word. Join the digits
+            # of each text row and look for the code there.
+            rows: dict[int, list[dict]] = {}
+            for w in self._words:
+                if w["text"].strip().isdigit():
+                    rows.setdefault(round(w["y"] / 14), []).append(w)
+            for ws in rows.values():
+                joined = "".join(w["text"].strip() for w in sorted(ws, key=lambda w: w["x"]))
+                if value in joined:
+                    return True
+        if "@" in value and len(value.split("@")[0]) >= 8:
+            # a long address is shown cut off ("monk.fleeced_7l@icl...") -- the local part alone is proof enough
+            local = self._ocr_fuzzy(value.split("@")[0])
+            if any(local in self._ocr_fuzzy(w["text"]) for w in self._words):
                 return True
         return False
 
