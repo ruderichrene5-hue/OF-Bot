@@ -778,12 +778,19 @@ def _run_row_driven_xx(info: dict) -> dict:
     driver = cls(x, info["device"], info["container"], logger=log.info)
     driver.identity = ident
     mailbox = AliasMailbox(info["alias"]) if info["alias"] else None
-    try:
-        from adb_bot.clients.sms.router import build_router
-        router = build_router(logger=log)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("no SMS router (%s) -- email chain only", exc)
-        router = None
+    router = None
+    if info.get("alias") and os.environ.get("IPHONE_SIGNUP_NUMBER_FIRST") != "1":
+        # 24.10 Rene ("neue Accounts. Mit iCloud."): an iCloud-alias row signs up by e-mail straight away --
+        # no rented number first. 23./24.10 the rented US numbers never got a code (B11, A4: two numbers,
+        # 90 s each, refunded) while the alias inbox works. IPHONE_SIGNUP_NUMBER_FIRST=1 restores the
+        # 13.10 number-first rule.
+        log.info("%s: iCloud alias row -- e-mail route, no SMS number", info["container"])
+    else:
+        try:
+            from adb_bot.clients.sms.router import build_router
+            router = build_router(logger=log)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("no SMS router (%s) -- email chain only", exc)
     try:
         res = S.run_signup(driver, router, ident, logger=log, mailbox=mailbox, country="US")
     except RateLimited as exc:
@@ -834,12 +841,19 @@ def _run_row_driven_wda(info: dict) -> dict:
     driver = IphoneSignupDriver(p, info["device"], info["container"], touch, logger=log)
     driver.identity = ident
     mailbox = AliasMailbox(info["alias"]) if info["alias"] else None
-    try:
-        from adb_bot.clients.sms.router import build_router
-        router = build_router(logger=log)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("no SMS router (%s) -- email chain only", exc)
-        router = None
+    router = None
+    if info.get("alias") and os.environ.get("IPHONE_SIGNUP_NUMBER_FIRST") != "1":
+        # 24.10 Rene ("neue Accounts. Mit iCloud."): an iCloud-alias row signs up by e-mail straight away --
+        # no rented number first. 23./24.10 the rented US numbers never got a code (B11, A4: two numbers,
+        # 90 s each, refunded) while the alias inbox works. IPHONE_SIGNUP_NUMBER_FIRST=1 restores the
+        # 13.10 number-first rule.
+        log.info("%s: iCloud alias row -- e-mail route, no SMS number", info["container"])
+    else:
+        try:
+            from adb_bot.clients.sms.router import build_router
+            router = build_router(logger=log)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("no SMS router (%s) -- email chain only", exc)
     try:
         # 10.10, explicit instruction (chat): buy US numbers for this fleet, not
         # DE -- flows.signup's PICKER_COUNTRY="DE" default assumes the picker
