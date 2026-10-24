@@ -84,6 +84,8 @@ class IphoneSignupDriverXX:
             self.x.pause(1, 1.5)
             return self.read_screen()
         for marker, button in (("please turn on notifications", "Not now"), ("add a profile picture", "Skip"),
+                               ("add a mobile number", "Skip"),          # 24.10 A6/B5: after the review-settings page
+                               ("follow 5 or", "Skip"),                  # 24.10 A6/B5: "Follow 5 or more people" (two OCR lines)
                                ("allow instagram to use your contacts", "Not now"), ("turn on contacts", "Not now"),
                                ("turn on push notifications", "Not now")):
             if marker in low and self.tap_label((button,)):
