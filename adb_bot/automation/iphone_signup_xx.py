@@ -135,6 +135,17 @@ class IphoneSignupDriverXX:
                 self._tap_word(w, repr(w["text"]))
                 self._words = []
                 return True
+        # 24.10 A4 live: the "I agree" button OCRs as "lagree" (capital I -> l, space lost) -- five reads, five
+        # "none of ['I agree'] on screen", account never created. Compare letters only, with the usual I/l/1/|
+        # confusion collapsed, before giving up.
+        def key(t: str) -> str:
+            return re.sub(r"[^a-z]", "", _norm(t).replace("|", "i").replace("1", "i").replace("l", "i"))
+        wanted_k = {key(l) for l in labels if key(l)}
+        for w in self._words:
+            if key(w["text"]) in wanted_k:
+                self._tap_word(w, f"{w['text']!r} (~ {labels[0]!r})")
+                self._words = []
+                return True
         if any(_norm(l) == "back" for l in labels):
             # 13.10 E17/E22 live: iOS shows the back button as a bare "<" glyph, never the word "Back", so the
             # number swap after a code that never came ended as "code did not advance in 4 tries".
