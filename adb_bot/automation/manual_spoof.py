@@ -74,7 +74,7 @@ VIDEO_EXT = (".mp4", ".mov", ".m4v")
 # Rene: size it to the account count, not a fixed number like the Scheduled pipeline's VARIANTS.
 EXTRA_VARIANTS = 50   # 17.10: 46 Healthy Nikki accounts, 40 variants were not enough
 # Lea posts from the farm too (13 containers, E13-E25): one local variant per account, same layout as Nikki.
-EXTRA_PER_MODEL = {"Nikki": EXTRA_VARIANTS, "Lea": 20, "Kathi": 25, "Luisa": 10}   # 23.10: Nikki retired; Kathi (G/H), Luisa (I) start
+EXTRA_PER_MODEL = {"Nikki": EXTRA_VARIANTS, "Lea": 20, "Kathi": 25, "Luisa": 10, "Mandy": 15}   # 23.10: Nikki retired; Kathi (G/H), Luisa (I) start
 
 
 def _lang(name: str) -> str | None:
