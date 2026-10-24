@@ -87,10 +87,14 @@ class IphoneSignupDriverXX:
             # 24.10 A6/B5/A8 live: the new account's "quick permissions" page; its only way on is a "Next" button
             # below the fold. Must run BEFORE the prompt loop ("turn on contacts" matches this page too) and must
             # NOT call tap_label() with empty words -- that re-enters read_screen() and recursed for 30 min on A8.
-            self.x.t.run("touch.on(1,560,2100):move(560,700):off()")
-            self.x.pause(1.5, 2.5)
-            words = self.x.ocr()
-            nxt = [w for w in words if _norm(w["text"]) in ("next", "skip")]
+            nxt, words = [], []
+            for _ in range(3):                                   # the page is long: the button needs 1-3 swipes
+                self.x.t.run("touch.on(1,560,2200):move(560,500):off()")
+                self.x.pause(1.5, 2.5)
+                words = self.x.ocr()
+                nxt = [w for w in words if _norm(w["text"]) in ("next", "skip")]
+                if nxt:
+                    break
             if nxt:
                 self._tap_word(nxt[-1], "review-settings Next")
                 self.logger("review-settings page -> Next")
