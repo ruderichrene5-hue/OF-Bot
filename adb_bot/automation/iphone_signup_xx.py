@@ -90,6 +90,16 @@ class IphoneSignupDriverXX:
                 self.logger(f"post-signup prompt {marker!r} -> {button}")
                 self.x.pause(1.5, 2.5)
                 return self.read_screen()
+        if "review the settings for" in low and "your new profile" in low:
+            # 24.10 A6/B5 live: the new account's "quick permissions" page; its only way on is a "Next" button
+            # below the fold (OCR at y~744 after one swipe up). Scroll, tap it, read again (-> feed = done).
+            self.x.t.run("touch.on(1,560,2100):move(560,900):off()")
+            self.x.pause(1.5, 2.5)
+            self._words = []
+            if self.tap_label(("Next", "Skip")):
+                self.logger("review-settings page -> Next")
+                self.x.pause(2, 3)
+                return self.read_screen()
         if "posts" in low and "followers" in low and "following" in low and ("follow" in low or "message" in low) \
                 and self.tap_label(("Back",)):
             # 24.10 A5 live: the new account's first "suggested" tap landed on a profile page (cristiano) --
