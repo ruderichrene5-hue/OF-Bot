@@ -83,6 +83,22 @@ class IphoneSignupDriverXX:
             self.logger("paste dialog -> Allow Paste")
             self.x.pause(1, 1.5)
             return self.read_screen()
+        if "review the settings for" in low and "your new profile" in low:
+            # 24.10 A6/B5/A8 live: the new account's "quick permissions" page; its only way on is a "Next" button
+            # below the fold. Must run BEFORE the prompt loop ("turn on contacts" matches this page too) and must
+            # NOT call tap_label() with empty words -- that re-enters read_screen() and recursed for 30 min on A8.
+            self.x.t.run("touch.on(1,560,2100):move(560,700):off()")
+            self.x.pause(1.5, 2.5)
+            words = self.x.ocr()
+            nxt = [w for w in words if _norm(w["text"]) in ("next", "skip")]
+            if nxt:
+                self._tap_word(nxt[-1], "review-settings Next")
+                self.logger("review-settings page -> Next")
+                self.x.pause(2, 3)
+            else:
+                self.logger("review-settings page: no Next after scrolling")
+            self._words = []
+            return self.read_screen() if nxt else "\n".join(w["text"] for w in words)
         for marker, button in (("please turn on notifications", "Not now"), ("add a profile picture", "Skip"),
                                ("add a mobile number", "Skip"),          # 24.10 A6/B5: after the review-settings page
                                ("follow 5 or", "Skip"),                  # 24.10 A6/B5: "Follow 5 or more people" (two OCR lines)
@@ -93,16 +109,6 @@ class IphoneSignupDriverXX:
             if marker in low and self.tap_label((button,)):
                 self.logger(f"post-signup prompt {marker!r} -> {button}")
                 self.x.pause(1.5, 2.5)
-                return self.read_screen()
-        if "review the settings for" in low and "your new profile" in low:
-            # 24.10 A6/B5 live: the new account's "quick permissions" page; its only way on is a "Next" button
-            # below the fold (OCR at y~744 after one swipe up). Scroll, tap it, read again (-> feed = done).
-            self.x.t.run("touch.on(1,560,2100):move(560,900):off()")
-            self.x.pause(1.5, 2.5)
-            self._words = []
-            if self.tap_label(("Next", "Skip")):
-                self.logger("review-settings page -> Next")
-                self.x.pause(2, 3)
                 return self.read_screen()
         if "posts" in low and "followers" in low and "following" in low and ("follow" in low or "message" in low) \
                 and self.tap_label(("Back",)):
