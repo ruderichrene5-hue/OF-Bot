@@ -1541,7 +1541,18 @@ def run_signup(driver: SignupDriver, router, identity: Identity, logger=None,
                 sleep(10)
 
             elif screen == SCREEN_PASSWORD:
-                if "password" not in done_flags:
+                if "password" not in done_flags or repeats >= 1:
+                    # 24.10 (B13 live: four reads of the password screen, only Next tapped after the first):
+                    # when the screen comes back, type the password again instead of pressing Next on
+                    # whatever is in the box -- and keep a picture of the screen that refused it.
+                    if repeats >= 1:
+                        keeper = getattr(driver, "keep_screen", None)
+                        if callable(keeper):
+                            try:
+                                keeper("signup-password-repeat", (text or "")[:400])
+                            except Exception:                   # noqa: BLE001
+                                pass
+                        log("info", "password screen again (%d) -- retyping", repeats)
                     driver.fill(("password",), identity.password, "password")
                     done_flags.add("password")
                     progressed = True

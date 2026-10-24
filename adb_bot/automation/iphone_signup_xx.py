@@ -218,6 +218,12 @@ class IphoneSignupDriverXX:
         self._allow_paste()
         self.x.pause(0.5, 0.8)
         self._words = []
+        if what == "password":
+            # 24.10 (B13 "password did not advance in 4 tries"): the field shows dots, OCR can never confirm the
+            # value, so the generic path below always "missed", cleared with a tap on the field's right end (the
+            # show-password eye sits there) and typed again. Type once, trust the paste, let the flow tap Next.
+            self.logger("password typed (masked field, no read-back)")
+            return True
         ok = self.field_holds(hints, value)
         if not ok and submits_itself:
             # 12.10, A8 live: the code field can auto-submit THIS fast -- by the time
