@@ -302,6 +302,18 @@ class IphoneSignupDriverXX:
             if not still_here:
                 self.logger(f"{what}: screen moved on after typing -- reading that as submitted, not missed")
                 return True
+        if not ok and what == "email address":
+            # 25.10 C18/D1 live: the email screen's "Email" placeholder IS the field -- the usual +28 pt below the
+            # label tapped beside it, nothing got focus, nothing was typed. Tap the placeholder itself and retype.
+            self.logger("email: not in the field -- tapping the placeholder itself and retyping")
+            self.x.tap(f["x"], f["label_y"])
+            self.x.pause(0.6, 1.0)
+            self._clear_field({**f, "y": f["label_y"]})
+            self.x.type(value)
+            self.x.pause(1.2, 1.8)
+            self._allow_paste()
+            self._words = []
+            ok = self.field_holds(hints, value)
         if not ok and what in ("mobile number", "password", "username"):
             # 13.10 E19/E20 live: the FIRST number of every run came back "field does not hold" and was thrown
             # away, the second always went in -- the paste dialog shows up after our one quick look. Look again
