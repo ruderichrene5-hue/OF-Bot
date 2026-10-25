@@ -117,6 +117,22 @@ def _drop_duplicates(model: str, raws: list[Path]) -> list[Path]:
     return keep
 
 
+SEEN_PATH = Path("/opt/adbbot/manual_spoof/seen_clips.json")
+
+
+def _seen() -> dict:
+    try:
+        import json
+        return json.loads(SEEN_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _seen_save(d: dict) -> None:
+    import json
+    SEEN_PATH.write_text(json.dumps(d, indent=1))
+
+
 def plan_all(model: str, raws: list[Path]) -> list[tuple[Path, str | None]]:
     """(raw, lang) for every raw, same grouping/order as plan() but with no 5-slot cap -- for
     outputs that don't live in a fixed time slot (11.10, Rene: clips 6-9 of a 9-clip day were
@@ -165,6 +181,22 @@ def run(date: str, only: set[str] | None = None) -> bool:
                 subprocess.run(["rclone", "copy", f"{SRC}/{model}/{lang}", str(sub), "--max-depth", "1", "-q"])
                 raws += [p for p in sub.iterdir() if p.suffix.lower() in VIDEO_EXT]
         raws = _drop_duplicates(model, raws)
+        # 25.10: clips stay in the Drive drop folder after their day; the 08:40 timer took 24.10's clips again and
+        # filed them into 25.10's slots, pushing the new clips to the 26th. A clip (by fingerprint) belongs to the
+        # first date it was spoofed for -- later dates skip it and drop it from their work folder.
+        seen = _seen()
+        fresh = []
+        for raw in raws:
+            fp = "|".join(_fingerprint(raw))
+            first = seen.get(fp)
+            if first and first < date:
+                log.info("%s: %s already spoofed for %s -- skipped", model, raw.name, first)
+                raw.unlink(missing_ok=True)
+                continue
+            seen.setdefault(fp, date)
+            fresh.append(raw)
+        _seen_save(seen)
+        raws = fresh
         log.info("%s: %d raws", model, len(raws))
         if model in RAW_ONLY:
             if raws:
