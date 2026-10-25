@@ -632,7 +632,7 @@ def tick(max_phones: int = 4) -> dict:
             fields = {"Warm-up Start": today}
             if not st:
                 fields[F_STATUS] = "setup"
-            _patch(T_ACC, row["id"], fields)
+            _patch(row["id"], fields)
             log.info("@%s: warm-up start set (new account)", row["fields"].get(F_USER))
     except Exception as exc:                                  # noqa: BLE001
         log.warning("auto warm-up start failed: %s", exc)
