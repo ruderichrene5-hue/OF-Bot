@@ -187,7 +187,7 @@ def run(date: str, only: set[str] | None = None) -> bool:
         seen = _seen()
         fresh = []
         for raw in raws:
-            fp = "|".join(_fingerprint(raw))
+            fp = f"{model}|" + "|".join(_fingerprint(raw))      # per model: the same clip may go to two models
             first = seen.get(fp)
             if first and first < date:
                 log.info("%s: %s already spoofed for %s -- skipped", model, raw.name, first)
