@@ -189,7 +189,7 @@ def run(date: str, only: set[str] | None = None) -> bool:
         for raw in raws:
             fp = f"{model}|" + "|".join(_fingerprint(raw))      # per model: the same clip may go to two models
             first = seen.get(fp)
-            if first and first < date:
+            if first and first < date and os.environ.get("MANUAL_SPOOF_ALLOW_REPEAT") != "1":   # Rene re-uploads on purpose
                 log.info("%s: %s already spoofed for %s -- skipped", model, raw.name, first)
                 raw.unlink(missing_ok=True)
                 continue
