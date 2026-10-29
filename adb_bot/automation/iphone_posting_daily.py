@@ -43,9 +43,12 @@ def healthy_containers(model: str) -> dict[str, list[str]]:
     # 22.10: Rene set 21 Nikki/Lea warm-up accounts to Healthy in one go, three of them with Creation Status
     # "Stuck / Needs Human" -- a Healthy status alone is not enough, the account must exist and be usable
     # 23.10 Rene: "Profilbild, Bio muss natuerlich ready sein" before the first reel -> both boxes required
+    # 29.10 Rene (Kathi): "wir machen nicht mit Warm-up, wir fangen einfach an zu posten" -- models listed in
+    # IPHONE_POSTING_NO_SETUP_GATE post without waiting for profile picture + bio
+    gate = "" if model in os.environ.get("IPHONE_POSTING_NO_SETUP_GATE", "").split(",") else ",{Profile Picture done}=1,{Bio done}=1"
     params = {"filterByFormula": f"AND({{Model (auto)}}='{model}',{{Status}}='Healthy',{{Container}}!='',"
-                                 f"{{Creation Status}}!='To Do',{{Creation Status}}!='Gmail Logged In',{{Creation Status}}!='Stuck / Needs Human',"
-                                 f"{{Profile Picture done}}=1,{{Bio done}}=1)",
+                                 f"{{Creation Status}}!='To Do',{{Creation Status}}!='Gmail Logged In',{{Creation Status}}!='Stuck / Needs Human'"
+                                 f"{gate})",
               "fields[]": ["Username", "Container"], "pageSize": 100}
     try:                                                      # containers parked by the warm-up (handle mismatch, C21)
         from adb_bot.automation.iphone_warmup import _skips
