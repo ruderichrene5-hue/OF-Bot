@@ -1,0 +1,9 @@
+[Unit]
+Description=ADB bot Drive schedule folders (daily)
+[Timer]
+Unit=adbbot-drive-folders.service
+OnCalendar=*-*-* 03:00:00 Europe/Berlin
+Persistent=true
+AccuracySec=60s
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,7 @@
+[Unit]
+Description=Track RunPod LoRA training into the Airtable Models table
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+EnvironmentFile=/etc/adbbot/env
+ExecStart=/root/adb_bot/.venv/bin/python3 -m adb_bot.automation.lora_tracker

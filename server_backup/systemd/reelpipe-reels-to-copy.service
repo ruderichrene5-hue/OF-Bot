@@ -1,0 +1,10 @@
+[Unit]
+Description=reel_pipeline: IG Reels To Copy (Waiting For Copy) -> Generate Reels rows; Done when the reel is done
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/reel_pipeline
+ExecStart=/usr/bin/flock -n /run/lock/reelpipe-reels-to-copy.lock /root/reel_pipeline/.venv/bin/python3 /root/reel_pipeline/reels_to_copy_runner.py
+TimeoutStartSec=10m

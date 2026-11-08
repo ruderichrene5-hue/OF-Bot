@@ -1,0 +1,9 @@
+[Unit]
+Description=Check the Tagesplan every 2 minutes for a signup time that has come (starts nothing on its own schedule)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=ADB bot: give every iPhone-farm Instagram account a free oopsie.bio link of its model (Airtable Link in Bio)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+EnvironmentFile=-/etc/adbbot/env
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.link_in_bio_assign --apply
+TimeoutStartSec=300

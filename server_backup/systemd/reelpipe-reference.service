@@ -1,0 +1,10 @@
+[Unit]
+Description=reel_pipeline: Reference Pictures rows with the Generate tick -> 4 candidates (Qwen Image Edit, serverless); Pick -> Picked Picture
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/reel_pipeline
+ExecStart=/usr/bin/flock -n /run/lock/reelpipe-reference.lock /root/reel_pipeline/.venv/bin/python3 /root/reel_pipeline/reference_runner.py
+TimeoutStartSec=3h

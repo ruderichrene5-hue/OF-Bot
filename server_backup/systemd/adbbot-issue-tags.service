@@ -1,0 +1,16 @@
+[Unit]
+Description=ADB bot issue-tag mirror (Needs Human Check -> MLX 'Issue' tag)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.run_loop issue-tags --apply
+RuntimeMaxSec=1800
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env
+
+[Install]
+WantedBy=multi-user.target

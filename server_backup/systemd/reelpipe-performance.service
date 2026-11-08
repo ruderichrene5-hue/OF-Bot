@@ -1,0 +1,10 @@
+[Unit]
+Description=reel_pipeline: daily Instagram numbers (RapidAPI) -> Airtable Performance + Reel Stats
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/reel_pipeline
+ExecStart=/usr/bin/flock -n /run/lock/reelpipe-performance.lock /root/reel_pipeline/.venv/bin/python3 /root/reel_pipeline/performance_collector.py
+TimeoutStartSec=1h

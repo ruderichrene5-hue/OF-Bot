@@ -1,0 +1,15 @@
+[Unit]
+Description=SSH tunnel server -> Mac mini relay. 22.10 (Rene: alles ueber WLAN): every phone by Bonjour name -- CatVNC :5900 -> 127.0.0.1:1590N, WDA :8100 -> 810N, WDA MJPEG :9100 -> 910N. sshd on the Mac resolves <name>.local (launchd agents get no Local Network permission, so no iproxy/socat there). N = stream number (A1 B2 C3 D4 E5 I6 G7 H8 F9 J11 K12 L13).
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ssh -N -i /root/.ssh/iphone_farm -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:15901:Farm-iPhone-01.local:5900 -L 127.0.0.1:8101:Farm-iPhone-01.local:8100 -L 127.0.0.1:9101:Farm-iPhone-01.local:9100 -L 127.0.0.1:15902:Farm-iPhone-02.local:5900 -L 127.0.0.1:8102:Farm-iPhone-02.local:8100 -L 127.0.0.1:9102:Farm-iPhone-02.local:9100 -L 127.0.0.1:15903:Farm-iPhone-03.local:5900 -L 127.0.0.1:8103:Farm-iPhone-03.local:8100 -L 127.0.0.1:9103:Farm-iPhone-03.local:9100 -L 127.0.0.1:15904:Farm-iPhone-04.local:5900 -L 127.0.0.1:8104:Farm-iPhone-04.local:8100 -L 127.0.0.1:9104:Farm-iPhone-04.local:9100 \
+  -L 127.0.0.1:15905:Farm-iPhone-05.local:5900 -L 127.0.0.1:8105:Farm-iPhone-05.local:8100 -L 127.0.0.1:9105:Farm-iPhone-05.local:9100 -L 127.0.0.1:15906:Farm-iPhone-06.local:5900 -L 127.0.0.1:8106:Farm-iPhone-06.local:8100 -L 127.0.0.1:9106:Farm-iPhone-06.local:9100 -L 127.0.0.1:15907:Farm-iPhone-07.local:5900 -L 127.0.0.1:8107:Farm-iPhone-07.local:8100 -L 127.0.0.1:9107:Farm-iPhone-07.local:9100 -L 127.0.0.1:15908:Farm-iPhone-08.local:5900 -L 127.0.0.1:8108:Farm-iPhone-08.local:8100 -L 127.0.0.1:9108:Farm-iPhone-08.local:9100 \
+  -L 127.0.0.1:15909:Renes-iPhone.local:5900 -L 127.0.0.1:8109:Renes-iPhone.local:8100 -L 127.0.0.1:9109:Renes-iPhone.local:9100 -L 127.0.0.1:15911:Farm-iPhone-11.local:5900 -L 127.0.0.1:8111:Farm-iPhone-11.local:8100 -L 127.0.0.1:9111:Farm-iPhone-11.local:9100 -L 127.0.0.1:15912:Farm-iPhone-12.local:5900 -L 127.0.0.1:8112:Farm-iPhone-12.local:8100 -L 127.0.0.1:9112:Farm-iPhone-12.local:9100 -L 127.0.0.1:15913:Farm-iPhone-13.local:5900 -L 127.0.0.1:8113:Farm-iPhone-13.local:8100 -L 127.0.0.1:9113:Farm-iPhone-13.local:9100 reynex03@100.86.11.83
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

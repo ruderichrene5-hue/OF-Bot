@@ -1,0 +1,9 @@
+[Unit]
+Description=Sync iPhone farm Shortcuts with Airtable proxies every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=60min
+
+[Install]
+WantedBy=timers.target

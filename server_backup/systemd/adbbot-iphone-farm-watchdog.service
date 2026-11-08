@@ -1,0 +1,10 @@
+[Unit]
+Description=iPhone farm watchdog: restart dropped live video (AirPlay mirroring), alert when a phone or the relay box is offline
+After=network-online.target tailscaled.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+EnvironmentFile=-/etc/adbbot/env
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.iphone_farm_watchdog
+TimeoutStartSec=170

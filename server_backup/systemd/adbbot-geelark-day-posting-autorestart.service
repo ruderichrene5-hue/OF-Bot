@@ -1,0 +1,15 @@
+[Unit]
+Description=ADB bot Geelark day-posting auto-restart (kicks it off again if it finished early with real backlog still untouched, instead of sitting idle until the next fixed fire or a person noticing)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.geelark_day_posting_autorestart
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env
+
+[Install]
+WantedBy=multi-user.target

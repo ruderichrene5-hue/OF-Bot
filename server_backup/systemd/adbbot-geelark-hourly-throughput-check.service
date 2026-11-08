@@ -1,0 +1,15 @@
+[Unit]
+Description=ADB bot Geelark hourly throughput check (compares the just-completed hour's shares against the trailing baseline, alerts on a real drop -- not just silence)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.geelark_hourly_throughput_check
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env
+
+[Install]
+WantedBy=multi-user.target

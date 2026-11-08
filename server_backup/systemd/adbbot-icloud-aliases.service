@@ -1,0 +1,15 @@
+[Unit]
+Description=ADB bot: Hide My Email aliases -- keeps each Apple ID's Multilogin profile open, icloud.com session warm (validate every 10 min), 15 aliases/day per ID at random times (Bangkok), cap 400
+After=adbbot-mlx-agent.service network-online.target
+Wants=network-online.target
+[Service]
+Restart=always
+RestartSec=60
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/.adb_bot/venv-browser/bin/python -m adb_bot.automation.icloud_aliases serve
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env
+
+[Install]
+WantedBy=multi-user.target

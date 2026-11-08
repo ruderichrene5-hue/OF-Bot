@@ -1,0 +1,15 @@
+[Unit]
+Description=iPhone farm VNC bridge (websockify on 127.0.0.1:6080; only reachable through adbbot-platform's /vnc)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/root/adb_bot
+# token file = one "<device record id>: <ip>:5900" line per phone, rebuilt from /etc/adbbot/iphone_farm.json
+ExecStartPre=/root/adb_bot/.venv/bin/python3 -m adb_bot.automation.iphone_farm_config /run/adbbot-vnc-tokens
+ExecStart=/root/adb_bot/.venv/bin/websockify --token-plugin TokenFile --token-source /run/adbbot-vnc-tokens 127.0.0.1:6080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

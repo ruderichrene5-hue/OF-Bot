@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot MultiLogin->Airtable profile sync (timer)
+
+[Timer]
+Unit=adbbot-mlx-sync.service
+OnBootSec=5min
+OnUnitActiveSec=180min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

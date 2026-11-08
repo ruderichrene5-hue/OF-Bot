@@ -1,0 +1,10 @@
+[Unit]
+Description=reel_pipeline: poll Models for 'LoRA trainieren' ticks every 5 minutes
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

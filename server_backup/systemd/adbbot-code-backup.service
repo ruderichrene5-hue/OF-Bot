@@ -1,0 +1,13 @@
+[Unit]
+Description=ADB bot daily code backup (mirror push to a personal, independent GitHub repo -- owner-controlled, separate from the shared origin remote)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+ExecStart=/bin/bash /root/adb_bot/scripts/backup_to_github.sh
+EnvironmentFile=-/etc/adbbot/env
+
+[Install]
+WantedBy=multi-user.target

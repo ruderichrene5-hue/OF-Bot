@@ -1,0 +1,11 @@
+[Unit]
+Description=reel_pipeline: train a LoRA for Models rows with the 'LoRA trainieren' tick (starts/stops the pod)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/reel_pipeline
+# a training run is ~1.5 h incl. pod start, samples and pod stop; never two at once
+ExecStart=/usr/bin/flock -n /run/lock/reelpipe-lora.lock /root/reel_pipeline/.venv/bin/python3 /root/reel_pipeline/lora_runner.py
+TimeoutStartSec=5h

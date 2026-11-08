@@ -1,0 +1,12 @@
+[Unit]
+Description=reel_pipeline: generate account pictures for Airtable rows with the Generation tick
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/reel_pipeline
+# flock: a run can take 20+ minutes (serverless cold start), the timer fires every 2 --
+# never two runs on the same rows
+ExecStart=/usr/bin/flock -n /run/lock/reelpipe-account-content.lock /root/reel_pipeline/.venv/bin/python3 /root/reel_pipeline/generate_account_content.py
+TimeoutStartSec=3h

@@ -1,0 +1,14 @@
+[Unit]
+Description=Appium 3 server (XCUITest driver) for the iPhone farm; talks to each phone's WDA through adbbot-vnc-tunnel (127.0.0.1:810N)
+After=network-online.target adbbot-vnc-tunnel.service
+Wants=adbbot-vnc-tunnel.service
+
+[Service]
+Environment=APPIUM_HOME=/opt/appium/home
+WorkingDirectory=/opt/appium
+ExecStart=/opt/appium/node_modules/.bin/appium server --address 127.0.0.1 --port 4723 --log-timestamp --log-no-colors --log /var/log/adbbot/appium.log
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

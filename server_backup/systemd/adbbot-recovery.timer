@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot recovery loop (un-flagged profiles -> retryable again) (timer)
+
+[Timer]
+Unit=adbbot-recovery.service
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

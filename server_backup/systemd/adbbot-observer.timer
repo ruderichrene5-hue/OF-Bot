@@ -1,0 +1,9 @@
+[Unit]
+Description=Instagram observer round, daily
+[Timer]
+Unit=adbbot-observer.service
+OnCalendar=*-*-* 22:00:00 Europe/Berlin
+Persistent=true
+AccuracySec=5min
+[Install]
+WantedBy=timers.target

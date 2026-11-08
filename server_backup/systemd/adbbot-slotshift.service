@@ -1,0 +1,6 @@
+[Unit]
+Description=Shift queue slots to 15:00,18:00,21:00 after the Berlin day rolls over
+
+[Service]
+Type=oneshot
+ExecStart=/root/adbbot-slotshift/apply.sh

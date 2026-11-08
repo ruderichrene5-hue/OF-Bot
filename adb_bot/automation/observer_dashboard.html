@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Veralta Viewer</title>
+<style>
+:root{
+  /* same palette as the Phones / Proxies & Containers pages */
+  color-scheme:dark;
+  --bg:#0b0d12; --surface:#161a22; --line:#262c38; --grid:#222631;
+  --text:#e6e8ee; --text-2:#c3c8d2; --muted:#9aa3b2;
+  --views:#4f8cff; --followers:#3fb950;
+  --good:#3fb950; --bad:#ff7a70; --warn:#d29922; --focus:#4f8cff;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1180px;margin:0 auto;padding:20px 16px 64px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px}
+h1{font-size:20px;margin:0}
+.muted{color:var(--muted)} .small{font-size:12px}
+.filters{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0}
+select,button{font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
+button{cursor:pointer}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{border:0;border-radius:0;border-right:1px solid var(--line)}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed="true"]{background:var(--focus);color:#fff}
+select:focus-visible,button:focus-visible,tr:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.tile .label{font-size:12px;color:var(--text-2)}
+.tile .value{font-size:26px;font-weight:650;font-variant-numeric:tabular-nums;margin-top:2px}
+.tile .sub{font-size:12px;color:var(--muted)}
+.up{color:var(--good)} .down{color:var(--bad)}
+td a{color:inherit;text-decoration:none}td a:hover{text-decoration:underline}.stage{font-size:11.5px;border:1px solid #5a4614;color:#d29922;border-radius:999px;padding:1px 8px;white-space:nowrap}
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px;margin-top:12px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px;position:relative}
+.card h2{font-size:14px;margin:0 0 2px}
+svg{display:block;width:100%;height:auto;overflow:visible}
+svg text{fill:var(--text-2);font-size:11px;font-variant-numeric:tabular-nums}
+.tip{position:absolute;pointer-events:none;background:var(--text);color:var(--surface);border-radius:6px;padding:6px 8px;font-size:12px;white-space:nowrap;opacity:0;transition:opacity .08s}
+.alert{border:1px solid var(--bad);color:var(--text);border-radius:10px;padding:8px 12px;margin:10px 0;background:color-mix(in srgb,var(--bad) 10%,var(--surface))}
+table{border-collapse:collapse;width:100%}
+th,td{padding:8px 10px;border-bottom:1px solid var(--grid);text-align:left;white-space:nowrap}
+th{font-size:12px;color:var(--text-2);font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+tbody tr{cursor:pointer} tbody tr:hover{background:color-mix(in srgb,var(--text) 4%,transparent)}
+tr.sel{background:color-mix(in srgb,var(--focus) 10%,transparent)}
+.st{font-size:12px;display:inline-flex;align-items:center;gap:5px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.scroll{overflow-x:auto}
+details{margin-top:12px} summary{cursor:pointer;color:var(--text-2)}
+.empty{padding:28px;text-align:center;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>Veralta Viewer</h1>
+  <span class="muted small" id="stamp"></span>
+</header>
+
+<div class="filters" role="group" aria-label="Filter">
+  <select id="fModel" aria-label="Model"></select>
+  <select id="fAcc" aria-label="Account"></select>
+  <select id="fStage" aria-label="Stage"></select>
+  <span class="seg" role="group" aria-label="Period">
+    <button data-days="1" aria-pressed="false">24 h</button>
+    <button data-days="7" aria-pressed="false">7 days</button>
+    <button data-days="30" aria-pressed="true">30 days</button>
+  </span>
+</div>
+
+<div id="alerts"></div>
+
+<div class="kpis">
+  <div class="tile"><div class="label">Views</div><div class="value" id="kViews">–</div><div class="sub" id="kViewsSub"></div></div>
+  <div class="tile"><div class="label">Followers</div><div class="value" id="kFol">–</div><div class="sub" id="kFolSub"></div></div>
+  <div class="tile"><div class="label">New reels</div><div class="value" id="kReels">–</div><div class="sub" id="kReelsSub"></div></div>
+  <div class="tile"><div class="label">Avg. views per reel</div><div class="value" id="kAvg">–</div><div class="sub">last 30 reels</div></div>
+</div>
+
+<div class="charts">
+  <div class="card"><h2>Views per day</h2><div class="muted small" id="vNote"></div><svg id="cViews" viewBox="0 0 560 240" role="img" aria-label="Views per day"></svg><div class="tip" id="tViews"></div></div>
+  <div class="card"><h2>Followers</h2><div class="muted small" id="fNote"></div><svg id="cFol" viewBox="0 0 560 240" role="img" aria-label="Follower history"></svg><div class="tip" id="tFol"></div></div>
+</div>
+
+<div class="card" style="margin-top:12px">
+  <h2>Accounts</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Account</th><th>Model</th><th>Stage</th><th>Status</th><th class="n">Followers</th><th class="n" id="hFd">+/-</th><th class="n" id="hV">Views</th><th class="n">Avg / reel</th><th>Tracking link</th><th>iPhone · Container</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table></div>
+  <div id="reels"></div>
+</div>
+</main>
+
+<script>
+const DATA = __DATA__;
+const ACC = DATA.accounts;
+const $ = id => document.getElementById(id);
+const fmt = v => v == null ? "–" : Math.round(v).toLocaleString("en-US");
+const signed = v => v == null ? "–" : (v > 0 ? "+" : "") + fmt(v);
+const dayKey = d => d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+const STATUS = {ok:["active","--good"], not_found:["check needed","--bad"], private:["private","--warn"], error:["unreadable","--warn"], pending:["waiting for first scan","--warn"]};
+let state = {model:"*", acc:"*", stage:"*", days:30};
+
+$("stamp").textContent = "As of " + new Date(DATA.generated*1000).toLocaleString("en-GB",{dateStyle:"short",timeStyle:"short"}) + " · updated daily";
+
+function fillSelects(){
+  const models = [...new Set(ACC.map(a => a.model))].sort();
+  $("fModel").innerHTML = `<option value="*">All models</option>` + models.map(m => `<option>${m}</option>`).join("");
+  $("fModel").value = state.model;
+  const list = ACC.filter(a => state.model === "*" || a.model === state.model).sort((a,b)=>(b.followers||0)-(a.followers||0));
+  $("fAcc").innerHTML = `<option value="*">All accounts (${list.length})</option>` + list.map(a => `<option value="${a.handle}">@${a.handle}</option>`).join("");
+  if (state.acc !== "*" && !list.some(a => a.handle === state.acc)) state.acc = "*";
+  $("fAcc").value = state.acc;
+  const stages = [...new Set(ACC.map(a => a.stage || "–"))].sort();
+  $("fStage").innerHTML = `<option value="*">All stages</option>` + stages.map(x => `<option>${x}</option>`).join("");
+  $("fStage").value = state.stage;
+}
+function selected(){
+  return ACC.filter(a => (state.model === "*" || a.model === state.model) && (state.acc === "*" || a.handle === state.acc)
+                      && (state.stage === "*" || (a.stage || "–") === state.stage));
+}
+function days(n){                     // last n calendar days incl. today, oldest first
+  const out = [], t = new Date(); t.setHours(12);
+  for (let i = n - 1; i >= 0; i--){ const d = new Date(t); d.setDate(t.getDate() - i); out.push(dayKey(d)); }
+  return out;
+}
+function followersOn(a, d){           // last known value on or before day d
+  let v = null;
+  for (const k of Object.keys(a.followersDaily).sort()) { if (k <= d) v = a.followersDaily[k]; }
+  return v;
+}
+
+function render(){
+  const sel = selected();
+  const chartDays = days(Math.max(state.days, 14));
+  const win = days(state.days);
+  // KPIs
+  const views = sel.reduce((s,a) => s + win.reduce((t,d) => t + (a.viewsDaily[d]||0), 0), 0);
+  const reels = sel.reduce((s,a) => s + win.reduce((t,d) => t + (a.newReelsDaily[d]||0), 0), 0);
+  const fNow = sel.reduce((s,a) => s + (a.followers||0), 0);
+  const start = win[0];
+  const withPast = sel.filter(a => Object.keys(a.followersDaily).some(k => k < start));
+  const fThen = withPast.reduce((s,a) => s + (followersOn(a, dayKey(new Date(new Date(start).getTime()-86400000)))||0), 0);
+  const fNowPast = withPast.reduce((s,a) => s + (a.followers||0), 0);
+  const covered = sel.length && sel.every(a => a.since <= start);
+  const label = state.days === 1 ? "last 24 h" : `last ${state.days} days`;
+  const anyGain = sel.some(a => Object.keys(a.viewsDaily).length);
+  $("kViews").textContent = anyGain ? fmt(views) : "–";
+  $("kViewsSub").textContent = label + (covered ? "" : " · tracked since " + earliest(sel));
+  $("kFol").textContent = fmt(fNow);
+  const fd = withPast.length ? fNowPast - fThen : null;
+  $("kFolSub").innerHTML = fd == null ? `Growth ${label}: tracked since ${earliest(sel)}` : `<span class="${fd>0?"up":fd<0?"down":""}">${signed(fd)}</span> ${label}`;
+  $("kReels").textContent = anyGain ? fmt(reels) : "–";
+  $("kReelsSub").textContent = label;
+  const avgs = sel.filter(a => a.avg != null);
+  $("kAvg").textContent = avgs.length ? fmt(avgs.reduce((s,a)=>s+a.avg,0)/avgs.length) : "–";
+  // charts
+  const vSeries = chartDays.map(d => ({d, v: sel.reduce((s,a) => s + (a.viewsDaily[d]||0), 0), has: sel.some(a => d in a.viewsDaily)}));
+  const fSeries = chartDays.map(d => ({d, v: sel.every(a => followersOn(a,d) == null) ? null : sel.reduce((s,a) => s + (followersOn(a,d)||0), 0)}));
+  bars($("cViews"), $("tViews"), vSeries);
+  line($("cFol"), $("tFol"), fSeries);
+  const since = earliest(sel);
+  $("vNote").textContent = vSeries.some(p => p.has) ? "" : `No daily values yet – the first comparison comes with the next run (data since ${since}).`;
+  $("fNote").textContent = fSeries.filter(p => p.v != null).length > 1 ? "" : `History builds up from ${since}, one point per day.`;
+  // table
+  $("hFd").textContent = "Followers " + (state.days === 1 ? "24 h" : state.days + " d");
+  $("hV").textContent = "Views " + (state.days === 1 ? "24 h" : state.days + " d");
+  $("rows").innerHTML = sel.sort((a,b)=>(b.followers||0)-(a.followers||0)).map(a => {
+    const [st, col] = STATUS[a.status] || [a.status, "--warn"];
+    const v = win.reduce((t,d)=>t+(a.viewsDaily[d]||0),0);
+    const past = Object.keys(a.followersDaily).some(k => k < start);
+    const d = past ? (a.followers||0) - (followersOn(a, dayKey(new Date(new Date(start).getTime()-86400000)))||0) : null;
+    const place = [a.iphone, a.container].filter(Boolean).join(" · ") || "–";
+    return `<tr tabindex="0" data-h="${a.handle}" class="${state.acc===a.handle?"sel":""}">
+      <td><a href="https://www.instagram.com/${a.handle}/" target="_blank" rel="noopener" onclick="event.stopPropagation()">@${a.handle}</a></td><td>${a.model}</td>
+      <td>${a.stage ? `<span class="stage">${a.stage}</span>` : '<span class="muted">–</span>'}</td>
+      <td><span class="st" title="${a.status === "not_found" ? "Instagram returned nothing for this handle. Look at the account on the phone; if the name is wrong, fix Username in Airtable - the next daily scan picks it up." : ""}"><span class="dot" style="background:var(${col})"></span>${st}</span></td>
+      <td class="n">${fmt(a.followers)}</td>
+      <td class="n ${d>0?"up":d<0?"down":""}">${d==null?'<span class="muted">since '+a.since.slice(8,10)+'/'+a.since.slice(5,7)+'</span>':signed(d)}</td>
+      <td class="n">${fmt(v)}</td><td class="n">${fmt(a.avg)}</td>
+      <td>${a.link ? `<a href="${a.link}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${a.link.replace(/^https?:\/\//, "")}</a>` : '<span class="muted">–</span>'}</td>
+      <td class="muted">${place}</td></tr>`;
+  }).join("") || `<tr><td colspan="10" class="empty">No accounts for this selection</td></tr>`;
+  document.querySelectorAll("#rows tr[data-h]").forEach(tr => {
+    const pick = () => { state.acc = state.acc === tr.dataset.h ? "*" : tr.dataset.h; fillSelects(); render(); };
+    tr.onclick = pick; tr.onkeydown = e => { if (e.key === "Enter") pick(); };
+  });
+  // reels of a single account
+  const one = state.acc !== "*" && sel[0];
+  $("reels").innerHTML = one ? `<details open><summary>Reels of @${one.handle} (newest first)</summary><div class="scroll"><table>
+    <thead><tr><th>#</th><th class="n">Views</th><th class="n">Likes</th><th class="n">Comments</th><th class="n">Like rate</th></tr></thead><tbody>
+    ${one.reels.map(r => `<tr><td>${r.code ? `<a href="https://www.instagram.com/reel/${r.code}/" target="_blank" rel="noopener">${r.pos}</a>` : r.pos}</td><td class="n">${fmt(r.views)}</td><td class="n">${fmt(r.likes)}</td><td class="n">${fmt(r.comments)}</td>
+      <td class="n">${r.views && r.likes!=null ? (100*r.likes/r.views).toFixed(1)+"%" : "–"}</td></tr>`).join("")}
+    </tbody></table></div></details>` : "";
+  // alerts
+  $("alerts").innerHTML = DATA.warning ? `<div class="alert">⚠️ ${DATA.warning}</div>` : "";
+}
+function earliest(sel){
+  const s = sel.map(a => a.since).sort()[0];
+  return s ? s.slice(8,10) + "/" + s.slice(5,7) : "–";
+}
+
+// ---- charts (plain SVG, one series each, hover tooltip) ----
+const W = 560, H = 240, P = {l:56, r:10, t:10, b:26};
+function scaleY(max){ const nice = niceMax(max); return {max: nice, y: v => P.t + (H-P.t-P.b) * (1 - v/nice)}; }
+function niceMax(m){ if (!m) return 3; if (m < 3) return 3; const p = Math.pow(10, Math.floor(Math.log10(m))); for (const k of [1,2,2.5,5,10]) if (k*p >= m) return k*p; return 10*p; }
+function axes(svg, sy, n, labels){
+  let g = "";
+  for (let i = 0; i <= 3; i++){ const v = sy.max*i/3, y = sy.y(v);
+    g += `<line x1="${P.l}" x2="${W-P.r}" y1="${y}" y2="${y}" stroke="var(--grid)"/><text x="${P.l-6}" y="${y+4}" text-anchor="end">${fmtShort(v)}</text>`; }
+  const step = Math.ceil(n / 6);
+  labels.forEach((d,i) => { if (i % step === 0 || i === n-1) g += `<text x="${xAt(i,n)}" y="${H-8}" text-anchor="middle">${d.slice(8,10)}/${d.slice(5,7)}</text>`; });
+  return g;
+}
+function fmtShort(v){ return v >= 1e6 ? (v/1e6).toLocaleString("en-US",{maximumFractionDigits:1})+"M" : v >= 1e4 ? (v/1e3).toLocaleString("en-US",{maximumFractionDigits:0})+"K" : fmt(v); }
+function xAt(i, n){ return P.l + (W-P.l-P.r) * (i + .5) / n; }
+function tipAt(svg, tip, i, n, html){
+  const r = svg.getBoundingClientRect(), card = svg.parentElement.getBoundingClientRect();
+  tip.innerHTML = html; tip.style.opacity = 1;
+  const x = (xAt(i,n)/W) * r.width + (r.left - card.left);
+  tip.style.left = Math.min(Math.max(x - tip.offsetWidth/2, 4), card.width - tip.offsetWidth - 4) + "px";
+  tip.style.top = (r.top - card.top + 4) + "px";
+}
+function hover(svg, tip, n, htmlFor){
+  svg.onmousemove = e => { const r = svg.getBoundingClientRect(); const x = (e.clientX - r.left) / r.width * W;
+    const i = Math.max(0, Math.min(n-1, Math.floor((x - P.l) / ((W-P.l-P.r)/n)))); tipAt(svg, tip, i, n, htmlFor(i));
+    svg.querySelectorAll("[data-i]").forEach(el => el.style.opacity = +el.dataset.i === i ? 1 : .55); };
+  svg.onmouseleave = () => { tip.style.opacity = 0; svg.querySelectorAll("[data-i]").forEach(el => el.style.opacity = 1); };
+}
+function bars(svg, tip, s){
+  if (!s.some(p => p.v)) { svg.innerHTML = ""; svg.style.display = "none"; return; }
+  svg.style.display = "";
+  const n = s.length, sy = scaleY(Math.max(...s.map(p => p.v)));
+  const bw = Math.max(2, (W-P.l-P.r)/n - 2);
+  let g = axes(svg, sy, n, s.map(p => p.d));
+  s.forEach((p,i) => { if (!p.v) return; const x = xAt(i,n) - bw/2, y = sy.y(p.v), h = sy.y(0) - y;
+    g += `<path data-i="${i}" fill="var(--views)" d="M${x},${sy.y(0)} v${-(h-Math.min(4,h))} q0,-${Math.min(4,h)} ${Math.min(4,bw/2)},-${Math.min(4,h)} h${bw-2*Math.min(4,bw/2)} q${Math.min(4,bw/2)},0 ${Math.min(4,bw/2)},${Math.min(4,h)} v${h-Math.min(4,h)} z"/>`; });
+  svg.innerHTML = g;
+  hover(svg, tip, n, i => `${s[i].d.slice(8,10)}/${s[i].d.slice(5,7)} · <b>${fmt(s[i].v)}</b> views`);
+}
+function line(svg, tip, s){
+  if (!s.some(p => p.v != null)) { svg.innerHTML = ""; svg.style.display = "none"; return; }
+  svg.style.display = "";
+  const n = s.length, vals = s.filter(p => p.v != null).map(p => p.v);
+  const lo = vals.length ? Math.min(...vals) : 0, hi = vals.length ? Math.max(...vals) : 1;
+  const pad = Math.max(1, (hi - lo) * .15), base = Math.max(0, lo - pad);
+  const top = niceMax(hi + pad - base) + base;
+  const y = v => P.t + (H-P.t-P.b) * (1 - (v - base) / (top - base));
+  let g = "";
+  for (let i = 0; i <= 3; i++){ const v = base + (top-base)*i/3; g += `<line x1="${P.l}" x2="${W-P.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/><text x="${P.l-6}" y="${y(v)+4}" text-anchor="end">${(top-base) < 20000 ? fmt(v) : fmtShort(v)}</text>`; }
+  const step = Math.ceil(n / 6);
+  s.forEach((p,i) => { if (i % step === 0 || i === n-1) g += `<text x="${xAt(i,n)}" y="${H-8}" text-anchor="middle">${p.d.slice(8,10)}/${p.d.slice(5,7)}</text>`; });
+  let path = "", started = false;
+  s.forEach((p,i) => { if (p.v == null) return; path += (started ? "L" : "M") + xAt(i,n) + "," + y(p.v); started = true; });
+  g += `<path d="${path}" fill="none" stroke="var(--followers)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  s.forEach((p,i) => { if (p.v != null) g += `<circle data-i="${i}" cx="${xAt(i,n)}" cy="${y(p.v)}" r="4" fill="var(--followers)" stroke="var(--surface)" stroke-width="2"/>`; });
+  svg.innerHTML = g;
+  hover(svg, tip, n, i => `${s[i].d.slice(8,10)}/${s[i].d.slice(5,7)} · <b>${fmt(s[i].v)}</b> followers`);
+}
+
+$("fModel").onchange = e => { state.model = e.target.value; state.acc = "*"; fillSelects(); render(); };
+$("fAcc").onchange = e => { state.acc = e.target.value; render(); };
+$("fStage").onchange = e => { state.stage = e.target.value; render(); };
+document.querySelectorAll(".seg button").forEach(b => b.onclick = () => {
+  state.days = +b.dataset.days; document.querySelectorAll(".seg button").forEach(x => x.setAttribute("aria-pressed", x === b)); render(); });
+fillSelects(); render();
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot queue loop (variants -> Posting Queue rows) (timer)
+
+[Timer]
+Unit=adbbot-queue.service
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

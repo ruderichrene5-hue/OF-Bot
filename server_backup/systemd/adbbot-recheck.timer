@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot recheck loop (Verifying -> Posted/Failed) (timer)
+
+[Timer]
+Unit=adbbot-recheck.service
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

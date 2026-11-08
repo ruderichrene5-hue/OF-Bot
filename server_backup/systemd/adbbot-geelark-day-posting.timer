@@ -1,0 +1,12 @@
+[Unit]
+Description=ADB bot Geelark day pass (Active_Posting, then human verification with whatever proxy capacity is left over) -- 2x/day 06:00/15:00 Berlin. Was 3x/day 07:00/12:30/18:30 until 2026-09-06 (changed same day as raising live capacity 4->9 modems and POSTS_PER_LAUNCH already at 3 -- two wider-spaced runs cover the same daily volume). Briefly hourly on 2026-09-01, reverted same day. A code-level deadline (geelark_scheduler.active_posting_budget_seconds) stops each pass 15 min before the Warmup window (00:00 Berlin since 2026-09-06, was 23:00) regardless of fire time, and also yields before whichever fixed slot comes next (DAY_POSTING_FIRE_TIMES_BERLIN), so a long pass still hands off cleanly.
+
+[Timer]
+Unit=adbbot-geelark-day-posting.service
+OnCalendar=*-*-* 06:00:00 Europe/Berlin
+OnCalendar=*-*-* 15:00:00 Europe/Berlin
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

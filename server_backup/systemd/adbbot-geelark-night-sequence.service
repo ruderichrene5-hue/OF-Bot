@@ -1,0 +1,24 @@
+[Unit]
+Description=ADB bot Geelark night sequence (ledger recheck, in-review recheck, then human verification, then Warmup)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+# Mirror of day-posting's guard -- refuse to start while a day pass is still
+# running. See adbbot-geelark-day-posting.service for why this exists (the
+# 2026-09-07 overlap incident): the two units had no mutual exclusion at
+# all, only systemd's own same-unit dedup, which does nothing for a
+# different unit.
+ExecStartPre=/bin/sh -c '! systemctl is-active --quiet adbbot-geelark-day-posting.service'
+# timeout enforces a real hard cap -- RuntimeMaxSec below is silently
+# ignored for Type=oneshot (confirmed live via the systemd journal), which
+# is exactly how this run overran its 2h budget by nearly 7h on 2026-09-07.
+ExecStart=/usr/bin/timeout --signal=TERM 7200 /root/adb_bot/.venv/bin/python -m adb_bot.automation.geelark_scheduler --night-sequence
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env
+
+[Install]
+WantedBy=multi-user.target

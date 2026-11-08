@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot MultiLogin minute check (warns before the fleet stops) (timer)
+
+[Timer]
+Unit=adbbot-mlx-minutes.service
+OnBootSec=5min
+OnUnitActiveSec=240min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

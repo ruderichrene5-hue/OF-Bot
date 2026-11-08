@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot cleanup loop (old used media) (timer)
+
+[Timer]
+Unit=adbbot-cleanup.service
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

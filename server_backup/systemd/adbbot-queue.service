@@ -1,0 +1,16 @@
+[Unit]
+Description=ADB bot queue loop (variants -> Posting Queue rows)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.run_loop queue --apply --targets profiles --slots 06:00,07:00,08:00,09:00,10:00,11:00,12:00,13:00,14:00,15:00,16:00,17:00,18:00,19:00,20:00,21:00,22:00,23:00
+RuntimeMaxSec=7200
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env
+
+[Install]
+WantedBy=multi-user.target

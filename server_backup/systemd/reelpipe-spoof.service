@@ -1,0 +1,10 @@
+[Unit]
+Description=reel_pipeline: spoof Generate Reels rows with the Spoof tick (adb_bot spoofer, local CPU)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/reel_pipeline
+ExecStart=/usr/bin/flock -n /run/lock/reelpipe-spoof.lock /root/reel_pipeline/.venv/bin/python3 /root/reel_pipeline/spoof_runner.py
+TimeoutStartSec=3h

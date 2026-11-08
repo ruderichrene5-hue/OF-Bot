@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot posting loop (Posting Queue -> IG) (timer)
+
+[Timer]
+Unit=adbbot-posting.service
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

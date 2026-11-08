@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot MultiLogin guard (stops the fleet when proxy traffic or minutes run out) (timer)
+
+[Timer]
+Unit=adbbot-mlx-guard.service
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

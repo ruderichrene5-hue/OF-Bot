@@ -1,0 +1,11 @@
+[Unit]
+Description=reel_pipeline: render reels for Generate Reels rows with the Create Reel tick (serverless)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/reel_pipeline
+# one run can take 30-60 min per row (serverless queue + render); never overlap
+ExecStart=/usr/bin/flock -n /run/lock/reelpipe-reels.lock /root/reel_pipeline/.venv/bin/python3 /root/reel_pipeline/reel_runner.py
+TimeoutStartSec=6h

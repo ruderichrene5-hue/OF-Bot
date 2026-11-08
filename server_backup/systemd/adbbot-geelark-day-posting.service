@@ -1,0 +1,37 @@
+[Unit]
+Description=ADB bot Geelark day pass (Active_Posting: scroll + post, no-flag invocation resolves the tag by time of day)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+# Refuse to start while the night sequence is still running -- found live
+# 2026-09-07: RuntimeMaxSec (below) never actually enforced on this
+# Type=oneshot unit (systemd logs "RuntimeMaxSec= has no effect in
+# combination with Type=oneshot. Ignoring." and does nothing), so a slow
+# night pass had no hard stop and was still running when this timer fired
+# at 06:00 Berlin -- two independent GeeLark processes then ran concurrently
+# on the same 9 proxies for hours. systemd only ever prevented the SAME
+# unit from double-starting, never a DIFFERENT one; this guard is the
+# missing mutual exclusion. A refused start here is not retried until the
+# next scheduled fire (no Persistent-triggered catch-up loop).
+ExecStartPre=/bin/sh -c '! systemctl is-active --quiet adbbot-geelark-night-sequence.service'
+# timeout actually enforces a hard wall-clock cap (RuntimeMaxSec does not,
+# see above) -- sends SIGTERM at the deadline, which geelark_scheduler's own
+# installed handler (_install_sigterm_cleanup) catches to close any open
+# phones cleanly before exiting, same as an operator-issued `systemctl stop`.
+# 18000s (5h) cut off a real, still-productive run on 2026-09-07 (218 posts,
+# 83/182 phones done) well before the worklist was through -- explicit
+# instruction not to stop early. Raised to 50000s (~13.9h): still a genuine
+# crash/hang safety net, but long enough that geelark_scheduler's own
+# internal deadline (active_posting_budget_seconds, which yields before the
+# night window on wall-clock time, not a fixed duration) is what actually
+# ends a normal run, not this external cap.
+ExecStart=/usr/bin/timeout --signal=TERM 50000 /root/adb_bot/.venv/bin/python -m adb_bot.automation.geelark_scheduler
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env
+
+[Install]
+WantedBy=multi-user.target

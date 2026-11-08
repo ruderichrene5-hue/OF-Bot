@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot spoofing pipeline (Drive/raw -> Spoof Variants) (timer)
+
+[Timer]
+Unit=adbbot-pipeline.service
+OnBootSec=5min
+OnUnitActiveSec=30min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

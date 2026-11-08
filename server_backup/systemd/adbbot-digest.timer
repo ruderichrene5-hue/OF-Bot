@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot daily digest (backlog -> Telegram) (timer)
+
+[Timer]
+Unit=adbbot-digest.service
+OnCalendar=*-*-* 08:00:00
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=ADB bot: create Hide My Email aliases via Multilogin Apple-ID profiles (<= ICLOUD_ALIASES_PER_DAY per Apple ID per day)
+After=adbbot-mlx-agent.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/.adb_bot/venv-browser/bin/python -m adb_bot.automation.icloud_aliases fill
+RuntimeMaxSec=1500
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env

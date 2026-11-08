@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the approved-pictures Drive sync every 10 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target

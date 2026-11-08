@@ -1,0 +1,16 @@
+[Unit]
+Description=ADB bot verification loop (flagged profiles -> challenge answered)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.run_loop verification --apply --limit-profiles 2 --max-numbers 4 --max-numbers-per-day 0 --min-balance 1.00
+RuntimeMaxSec=7200
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env
+
+[Install]
+WantedBy=multi-user.target

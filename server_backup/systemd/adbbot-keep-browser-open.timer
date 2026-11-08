@@ -1,0 +1,9 @@
+[Unit]
+Description=ADB bot: keep chosen MLX browser profiles open (every 5 min)
+[Timer]
+Unit=adbbot-keep-browser-open.service
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=30s
+[Install]
+WantedBy=timers.target

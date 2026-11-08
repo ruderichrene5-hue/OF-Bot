@@ -1,0 +1,12 @@
+[Unit]
+Description=Shift queue slots to 15:00,18:00,21:00 after the Berlin day rolls over
+
+[Timer]
+# 00:30 Berlin = 22:30 UTC. After midnight local so the new slots are not
+# retroactively due today. Persistent so a reboot across the moment still runs it.
+OnCalendar=2026-08-06 22:30:00 UTC
+Persistent=true
+RemainAfterElapse=no
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,129 @@
+{
+  "source": "/tmp/claude-0/-root/71d02c53-2826-47be-93bd-7e3c1bb5c348/scratchpad/size_demo_raw.mp4",
+  "output": "/tmp/claude-0/-root/71d02c53-2826-47be-93bd-7e3c1bb5c348/scratchpad/size_demo_out/size_demo_raw_variant_001.mp4",
+  "variant_index": 1,
+  "seed": 12345,
+  "preset": "normal",
+  "success": true,
+  "error": null,
+  "applied": [
+    {
+      "name": "crop",
+      "params": {
+        "fraction": 0.00863,
+        "cropped_width": 634,
+        "cropped_height": 1128,
+        "x": 3,
+        "y": 5
+      },
+      "summary": "crop 0.9% -> 634x1128 (rescaled)"
+    },
+    {
+      "name": "resize",
+      "params": {
+        "factor": 0.99629,
+        "width": 638,
+        "height": 1134
+      },
+      "summary": "resize x0.996 -> 638x1134"
+    },
+    {
+      "name": "brightness",
+      "params": {
+        "brightness": -0.0148
+      },
+      "summary": "brightness -1.5%"
+    },
+    {
+      "name": "contrast",
+      "params": {
+        "contrast": 1.01884,
+        "offset": 0.01884
+      },
+      "summary": "contrast +1.9%"
+    },
+    {
+      "name": "saturation",
+      "params": {
+        "saturation": 1.0131,
+        "offset": 0.0131
+      },
+      "summary": "saturation +1.3%"
+    },
+    {
+      "name": "bitrate",
+      "params": {
+        "factor": 0.8345,
+        "target_kbps": 5730,
+        "basis": "source"
+      },
+      "summary": "bitrate x0.83 -> 5730 kbps (source)"
+    },
+    {
+      "name": "audio",
+      "params": {
+        "audio_kbps": 96,
+        "channels": 2
+      },
+      "summary": "audio 96 kbps, 2ch"
+    },
+    {
+      "name": "metadata",
+      "params": {
+        "stripped": true,
+        "title": "clip_359925"
+      },
+      "summary": "metadata stripped, title=clip_359925"
+    }
+  ],
+  "command": [
+    "/usr/bin/ffmpeg",
+    "-y",
+    "-hide_banner",
+    "-nostdin",
+    "-i",
+    "/tmp/claude-0/-root/71d02c53-2826-47be-93bd-7e3c1bb5c348/scratchpad/size_demo_raw.mp4",
+    "-vf",
+    "crop=634:1128,scale=640:1138:flags=lanczos,scale=638:1134:flags=lanczos,eq=brightness=-0.01480,eq=contrast=1.01884,eq=saturation=1.01310",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "medium",
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "aac",
+    "-b:v",
+    "5730k",
+    "-maxrate",
+    "5730k",
+    "-bufsize",
+    "11460k",
+    "-b:a",
+    "96k",
+    "-ac",
+    "2",
+    "-map_metadata",
+    "-1",
+    "-metadata",
+    "title=clip_359925",
+    "-movflags",
+    "+faststart",
+    "/tmp/claude-0/-root/71d02c53-2826-47be-93bd-7e3c1bb5c348/scratchpad/size_demo_out/size_demo_raw_variant_001.mp4"
+  ],
+  "processing_seconds": 4.7485385104082525,
+  "output_size_bytes": 8284740,
+  "source_summary": "640x1138 60fps h264 11.3s [aac]",
+  "output_summary": "638x1134 60fps h264 11.3s [aac]",
+  "validation": {
+    "ok": true,
+    "checks": {
+      "file_nonempty": true,
+      "probeable": true,
+      "has_video_stream": true,
+      "has_audio_stream": true,
+      "duration_matches": true
+    },
+    "messages": []
+  }
+}

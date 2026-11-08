@@ -1,0 +1,15 @@
+[Unit]
+Description=ADB bot Geelark IP diversity log (records each real proxy port's current exit IP, read-only, no rotation triggered)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.geelark_ip_diversity_log
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env
+
+[Install]
+WantedBy=multi-user.target

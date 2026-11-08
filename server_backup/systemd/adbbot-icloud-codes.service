@@ -1,0 +1,14 @@
+[Unit]
+Description=ADB bot: watch the iCloud inboxes (IMAP, every ~6 s) and write each new Hide My Email signup code into Airtable Mail Aliases
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/adbbot/env
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python3 -m adb_bot.automation.icloud_code_watch
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

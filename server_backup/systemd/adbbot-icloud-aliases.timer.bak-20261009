@@ -1,0 +1,9 @@
+[Unit]
+Description=ADB bot: Hide My Email aliases, 2 per Apple ID every 3h between 07:00 and 23:00 (= 10/day cap reached by evening)
+[Timer]
+Unit=adbbot-icloud-aliases.service
+OnCalendar=*-*-* 07,10,13,16,19,22:15:00
+RandomizedDelaySec=20min
+Persistent=false
+[Install]
+WantedBy=timers.target

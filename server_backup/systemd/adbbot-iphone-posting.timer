@@ -1,0 +1,9 @@
+[Unit]
+Description=iPhone farm daily posting start, 09:05 Berlin
+
+[Timer]
+OnCalendar=*-*-* 09:05:00 Europe/Berlin
+Persistent=false
+
+[Install]
+WantedBy=timers.target

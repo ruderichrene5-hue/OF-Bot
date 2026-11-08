@@ -1,0 +1,10 @@
+[Unit]
+Description=iPhone farm: account setup tick (profile picture, bio, story highlight) from Airtable material
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+EnvironmentFile=/etc/adbbot/env
+ExecStart=/usr/bin/flock -n /run/lock/adbbot-iphone-setup.lock /root/adb_bot/.venv/bin/python -m adb_bot.automation.iphone_setup tick --max-phones 8
+TimeoutStartSec=3600

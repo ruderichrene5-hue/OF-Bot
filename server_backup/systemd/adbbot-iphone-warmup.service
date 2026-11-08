@@ -1,0 +1,10 @@
+[Unit]
+Description=iPhone farm: four-day warm-up, one account per phone per tick (iphone_warmup tick)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+EnvironmentFile=/etc/adbbot/env
+ExecStart=/usr/bin/flock -n /run/lock/adbbot-iphone-warmup.lock /root/adb_bot/.venv/bin/python -m adb_bot.automation.iphone_warmup tick --max-phones 8
+TimeoutStartSec=3600

@@ -1,0 +1,8 @@
+[Unit]
+Description=iPhone farm: spoof today's clips from Drive 'Manuell Spoofer' for Kathi, Lea, Mandy (slots + farm variants)
+After=network-online.target
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+EnvironmentFile=/etc/adbbot/env
+ExecStart=/bin/sh -c '/root/adb_bot/.venv/bin/python -m adb_bot.automation.manual_spoof "$(TZ=Europe/Berlin date +%%F)" Kathi,Lea,Mandy'

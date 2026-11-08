@@ -1,0 +1,10 @@
+[Unit]
+Description=reel_pipeline: Accounts SOP Approve -> review pictures into Profile Picture / Post / Story
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/reel_pipeline
+ExecStart=/usr/bin/flock -n /run/lock/reelpipe-approve.lock /root/reel_pipeline/.venv/bin/python3 /root/reel_pipeline/approve_runner.py
+TimeoutStartSec=5m

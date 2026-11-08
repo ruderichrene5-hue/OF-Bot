@@ -1,0 +1,14 @@
+[Unit]
+Description=ADB bot Drive "Scheduled (Account Manager)" folders: create next 7 days, archive older than yesterday
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.drive_schedule_folders --apply
+RuntimeMaxSec=1800
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env
+[Install]
+WantedBy=multi-user.target

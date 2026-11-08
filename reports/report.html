@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VTF report — normal</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         margin: 0; padding: 1.5rem; line-height: 1.45;
+         background: #fff; color: #1a1a1a; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #16181d; color: #e6e6e6; }
+    .card { background: #1f232b !important; border-color: #333 !important; }
+    th { background: #262b34 !important; }
+    code, pre { background: #0d0f13 !important; }
+    a { color: #6ea8fe; }
+  }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  .meta { color: #888; font-size: .9rem; margin-bottom: 1.25rem; }
+  .card { border: 1px solid #e2e2e2; border-radius: 10px; padding: 1rem 1.25rem;
+          margin-bottom: 1.25rem; background: #fafafa; }
+  .src { font-size: 1.05rem; font-weight: 600; margin: 0 0 .1rem; word-break: break-all; }
+  .srcmeta { color: #888; font-size: .85rem; margin-bottom: .75rem; }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  th, td { text-align: left; padding: .5rem .6rem; vertical-align: top;
+           border-bottom: 1px solid #e5e5e5; }
+  th { background: #f0f0f0; font-weight: 600; }
+  .ok { color: #1a7f37; font-weight: 600; }
+  .fail { color: #cf222e; font-weight: 600; }
+  ul.changes { margin: 0; padding-left: 1.1rem; }
+  ul.changes li { margin: .1rem 0; }
+  code { background: #f0f0f0; padding: .05rem .3rem; border-radius: 4px; }
+  pre { background: #f0f0f0; padding: .6rem; border-radius: 6px; overflow-x: auto;
+        white-space: pre-wrap; word-break: break-all; font-size: .8rem; }
+  details { margin-top: .4rem; }
+  summary { cursor: pointer; color: #666; font-size: .85rem; }
+  .num { white-space: nowrap; color: #666; }
+</style></head><body>
+<h1>Batch report — preset “normal”</h1>
+<div class="meta">Seed 12345 · 1 variant(s) · <span class="ok">1 ok</span> / <span class="fail">0 failed</span> · 4.7s · 8.3 MB · 2026-09-11T07:41:46.993911+00:00</div>
+<div class="card">
+<div class="src">size_demo_raw.mp4</div>
+<div class="srcmeta">640x1138 60fps h264 11.3s [aac]</div>
+<table><thead><tr><th>#</th><th>Status</th><th>Changes applied</th><th>Output</th><th class='num'>Size</th><th class='num'>Time</th></tr></thead><tbody>
+<tr><td class='num'>1</td><td><span class="ok">✓ pass</span></td><td><ul class='changes'><li>crop 0.9% -&gt; 634x1128 (rescaled)</li><li>resize x0.996 -&gt; 638x1134</li><li>brightness -1.5%</li><li>contrast +1.9%</li><li>saturation +1.3%</li><li>bitrate x0.83 -&gt; 5730 kbps (source)</li><li>audio 96 kbps, 2ch</li><li>metadata stripped, title=clip_359925</li></ul><details><summary>ffmpeg command</summary><pre>/usr/bin/ffmpeg -y -hide_banner -nostdin -i /tmp/claude-0/-root/71d02c53-2826-47be-93bd-7e3c1bb5c348/scratchpad/size_demo_raw.mp4 -vf crop=634:1128,scale=640:1138:flags=lanczos,scale=638:1134:flags=lanczos,eq=brightness=-0.01480,eq=contrast=1.01884,eq=saturation=1.01310 -c:v libx264 -preset medium -pix_fmt yuv420p -c:a aac -b:v 5730k -maxrate 5730k -bufsize 11460k -b:a 96k -ac 2 -map_metadata -1 -metadata title=clip_359925 -movflags +faststart /tmp/claude-0/-root/71d02c53-2826-47be-93bd-7e3c1bb5c348/scratchpad/size_demo_out/size_demo_raw_variant_001.mp4</pre></details></td><td>size_demo_raw_variant_001.mp4</td><td class='num'>8.28 MB</td><td class='num'>4.75s</td></tr>
+</tbody></table></div>
+</body></html>

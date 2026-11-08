@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RNX Viewer · CRM</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b0d12; --side:#0f1219; --panel:#161a22; --panel2:#1b2029; --line:#262c38; --fg:#e6e8ee; --muted:#9aa3b2;
+          --accent:#4f8cff; --pink:#ff5c9a; --teal:#2fd3b5; --ok:#3fb950; --bad:#ff6b6b; --warn:#d29922; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; }
+  a { color:inherit; text-decoration:none; }
+  .app { display:flex; min-height:calc(100vh - var(--nav-h, 0px)); }
+  .side { width:230px; flex:none; background:var(--side); border-right:1px solid var(--line); padding:18px 12px; display:flex; flex-direction:column; gap:4px; }
+  .side a.nav { display:flex; align-items:center; gap:10px; padding:9px 12px; border-radius:9px; color:var(--muted); font-weight:600; }
+  .side a.nav:hover { color:var(--fg); background:#141821; }
+  .side a.nav.on { color:var(--fg); background:var(--panel); }
+  .side svg { width:17px; height:17px; flex:none; }
+  .side h4 { margin:22px 12px 8px; font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+  .mini { display:flex; gap:10px; align-items:center; padding:6px 10px; border-radius:8px; cursor:pointer; }
+  .mini:hover { background:#141821; }
+  .mini img, .mini .ph { width:34px; height:34px; border-radius:7px; object-fit:cover; background:#232938; flex:none; }
+  .mini .h { font-weight:600; font-size:12.5px; } .mini .v { color:var(--muted); font-size:11.5px; }
+  main { flex:1; padding:24px 30px 50px; min-width:0; background-image:radial-gradient(#1b2029 1px, transparent 1px); background-size:22px 22px; }
+  main > * { max-width:1440px; }
+  .head { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap; margin-bottom:20px; }
+  h1 { margin:0; font-size:24px; } .sub { color:var(--muted); margin-top:2px; }
+  .seg { display:inline-flex; background:var(--panel); border:1px solid var(--line); border-radius:11px; padding:3px; }
+  .seg button { background:none; border:0; color:var(--muted); font:inherit; font-weight:600; padding:6px 14px; border-radius:8px; cursor:pointer; }
+  .seg button.on { background:var(--panel2); color:var(--fg); }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit, minmax(190px, 1fr)); gap:12px; margin-bottom:16px; }
+  .kpi { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px 18px; }
+  .kpi .l { color:var(--muted); font-size:12.5px; } .kpi .v { font-size:27px; font-weight:750; margin:3px 0 2px; font-variant-numeric:tabular-nums; }
+  .kpi .d { font-size:12.5px; color:var(--muted); } .up { color:var(--ok) !important; } .down { color:var(--bad) !important; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:18px 22px; margin-bottom:16px; }
+  .card h3 { margin:0; font-size:16px; } .card .cs { color:var(--muted); font-size:12.5px; margin:2px 0 10px; }
+  .card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+  .chart { position:relative; } .chart svg { width:100%; height:260px; display:block; }
+  .tip { position:absolute; pointer-events:none; background:#0f1219; border:1px solid var(--line); border-radius:9px; padding:7px 10px; font-size:12.5px; display:none; white-space:nowrap; }
+  .tip b { font-variant-numeric:tabular-nums; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; } @media (max-width:1100px){ .grid2 { grid-template-columns:1fr; } }
+  .rank { display:flex; align-items:center; gap:14px; padding:10px 4px; border-top:1px solid #1d222d; cursor:pointer; }
+  .rank:first-of-type { border-top:0; } .rank:hover { background:#181c25; }
+  .rank .n { width:18px; color:var(--muted); text-align:right; }
+  .av { width:40px; height:40px; border-radius:50%; object-fit:cover; background:#232938; flex:none; display:grid; place-items:center; color:var(--muted); font-weight:700; font-size:13px; }
+  .rank .who { flex:1; min-width:0; } .rank .who b { display:block; } .rank .who span { color:var(--muted); font-size:12.5px; }
+  .rank .delta { font-weight:650; font-variant-numeric:tabular-nums; min-width:80px; text-align:right; }
+  .reels { display:grid; grid-template-columns:repeat(auto-fill, minmax(170px, 1fr)); gap:12px; }
+  .reel { position:relative; aspect-ratio:9/14; border-radius:13px; overflow:hidden; background:linear-gradient(160deg,#2a3245,#141821); display:block; }
+  .reel img { width:100%; height:100%; object-fit:cover; }
+  .reel .ov { position:absolute; inset:auto 0 0 0; padding:40px 12px 11px; background:linear-gradient(transparent, rgba(0,0,0,.85)); font-size:12.5px; }
+  .reel .ov b { display:block; font-size:13.5px; margin-bottom:3px; } .reel .ov span { margin-right:9px; }
+  .filters { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+  input, select { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:8px 12px; font:inherit; }
+  input { min-width:240px; }
+  .btn { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:8px 14px; font:inherit; font-weight:600; cursor:pointer; }
+  .btn.red { color:var(--bad); border-color:#5a2424; } .btn.on { border-color:var(--accent); }
+  .acc { display:grid; grid-template-columns:44px minmax(160px,1.6fr) 130px 105px 90px minmax(110px,1fr) 115px 110px 150px 160px; align-items:center; gap:12px;
+         background:var(--panel); border:1px solid var(--line); border-radius:13px; padding:11px 14px; margin-bottom:8px; }
+  .acc .lbl { color:var(--muted); font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; } .acc .val { font-weight:650; font-variant-numeric:tabular-nums; }
+  .acc .h b { display:block; } .acc .h span { color:var(--muted); font-size:12.5px; }
+  .st { font-weight:650; } .st:before { content:"● "; } .st.active { color:var(--ok); } .st.inactive, .st.banned { color:var(--bad); } .st.check { color:var(--warn); }
+  .tag { display:inline-block; font-size:11.5px; border:1px solid var(--line); border-radius:7px; padding:2px 8px; color:var(--muted); }
+  .tag.warm { color:var(--warn); border-color:#5a4614; }
+  .va { justify-self:end; white-space:nowrap; }
+  .st { white-space:nowrap; }
+  @media (max-width:1250px){ .acc { grid-template-columns:44px 1fr 100px 100px 120px; } .acc .hide-s { display:none; } }
+  .cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:14px; }
+  .mcard .big { font-size:22px; font-weight:750; } .mcard .row { display:flex; justify-content:space-between; color:var(--muted); font-size:13px; padding:4px 0; border-top:1px solid #1d222d; }
+  .mcard .row b { color:var(--fg); }
+  .empty { color:var(--muted); padding:20px 4px; }
+  .back { color:var(--muted); font-weight:600; cursor:pointer; display:inline-block; margin-bottom:12px; }
+  @media (max-width:800px){ .side { display:none; } main { padding:16px; } input { min-width:0; width:100%; } }
+.creator .side a[data-p="models"],.creator .side a[data-p="phones"]{display:none}.side .creator-only{display:none}.creator .side .creator-only{display:flex}
+.creator .kpi.kpi-models,.creator #fm,.creator #fp,.creator .acc .cell-phone,.creator .acc .cell-stage{display:none!important}
+.plan-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-top:14px}.plan-grid>div{background:#0f1218;border:1px solid #262c38;border-radius:10px;padding:10px;font-size:12px;color:#9aa3b2;min-height:90px}.plan-grid b{display:block;color:#e6e8ee;margin-bottom:4px}
+@media(max-width:800px){.plan-grid{grid-template-columns:repeat(2,1fr)}}
+</style></head>
+<body>
+<div class="app">
+  <nav class="side">
+    <a class="nav" href="#home" data-p="home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/></svg>Home</a>
+    <a class="nav" href="#accounts" data-p="accounts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M16 12v1.5a2.5 2.5 0 0 0 5 0V12a9 9 0 1 0-3.5 7.1"/></svg>Accounts</a>
+    <a class="nav" href="#models" data-p="models"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M17 4a4 4 0 0 1 0 8M22 21a7 7 0 0 0-4-6.3"/></svg>Models</a>
+    <a class="nav" href="#phones" data-p="phones"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M11 18h2"/></svg>Phones</a>
+    <a class="nav creator-only" href="#plan" data-p="plan"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="17" rx="3"/><path d="M3 10h18M8 2v4M16 2v4"/></svg>Content plan</a>
+    <h4>▷ Top reels</h4>
+    <div id="sideReels"></div>
+  </nav>
+  <main id="main"></main>
+</div>
+<script>
+const D = __DATA__;
+const A = D.accounts;
+const CREATOR = D.creator || null;                                   // model login: only her accounts
+if (CREATOR) document.documentElement.classList.add("creator");
+const $ = s => document.querySelector(s);
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = n => n == null ? "–" : Math.abs(n) >= 1e9 ? (n/1e9).toFixed(1).replace(/\.0$/,"") + "B" : Math.abs(n) >= 1e6 ? (n/1e6).toFixed(1).replace(/\.0$/,"") + "M"
+               : Math.abs(n) >= 1e4 ? (n/1e3).toFixed(1).replace(/\.0$/,"") + "K" : Math.round(n).toLocaleString("en-US");
+const sgn = n => n == null ? "–" : (n > 0 ? "+" : n < 0 ? "" : "±") + fmt(n);
+const STATUS = { active:"Active", inactive:"Inactive", banned:"Banned", check:"Check needed" };
+const PERIODS = { day:1, week:7, month:30, lifetime:3650 };
+let period = "month";
+const dayKey = d => d.toISOString().slice(0,10);
+function days(n){ const out = [], t = new Date(D.today + "T12:00:00Z"); for (let i = n - 1; i >= 0; i--){ const d = new Date(t); d.setUTCDate(t.getUTCDate() - i); out.push(dayKey(d)); } return out; }
+const allDates = [...new Set(A.flatMap(a => Object.keys(a.followersDaily)))].sort();
+function windowDays(){ const n = PERIODS[period]; return period === "lifetime" ? (allDates.length ? days(Math.max(2, Math.round((new Date(D.today) - new Date(allDates[0])) / 864e5) + 1)) : days(30)) : days(Math.max(n, period === "day" ? 2 : n)); }
+function folOn(a, d){ let v = null; for (const k of Object.keys(a.followersDaily).sort()) if (k <= d) v = a.followersDaily[k]; return v; }
+function gain(a, n){ const ks = Object.keys(a.followersDaily).sort(); if (ks.length < 2) return null;
+  const last = ks[ks.length-1], start = new Date(last); start.setUTCDate(start.getUTCDate() - n); const s = dayKey(start);
+  const older = ks.filter(k => k <= s); const base = older.length ? a.followersDaily[older[older.length-1]] : (period === "lifetime" ? a.followersDaily[ks[0]] : null);
+  return base == null ? null : a.followersDaily[last] - base; }
+function viewsIn(a, n){ const ks = days(n); return ks.reduce((t, d) => t + (a.viewsDaily[d] || 0), 0); }
+const hasViews = a => Object.keys(a.viewsDaily).length > 0;
+
+// ---------- charts (smooth area, hover tooltip) ----------
+function chart(el, series, color, label){
+  const W = 900, H = 260, P = { l:58, r:16, t:16, b:28 };
+  const first = series.findIndex(p => p.v != null); if (first > 0) series = series.slice(first);   // start where data starts
+  const pts = series.filter(p => p.v != null);
+  if (pts.length < 2){ el.innerHTML = `<div class="empty">The curve appears after the second day of data.</div>`; return; }
+  let lo = Math.min(...pts.map(p => p.v)), hi = Math.max(...pts.map(p => p.v)); if (lo === hi){ lo -= 1; hi += 1; }
+  const pad = (hi - lo) * .12; lo -= pad; hi += pad; if (lo < 0 && Math.min(...pts.map(p => p.v)) >= 0) lo = 0;
+  const x = i => P.l + i / (series.length - 1) * (W - P.l - P.r), y = v => P.t + (1 - (v - lo) / (hi - lo)) * (H - P.t - P.b);
+  const xy = series.map((p, i) => p.v == null ? null : [x(i), y(p.v)]).filter(Boolean);
+  let d = `M${xy[0][0]},${xy[0][1]}`;
+  for (let i = 1; i < xy.length; i++){ const [x0,y0] = xy[i-1], [x1,y1] = xy[i], cx = (x0 + x1) / 2; d += ` C${cx},${y0} ${cx},${y1} ${x1},${y1}`; }
+  const area = d + ` L${xy[xy.length-1][0]},${H-P.b} L${xy[0][0]},${H-P.b} Z`;
+  const ticks = hi - lo < 6 ? Array.from({ length: Math.floor(hi) - Math.ceil(lo) + 1 }, (_, i) => Math.ceil(lo) + i)   // small counts: whole numbers only
+                : [0, .33, .66, 1].map(f => lo + (hi - lo) * f);
+  const xl = series.map((p, i) => [i, p.d]).filter((_, i, arr) => arr.length <= 8 || i % Math.ceil(arr.length / 7) === 0 || i === arr.length - 1);
+  const gid = "g" + Math.random().toString(36).slice(2);
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${color}" stop-opacity=".35"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient>
+      <linearGradient id="${gid}s" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#4f8cff"/><stop offset="1" stop-color="#9b5cff"/></linearGradient></defs>
+    ${ticks.map(t => `<line x1="${P.l}" x2="${W-P.r}" y1="${y(t)}" y2="${y(t)}" stroke="#232938"/><text x="${P.l-8}" y="${y(t)+4}" fill="#6b7486" font-size="11" text-anchor="end">${fmt(t)}</text>`).join("")}
+    ${xl.map(([i, dd]) => `<text x="${x(i)}" y="${H-8}" fill="#6b7486" font-size="11" text-anchor="middle">${dd.slice(8,10)}.${dd.slice(5,7)}</text>`).join("")}
+    <path d="${area}" fill="url(#${gid})"/><path d="${d}" fill="none" stroke="url(#${gid}s)" stroke-width="2.5"/>
+    <line class="hv" x1="0" x2="0" y1="${P.t}" y2="${H-P.b}" stroke="#4a5266" stroke-dasharray="3 3" style="display:none"/><circle class="hc" r="4.5" fill="${color}" style="display:none"/></svg><div class="tip"></div>`;
+  const svg = el.querySelector("svg"), tip = el.querySelector(".tip"), hv = el.querySelector(".hv"), hc = el.querySelector(".hc");
+  svg.onmousemove = e => { const r = svg.getBoundingClientRect(), px = (e.clientX - r.left) / r.width * W;
+    let i = Math.round((px - P.l) / (W - P.l - P.r) * (series.length - 1)); i = Math.max(0, Math.min(series.length - 1, i));
+    const p = series[i]; if (p.v == null) return;
+    hv.setAttribute("x1", x(i)); hv.setAttribute("x2", x(i)); hv.style.display = ""; hc.setAttribute("cx", x(i)); hc.setAttribute("cy", y(p.v)); hc.style.display = "";
+    tip.style.display = "block"; tip.innerHTML = `${p.d.slice(8,10)}.${p.d.slice(5,7)}.${p.d.slice(0,4)}<br>${label} <b>${p.v.toLocaleString("en-US")}</b>`;
+    tip.style.left = Math.min(r.width - 170, Math.max(0, x(i) / W * r.width + 12)) + "px"; tip.style.top = "8px"; };
+  svg.onmouseleave = () => { tip.style.display = "none"; hv.style.display = "none"; hc.style.display = "none"; };
+}
+function spark(a){ const ks = days(14), vs = ks.map(d => folOn(a, d)).filter(v => v != null); if (vs.length < 2) return "";
+  const lo = Math.min(...vs), hi = Math.max(...vs) || 1, w = 110, h = 28;
+  const p = vs.map((v, i) => `${(i/(vs.length-1)*w).toFixed(1)},${(h - 3 - (v - lo) / ((hi - lo) || 1) * (h - 6)).toFixed(1)}`).join(" ");
+  return `<svg width="${w}" height="${h}"><polyline fill="none" stroke="${vs[vs.length-1] >= vs[0] ? "#3fb950" : "#ff6b6b"}" stroke-width="2" points="${p}"/></svg>`; }
+const avatar = (a, cls = "av") => a.avatar ? `<img class="${cls}" src="${esc(a.avatar)}" alt="">` : `<div class="${cls}">${esc(a.handle.slice(0,2).toUpperCase())}</div>`;
+const reelUrl = c => `https://www.instagram.com/reel/${c}/`;
+function topReels(list, n){ return list.flatMap(a => a.reels.map(r => ({ ...r, handle:a.handle }))).sort((x, y) => y.views - x.views).slice(0, n); }
+function reelCard(r){ return `<a class="reel" href="${reelUrl(r.code)}" target="_blank" rel="noopener">${r.thumb ? `<img src="${esc(r.thumb)}" alt="" loading="lazy">` : ""}
+  <div class="ov"><b>@${esc(r.handle)}</b><span>▶ ${fmt(r.views)}</span><span>♡ ${fmt(r.likes)}</span><span>💬 ${fmt(r.comments)}</span></div></a>`; }
+
+// ---------- pages ----------
+function home(){
+  const win = windowDays(), n = PERIODS[period];
+  const fNow = A.reduce((s, a) => s + (a.followers || 0), 0);
+  const fGain = A.map(a => gain(a, n)).filter(v => v != null); const fg = fGain.length ? fGain.reduce((s, v) => s + v, 0) : null;
+  const vTot = A.reduce((s, a) => s + a.totalViews, 0);
+  const vGain = A.some(hasViews) ? A.reduce((s, a) => s + viewsIn(a, period === "lifetime" ? 3650 : n), 0) : null;
+  const active = A.filter(a => a.status === "active").length;
+  const reelsToday = A.reduce((s, a) => s + (a.newReelsDaily[D.today] || 0), 0);
+  const label = { day:"today", week:"last 7 days", month:"last 30 days", lifetime:"all time" }[period];
+  const fSeries = win.map(d => ({ d, v: A.every(a => folOn(a, d) == null) ? null : A.reduce((s, a) => s + (folOn(a, d) || 0), 0) }));
+  const vSeries = win.map(d => ({ d, v: A.some(a => d in a.viewsDaily) ? A.reduce((s, a) => s + (a.viewsDaily[d] || 0), 0) : null }));
+  const top = A.map(a => ({ a, g: gain(a, n) })).sort((x, y) => (y.g ?? -1e12) - (x.g ?? -1e12)).slice(0, 5);
+  $("#main").innerHTML = `
+    <div class="head"><div><h1>${CREATOR ? "Hi " + esc(CREATOR) : "Home"}</h1><div class="sub">${CREATOR ? "Your accounts, reels and plan" : "What's happening across your accounts"} · data from ${D.built}</div></div>
+      <div class="seg" id="seg">${Object.keys(PERIODS).map(k => `<button data-k="${k}" class="${k === period ? "on" : ""}">${k[0].toUpperCase() + k.slice(1)}</button>`).join("")}</div></div>
+    <div class="kpis">
+      <div class="kpi"><div class="l">Total followers</div><div class="v">${fmt(fNow)}</div><div class="d ${fg > 0 ? "up" : fg < 0 ? "down" : ""}">${fg == null ? "growth from the 2nd day" : sgn(fg) + " " + label}</div></div>
+      <div class="kpi"><div class="l">Total views</div><div class="v">${fmt(vTot)}</div><div class="d ${vGain > 0 ? "up" : ""}">${vGain == null ? "last 30 reels per account" : "+" + fmt(vGain) + " " + label}</div></div>
+      <div class="kpi"><div class="l">Accounts</div><div class="v">${A.length}</div><div class="d">${active} active</div></div>
+      <div class="kpi kpi-models"><div class="l">Models</div><div class="v">${D.models.length}</div><div class="d">${new Set(A.map(a => a.model)).size} with accounts</div></div>
+      <div class="kpi"><div class="l">Reels posted today</div><div class="v">${reelsToday}</div><div class="d">across all accounts</div></div>
+    </div>
+    <div class="grid2">
+      <div class="card"><div class="card-head"><div><h3>Followers</h3><div class="cs">All accounts, ${label}</div></div></div><div class="chart" id="cF"></div></div>
+      <div class="card"><div class="card-head"><div><h3>Views gained</h3><div class="cs">New views per day, all accounts</div></div></div><div class="chart" id="cV"></div></div>
+    </div>
+    <div class="card"><h3>Top accounts</h3><div class="cs">Fastest growing, ${label}</div>
+      ${top.map((t, i) => `<div class="rank" data-h="${esc(t.a.handle)}"><span class="n">${i+1}</span>${avatar(t.a)}<div class="who"><b>${esc(t.a.handle)}</b><span>${esc(t.a.model)} · ${fmt(t.a.followers)} followers</span></div>${spark(t.a)}
+        <span class="delta ${t.g > 0 ? "up" : t.g < 0 ? "down" : ""}">${t.g == null ? "–" : (t.g > 0 ? "↗ " : t.g < 0 ? "↘ " : "→ ") + sgn(t.g)}</span></div>`).join("") || `<div class="empty">No data yet.</div>`}</div>
+    <div class="card"><div class="card-head"><div><h3>Top reels</h3><div class="cs">Most viewed across all accounts</div></div><a class="btn" href="#accounts">See all</a></div>
+      <div class="reels">${topReels(A, 10).map(reelCard).join("") || `<div class="empty">No reels yet — the accounts are still in warm-up.</div>`}</div></div>`;
+  chart($("#cF"), fSeries, "#9b5cff", "Followers"); chart($("#cV"), vSeries, "#4f8cff", "Views");
+  $("#seg").querySelectorAll("button").forEach(b => b.onclick = () => { period = b.dataset.k; home(); });
+  document.querySelectorAll(".rank").forEach(r => r.onclick = () => location.hash = "account/" + r.dataset.h);
+}
+
+let accState = { q:"", model:"*", status:"*", phone:"*", sort:"followers" };
+function accounts(){
+  const banned = A.filter(a => a.status === "banned").length;
+  const phones = [...new Set(A.map(a => a.phone).filter(Boolean))].sort();
+  const list = A.filter(a => (!accState.q || a.handle.toLowerCase().includes(accState.q.toLowerCase().replace(/^@/, ""))) &&
+      (accState.model === "*" || a.model === accState.model) && (accState.status === "*" || a.status === accState.status) && (accState.phone === "*" || a.phone === accState.phone))
+    .sort((x, y) => accState.sort === "handle" ? x.handle.localeCompare(y.handle) : accState.sort === "views" ? y.totalViews - x.totalViews
+      : accState.sort === "growth" ? (gain(y, 7) ?? -1e12) - (gain(x, 7) ?? -1e12) : (y.followers ?? -1) - (x.followers ?? -1));
+  $("#main").innerHTML = `
+    <div class="head"><div><h1>Accounts</h1><div class="sub">${CREATOR ? "Your accounts · followers, growth and health" : "Every Instagram account in Airtable"}</div></div>
+      <button class="btn red ${accState.status === "banned" ? "on" : ""}" id="bBan">⊘ Banned (${banned})</button></div>
+    <div class="filters">
+      <input id="fq" type="search" placeholder="Search username…" value="${esc(accState.q)}">
+      <select id="fm"><option value="*">All models</option>${[...new Set([...D.models, ...A.map(a => a.model)])].sort().map(m => `<option ${m === accState.model ? "selected" : ""}>${esc(m)}</option>`).join("")}</select>
+      <select id="fs"><option value="*">All statuses</option>${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${k === accState.status ? "selected" : ""}>${v}</option>`).join("")}</select>
+      <select id="fp"><option value="*">All phones</option>${phones.map(p => `<option ${p === accState.phone ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>
+      <select id="fo">${[["followers","Most followers"],["growth","Fastest growing (7 d)"],["views","Most views"],["handle","A–Z"]].map(([k, v]) => `<option value="${k}" ${k === accState.sort ? "selected" : ""}>${v}</option>`).join("")}</select>
+    </div>
+    ${list.map(a => { const g = gain(a, 1); return `<div class="acc">${avatar(a)}
+      <div class="h"><b>${esc(a.handle)}</b><span>${esc(a.model)}</span></div>
+      <div><div class="lbl">Status</div><span class="st ${a.status}">${STATUS[a.status]}</span></div>
+      <div><div class="lbl">Total views</div><div class="val">▶ ${fmt(a.totalViews)}</div></div>
+      <div><div class="lbl">Followers</div><div class="val">${fmt(a.followers)}</div></div>
+      <div class="hide-s cell-stage"><div class="lbl">Stage</div>${a.stage ? `<span class="tag ${/warm/i.test(a.stage) ? "warm" : ""}">${esc(a.stage)}</span>` : `<span class="tag">–</span>`}</div>
+      <div class="hide-s"><div class="lbl">Followers · today</div><div class="val ${g > 0 ? "up" : g < 0 ? "down" : ""}">${g == null ? "–" : (g > 0 ? "↗ " : g < 0 ? "↘ " : "→ ") + sgn(g)}</div></div>
+      <div class="hide-s cell-phone"><div class="lbl">Phone</div><a class="val" href="/live" title="Open the Phones page">${esc((a.phone || "–").replace("iPhone ", "📱 "))}${a.container ? " · " + esc(a.container) : ""}</a></div>
+      <div class="hide-s"><div class="lbl">Tracking link</div>${a.link ? `<a class="val" href="${esc(a.link)}" target="_blank" rel="noopener" title="${esc(a.link)}">🔗 ${esc(a.link.replace(/^https?:\/\/(www\.)?oopsie\.bio\//, ""))}</a>` : `<span class="tag">–</span>`}</div>
+      <a class="btn va" href="#account/${esc(a.handle)}">▥ View analytics</a></div>`; }).join("") || `<div class="empty">No accounts match.</div>`}
+    <div class="sub" style="margin-top:6px">Showing ${list.length} of ${A.length} accounts</div>`;
+  const re = () => accounts();
+  $("#fq").oninput = e => { accState.q = e.target.value; re(); $("#fq").focus(); $("#fq").setSelectionRange(99, 99); };
+  $("#fm").onchange = e => { accState.model = e.target.value; re(); }; $("#fs").onchange = e => { accState.status = e.target.value; re(); };
+  $("#fp").onchange = e => { accState.phone = e.target.value; re(); }; $("#fo").onchange = e => { accState.sort = e.target.value; re(); };
+  $("#bBan").onclick = () => { accState.status = accState.status === "banned" ? "*" : "banned"; re(); };
+}
+
+function account(handle){
+  const a = A.find(x => x.handle === handle); if (!a){ $("#main").innerHTML = `<div class="empty">Account not found.</div>`; return; }
+  const win = days(30);
+  $("#main").innerHTML = `<a class="back" href="#accounts">← Accounts</a>
+    <div class="head"><div style="display:flex;gap:14px;align-items:center">${avatar(a).replace('class="av"', 'class="av" style="width:56px;height:56px"')}
+      <div><h1><a href="https://www.instagram.com/${esc(a.handle)}/" target="_blank" rel="noopener">@${esc(a.handle)}</a></h1>
+      <div class="sub">${esc(a.model)} · <span class="st ${a.status}">${STATUS[a.status]}</span>${a.stage ? " · " + esc(a.stage) : ""}${a.phone ? " · " + esc(a.phone) + " " + esc(a.container) : ""}${a.link ? ` · <a href="${esc(a.link)}" target="_blank" rel="noopener">🔗 ${esc(a.link.replace(/^https?:\/\//, ""))}</a>` : ""}</div></div></div></div>
+    <div class="kpis">
+      <div class="kpi"><div class="l">Followers</div><div class="v">${fmt(a.followers)}</div><div class="d">${sgn(gain(a, 7))} in 7 days</div></div>
+      <div class="kpi"><div class="l">Views (last 30 reels)</div><div class="v">${fmt(a.totalViews)}</div><div class="d">+${fmt(viewsIn(a, 7))} in 7 days</div></div>
+      <div class="kpi"><div class="l">Posts</div><div class="v">${fmt(a.posts)}</div><div class="d">${a.reels.length} reels tracked</div></div>
+    </div>
+    <div class="grid2">
+      <div class="card"><h3>Followers</h3><div class="cs">Last 30 days</div><div class="chart" id="aF"></div></div>
+      <div class="card"><h3>Views gained</h3><div class="cs">Per day</div><div class="chart" id="aV"></div></div></div>
+    <div class="card"><h3>Reels</h3><div class="cs">Newest snapshot, most viewed first</div><div class="reels">${a.reels.map(r => reelCard({ ...r, handle:a.handle })).join("") || `<div class="empty">No reels yet.</div>`}</div></div>`;
+  chart($("#aF"), win.map(d => ({ d, v: folOn(a, d) })), "#9b5cff", "Followers");
+  chart($("#aV"), win.map(d => ({ d, v: d in a.viewsDaily ? a.viewsDaily[d] : null })), "#4f8cff", "Views");
+}
+
+function models(){
+  const ms = [...new Set([...D.models, ...A.map(a => a.model)])].filter(m => m !== "No model" || A.some(a => a.model === m)).sort();   // every Airtable model, also without accounts yet
+  $("#main").innerHTML = `<div class="head"><div><h1>Models</h1><div class="sub">Totals over every account of a model</div></div></div>
+    <div class="cards">${ms.map(m => { const l = A.filter(a => a.model === m), f = l.reduce((s, a) => s + (a.followers || 0), 0);
+      const g = l.map(a => gain(a, 7)).filter(v => v != null), best = [...l].sort((x, y) => (y.followers || 0) - (x.followers || 0))[0];
+      return `<div class="card mcard"><h3>${esc(m)}</h3><div class="cs">${l.length} accounts</div><div class="big">${fmt(f)} <span class="sub" style="font-size:13px">followers</span></div>
+        <div class="row"><span>Growth 7 days</span><b class="${g.length && g.reduce((s, v) => s + v, 0) > 0 ? "up" : ""}">${g.length ? sgn(g.reduce((s, v) => s + v, 0)) : "–"}</b></div>
+        <div class="row"><span>Views 7 days</span><b>+${fmt(l.reduce((s, a) => s + viewsIn(a, 7), 0))}</b></div>
+        <div class="row"><span>Active / warm-up / problems</span><b>${l.filter(a => a.status === "active" && !/warm/i.test(a.stage)).length} / ${l.filter(a => /warm/i.test(a.stage)).length} / ${l.filter(a => a.status !== "active").length}</b></div>
+        <div class="row"><span>Biggest account</span><b>${best ? "@" + esc(best.handle) : "–"}</b></div>
+        <a class="btn" style="margin-top:10px;display:inline-block" href="#accounts" onclick="accState.model='${esc(m)}'">Show accounts</a></div>`; }).join("")}</div>`;
+}
+
+function phones(){
+  $("#main").innerHTML = `<div class="head"><div><h1>Phones</h1><div class="sub">Accounts and numbers per phone</div></div><a class="btn" href="/live">Open live view →</a></div>
+    <div class="cards">${D.phones.map(p => { const l = A.filter(a => p.accounts.includes(a.id));
+      return `<div class="card mcard"><h3>📱 ${esc(p.name)}</h3><div class="cs">${l.length} accounts · ${p.withProxy} containers with proxy</div>
+        <div class="big">${fmt(l.reduce((s, a) => s + (a.followers || 0), 0))} <span class="sub" style="font-size:13px">followers</span></div>
+        <div class="row"><span>Views 7 days</span><b>+${fmt(l.reduce((s, a) => s + viewsIn(a, 7), 0))}</b></div>
+        <div class="row"><span>Active / warm-up / problems</span><b>${l.filter(a => a.status === "active" && !/warm/i.test(a.stage)).length} / ${l.filter(a => /warm/i.test(a.stage)).length} / ${l.filter(a => a.status !== "active").length}</b></div>
+        <div class="row"><span>Free containers</span><b>${Math.max(0, p.withProxy - l.length)}</b></div>
+        <a class="btn" style="margin-top:10px;display:inline-block" href="#accounts" onclick="accState.phone='${esc(p.name)}'">Show accounts</a></div>`; }).join("")}</div>`;
+}
+
+function plan(){
+  const days = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+  $("#main").innerHTML = `<div class="head"><div><h1>Content plan</h1><div class="sub">This week · from your marketing team</div></div></div>
+    <div class="card" style="padding:22px"><div class="plan-grid">${days.map(d => `<div><b>${d}</b>–</div>`).join("")}</div>
+    <div class="sub" style="margin-top:14px">Your team fills this in. Shoot days, reels per day and hooks will appear here.</div></div>`;
+}
+function side(){
+  $("#sideReels").innerHTML = topReels(A, 4).map(r => `<a class="mini" href="${reelUrl(r.code)}" target="_blank" rel="noopener">${r.thumb ? `<img src="${esc(r.thumb)}" alt="">` : `<div class="ph"></div>`}
+    <div><div class="h">@${esc(r.handle)}</div><div class="v">▷ ${fmt(r.views)}</div></div></a>`).join("") || `<div class="mini" style="cursor:default"><div class="v">No reels yet</div></div>`;
+}
+function route(){
+  const h = location.hash.slice(1) || "home", [p, arg] = h.split("/");
+  document.querySelectorAll(".side a.nav").forEach(a => a.classList.toggle("on", a.dataset.p === (p === "account" ? "accounts" : p)));
+  const pages = CREATOR ? { home, accounts, plan } : { home, accounts, models, phones };
+  (pages[p] || (p === "account" ? () => account(decodeURIComponent(arg || "")) : home))();
+  window.scrollTo(0, 0);
+}
+window.addEventListener("hashchange", route); side(); route();
+</script>
+</body></html>

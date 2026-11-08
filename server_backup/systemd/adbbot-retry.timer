@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot retry loop (retryable Failed -> Pending) (timer)
+
+[Timer]
+Unit=adbbot-retry.service
+OnBootSec=5min
+OnUnitActiveSec=30min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

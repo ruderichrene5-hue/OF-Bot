@@ -1,0 +1,9 @@
+[Unit]
+Description=Assign oopsie.bio links to new iPhone-farm accounts every 15 min
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target

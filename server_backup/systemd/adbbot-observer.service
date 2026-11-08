@@ -1,0 +1,10 @@
+[Unit]
+Description=Instagram observer round (followers, reel views, status of every tracked account)
+After=adbbot-mlx-agent.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.observer_run --detail 10
+TimeoutStartSec=4h
+EnvironmentFile=-/etc/adbbot/env

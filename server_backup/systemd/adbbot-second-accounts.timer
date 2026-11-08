@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot two-account watch (both accounts of a phone posting?) (timer)
+
+[Timer]
+Unit=adbbot-second-accounts.service
+OnBootSec=5min
+OnUnitActiveSec=60min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

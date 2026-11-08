@@ -1,0 +1,10 @@
+[Unit]
+Description=iPhone farm: rewrite container Shortcuts whose proxy IP check no longer matches Airtable (Containers table)
+After=network-online.target tailscaled.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+EnvironmentFile=-/etc/adbbot/env
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.iphone_farm_shortcuts
+TimeoutStartSec=3600

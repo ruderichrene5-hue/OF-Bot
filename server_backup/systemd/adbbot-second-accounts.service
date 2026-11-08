@@ -1,0 +1,16 @@
+[Unit]
+Description=ADB bot two-account watch (both accounts of a phone posting?)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.run_loop second-accounts --apply
+RuntimeMaxSec=7200
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot issue-tag mirror (Needs Human Check -> MLX 'Issue' tag) (timer)
+
+[Timer]
+Unit=adbbot-issue-tags.service
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

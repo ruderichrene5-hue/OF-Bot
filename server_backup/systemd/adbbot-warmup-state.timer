@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot warm-up state publisher (Run Log -> Airtable + MLX tags) (timer)
+
+[Timer]
+Unit=adbbot-warmup-state.service
+OnBootSec=5min
+OnUnitActiveSec=30min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

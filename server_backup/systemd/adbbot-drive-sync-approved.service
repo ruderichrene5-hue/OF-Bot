@@ -1,0 +1,9 @@
+[Unit]
+Description=Copy approved account pictures (Airtable Accounts) to each account's Google Drive folder
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/reel_pipeline
+EnvironmentFile=/etc/adbbot/env
+ExecStart=/root/reel_pipeline/.venv/bin/python3 /root/reel_pipeline/drive_sync_approved.py
+TimeoutStartSec=1800

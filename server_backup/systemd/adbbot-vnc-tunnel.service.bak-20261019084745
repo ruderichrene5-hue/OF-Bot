@@ -1,0 +1,16 @@
+[Unit]
+Description=SSH tunnel server -> Mac mini relay: the iPhones' CatVNC (USB-forwarded 127.0.0.1:5901-5905 there) as 127.0.0.1:15901-15905 here, so /vnc works from https (app.rnx-viewer.com); since 13.10 also WDA 127.0.0.1:810N -> phone :8100 (launchd agents on the Mac get no Local Network permission)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ssh -N -i /root/.ssh/iphone_farm -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:15901:192.168.1.106:5900 -L 127.0.0.1:15902:192.168.1.101:5900 -L 127.0.0.1:15903:192.168.1.105:5900 \
+  -L 127.0.0.1:15904:192.168.1.104:5900 -L 127.0.0.1:15905:192.168.1.115:5900 -L 127.0.0.1:15906:192.168.1.120:5900 -L 127.0.0.1:15907:192.168.1.117:5900 -L 127.0.0.1:15908:192.168.1.119:5900 \
+  -L 127.0.0.1:8101:100.86.11.83:8101 -L 127.0.0.1:8102:100.86.11.83:8102 -L 127.0.0.1:8103:100.86.11.83:8103 -L 127.0.0.1:8104:100.86.11.83:8104 -L 127.0.0.1:8105:100.86.11.83:8105 -L 127.0.0.1:8106:100.86.11.83:8106 -L 127.0.0.1:8107:100.86.11.83:8107 -L 127.0.0.1:8108:100.86.11.83:8108 \
+  -L 127.0.0.1:15909:192.168.1.123:5900 -L 127.0.0.1:8109:100.86.11.83:8109 reynex03@100.86.11.83
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=ADB bot Geelark posting-stall Telegram alert (checks the post ledger, alerts if quiet too long during the active window)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.geelark_posting_stall_alert
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env
+
+[Install]
+WantedBy=multi-user.target

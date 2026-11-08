@@ -1,0 +1,10 @@
+[Unit]
+Description=reel_pipeline: poll Reference Pictures for Generate ticks and Picks every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

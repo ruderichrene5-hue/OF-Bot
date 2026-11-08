@@ -1,0 +1,10 @@
+[Unit]
+Description=iPhone farm warm-up tick every 20 min (09-23 Berlin is enforced in code)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=20min
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

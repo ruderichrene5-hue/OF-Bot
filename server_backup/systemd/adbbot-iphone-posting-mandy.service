@@ -1,0 +1,9 @@
+[Unit]
+Description=iPhone farm: daily posting on every Healthy Mandy account (iphone_posting_daily --model Mandy)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/adb_bot
+EnvironmentFile=/etc/adbbot/env
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.iphone_posting_daily --model Mandy

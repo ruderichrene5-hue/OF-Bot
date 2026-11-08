@@ -1,0 +1,765 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RNX Viewer · Phones</title>
+<style>
+  :root { color-scheme: dark;
+    --bg:#0b0d12; --panel:#161a22; --line:#262c38; --fg:#e6e8ee; --muted:#9aa3b2;
+    --accent:#4f8cff; --ok:#3fb950; --warn:#d29922; --off:#6e7681; }
+  * { box-sizing:border-box; }
+  body { background:var(--bg); color:var(--fg); margin:0;
+         font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; overflow:hidden; }
+  header { display:flex; align-items:center; gap:12px; padding:12px 18px;
+           border-bottom:1px solid var(--line); background:#0f1219; }
+  header h1 { font-size:16px; margin:0; font-weight:650; }
+  header nav { display:flex; gap:4px; margin-left:18px; }
+  header nav a { color:var(--muted); text-decoration:none; padding:6px 10px; border-radius:7px; font-weight:600; font-size:13px; }
+  header nav a.on { color:var(--fg); background:var(--panel); }
+  header .sp { flex:1; }
+  button { font:inherit; cursor:pointer; border-radius:8px; border:1px solid var(--line);
+           background:var(--panel); color:var(--fg); padding:6px 12px; font-weight:600; font-size:13px; }
+  button:hover { border-color:#3a4252; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .app { display:flex; height:calc(100vh - var(--nav-h, 0px)); }
+  /* Rene 2026-10-08: the page is the overview only -- no device list, size slider or Arrange; phones open in "Phones only" */
+  body > header, aside, .splitter { display:none !important; }
+  body.focus #emptyDesk { display:none !important; }
+  #focusEmpty { display:none; position:absolute; inset:0; place-items:center; color:var(--muted); font-size:14px; }
+  body.focus.nowin #focusEmpty { display:grid; }
+  .size { color:var(--muted); font-size:12px; display:flex; align-items:center; gap:6px; }
+  .size input { width:110px; accent-color:var(--accent); }
+  aside { width:var(--aside-w, 300px); flex:none; border-right:1px solid var(--line); overflow-y:auto; padding:14px; }
+  aside h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:4px 4px 10px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px; margin-bottom:10px;
+          display:grid; grid-template-columns:38px 1fr auto; gap:10px; align-items:center; }
+  .card.open { border-color:var(--accent); }
+  .phone-ico { width:38px; height:62px; border-radius:9px; border:2px solid #3a4252; position:relative; }
+  .phone-ico::after { content:""; position:absolute; top:4px; left:50%; width:12px; height:3px; margin-left:-6px; border-radius:2px; background:#3a4252; }
+  .phone-ico.schwarz { background:#111; } .phone-ico.weiss { background:#e9e9ec; border-color:#c9c9cf; }
+  .card .name { font-weight:650; }
+  .card .meta { color:var(--muted); font-size:12px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:1px; }
+  .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.off{background:var(--off)}
+  .play { width:38px; height:38px; border-radius:50%; padding:0; display:grid; place-items:center;
+          background:var(--accent); border:none; }
+  .play svg { width:16px; height:16px; fill:#fff; margin-left:2px; }
+  .card.open .play { background:#2a3140; }
+  .card.open .play svg { margin-left:0; }
+  .hint { color:var(--muted); font-size:12px; margin:14px 4px; }
+  .vpill { display:inline-block; margin-top:4px; font-size:11px; font-weight:700; border-radius:6px; padding:1px 7px; }
+  .vpill.on { background:#12301d; color:#3fb950; border:1px solid #1f5c33; }
+  .vpill.off { background:#3a1414; color:#ff7a70; border:1px solid #6e2222; }
+  .vpill.unk { background:#1c212b; color:var(--muted); border:1px solid var(--line); }
+  .acc-h { margin-top:18px !important; }
+  .lines { color:var(--muted); font-size:12px; white-space:nowrap; } .lines b { color:var(--fg); } .lines .full { color:#ff7a70; }
+  .acc-h, #accSearch, #accList, .chips { display:none !important; }
+  .acc-search { width:100%; box-sizing:border-box; padding:8px 10px; border-radius:8px; border:1px solid var(--line);
+                background:#0f1219; color:var(--fg); font:inherit; font-size:13px; margin-bottom:8px; }
+  .acc-search:focus { outline:none; border-color:var(--accent); }
+  .help { position:relative; width:22px; height:22px; border-radius:50%; border:1px solid var(--line); color:var(--muted);
+          display:grid; place-items:center; font-size:12px; font-weight:700; cursor:help; }
+  .help-pop { display:none; position:absolute; top:28px; left:0; width:340px; background:#1c212b; border:1px solid var(--line);
+              border-radius:10px; padding:10px 12px; font-size:12.5px; font-weight:400; color:var(--fg); line-height:1.5; z-index:3000;
+              box-shadow:0 8px 30px rgba(0,0,0,.5); }
+  .help:hover .help-pop, .help:focus .help-pop { display:block; }
+  .acc-group { margin:10px 4px 4px; font-size:11.5px; font-weight:700; color:var(--muted); display:flex; justify-content:space-between; }
+  .acc { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:8px; cursor:pointer; }
+  .acc.active { background:#16233a; box-shadow:inset 3px 0 0 var(--accent); }
+  .cid { font:600 11.5px ui-monospace,SFMono-Regular,Menlo,monospace; background:#222836; color:#c9d1d9;
+         border-radius:5px; padding:2px 6px; min-width:26px; text-align:center; flex:none; }
+  .sdot { width:7px; height:7px; border-radius:50%; flex:none; background:var(--off); }
+  .sdot.todo { background:var(--warn); } .sdot.live { background:var(--ok); }
+  /* account chips under each phone's title bar */
+  .chips { display:flex; gap:6px; overflow-x:auto; padding:6px 8px; background:#141821; border-bottom:1px solid var(--line);
+           scrollbar-width:thin; }
+  .chips::-webkit-scrollbar { height:3px; } .chips::-webkit-scrollbar-thumb { background:#2a3140; border-radius:3px; }
+  .chip { flex:none; border:1px solid var(--line); background:#1c212b; color:var(--fg); border-radius:999px;
+          padding:3px 10px 3px 4px; font-size:12px; font-weight:500; display:flex; align-items:center; gap:6px; cursor:pointer; }
+  .chip .cid { padding:1px 5px; font-size:11px; }
+  .chip:hover { border-color:#3a4252; }
+  .chip.active { border-color:var(--accent); background:#16233a; }
+  .chip:disabled { opacity:.5; }
+  .acc:hover { background:var(--panel); }
+  .acc .who { flex:1; min-width:0; }
+  .acc .u { font-weight:600; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; min-width:0; }
+  .acc .where { color:var(--muted); font-size:11.5px; }
+  .acc .tag { font-size:10.5px; color:#d29922; border:1px solid #5a4614; border-radius:5px; padding:0 4px; margin-left:4px; }
+  .acc .go { width:30px; height:30px; border-radius:50%; padding:0; display:grid; place-items:center;
+             background:var(--accent); border:none; flex:none; }
+  .acc .go svg { width:12px; height:12px; fill:#fff; margin-left:2px; }
+  .acc .go:disabled { opacity:.5; }
+  .acc-empty { color:var(--muted); font-size:12px; padding:6px 8px; }
+  .toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#1c212b; border:1px solid var(--line);
+           color:var(--fg); padding:9px 14px; border-radius:10px; font-size:13px; z-index:2000; box-shadow:0 8px 30px rgba(0,0,0,.5); }
+  main { flex:1; position:relative; overflow:hidden;
+         background-image:radial-gradient(#1b2029 1px, transparent 1px); background-size:22px 22px; }
+  /* overview centred on the screen, at most 5 phones per row, a short last row centred too (Rene 2026-10-08) */
+  .board { position:absolute; inset:0; overflow-y:auto; padding:28px 26px; display:flex; flex-direction:column; align-items:center; }
+  .board > * { flex:none; } .board::before, .board::after { content:""; flex:1; }   /* vertical centring that still scrolls */
+  .board-head { display:flex; flex-direction:column; align-items:center; text-align:center; gap:12px; margin-bottom:22px; }
+  .board-title { margin:0 0 4px; font-size:22px; }
+  .tiles { display:flex; flex-wrap:wrap; justify-content:center; gap:14px; max-width:calc(5 * 240px + 4 * 14px); }
+  .tiles .tile { width:240px; }
+  .tile { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px 16px; }
+  .tile .top { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+  .tile .name { font-weight:650; font-size:15px; }
+  .tile .phone-ico { width:24px; height:40px; }
+  .tile .row { display:flex; justify-content:space-between; font-size:12.5px; color:var(--muted); padding:3px 0; border-top:1px solid #1d222d; }
+  .tile .row b { color:var(--fg); font-weight:600; }
+  .tile .warn { color:#ff7a70; } .tile .good { color:var(--ok); }
+  .bat { display:inline-block; width:34px; height:12px; border:1px solid #6b7486; border-radius:3px; position:relative; vertical-align:-1px; margin-right:5px; }
+  .bat i { position:absolute; left:1px; top:1px; bottom:1px; border-radius:1px; background:var(--ok); }
+  .camwarn { display:none; margin:0 0 18px; max-width:640px; background:#3a1414; border:1px solid #6e2222; color:#ffb4ad;
+             border-radius:12px; padding:10px 14px; font-size:13px; text-align:center; }
+  .camwarn.on { display:block; }
+  .board-hint { color:var(--muted); font-size:12px; margin-top:20px; text-align:center; max-width:640px; }
+  .win { position:absolute; width:300px; background:var(--panel); border:1px solid #333b4a; border-radius:14px;
+         box-shadow:0 12px 40px rgba(0,0,0,.5); overflow:hidden; display:flex; flex-direction:column; }
+  .win.focus { border-color:var(--accent); }
+  .bar { display:flex; align-items:center; gap:8px; padding:8px 10px; cursor:grab; user-select:none;
+         background:#1c212b; border-bottom:1px solid var(--line); font-weight:600; font-size:13px; }
+  .bar:active { cursor:grabbing; }
+  .bar .t { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .bar .fps { color:var(--muted); font-weight:500; font-size:11px; font-variant-numeric:tabular-nums; }
+  .bar button { padding:2px 7px; border-radius:6px; font-size:12px; background:transparent; flex:none; }
+  .bar .t { min-width:0; } .bar .t .short { display:none; }
+  /* narrow windows (many phones in Phones only): short name, tighter buttons, no full-screen button -- ✕ must stay visible */
+  .win { container-type:inline-size; }
+  @container (max-width: 250px) {
+    .bar { gap:3px; padding:8px 6px; } .bar button { padding:2px 4px; }
+    .bar .t .full { display:none; } .bar .t .short { display:inline; }
+    .bar button.fs { display:none; }
+  }
+  #focusPhones { display:flex; gap:6px; flex-wrap:nowrap; }
+  #focusBar { white-space:nowrap; max-width:calc(100vw - 16px); overflow-x:auto; }
+  .screen { aspect-ratio: 1125 / 2436; background:#000; position:relative; }
+  /* always show a pointer over the phone screen; noVNC sets cursor:none inline */
+  .screen canvas { cursor: crosshair !important; }
+  /* AirPlay video sits on top of the (frameless) VNC canvas; clicks fall through to it */
+  .screen video.live { position:absolute; inset:0; width:100%; height:100%; object-fit:contain;   /* 12.10: iPhone 7/8 (750x1334) were squeezed into the iPhone X box -- keep each phone's own aspect */
+                       pointer-events:none; z-index:1; background:#000; }
+  .screen .wait button { margin-top:4px; }
+  /* the notice must not swallow touches: swiping a dark/idle phone is what makes its video start (2026-10-09) */
+  .screen .wait button { pointer-events:auto; }
+  .win.vncpic .screen canvas { filter:url(#swaprb); }
+  .screen .wait { pointer-events:none; position:absolute; z-index:2; background:#000; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+                  gap:10px; color:#8b93a3; font-size:12.5px; text-align:center; padding:20px; }
+  .spinner { width:26px; height:26px; border:3px solid #2a3140; border-top-color:var(--accent); border-radius:50%; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg) } }
+  .ctr { display:flex; gap:6px; padding:8px; justify-content:center; border-top:1px solid var(--line); }
+  .ctr button { flex:1; padding:5px 0; font-size:12px; }
+  /* above the live video (z-index 1), otherwise the video swallows the drag */
+  .resize { position:absolute; right:0; bottom:0; width:26px; height:26px; cursor:nwse-resize; z-index:5;
+            background:linear-gradient(135deg, transparent 55%, #6b7486 55%); border-bottom-right-radius:13px; }
+  .resize:hover { background:linear-gradient(135deg, transparent 55%, var(--accent) 55%); }
+  /* Phones: list on top, phone windows stacked full-width below (no dragging) */
+  /* drag the line between the list and the phones to make the list wider/narrower */
+  .splitter { width:6px; flex:none; cursor:col-resize; margin-left:-3px; margin-right:-3px; z-index:4; position:relative; }
+  .splitter:hover, .splitter.drag { background:var(--accent); opacity:.6; }
+  body.dragging { cursor:col-resize; user-select:none; }
+  body.dragging iframe, body.dragging video, body.dragging canvas { pointer-events:none; }
+  /* phones-only view: no platform bar, no header, no list -- just the phones on the dotted desk */
+  body.focus .pf-nav, body.focus header, body.focus aside, body.focus .splitter { display:none !important; }
+  body.focus .app { height:100vh; }
+  html:has(body.focus) { padding-top:0 !important; }
+  #focusBar { display:none; position:fixed; top:8px; left:50%; transform:translateX(-50%); z-index:3000; gap:6px; align-items:center;
+              background:rgba(15,18,25,.85); border:1px solid var(--line); border-radius:12px; padding:5px 6px; }
+  body.focus #focusBar { display:flex; }
+  #focusBar button { padding:4px 10px; font-size:12.5px; }
+  #focusBar .ph.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  body.focus .win .resize { display:none; }
+  body.focus .bar { cursor:default; }
+  body.focus main { overflow-y:auto; }
+  @media (max-width: 700px) {
+    body { overflow:auto; }
+    .app { display:block; height:auto; }
+    aside { width:auto; border-right:0; padding-bottom:0; }
+    main { overflow:visible; background:none; min-height:0; }
+    .win { position:relative !important; left:auto !important; top:auto !important; width:auto !important;
+           max-width:420px; margin:0 auto 16px; z-index:auto !important; }
+    .resize, #tile, .size, .splitter, #focusBtn { display:none; }
+    .board { position:static; padding:12px 16px 24px; }
+    .bar { cursor:default; }
+  }
+</style></head>
+<body>
+<header>
+  <h1>Phones</h1>
+  <span class="help" tabindex="0">?<span class="help-pop">
+    <b>Accounts</b> (left) or the chips under a phone: click to run that container's Shortcut on the phone.<br>
+    <b>▶</b> on a device opens it as a window · <b>☀︎</b> screen on (stays on) · <b>⟲</b> restarts a frozen screen · <b>↻</b> refresh — use it whenever the picture looks stuck.<br>
+    Drag a window by its title bar, resize it at its bottom-right corner. Layout is remembered.</span></span>
+  <span class="sp"></span>
+  <label class="size">Size <input id="size" type="range" min="180" max="1000" step="10"></label>
+  <button id="focusBtn" title="Only the phones, full window">⛶ Phones only</button>
+  <button id="tile">Arrange</button>
+</header>
+<!-- CatVNC sends red and blue swapped (blue sea came out brown, 2026-10-09): swap them back on the canvas -->
+<svg width="0" height="0" style="position:absolute"><filter id="swaprb" color-interpolation-filters="sRGB">
+  <feColorMatrix type="matrix" values="0 0 1 0 0  0 1 0 0 0  1 0 0 0 0  0 0 0 1 0"/></filter></svg>
+<div id="focusBar"><span id="focusPhones"></span><button id="focusAll">All</button><button id="exitFocus" title="Back to the overview (closes all phones)">✕ Back to overview</button></div>
+<div class="app">
+  <aside>
+    <h2>Devices</h2>
+    <div id="list"></div>
+    <h2 class="acc-h">Accounts</h2>
+    <input id="accSearch" class="acc-search" type="search" placeholder="Search account, container, phone…" autocomplete="off">
+    <div id="accList"></div>
+  </aside>
+  <div class="splitter" id="splitter" title="Drag to resize the list"></div>
+  <main id="desk"><div class="board" id="emptyDesk">
+    <div class="board-head"><div><h2 class="board-title">Overview</h2><div class="lines" id="boardLines">Loading…</div></div>
+      <button class="primary" id="boardFocus">⛶ Open Phones only</button></div>
+    <div class="camwarn" id="camWarn"><b>No live video on any phone:</b> the Mac mini blocked the camera permission of the capture tool.
+      Fix it at the Mac mini: System Settings → Privacy &amp; Security → Camera → turn on <b>usbcap2</b>.</div>
+    <div class="tiles" id="tiles"></div>
+    <div class="board-hint">Status only. To see and control phones, click “Open Phones only”. Video runs only while a phone is open — about 3 live videos fit on one USB port of the Mac mini.</div>
+  </div><div id="focusEmpty">Pick a phone in the bar at the top (or “All”).</div></main>
+</div>
+
+<script>
+const PHONES = __PHONES__;
+// Layout test (Rene 2026-10-08): /live?demo=2 adds 2 fake phones in this browser only -- no token, so no video, VNC or actions.
+(function(){ const n = Math.min(20, +new URLSearchParams(location.search).get("demo") || 0);
+  for (let i = 0; i < n; i++) PHONES.push({ ...PHONES[i % PHONES.length], id: "demo" + i, token: "", video: false, label: "",
+    name: "iPhone " + String.fromCharCode(70 + i), state: "warn", accounts: 0 }); })();
+const STATE_TXT = { ok:"Online", warn:"Not set up", off:"Not on USB (cable / hub port?)" };
+
+const store = {
+  get(k){ try { return JSON.parse(localStorage.getItem(k)); } catch(e){ return null; } },
+  set(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} }
+};
+const desk = document.getElementById("desk"), list = document.getElementById("list");
+
+// --- resizable device list (width remembered per browser)
+(function(){
+  const root = document.documentElement, sp = document.getElementById("splitter");
+  const MIN = 200, MAX = () => Math.max(260, window.innerWidth * 0.6);
+  const apply = w => root.style.setProperty("--aside-w", Math.round(Math.min(MAX(), Math.max(MIN, w))) + "px");
+  const saved = store.get("asideW"); if (saved) apply(saved);
+  sp.addEventListener("pointerdown", e => {
+    e.preventDefault(); sp.setPointerCapture(e.pointerId); sp.classList.add("drag"); document.body.classList.add("dragging");
+    const left = document.querySelector("aside").getBoundingClientRect().left;
+    const move = ev => apply(ev.clientX - left);
+    const up = ev => { sp.releasePointerCapture(e.pointerId); sp.classList.remove("drag"); document.body.classList.remove("dragging");
+      sp.removeEventListener("pointermove", move); sp.removeEventListener("pointerup", up);
+      store.set("asideW", parseInt(getComputedStyle(root).getPropertyValue("--aside-w"))); };
+    sp.addEventListener("pointermove", move); sp.addEventListener("pointerup", up);
+  });
+  sp.addEventListener("dblclick", () => { apply(300); store.set("asideW", 300); });
+})();
+
+// --- phones-only view
+function setFocus(on){
+  document.body.classList.toggle("focus", on); store.set("focus", on);
+  if (on) layoutGrid();
+  else Object.keys(wins).forEach(closeWin);                   // the overview shows no phones: hide them (they stay connected)
+  document.body.classList.toggle("nowin", !Object.keys(wins).length);
+  renderFocusBar();
+}
+// Phones-only grid: up to 5 per row, 2 rows fill the screen (10 phones); 1 phone sits in the middle,
+// 2 side by side at the same size, and so on. More than 10 continue below (scroll).
+function layoutGrid(){
+  if (!document.body.classList.contains("focus")) return;
+  const ids = PHONES.map(p => p.id).filter(id => wins[id]); const n = ids.length; if (!n) return;
+  const gap = 16, top = 52, bar = 37 + 2;
+  const cols = Math.min(n, 5), rows = Math.ceil(n / cols), shown = Math.min(rows, 2);
+  const W = desk.clientWidth, H = window.innerHeight - desk.getBoundingClientRect().top - top;
+  // tallest phone shown decides the row height (iPhone X 1125/2436; a grid of only 7/8s gets wider windows)
+  const ar = Math.min(...ids.map(id => +wins[id].querySelector(".screen")?.dataset.ar || 1125 / 2436));
+  const w = Math.floor(Math.min((W - gap * (cols + 1)) / cols, ((H - gap * (shown + 1)) / shown - bar) * ar));
+  const h = bar + w / ar;
+  const x0 = (W - (cols * w + (cols - 1) * gap)) / 2;
+  const y0 = top + Math.max(gap, (H - (shown * h + (shown - 1) * gap)) / 2);
+  ids.forEach((id, i) => { const el = wins[id], r = Math.floor(i / cols), c = i % cols;
+    const inRow = Math.min(cols, n - r * cols), xr = x0 + (cols - inRow) * (w + gap) / 2;   // centre a short last row
+    el.style.width = w + "px"; el.style.left = Math.round(xr + c * (w + gap)) + "px"; el.style.top = Math.round(y0 + r * (h + gap)) + "px"; });
+}
+function renderFocusBar(){
+  const box = document.getElementById("focusPhones"); if (!box) return;
+  box.innerHTML = PHONES.map(p => `<button class="ph ${wins[p.id] ? "on" : ""}" data-id="${p.id}" title="${p.name} — click to show / hide">${p.name.replace(/^iPhone\s+/, "")}</button>`).join("");
+  box.querySelectorAll(".ph").forEach(b => b.onclick = () => { wins[b.dataset.id] ? closeWin(b.dataset.id) : openWin(b.dataset.id); });
+}
+window.addEventListener("resize", () => layoutGrid());
+document.getElementById("focusBtn").onclick = () => setFocus(true);
+document.getElementById("exitFocus").onclick = () => setFocus(false);
+// Paste from the Mac (Rene 09.10): Cmd/Ctrl+V used to reach the phone as a key press, so iOS pasted its OWN
+// old clipboard. Now the Mac's clipboard text is put on the phone's pasteboard first, then Cmd+V is sent.
+function activePhone(){
+  const id = Object.keys(wins).find(k => wins[k].classList.contains("focus"));
+  return id ? { id, el: wins[id], p: PHONES.find(x => x.id === id) } : null;
+}
+// Hidden textarea: a canvas gets no 'paste' event in Chrome, an editable field always does (any origin).
+const pasteBox = Object.assign(document.createElement("textarea"), { "aria-hidden": "true" });
+pasteBox.style.cssText = "position:fixed;left:-9999px;top:0;width:10px;height:10px;opacity:0";
+document.body.appendChild(pasteBox);
+let pasteTarget = null;
+document.addEventListener("keydown", e => {
+  if (!(e.metaKey || e.ctrlKey)) return;
+  const k = (e.key || "").toLowerCase();
+  if (k !== "v" && k !== "c") return;
+  const a = activePhone(); if (!a || !a.p) return;
+  e.stopImmediatePropagation();                // keep noVNC from sending Cmd+V/C to the phone as key presses
+  if (k === "v") { pasteTarget = a; pasteBox.value = ""; pasteBox.focus(); return; }   // paste lands in pasteBox
+  e.preventDefault();
+  copyFromPhone(a);
+}, true);
+// Copy from the phone (Rene 10.10): copy on the phone as usual, then Cmd+C in its window -> Mac clipboard.
+async function copyFromPhone(a){
+  try {
+    const r = await fetch(location.origin + "/phones/clipboard_read?token=" + encodeURIComponent(a.p.token) + "&t=" + TICKET, { method: "POST" });
+    const j = await r.json();
+    if (!j.ok) { toast(`${a.p.name}: ${j.message || "could not read the phone's clipboard"}`); return; }
+    if (!j.text) { toast(`${a.p.name}: phone clipboard is empty (copy something on the phone first)`); return; }
+    await navigator.clipboard.writeText(j.text);
+    toast(`Copied from ${a.p.name}: ${j.text.length > 40 ? j.text.slice(0, 40) + "…" : j.text}`);
+  } catch (err) { toast(`${a.p.name}: copy failed (${err.message || err})`); }
+}
+pasteBox.addEventListener("paste", async e => {
+  const a = pasteTarget; pasteTarget = null;
+  const text = (e.clipboardData && e.clipboardData.getData("text")) || "";
+  e.preventDefault();
+  a?.el.querySelector(".screen canvas")?.focus();
+  if (!a || !a.p) return;
+  if (!text) { toast("Nothing to paste (clipboard has no text)"); return; }
+  // 10.10: VNC key presses did not reach the phone -> the server types it with XXTouch (sys.input_text)
+  // into the focused field and also puts it on the phone's clipboard. VNC typing stays as the fallback.
+  try {
+    const r = await fetch(location.origin + "/phones/clipboard?mode=type&token=" + encodeURIComponent(a.p.token) + "&t=" + TICKET,
+                          { method: "POST", body: text.slice(0, 20000) });
+    const j = await r.json();
+    if (j.ok) { toast(`${a.p.name}: ${j.message}`); return; }
+  } catch (err) { /* fall through to VNC typing */ }
+  // X11 keysym: Latin-1 = code point, everything else 0x01000000 + code point; newline = Return.
+  const rfb = a.el._rfb;
+  if (!rfb) { toast(`${a.p.name}: paste failed (phone not reachable)`); return; }
+  for (const ch of text.slice(0, 2000)) {
+    const cp = ch.codePointAt(0);
+    const sym = ch === "\n" ? 0xff0d : ch === "\t" ? 0xff09 : cp < 0x100 ? cp : 0x01000000 + cp;
+    rfb.sendKey(sym, null, true); rfb.sendKey(sym, null, false);
+    await new Promise(r => setTimeout(r, 12));
+  }
+  toast(`${a.p.name}: typed ${Math.min(text.length, 2000)} characters`);
+});
+// no Esc shortcut: Esc is also typed into the phones (keyboard) and closed every window (Rene 2026-10-09)
+document.getElementById("focusAll").onclick = () => PHONES.forEach(p => wins[p.id] || openWin(p.id));
+const wins = {}, hiddenWins = {}; let z = 10;   // hiddenWins: hidden but still connected (never closed)
+const MAX_VIDEO = 2;                 // macOS AVFoundation reliably streams only ~2 iOS screens at once
+let videoSlots = [];                 // phone ids that get USB video (most-recently focused first)
+const watchedNow = new Set();
+function promoteVideo(id){ if (!wins[id]) return;
+  videoSlots = [id, ...videoSlots.filter(x => x !== id)].slice(0, MAX_VIDEO); refreshSlots(); }
+function refreshSlots(){
+  videoSlots = videoSlots.filter(id => wins[id]).slice(0, MAX_VIDEO);
+  const want = new Set(videoSlots);
+  want.forEach(id => { if (!watchedNow.has(id)) { watchedNow.add(id); const p = PHONES.find(x => x.id === id);
+    if (p) { if (wins[id]) wins[id]._videoSince = Date.now(); watchPhone(p, true); } } });
+  [...watchedNow].forEach(id => { if (!want.has(id)) { watchedNow.delete(id);
+    const p = PHONES.find(x => x.id === id); if (p) watchPhone(p, false); } });
+  reconcileModes();
+}
+
+function renderList(){
+  list.innerHTML = PHONES.map(p => `
+    <div class="card ${wins[p.id] ? "open" : ""}" data-id="${p.id}">
+      <div class="phone-ico ${p.color}"></div>
+      <div>
+        <div class="name">${p.name}${p.label ? ` <span class="meta">(${p.label})</span>` : ""}</div>
+        <div class="meta"><span class="dot ${p.state}"></span>${STATE_TXT[p.state]}</div>
+        <div class="meta">${p.containers}/${p.max} containers · ${p.accounts} with an account</div>
+        <div class="vpn" data-vpn="${p.token}"><span class="vpill unk">VPN …</span></div>
+      </div>
+      <button class="play" title="${wins[p.id] ? "Close" : "Open"}">
+        ${wins[p.id]
+          ? '<svg viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" rx="1"/></svg>'
+          : '<svg viewBox="0 0 16 16"><path d="M4 2.5v11l9.5-5.5z"/></svg>'}
+      </button>
+    </div>`).join("");
+  if (typeof applyVpn === "function") applyVpn();
+  list.querySelectorAll(".card .play").forEach(b => b.onclick = () => {
+    const id = b.closest(".card").dataset.id; wins[id] ? closeWin(id) : openWin(id);
+  });
+  document.body.classList.toggle("nowin", !Object.keys(wins).length);
+}
+
+function focusWin(el){ Object.values(wins).forEach(w => w.classList.remove("focus")); el.classList.add("focus"); el.style.zIndex = ++z;
+  const id = Object.keys(wins).find(k => wins[k] === el); if (id) promoteVideo(id); }
+
+function openWin(id, pos){
+  if (!document.body.classList.contains("focus")) setFocus(true);   // phones are only shown in "Phones only"
+  if (hiddenWins[id]) {                                             // un-hide: same window, still connected
+    const el = hiddenWins[id]; delete hiddenWins[id]; el.style.display = ""; wins[id] = el; focusWin(el);
+    renderList(); layoutGrid(); renderFocusBar(); return;
+  }
+  const p = PHONES.find(x => x.id === id);
+  const saved = pos || store.get("win:" + id) || { x: 30 + Object.keys(wins).length * ((+sizeEl.value || 300) + 30), y: 24, w: +sizeEl.value || 300 };
+  const el = document.createElement("div");
+  el.className = "win";
+  el.style.left = saved.x + "px"; el.style.top = saved.y + "px"; el.style.width = saved.w + "px";
+  el.innerHTML = `
+    <div class="bar"><span class="dot ${p.state}"></span><span class="t" title="${p.name}"><span class="full">${p.name}</span><span class="short">${p.name.replace(/^iPhone\s+/, "")}</span></span>
+      <button title="Screen on (and keep it on)">☀︎</button><button title="Respring: restart the iPhone's screen/UI (~15 s), fixes a frozen phone">⟲</button><button title="Refresh: fixes a stuck picture (restarts the video if needed, ~15 s)">↻</button><button class="fs" title="Full screen">⤢</button><button title="Hide (stays connected)">–</button></div>
+    ${chipsHtml(p)}
+    <div class="screen"><div class="wait"><div class="spinner"></div><div class="msg">Connecting…</div></div></div>
+    <div class="resize"></div>`;
+  desk.appendChild(el); wins[id] = el; focusWin(el);
+  el._watchStarted = Date.now();   // watch/capture is driven by the video slots (promoteVideo)
+  el.addEventListener("pointerdown", () => focusWin(el));
+  const [wakeBtn, respringBtn, againBtn, fullBtn, closeBtn] = el.querySelectorAll(".bar button");
+  wakeBtn.onclick = () => phoneAction(p, el, wakeBtn, "wake", 1500);
+  respringBtn.onclick = () => confirm(`Respring ${p.name}? The screen restarts and is back in about 15 seconds. Open apps are closed and the Shadowrocket VPN DISCONNECTS — run the account's Shortcut again afterwards.`)
+    && phoneAction(p, el, respringBtn, "respring", 15000);
+  closeBtn.onclick = () => closeWin(id);
+  fullBtn.onclick = () => el.querySelector(".screen").requestFullscreen?.();
+  againBtn.onclick = () => { el._forceVideoOnce = true; connect(p, el); };   // ↻ : try USB video again now
+  el.querySelectorAll(".chip").forEach(c => c.onclick = () => runAccount(ACCOUNTS[+c.dataset.i], c));
+  connect(p, el);
+  drag(el, el.querySelector(".bar"), id, false);
+  drag(el, el.querySelector(".resize"), id, true);
+  renderList(); layoutGrid(); renderFocusBar();
+}
+
+// Rene 10.10: phones can only be HIDDEN, never closed -- closing stopped/started the Mac's capture and that
+// churn hung macOS's screen service. A hidden window keeps its video + touch connection and comes back at once.
+function closeWin(id){ const el = wins[id]; if (!el) return;
+  el.style.display = "none"; hiddenWins[id] = el; delete wins[id];
+  videoSlots = videoSlots.filter(x => x !== id); refreshSlots();
+  renderList(); layoutGrid(); renderFocusBar(); }
+
+// Wake: the server opens Settings on the phone over SSH (uiopen), which turns a dark screen on.
+// CatVNC keeps sending the old (black) frame, so reconnect once the screen is lit.
+// Live video: WebRTC (WHEP) from the relay next to the phones; this server only passes the offer/answer.
+async function playVideo(p, el){
+  const screen = el.querySelector(".screen");
+  const say = (html) => { let w = screen.querySelector(".wait");
+    if (!w) { w = document.createElement("div"); w.className = "wait"; screen.appendChild(w); } w.innerHTML = html; return w; };
+  let v = screen.querySelector("video.live");
+  if (!v) { v = document.createElement("video"); v.className = "live"; v.muted = true; v.autoplay = true; v.playsInline = true; screen.appendChild(v);
+    // 12.10: the box takes the phone's real shape (iPhone 7/8 = 750x1334, X = 1125x2436) instead of always iPhone X
+    const fit = () => { if (v.videoWidth && v.videoHeight) { const ar = v.videoWidth / v.videoHeight;
+      if (Math.abs(ar - (+screen.dataset.ar || 0)) > 0.01) { screen.dataset.ar = ar; screen.style.aspectRatio = `${v.videoWidth} / ${v.videoHeight}`; layoutGrid(); } } };
+    v.addEventListener("loadedmetadata", fit); v.addEventListener("resize", fit); }
+  el._pc?.close();
+  const pc = new RTCPeerConnection();
+  el._pc = pc;
+  pc.addTransceiver("video", { direction: "recvonly" });
+  pc.ontrack = e => {
+    v.srcObject = e.streams[0] || new MediaStream([e.track]);
+    // show frames as soon as they arrive instead of buffering for smoothness
+    try { e.receiver.jitterBufferTarget = 0; } catch (_) {}
+    try { e.receiver.playoutDelayHint = 0; } catch (_) {}
+  };
+  v.onplaying = () => screen.querySelector(".wait")?.remove();
+  pc.onconnectionstatechange = () => { if (["failed", "disconnected"].includes(pc.connectionState) && el._pc === pc)
+    say('<div class="msg">Video lost. ↻ to reconnect.</div>'); };
+  say('<div class="spinner"></div><div class="msg">Starting video…</div>');
+  await pc.setLocalDescription(await pc.createOffer());
+  await new Promise(r => { if (pc.iceGatheringState === "complete") return r();
+    pc.onicegatheringstatechange = () => pc.iceGatheringState === "complete" && r(); setTimeout(r, 1500); });
+  let res;
+  try { res = await fetch(location.origin + "/phones/whep?token=" + encodeURIComponent(p.token) + "&t=" + TICKET,
+                          { method: "POST", headers: { "Content-Type": "application/sdp" }, body: pc.localDescription.sdp }); }
+  catch (e) { say('<div class="msg">Video relay not reachable.</div>'); return; }
+  if (res.status === 404 || res.status === 400) {
+    pc.close();
+    if (Date.now() - (el._watchStarted || 0) < 30000) {          // capture just (re)started: give it ~30 s
+      say('<div class="spinner"></div><div class="msg">Starting video…</div>');
+      setTimeout(() => wins[p.id] === el && playVideo(p, el), 3000);
+      return;
+    }
+    const why = videoReason(p);
+    const w = say(`<div class="msg">${why}</div><button>▶ Try again</button>`);
+    w.querySelector("button").onclick = async (ev) => {
+      ev.target.disabled = true; say('<div class="spinner"></div><div class="msg">Waking the phone and restarting its video… (~15 s)</div>');
+      el._watchStarted = Date.now(); await watchPhone(p, true);
+      const r = await fetch(location.origin + "/phones/mirror?token=" + encodeURIComponent(p.token) + "&t=" + TICKET, { method: "POST" });
+      const j = await r.json().catch(() => ({ ok: false, message: "no answer" }));
+      if (!j.ok) say(`<div class="msg">Could not start video: ${j.message}</div>`);
+      else setTimeout(() => playVideo(p, el), 4000);
+    };
+    return;
+  }
+  if (!res.ok) { say(`<div class="msg">Video error (${res.status}): ${await res.text()}</div>`); return; }
+  await pc.setRemoteDescription({ type: "answer", sdp: await res.text() });
+}
+
+// Respring: restarts SpringBoard over SSH; the jailbreak survives, the live view reconnects after it.
+async function phoneAction(p, el, btn, action, reconnectAfter){
+  if (!p.token) return;
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = "…";
+  try {
+    const r = await fetch(location.origin + `/phones/${action}?token=` + encodeURIComponent(p.token) + "&t=" + TICKET, { method: "POST" });
+    const j = await r.json().catch(() => ({ ok: false, message: "no answer" }));
+    if (!j.ok) alert(`${action} failed on ${p.name}: ${j.message}`);
+    else if (reconnectAfter) setTimeout(() => connect(p, el), reconnectAfter);
+    else toast(`${p.name}: screen goes dark within 30 seconds`);
+  } catch (e) { alert(`${action} failed on ${p.name}: ${e}`); }
+  btn.disabled = false; btn.textContent = label;
+}
+
+// Live screen: noVNC over a WebSocket to /vnc (the server splices it to the phone's CatVNC).
+const NOVNC = "https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/core/rfb.js";
+const TICKET = "__VNC_TICKET__";
+async function connect(p, el){
+  const screen = el.querySelector(".screen");
+  const say = (txt, spin) => {
+    let w = screen.querySelector(".wait");
+    if (!w) { w = document.createElement("div"); w.className = "wait"; screen.appendChild(w); }
+    w.innerHTML = (spin ? '<div class="spinner"></div>' : "") + `<div class="msg">${txt}</div>`;
+  };
+  if (p.id.startsWith("demo")) { say("Demo phone — layout test only"); return; }
+  el._rfb?.disconnect(); el._rfb = null; el._pc?.close(); el._pc = null;
+  screen.querySelectorAll(":scope > div:not(.wait)").forEach(n => n.remove());
+  if (!p.token) { say("This phone is not set up for live view yet."); return; }
+  say("Connecting…", true);
+  let RFB;
+  try { RFB = (await import(NOVNC)).default; } catch (e) { say("Could not load the viewer (noVNC)."); return; }
+  // With live video, VNC is only used for touches: never ask CatVNC for frames (Raw, ~1.7 MB each).
+  if (!RFB.messages._noFramesPatch) {
+    const orig = RFB.messages.fbUpdateRequest;
+    // picture from CatVNC: at most 30 frame requests per second (Rene 2026-10-09: "auf 30 fps runter")
+    RFB.messages.fbUpdateRequest = (sock, ...a) => {
+      if (sock._noFrames) return;
+      const wait = (sock._lastReq || 0) + (sock._gap || 33) - performance.now();
+      if (wait > 0) { clearTimeout(sock._reqT); sock._reqT = setTimeout(() => { sock._lastReq = performance.now(); orig.call(RFB.messages, sock, ...a); }, wait); return; }
+      sock._lastReq = performance.now(); orig.call(RFB.messages, sock, ...a);
+    };
+    RFB.messages._noFramesPatch = true;
+  }
+  // Direct to the relay box when possible (plain ws:// only works from an http page, i.e. over Tailscale);
+  // otherwise through this server's /vnc bridge.
+  const url = (p.vncDirect && location.protocol === "http:")
+    ? p.vncDirect + "/?token=" + encodeURIComponent(p.token)
+    : (location.protocol === "https:" ? "wss://" : "ws://") + location.host +
+      "/vnc?token=" + encodeURIComponent(p.token) + "&t=" + TICKET;
+  const useVideo = winUsesVideo(p, el);            // USB video if it has frames, else CatVNC picture
+  el._mode = useVideo ? "video" : "vnc";
+  const rfb = new RFB(screen, url, { credentials: { password: p.vnc } });
+  el.classList.toggle("vncpic", !useVideo);
+  rfb._sock._noFrames = !!useVideo;
+  // CatVNC frames are uncompressed (~1.7 MB): through this server (Germany) they cross the world twice,
+  // so cap that path at 10 fps; straight to the Mac mini (Tailscale, http page) 30 fps (2026-10-09)
+  rfb._sock._gap = url.startsWith(p.vncDirect || "\u0000") ? 33 : 100;
+  rfb.scaleViewport = true; rfb.resizeSession = false;
+  rfb.showDotCursor = true;   // CatVNC sends no cursor shape -> noVNC would hide the mouse entirely
+  rfb.qualityLevel = 6; rfb.compressionLevel = 2;
+  // Video comes over USB from the Mac mini and does not need VNC: start it right away instead of
+  // waiting for the touch connection (2026-10-07: a sleeping MacBook used to leave every window black).
+  if (useVideo) playVideo(p, el);
+  rfb.addEventListener("connect", () => { if (!useVideo) screen.querySelector(".wait")?.remove(); });
+  rfb.addEventListener("disconnect", e => {
+    if (el._rfb !== rfb) return;
+    const msg = e.detail.clean ? "Touch control disconnected. ↻ to reconnect." : "Touch control not reachable (Mac mini or phone off?). ↻ to retry.";
+    // with a running picture, don't cover it -- just say that taps won't work
+    if (useVideo && screen.querySelector("video.live")?.srcObject) toast(`${p.name}: ${msg}`); else say(msg);
+    // reconnect by itself: a respring restarts CatVNC and used to leave the mouse dead until ↻ (2026-10-09)
+    el._vncRetry = Math.min(30000, (el._vncRetry || 1500) * 2);
+    setTimeout(() => { if (el.isConnected && el._rfb === rfb) connect(p, el); }, el._vncRetry);
+  });
+  rfb.addEventListener("connect", () => { el._vncRetry = 0; });
+  rfb.addEventListener("securityfailure", () => say("Wrong VNC password."));
+  el._rfb = rfb;
+}
+
+function save(id, el){ store.set("win:" + id, { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth }); }
+
+function drag(el, handle, id, resize){
+  handle.addEventListener("pointerdown", e => {
+    if (e.target.tagName === "BUTTON" || window.innerWidth <= 700 || document.body.classList.contains("focus")) return;
+    e.preventDefault(); handle.setPointerCapture(e.pointerId);
+    const sx = e.clientX, sy = e.clientY, ox = el.offsetLeft, oy = el.offsetTop, ow = el.offsetWidth;
+    const move = ev => {
+      if (resize) { el.style.width = Math.max(180, Math.min(1000, ow + ev.clientX - sx)) + "px"; }
+      else {
+        el.style.left = Math.max(0, Math.min(desk.clientWidth - 60, ox + ev.clientX - sx)) + "px";
+        el.style.top  = Math.max(0, Math.min(desk.clientHeight - 40, oy + ev.clientY - sy)) + "px";
+      }
+    };
+    const up = () => { handle.removeEventListener("pointermove", move); handle.removeEventListener("pointerup", up); save(id, el); };
+    handle.addEventListener("pointermove", move); handle.addEventListener("pointerup", up);
+  });
+}
+
+const sizeEl = document.getElementById("size");
+sizeEl.value = store.get("size") || 300;
+sizeEl.oninput = () => {
+  store.set("size", +sizeEl.value);
+  Object.entries(wins).forEach(([id, el]) => { el.style.width = sizeEl.value + "px"; save(id, el); });
+};
+
+document.getElementById("tile").onclick = () => {
+  const ids = Object.keys(wins); if (!ids.length) return;
+  const gap = 18, w = 260, perRow = Math.max(1, Math.floor((desk.clientWidth - gap) / (w + gap)));
+  ids.forEach((id, i) => {
+    const el = wins[id];
+    el.style.width = w + "px";
+    el.style.left = gap + (i % perRow) * (w + gap) + "px";
+    el.style.top = gap + Math.floor(i / perRow) * (w * 2.3 + gap) + "px";
+    save(id, el);
+  });
+};
+// ---- Account list: ▶ opens the phone and runs the container's Shortcut (A1, B7, …) on it.
+// The Shortcut itself switches the Crane container and only continues once the proxy is connected.
+const ACCOUNTS = PHONES.flatMap(p => (p.accountList || []).map(a => ({ ...a, phone: p })))
+  .sort((a, b) => a.username.localeCompare(b.username));
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function toast(msg){ const t = document.createElement("div"); t.className = "toast"; t.textContent = msg;
+  document.body.appendChild(t); setTimeout(() => t.remove(), 3500); }
+// last started container per phone (this browser), shown as "active" in the list and on the chips
+const store2 = { get(k){ try { return localStorage.getItem(k); } catch (e) { return null; } },
+                 set(k, v){ try { localStorage.setItem(k, v); } catch (e) {} } };
+const activeOf = p => store2.get("active:" + p.id);
+const sclass = st => /to ?do|creat|pending/i.test(st || "") ? "todo" : /active|live|healthy|posting/i.test(st || "") ? "live" : "";
+function chipsHtml(p){
+  const mine = ACCOUNTS.filter(a => a.phone === p)
+    .sort((a, b) => a.container.localeCompare(b.container, undefined, { numeric: true }));
+  if (!mine.length) return "";
+  return `<div class="chips">${mine.map(a => `<button class="chip ${activeOf(p) === a.container ? "active" : ""}" data-i="${ACCOUNTS.indexOf(a)}"
+    title="Run Shortcut ${esc(a.container)} (@${esc(a.username)})"><span class="cid">${esc(a.container)}</span>${esc(a.username)}</button>`).join("")}</div>`;
+}
+function renderAccounts(){
+  const q = (document.getElementById("accSearch").value || "").trim().toLowerCase();
+  const el = document.getElementById("accList");
+  let html = "";
+  for (const p of PHONES) {
+    const rows = ACCOUNTS.filter(a => a.phone === p &&
+        (!q || [a.username, a.container, p.name, p.label].join(" ").toLowerCase().includes(q)))
+      .sort((a, b) => a.container.localeCompare(b.container, undefined, { numeric: true }));
+    if (!rows.length) continue;
+    html += `<div class="acc-group"><span>${esc(p.name)} ${p.label ? "(" + esc(p.label) + ")" : ""}</span><span>${rows.length}</span></div>`;
+    html += rows.map(a => `<div class="acc ${activeOf(p) === a.container ? "active" : ""}" data-i="${ACCOUNTS.indexOf(a)}"
+        title="Run Shortcut ${esc(a.container)} on ${esc(p.name)}${a.status ? " · " + esc(a.status) : ""}">
+      <span class="cid">${esc(a.container)}</span><span class="u">@${esc(a.username)}</span>
+      <span class="sdot ${sclass(a.status)}" title="${esc(a.status || "")}"></span></div>`).join("");
+  }
+  el.innerHTML = html || `<div class="acc-empty">${ACCOUNTS.length ? "No match." : "No accounts linked to containers in Airtable yet."}</div>`;
+  el.querySelectorAll(".acc").forEach(r => r.onclick = () => runAccount(ACCOUNTS[+r.dataset.i], r));
+}
+function markActive(p, container){
+  store2.set("active:" + p.id, container);
+  renderAccounts();
+  const w = wins[p.id];
+  if (w) w.querySelectorAll(".chip").forEach(c => c.classList.toggle("active", ACCOUNTS[+c.dataset.i].container === container));
+}
+async function runAccount(a, btn){
+  const p = a.phone;
+  if (!p.token) { toast(`${p.name} is not set up for remote control.`); return; }
+  if (!wins[p.id]) openWin(p.id); else focusWin(wins[p.id]);
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.style.opacity = .6;
+  try {
+    const r = await fetch(location.origin + "/phones/shortcut?token=" + encodeURIComponent(p.token) +
+                          "&name=" + encodeURIComponent(a.container) + "&t=" + TICKET, { method: "POST" });
+    const j = await r.json().catch(() => ({ ok: false, message: "no answer" }));
+    if (j.ok) markActive(p, a.container);
+    toast(j.ok ? `▶ ${a.container} started on ${p.name} for @${a.username}` : `Could not start ${a.container}: ${j.message}`);
+  } catch (e) { toast(`Could not start ${a.container}: ${e}`); }
+  btn.disabled = false;
+  btn.style.opacity = "";
+}
+document.getElementById("accSearch").oninput = renderAccounts;
+renderAccounts();
+// Live VPN badge per phone (Shadowrocket tunnel running? which proxy container?), read silently by the server.
+var VPN_LAST = null;
+function applyVpn(){
+  if (!VPN_LAST) return;
+  document.querySelectorAll("[data-vpn]").forEach(el => {
+      const v = VPN_LAST[el.dataset.vpn];
+      el.innerHTML = !v || !v.reachable ? '<span class="vpill unk">VPN ?</span>'
+        : v.vpn ? `<span class="vpill on">VPN on${v.container ? " · " + esc(v.container) : ""}</span>`
+                : '<span class="vpill off">VPN OFF</span>';
+  });
+}
+async function pollVpn(){
+  try {
+    const r = await fetch(location.origin + "/phones/status", { cache: "no-store" });
+    VPN_LAST = await r.json();
+    applyVpn(); if (typeof renderBoard === 'function') renderBoard();
+  } catch (e) {}
+}
+pollVpn(); setInterval(pollVpn, 15000);
+
+renderList();
+// Rene 2026-10-08: nothing opens by itself -- phones open only when someone opens them (each open
+// window streams video and takes a USB slot). The overview board below is the start page.
+
+
+// ---- video only while a window is open (one USB port carries ~3 live videos) ----
+async function watchPhone(p, on){
+  if (!p.token || !p.video) return;      // picture from CatVNC: no USB capture needed (keeps the phones cooler)
+  try { await fetch(location.origin + `/phones/${on ? "watch" : "unwatch"}?token=` + encodeURIComponent(p.token) + "&t=" + TICKET,
+                    { method: "POST", keepalive: true }); } catch (e) {}
+}
+setInterval(refreshSlots, 60000);
+window.addEventListener("pagehide", () => Object.keys(wins).forEach(id => { const p = PHONES.find(x => x.id === id); if (p) watchPhone(p, false); }));
+var LINES = null;
+const nameOf = tok => (PHONES.find(x => x.token === tok) || {}).name || "?";
+// USB screen capture (macOS CoreMediaIO) is flaky with several iPhones -- a phone can be "connected"
+// yet send 0 frames. So per window: USB video when the relay reports frames, otherwise the CatVNC
+// picture, which always works. Switches back by itself the moment USB frames return (Rene 10.10).
+function winUsesVideo(p, el){
+  // Rene 11.10: "VNC bitte nicht mehr" -- never show the CatVNC picture; windows show USB video only
+  // (VNC stays an invisible touch channel). No frames -> the window says why instead of falling back.
+  return !!p.video;
+}
+function reconcileModes(){
+  Object.keys(wins).forEach(id => { const el = wins[id], p = PHONES.find(x => x.id === id);
+    if (!p || !p.token || !p.video || !el._mode) return;
+    const want = winUsesVideo(p, el) ? "video" : "vnc";
+    if (want !== el._mode) connect(p, el);
+  });
+}
+function videoReason(p){
+  const st = LINES && LINES.phones[p.token];
+  if (LINES && LINES.camera_blocked)
+    return "No picture: the Mac mini blocked the camera permission of the capture tool (usbcap2). Fix it at the Mac mini: " +
+           "System Settings → Privacy & Security → Camera → turn on usbcap2.";
+  if (!st) return "Video is off for this phone.";
+  if (!st.on_usb) return "Not on USB — the Mac mini doesn't see this phone. Check its cable / hub port.";
+  const line = LINES.lines[st.line];
+  if (!st.live && line && line.live.length >= LINES.capacity)
+    return `No picture: the ${st.line} port already carries ${line.live.length} live videos (${line.live.map(nameOf).join(", ")}). ` +
+           `Close one of those windows, or plug this phone into another USB port of the Mac mini.`;
+  return "No picture yet — the phone sends nothing while its screen doesn't change. Try again, or wake it with ☀︎.";
+}
+async function pollLines(){
+  try { LINES = await (await fetch(location.origin + "/phones/lines", { cache: "no-store" })).json(); } catch (e) { return; }
+  const order = ["USB-A", "USB-C 1", "USB-C 2"];
+  const parts = order.map(l => { const n = (LINES.lines[l] || { live: [] }).live.length;
+    return `<span class="${n >= LINES.capacity ? "full" : ""}">${l} <b>${n}/${LINES.capacity}</b></span>`; });
+  const off = PHONES.filter(p => p.token && LINES.phones[p.token] && !LINES.phones[p.token].on_usb).map(p => p.name.replace(/^iPhone\s+/, ""));
+  const html = "Videos: " + parts.join(" · ") + (off.length ? ` · <span class="full">not on USB: ${off.join(", ")}</span>` : "");
+  const e = document.getElementById("boardLines"); if (e) e.innerHTML = html;
+  document.getElementById("camWarn")?.classList.toggle("on", !!LINES.camera_blocked);
+  renderBoard();
+  reconcileModes();
+}
+pollLines(); setInterval(pollLines, 15000);
+
+function renderBoard(){
+  const t = document.getElementById("tiles"); if (!t) return;
+  t.innerHTML = PHONES.map(p => {
+    const st = (LINES && LINES.phones[p.token]) || {};
+    const v = (typeof VPN_LAST !== "undefined" && VPN_LAST) ? VPN_LAST[p.token] : null;
+    const usb = !LINES ? "<b>…</b>" : st.on_usb ? `<b class="good">● ${st.line || "USB"}</b>` : `<b class="warn">● not on USB</b>`;
+    const vid = st.live ? `<b class="good">live</b>` : (wins[p.id] ? `<b>starting…</b>` : `<b>off</b>`);
+    const vpn = !v || !v.reachable ? `<b>?</b>` : (v.vpn ? `<b class="good">on · ${(v.container || "").replace(" Proxy", "")}</b>` : `<b class="warn">off</b>`);
+    const lvl = st.battery, bat = lvl == null ? "<b>?</b>" :
+      `<b><span class="bat"><i style="width:${Math.max(2, Math.round(lvl * 0.3))}px;background:${lvl < 25 ? "#ff7a70" : lvl < 45 ? "#d29922" : "var(--ok)"}"></i></span>${lvl}%${st.charging ? " ⚡" : ""}</b>`;
+    return `<div class="tile" data-id="${p.id}">
+      <div class="top"><div class="phone-ico ${p.color}"></div><div><div class="name">${p.name}</div>
+        <div class="meta"><span class="dot ${p.state}"></span>${STATE_TXT[p.state]}</div></div></div>
+      <div class="row"><span>USB port</span>${usb}</div>
+      <div class="row"><span>Video</span>${vid}</div>
+      <div class="row"><span>VPN</span>${vpn}</div>
+      <div class="row"><span>Battery</span>${bat}</div>
+      <div class="row"><span>Accounts</span><b>${p.accounts} / ${p.containers}</b></div>
+    </div>`; }).join("");
+}
+document.getElementById("boardFocus").onclick = () => setFocus(true);
+renderBoard();
+if (store.get("focus")) setFocus(true);
+</script>
+</body></html>

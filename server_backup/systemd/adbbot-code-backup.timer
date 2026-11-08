@@ -1,0 +1,9 @@
+[Unit]
+Description=ADB bot daily code backup timer
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 Europe/Berlin
+Persistent=true
+
+[Install]
+WantedBy=timers.target

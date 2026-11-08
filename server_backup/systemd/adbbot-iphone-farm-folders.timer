@@ -1,0 +1,10 @@
+[Unit]
+Description=ADB bot iPhone-farm Drive folders (every 15 min)
+[Timer]
+Unit=adbbot-iphone-farm-folders.service
+OnBootSec=2min
+OnUnitActiveSec=15min
+Persistent=true
+AccuracySec=60s
+[Install]
+WantedBy=timers.target

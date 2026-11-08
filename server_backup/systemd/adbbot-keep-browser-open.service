@@ -1,0 +1,12 @@
+[Unit]
+Description=ADB bot: keep chosen MLX browser profiles open on the server (for chatters over RDP)
+After=adbbot-mlx-agent.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.keep_browser_open
+RuntimeMaxSec=600
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env

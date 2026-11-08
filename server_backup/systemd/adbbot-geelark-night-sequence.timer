@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot Geelark night sequence (ledger recheck, in-review recheck, then human verification, then Warmup) (timer). Moved 23:00 -> 00:00 Berlin 2026-09-06, same day as day-posting's 3x/day -> 2x/day change (06:00/15:00) -- see geelark_scheduler.WARMUP_WINDOW_START_HOUR.
+
+[Timer]
+Unit=adbbot-geelark-night-sequence.service
+OnCalendar=*-*-* 00:00:00 Europe/Berlin
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=ADB bot: create a Drive folder for every physical-farm Instagram account that doesn't have one yet
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.iphone_farm_account_folders --apply
+RuntimeMaxSec=600
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/adbbot/env
+[Install]
+WantedBy=multi-user.target

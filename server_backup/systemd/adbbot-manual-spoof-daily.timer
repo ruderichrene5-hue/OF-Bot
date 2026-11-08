@@ -1,0 +1,7 @@
+[Unit]
+Description=iPhone farm daily spoof of the Drive drop folders, 08:40 Berlin (Rene 24.10: "poste auch")
+[Timer]
+OnCalendar=*-*-* 08:40:00 Europe/Berlin
+Persistent=false
+[Install]
+WantedBy=timers.target

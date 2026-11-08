@@ -1,0 +1,2 @@
+source,output,variant_index,success,error,processing_seconds,output_size_bytes,seed,preset,transforms,validation_ok
+/tmp/claude-0/-root/71d02c53-2826-47be-93bd-7e3c1bb5c348/scratchpad/size_demo_raw.mp4,/tmp/claude-0/-root/71d02c53-2826-47be-93bd-7e3c1bb5c348/scratchpad/size_demo_out/size_demo_raw_variant_001.mp4,1,True,,4.749,8284740,12345,normal,"crop 0.9% -> 634x1128 (rescaled); resize x0.996 -> 638x1134; brightness -1.5%; contrast +1.9%; saturation +1.3%; bitrate x0.83 -> 5730 kbps (source); audio 96 kbps, 2ch; metadata stripped, title=clip_359925",True

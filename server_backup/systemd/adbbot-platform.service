@@ -1,0 +1,12 @@
+[Unit]
+Description=Team platform (Accounts dashboard) on 127.0.0.1:8095 -- for Cloudflare Tunnel
+After=network-online.target
+Wants=network-online.target
+[Service]
+WorkingDirectory=/root/adb_bot
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.platform_server
+Restart=always
+RestartSec=5
+EnvironmentFile=-/etc/adbbot/env
+[Install]
+WantedBy=multi-user.target

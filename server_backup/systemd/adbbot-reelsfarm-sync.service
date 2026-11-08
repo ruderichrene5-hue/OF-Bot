@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot Reels Farm Airtable sync (MLX fleet -> standalone tracking base, read-only on our side)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/adb_bot
+EnvironmentFile=-/etc/adbbot/env
+ExecStart=/root/adb_bot/.venv/bin/python -m adb_bot.automation.reelsfarm_sync --apply
+StandardOutput=journal
+StandardError=journal

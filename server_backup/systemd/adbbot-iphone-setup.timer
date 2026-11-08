@@ -1,0 +1,10 @@
+[Unit]
+Description=iPhone farm setup tick every 20 min (09-23 Berlin enforced in code)
+
+[Timer]
+OnBootSec=7min
+OnUnitActiveSec=20min
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

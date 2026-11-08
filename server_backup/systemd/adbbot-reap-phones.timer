@@ -1,0 +1,11 @@
+[Unit]
+Description=ADB bot orphan-phone reaper (closes abandoned phones) (timer)
+
+[Timer]
+Unit=adbbot-reap-phones.service
+OnBootSec=5min
+OnUnitActiveSec=20min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
