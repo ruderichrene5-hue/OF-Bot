@@ -231,7 +231,7 @@ def run(date: str, only: set[str] | None = None) -> bool:
                 clipname = re.sub(r"[^A-Za-z0-9]+", "_", raw.stem).strip("_")
                 out_dir = work / "extra" / model / "DE" / clipname
                 out_dir.mkdir(parents=True, exist_ok=True)
-                for v in range(1, EXTRA_PER_MODEL[model] + 1):
+                for v in range(1, int(os.environ.get("MANUAL_SPOOF_EXTRA_N") or EXTRA_PER_MODEL[model]) + 1):   # 09.11, Rene: 2 own variants per clip
                     name = f"{clipname}_x{v:02d}.mp4"
                     jobs.append((model, raw, out_dir / name, zlib.crc32(f"{raw.name}/extra{v}".encode()) % 100000))
 

@@ -81,6 +81,82 @@ def fetch_references(plan: list) -> None:
             threading.Thread(target=_download_ref, args=(p["id"], p["reference"]), daemon=True).start()
 
 
+_CACHE: dict = {}
+
+
+def fetch_cached(table: str, ttl: float = 30.0) -> list:
+    """15.11 Rene "alles langsam": who-is-logged-in lookups ran one Airtable read (~0.5 s) per click.
+    Short-lived copy for those lookups only; callers that compare passwords read fresh."""
+    import time as _t
+    hit = _CACHE.get(table)
+    age = _t.time() - hit[0] if hit else None
+    if hit and age < ttl:
+        return hit[1]
+    if hit and age < 600:                                    # 16.11 "warum lädt das": stale copy now, fresh one behind it
+        _refresh_later(table)
+        return hit[1]
+    started = _t.time()
+    rows = _fetch(table)
+    _store(table, started, rows)
+    return rows
+
+
+_BUSTED: dict = {}
+
+
+def _store(table: str, started: float, rows: list) -> None:
+    """16.11 launch check: a read that began before the last write must not land in the cache. A background refresh
+    started before her last video was saved came back after the bust and served "0 von 4 Videos" for 20 s, so
+    "Weiter zu deinem Portal" sent her back to the videos."""
+    import time as _t
+    if _BUSTED.get(table, 0) >= started or _BUSTED.get(None, 0) >= started:
+        return
+    _CACHE[table] = (_t.time(), rows)
+
+
+_REFRESHING: set = set()
+
+
+def _refresh_later(table: str) -> None:
+    import threading, time as _t
+    if table in _REFRESHING:
+        return
+    _REFRESHING.add(table)
+    def run():
+        try:
+            started = _t.time()
+            _store(table, started, _fetch(table))
+        except Exception as e:  # noqa: BLE001
+            print("[portal] cache refresh failed", table, e)
+        finally:
+            _REFRESHING.discard(table)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def warm(tables: list) -> None:
+    """Fill the cache at start-up and keep it warm (every 60 s), so no click waits for Airtable."""
+    import threading, time as _t
+    def loop():
+        while True:
+            for t in tables:
+                try:
+                    started = _t.time()
+                    _store(t, started, _fetch(t))
+                except Exception as e:  # noqa: BLE001
+                    print("[portal] warm failed", t, e)
+            _t.sleep(60)
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def bust(table: str | None = None) -> None:
+    import time as _t
+    _BUSTED[table] = _t.time()
+    if table:
+        _CACHE.pop(table, None)
+    else:
+        _CACHE.clear()
+
+
 def _fetch(table: str, formula: str | None = None) -> list:
     out, offset = [], None
     while True:
@@ -106,7 +182,11 @@ def _att(v):
 
 def portal_data(model: str, crm_dataset: dict | None = None) -> dict:
     base = crm.creator_view(crm_dataset or crm.data(), model)
-    models = {str(m["fields"].get("Name", "")).strip().lower(): m for m in _fetch(T_MODELS)}
+    from concurrent.futures import ThreadPoolExecutor        # 15.11: three tables in parallel, page must feel instant
+    with ThreadPoolExecutor(3) as ex:
+        f_m, f_p, f_t = ex.submit(fetch_cached, T_MODELS, 20), ex.submit(fetch_cached, T_PLAN, 20), ex.submit(fetch_cached, T_TASKS, 20)   # 16.11 warm cache
+        rows_m, rows_p, rows_t = f_m.result(), f_p.result(), f_t.result()
+    models = {str(m["fields"].get("Name", "")).strip().lower(): m for m in rows_m}
     me = models.get(model.strip().lower(), {"id": None, "fields": {}})
     mid = me.get("id")
     plan = [{"id": r["id"], "title": f.get("Title", ""), "date": f.get("Date"), "platform": f.get("Platform", ""),
@@ -114,12 +194,12 @@ def portal_data(model: str, crm_dataset: dict | None = None) -> dict:
              "caption": f.get("Caption", ""), "outfit": f.get("Outfit / location", ""), "reference": f.get("Reference"),
              "published": f.get("Published link"), "file": _att(f.get("Files")), "notes": f.get("Notes", ""), "drive": f.get("Drive folder"),
              "transcript": f.get("Transcript", ""), "transcriptDe": f.get("Transcript DE", "")}
-            for r in _fetch(T_PLAN) for f in [r["fields"]] if mid and mid in (f.get("Model") or [])]
+            for r in rows_p for f in [r["fields"]] if mid and mid in (f.get("Model") or [])]
     tasks = [{"id": r["id"], "title": f.get("Task", ""), "category": f.get("Category", ""), "due": f.get("Due"),
               "dueType": f.get("Due type", "Fixed day" if f.get("Due") else "This week"), "status": f.get("Status", "Open"),
               "priority": f.get("Priority", ""), "assigned": f.get("Assigned to", "Model"), "desc": f.get("Description", ""),
-              "file": _att(f.get("Files")), "drive": f.get("Drive folder")}
-             for r in _fetch(T_TASKS) for f in [r["fields"]] if mid and mid in (f.get("Model") or []) and f.get("Visible to model")]
+              "file": _att(f.get("Files")), "drive": f.get("Drive folder"), "review": f.get("Task", "") in _review_titles()}
+             for r in rows_t for f in [r["fields"]] if mid and mid in (f.get("Model") or []) and f.get("Visible to model")]
     for p in plan:
         p["refVideo"] = f"/portal/ref/{p['id']}.mp4" if ref_file(f"{p['id']}.mp4") else None
     fetch_references(plan)
@@ -132,12 +212,24 @@ def portal_data(model: str, crm_dataset: dict | None = None) -> dict:
     # 16.10 Rene: no fleet reels, no view counts, no account health in the portal -- followers and growth only
     base["accounts"] = [{k: v for k, v in a.items() if k in ("id", "handle", "avatar", "followers", "followersDaily", "posts", "link")}
                         for a in base["accounts"]]
+    # 15.11 Rene: results, not machinery -- per-model switch "Accounts im Portal": Nein / Nur Summen (default) / Alle
+    acc_mode = str(me.get("fields", {}).get("Accounts im Portal") or "Nein")
+    if acc_mode == "Nein":
+        base["accounts"] = []
+    elif acc_mode != "Alle":
+        base["accounts"] = [{**a, "handle": f"Account {i + 1}", "avatar": None, "link": None} for i, a in enumerate(base["accounts"])]
     plan.sort(key=lambda x: (x["date"] or "9999", x["title"]))
     tasks.sort(key=lambda x: (x["due"] or "9999", x["title"]))
     f = me.get("fields", {})
     return {**base, "model": {"name": f.get("Name", model), "language": f.get("Language", "EN"), "shootDays": f.get("Shoot days") or [],
-                              "onlyfans": f.get("OnlyFans link"), "drive": f.get("Drive folder")}, "plan": plan, "tasks": tasks,
+                              "onlyfans": f.get("OnlyFans link"), "drive": f.get("Drive folder"), "accountsMode": acc_mode}, "plan": plan, "tasks": tasks,
             "today": dt.date.today().isoformat()}
+
+
+def _review_titles() -> set:
+    """16.11 Rene: Referenzbilder / OF-Bilder are ticked by the team after checking the images, never by her."""
+    from .onboarding_portal import REVIEW_KEYS, _ob_title
+    return set().union(*(_ob_title(k) for k in REVIEW_KEYS))
 
 
 def mark_done(rec_id: str, done: bool, creator: str | None = None) -> bool:
@@ -153,8 +245,11 @@ def mark_done(rec_id: str, done: bool, creator: str | None = None) -> bool:
             names = {m["id"]: m["fields"].get("Name", "") for m in _fetch(T_MODELS)}
             if creator.strip().lower() not in {names.get(x, "").strip().lower() for x in r.json()["fields"].get("Model") or []}:
                 return False
+            if table == T_TASKS and r.json()["fields"].get("Task", "") in _review_titles():
+                return False
         r = requests.patch(f"https://api.airtable.com/v0/{BASE}/{table}/{rec_id}", headers={**hdr, "Content-Type": "application/json"},
                            json={"fields": {field: on if done else off}}, timeout=20)
+        bust(table)
         return r.status_code == 200
     return False
 

@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Northfeed · Kurs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;1,9..144,500&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700&display=swap">
+<style>
+  :root{color-scheme:dark;--bg:#0b0d12;--panel:#161a22;--panel2:#1b2029;--line:#262c38;--line2:#343c4d;--fg:#e6e8ee;--muted:#9aa3b2;--dim:#6b7486;
+        --pink:#ff5c9a;--pink2:#ff9ec4;--ice:#ffc2da;--ok:#3fb950;--bad:#ff6b6b;--warn:#d29922;--r:18px;
+        --sans:"Bricolage Grotesque","Helvetica Neue",Arial,sans-serif;--display:"Fraunces",Georgia,serif}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 var(--sans);-webkit-font-smoothing:antialiased;min-height:100vh;
+       background-image:radial-gradient(900px 500px at 85% -10%,rgba(255,92,154,.18),transparent 60%),radial-gradient(700px 400px at -10% 30%,rgba(255,158,196,.08),transparent 60%)}
+  a{color:inherit;text-decoration:none} button{font:inherit;color:inherit}
+  .nav{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:12px;padding:14px clamp(16px,4vw,48px);background:rgba(11,13,18,.72);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+  .logo{display:flex;align-items:center;gap:9px} .logo img{height:26px;display:block} .logo .lp{font-family:var(--display);font-style:italic;font-size:22px;color:var(--pink2);position:relative;top:1px}
+  .nav .back{margin-left:auto;color:var(--muted);font-weight:600;font-size:14px}
+  .lang{display:inline-flex;border:1px solid var(--line2);border-radius:999px;padding:2px;background:var(--panel);margin-left:10px}
+  .lang button{background:none;border:0;color:var(--muted);font-size:12px;font-weight:700;padding:4px 8px;border-radius:999px;cursor:pointer} .lang button.on{background:var(--panel2);color:var(--fg)}
+  main{padding:28px clamp(16px,4vw,48px) 90px;max-width:1100px;margin:0 auto}
+  .eyebrow{display:inline-flex;gap:8px;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--pink2);font-weight:600}
+  h1{font-family:var(--display);font-weight:500;font-size:clamp(28px,4.5vw,44px);line-height:1.04;margin:6px 0 4px;letter-spacing:-.01em} h1 em{font-style:italic;color:var(--pink2)}
+  .lead{color:var(--muted);margin:0 0 22px;max-width:62ch}
+  .card{background:linear-gradient(180deg,rgba(26,23,38,.75),rgba(18,16,28,.85));border:1px solid var(--line2);border-radius:var(--r);padding:18px 20px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+  .courses{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+  .course{display:grid;grid-template-columns:72px 1fr;gap:16px;align-items:center;cursor:pointer;transition:transform .2s,border-color .2s} .course:hover{transform:translateY(-2px);border-color:var(--pink)}
+  .course .t{font-weight:700;font-size:17px;line-height:1.25} .course .s{color:var(--muted);font-size:13px;margin-top:4px}
+  .ring{width:72px;height:72px;position:relative} .ring svg{transform:rotate(-90deg)} .ring circle{fill:none;stroke-width:6} .ring .bg{stroke:var(--line2)} .ring .fg{stroke:var(--pink);stroke-linecap:round;transition:stroke-dashoffset .6s}
+  .ring b{position:absolute;inset:0;display:grid;place-items:center;font-size:14px;font-variant-numeric:tabular-nums}
+  .ring.done .fg{stroke:var(--ok)}
+  .layout{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:18px} @media(max-width:860px){.layout{grid-template-columns:1fr}}
+  /* 16.11 Rene ("Querformat auf dem MacBook"): the tutorials are 9:16; the box follows the video instead of a fixed 16:9 -
+     full width on the phone, on a laptop as tall as the screen allows and centred. Landscape videos switch the box via JS. */
+  .player{position:relative;border-radius:var(--r);overflow:hidden;background:#000;border:1px solid var(--line2);aspect-ratio:9/16;
+    width:min(100%, calc(82vh * 9 / 16));margin:0 auto}
+  .player.wide{aspect-ratio:16/9;width:100%}
+  .player video{width:100%;height:100%;display:block;background:#08090d;object-fit:contain}
+  /* 16.11 Rene: on a laptop the box goes wide (4:3) and the sides take the tutorials' own background colour, so the video runs edge to edge */
+  /* 17.11 Rene: on the Mac too the player is phone-shaped (the videos are 9:16), as high as the screen allows; the list sits right next to it */
+  /* 17.11 (2): the player fills the screen height, title / text / next button + the list sit on the right - nothing to scroll */
+  .linfo .eyebrow{margin:0 0 4px}.linfo .lesson-head{margin-top:4px}
+  @media (min-width:900px){ .layout{grid-template-columns:calc(min(100vh - 205px, 820px) * 9 / 16) 400px;justify-content:center;gap:30px;align-items:start}
+    .player{aspect-ratio:9/16;width:100%;background:#08090d}
+    .bk:has(+ .layout){margin-left:calc((100% - min(100vh - 205px, 820px) * 9 / 16 - 430px) / 2)} }
+  /* 18.11 Rene (chatter course is 16:9, "so klein" on the MacBook): landscape videos get a wide column instead of the portrait one */
+  @media (min-width:900px){ .layout.wide{grid-template-columns:minmax(0, calc((100vh - 205px) * 16 / 9)) 330px;justify-content:center}
+    main:has(.layout.wide){max-width:1560px!important} .bk:has(+ .layout.wide){margin-left:0} }
+  .layout3{display:grid;grid-template-columns:290px minmax(0,410px) 320px;gap:26px;justify-content:center}   /* 17.11 desktop: chapters | portrait player | list + takeaways */
+  .layout3 .player{aspect-ratio:9/16 !important;width:100%;max-height:none !important}
+  .chap b.h,.take b.h{display:block;font-family:Fraunces,serif;font-weight:500;font-size:21px}.chap .sub2,.take .sub2{color:var(--muted);font-size:12.5px;margin:2px 0 12px}
+  .chap .ci{display:flex;gap:12px;padding:8px 11px;border-radius:11px;cursor:pointer;color:var(--muted);font-weight:600;border:1px solid transparent}
+  .chap .ci b{width:40px;flex:none;font-weight:600;font-variant-numeric:tabular-nums;color:#6f7787}.chap .ci:hover{color:var(--fg)}
+  .chap .ci.on{background:rgba(255,92,154,.12);border-color:var(--pink);color:#fff}.chap .ci.on b{color:var(--pink2)}
+  .take{margin-top:14px}.take .tk{display:flex;gap:10px;align-items:flex-start;padding:7px 0;font-weight:600;cursor:pointer}
+  .take .tk i{width:20px;height:20px;border-radius:6px;border:2px solid var(--pink);flex:none;margin-top:2px}
+  .take .tk.ok i{background:var(--pink)}.take .tk.ok{color:var(--muted)}
+  #amb{position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:-1;pointer-events:none;opacity:.45;filter:blur(90px) saturate(1.5)}
+  .player .lockmsg{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:20px;color:var(--muted);background:rgba(11,13,18,.85)}
+  .bar{height:6px;border-radius:999px;background:var(--line2);overflow:hidden;margin-top:10px} .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--pink),var(--ice));width:0;transition:width .4s} .bar.done i{background:var(--ok)}
+  .lesson-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:14px 0 6px}
+  .lesson-head h2{font-family:var(--display);font-weight:500;font-size:24px;margin:0}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;background:rgba(255,160,200,.12);color:var(--ice);font-size:12px;font-weight:600;white-space:nowrap}
+  .pill.ok{background:rgba(63,185,80,.14);color:#7ee098} .pill.gray{background:rgba(154,163,178,.14);color:var(--muted)}
+  .btn{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;border-radius:999px;border:1px solid var(--line2);background:var(--panel);cursor:pointer;font-weight:600;font-size:14px}
+  .btn.p{background:linear-gradient(135deg,var(--pink),#e03d7e);border-color:transparent;color:#fff} .btn:disabled{opacity:.45;cursor:not-allowed}
+  .text{color:#d9dde6;line-height:1.6;margin-top:12px;white-space:pre-wrap} .text a{color:var(--pink2);text-decoration:underline}
+  .files{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px} .files a{padding:6px 12px;border-radius:999px;border:1px solid var(--line2);background:var(--panel);font-size:13px}
+  .list{display:flex;flex-direction:column;gap:6px}
+  .li{display:grid;grid-template-columns:44px 1fr auto;gap:10px;align-items:center;padding:11px 12px;border-radius:12px;background:var(--panel);border:1px solid var(--line);cursor:pointer}
+  .li.on{border-color:var(--pink)} .li.locked{opacity:.45;cursor:not-allowed} .li .n{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;background:var(--panel2);border:1px solid var(--line2)}
+  .li.done .n{background:var(--ok);border-color:transparent;color:#0b0d12} .li .t{font-weight:600;font-size:14px;line-height:1.3} .li .s{color:var(--muted);font-size:12px} .li svg{width:14px;height:14px;stroke:var(--muted);fill:none;stroke-width:2}
+  .quiz{margin-top:16px;padding:14px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--line)} .quiz label{display:block;padding:6px 0;cursor:pointer}
+  .toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:var(--panel);border:1px solid var(--pink);padding:10px 16px;border-radius:999px;font-weight:600;opacity:0;transition:opacity .3s;z-index:40;pointer-events:none} .toast.on{opacity:1}
+  .empty{color:var(--muted);text-align:center;padding:30px 10px}
+.bk{display:inline-flex;vertical-align:middle;margin:0 14px 0 0;align-items:center;gap:9px;font-weight:600;font-size:14px;color:#c9cfdb;text-decoration:none;cursor:pointer;background:none;border:0;padding:0;font-family:inherit}.bk i{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:#1b2029;border:1px solid #343c4d;transition:background .15s,border-color .15s}.bk:hover{color:#fff}.bk:hover i{background:#ff5c9a;border-color:#ff5c9a}.bk:hover i svg{stroke:#fff}.bk svg{width:14px;height:14px;stroke:#ff9ec4;fill:none;stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round}
+.tile{position:relative;flex:none;width:58px;height:58px;border-radius:16px;display:grid;place-items:center;background:linear-gradient(140deg,rgba(255,92,154,.30),rgba(124,92,255,.22));border:1px solid rgba(255,92,154,.28)}.tile .em{font-size:28px;line-height:1}.tile .nb{position:absolute;right:-6px;bottom:-6px;min-width:22px;height:22px;padding:0 5px;border-radius:11px;display:grid;place-items:center;font-size:11.5px;font-weight:800;background:var(--panel2,#1b2029);border:2px solid var(--bg,#0b0d12);color:var(--fg,#e6e8ee)}.tile.done .nb{background:var(--pink,#ff5c9a);color:#fff}.tile.locked{filter:grayscale(1);opacity:.6}.tile.sm{width:40px;height:40px;border-radius:12px}.tile.sm .em{font-size:19px}.tile.sm .nb{min-width:18px;height:18px;font-size:10px;right:-5px;bottom:-5px}.vsec{margin-top:8px}.vsec h2{font-family:var(--display);font-weight:500;font-size:26px;margin:22px 0 10px}.vmeta{display:flex;align-items:center;gap:14px;color:var(--muted);font-size:14px;font-weight:600;margin:6px 0 14px}.vmeta .bar{flex:1;max-width:280px;margin:0}.vgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}.vc{display:flex;align-items:center;gap:16px;background:var(--panel,#161a22);border:1px solid var(--line2,#343c4d);border-radius:18px;padding:18px;cursor:pointer;transition:border-color .15s,transform .15s}.vc:hover{border-color:var(--pink,#ff5c9a);transform:translateY(-1px)}.vc.locked{opacity:.55;cursor:default}.vc.locked:hover{border-color:var(--line2,#343c4d);transform:none}.vn{flex:none;width:44px;height:44px;border-radius:14px;display:grid;place-items:center;font-weight:700;background:rgba(255,92,154,.14);color:var(--pink2,#ff9ec4)}.vc.done .vn{background:var(--pink,#ff5c9a);color:#fff}.vb{flex:1;min-width:0}.vt{font-weight:700;font-size:16.5px}.vs{color:var(--muted);font-size:13.5px;margin-top:2px}.vb .bar{margin:8px 0 0;height:5px}.vp{flex:none;width:40px;height:40px;border-radius:50%;display:grid;place-items:center;background:var(--pink,#ff5c9a)}.vc.locked .vp,.vc.done .vp{background:var(--panel2,#1b2029)}.vp svg{width:18px;height:18px;fill:none;stroke:var(--muted);stroke-width:2}.vp svg.pl{fill:#fff;stroke:none}.vc.done .vp svg.pl{fill:var(--pink2,#ff9ec4)}.faq{margin-top:40px}.faq h2{font-family:var(--display);font-weight:500;font-size:32px;margin:0 0 14px}.faq h2 em{font-style:italic;color:var(--pink2,#ff9ec4)}.faq details{background:var(--panel,#161a22);border:1px solid var(--line2,#343c4d);border-radius:16px;margin:0 0 8px}.faq summary{list-style:none;cursor:pointer;display:flex;justify-content:space-between;gap:12px;padding:16px 18px;font-weight:700;font-size:15.5px}.faq summary::-webkit-details-marker{display:none}.faq summary span{color:var(--pink2,#ff9ec4);font-size:20px;line-height:1;transition:transform .2s}.faq details[open] summary span{transform:rotate(45deg)}.faq details p{margin:0;padding:0 18px 16px;color:var(--muted);font-size:15px;line-height:1.5}
+.vhead{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap;margin:26px 0 6px}.vhead h2{font-family:var(--display);font-weight:500;font-size:32px;margin:0}.vhead .vmeta{margin:0}.vdesc{color:var(--muted);margin:0 0 12px;font-size:15px}.vlist{display:flex;flex-direction:column;gap:8px}.vr{display:flex;align-items:center;gap:16px;background:var(--panel,#161a22);border:1px solid var(--line2,#343c4d);border-radius:16px;padding:14px 18px;cursor:pointer;transition:border-color .15s}.vr:hover{border-color:var(--pink,#ff5c9a)}.vr.locked{opacity:.55;cursor:default}.vr.locked:hover{border-color:var(--line2,#343c4d)}.vr .vn{width:36px;height:36px;border-radius:11px;font-size:14px}.vr.done .vn{background:var(--pink,#ff5c9a);color:#fff}.vr .vp{width:36px;height:36px}.vr.locked .vp,.vr.done .vp{background:var(--panel2,#1b2029)}.vr.done .vp svg.pl{fill:var(--pink2,#ff9ec4)}
+</style></head>
+<body>
+<div class="nav"><a class="logo" href="#"><img src="__LOGO__" alt="Northfeed"><span class="lp" id="lp">Kurs</span></a>
+  <a class="back" id="back" href="/">← Portal</a>
+  <span class="lang"><button data-l="DE">DE</button><button data-l="EN">EN</button></span></div>
+<main id="main"></main>
+<div class="toast" id="toast"></div>
+<script>
+const D = __DATA__;
+const T = {
+  DE:{kurs:"Kurs",back:"← Portal",courses:"Deine <em>Videos</em>",lead:"Fang mit „Plattform“ an, die Videos dort laufen der Reihe nach. Danach kannst du alle anderen anschauen, wann und in welcher Reihenfolge du willst. Sie bleiben immer hier zum Nachschauen.",
+      lessons:"Lektionen",min:"Min.",done:"abgeschlossen",locked:"Gesperrt",available:"Jetzt ansehen",next:"Nächste Lektion →",back2:"Zurück zur Übersicht",allVideos:"Alle Videos",
+      lockedMsg:"Diese Lektion ist noch gesperrt. Schau erst die vorherige zu Ende.",noVideo:"Video folgt in Kürze.",unlocked:"Nächste Lektion freigeschaltet 🎉",
+      finished:"Kurs abgeschlossen 🎉",of:"von",empty:"Noch keine Kurse für dich.",files:"Downloads",quiz:"Kurze Frage",check:"Prüfen",right:"Richtig!",wrong:"Nicht ganz, versuch es nochmal.",progress:"Fortschritt",seekMsg:"Du kannst nur bis zur schon gesehenen Stelle vorspulen."},
+  EN:{kurs:"Course",back:"← Portal",courses:"Your <em>videos</em>",lead:"Start with “Platform”, those videos play in order. After that you can watch everything else whenever and in any order you like. They always stay here to look things up.",
+      lessons:"lessons",min:"min",done:"completed",locked:"Locked",available:"Watch now",next:"Next lesson →",back2:"Back to overview",allVideos:"All videos",
+      lockedMsg:"This lesson is still locked. Finish the previous one first.",noVideo:"Video coming soon.",unlocked:"Next lesson unlocked 🎉",
+      finished:"Course completed 🎉",of:"of",empty:"No courses for you yet.",files:"Downloads",quiz:"Quick question",check:"Check",right:"Correct!",wrong:"Not quite, try again.",progress:"Progress",seekMsg:"You can only skip ahead to where you have already watched."}
+};
+let lang = (localStorage.getItem("nf_course_lang") || D.lang || "DE").toUpperCase(); if (!T[lang]) lang = "DE";
+if (D.audience === "Chatter") {                // 18.11 Rene: chatters see English only, no language switch, no model wording
+  lang = "EN"; T.EN.lead = "Watch the lessons in order. When the course is finished, your portal opens with your shift and your creators.";
+  document.addEventListener("DOMContentLoaded", () => { const l = document.querySelector(".lang"); if (l) l.remove(); });
+}
+document.title = "Northfeed · " + T[lang].kurs;
+const t = k => T[lang][k] || k;
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const state = {course: null, lesson: null};
+let player = null, tick = null, furthest = 0, lastSent = 0, dirty = false;
+
+function setLang(l){ lang = l; localStorage.setItem("nf_course_lang", l); document.documentElement.lang = l.toLowerCase(); render(); }
+document.querySelectorAll(".lang button").forEach(b => { b.onclick = () => setLang(b.dataset.l); });
+$("#back").href = D.back || "/";
+
+function toast(msg){ const el = $("#toast"); el.textContent = msg; el.classList.add("on"); setTimeout(() => el.classList.remove("on"), 2600); }
+function ring(p, done){ const r = 30, c = 2*Math.PI*r; return `<div class="ring ${done?"done":""}"><svg width="72" height="72"><circle class="bg" cx="36" cy="36" r="${r}"/><circle class="fg" cx="36" cy="36" r="${r}" stroke-dasharray="${c}" stroke-dashoffset="${c*(1-p/100)}"/></svg><b>${p}%</b></div>`; }
+function fmt(sec){ sec = Math.round(sec||0); return `${Math.floor(sec/60)}:${String(sec%60).padStart(2,"0")}`; }
+
+function render(){
+  document.querySelectorAll(".lang button").forEach(b => b.classList.toggle("on", b.dataset.l === lang));
+  $("#lp").textContent = t("kurs"); $("#back").textContent = t("back");
+  if (state.course && state.lesson) return renderLesson();
+  if (state.course) return renderCourse();
+  renderHome();
+}
+
+function renderHome(){                                       // 16.11 Rene: the videos straight away, big, like the plan; FAQ below
+  stopPlayer();
+  const cs = D.courses;
+  const row = (c, l, i) => `<div class="vr ${l.state}" onclick="openFrom('${c.id}','${l.id}')">
+      ${tile(l,i)}
+      <div class="vb"><div class="vt">${esc(l.title)}</div><div class="vs">${l.duration?fmt(l.duration):""}${l.state==="done"?` · ${esc(t("done"))}`:l.state==="locked"?` · ${esc(t("locked"))}`:l.percent?` · ${l.percent}%`:""}</div></div>
+      <div class="vp">${l.state==="locked"?'<svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>':'<svg viewBox="0 0 24 24" class="pl"><path d="M8 5v14l11-7z"/></svg>'}</div></div>`;
+  const sections = cs.map(c => `<section class="vsec"><div class="vhead"><h2>${esc(c.title)}</h2><div class="vmeta">${c.done} ${t("of")} ${c.total} ${t("done")}<div class="bar ${c.percent===100?"done":""}"><i style="width:${c.percent}%"></i></div></div></div>
+      ${c.description ? `<p class="vdesc">${esc(c.description)}</p>` : ""}<div class="vlist">${c.lessons.map((l,i) => row(c, l, i)).join("")}</div></section>`).join("") || `<div class="empty">${esc(t("empty"))}</div>`;
+  const faq = (FAQ[D.lang] || FAQ.DE);
+  $("#main").innerHTML = `<span class="eyebrow">Northfeed Onboarding</span><h1>${t("courses")}</h1><p class="lead">${esc(t("lead"))}</p>${sections}
+    ${D.audience === "Model" ? `<section class="faq"><h2>${D.lang==="EN"?"Questions &amp; <em>answers</em>":"Fragen &amp; <em>Antworten</em>"}</h2>
+      ${faq.map(([q,a]) => `<details><summary>${esc(q)}<span>+</span></summary><p>${esc(a)}</p></details>`).join("")}</section>` : ""}`;
+}
+function isGate(c){ return D.audience === "Model" && /plattform|platform|onboarding/i.test(c.title || ""); }
+// 16.11 Rene: the portal opens the moment the last platform video is done, no reload: swap in the full menu
+async function unlockPortal(){
+  document.querySelectorAll('script[type="speculationrules"]').forEach(s => s.remove());   // 16.11: drop pages prerendered while locked
+  toast(LANGX()==="EN" ? "Your portal is unlocked 🎉" : "Dein Portal ist freigeschaltet 🎉");
+  try { const html = await (await fetch(location.pathname, {cache: "no-store"})).text();
+    const nav = new DOMParser().parseFromString(html, "text/html").getElementById("pfn"), cur = document.getElementById("pfn");
+    if (nav && cur) cur.replaceWith(nav); } catch (e) {} }
+function LANGX(){ return (D.lang || "DE").toUpperCase(); }
+function openFrom(cid, lid){ state.course = D.courses.find(c => c.id === cid); openLesson(lid); }
+const FAQ = {
+ DE: [
+  ["Ich verstehe etwas nicht. Wen frage ich?", "Schreib uns einfach auf WhatsApp. Wir antworten meistens innerhalb weniger Stunden."],
+  ["Kann ich die Videos später nochmal ansehen?", "Ja, jederzeit. Sie bleiben hier unter „Onboarding“."],
+  ["Wo lade ich meine Referenzbilder hoch?", "In der Google-Drive-App, in deinen Ordner „Referenzbilder“. Die Aufgabe „Referenzbilder hochladen“ auf der Startseite öffnet ihn dir direkt, dort steht auch, welche Bilder wir brauchen."],
+  ["Wo lade ich meine Videos für OF hoch?", "In der Google-Drive-App, im Ordner der jeweiligen Stufe. Unter „Skripte“ öffnet dir jede Stufe direkt den richtigen Ordner."],
+  ["Ich sehe meinen Drive-Ordner nicht.", "Melde dich in der Google-Drive-App mit der Gmail-Adresse an, die du uns gegeben hast. Der Ordner liegt unter „Für mich freigegeben“. Klappt es nicht, schreib uns auf WhatsApp."],
+  ["Muss ich jeden Tag Reels drehen?", "Nein. Für Instagram baut unsere KI die Reels aus deinen Fotos und wir posten sie. Du drehst nur nach deinem Skript, Stufe für Stufe."],
+  ["Wer sieht meine Passwörter?", "Nur unser Team. Sie werden verschlüsselt gespeichert und nirgends per Mail verschickt."],
+  ["Wie läuft die Abrechnung?", "Jeden Montag kommt die Rechnung für die Vorwoche, im Portal unter „Abrechnung“. Dort lädst du auch den Überweisungsnachweis hoch."]],
+ EN: [
+  ["Something is unclear. Who do I ask?", "Just message us on WhatsApp. We usually reply within a few hours."],
+  ["Can I watch the videos again later?", "Yes, any time. They stay here under “Onboarding”."],
+  ["Where do I upload my reference images?", "In the Google Drive app, into your folder \"Referenzbilder\". The task \"Upload reference images\" on the home page opens it for you and says which images we need."],
+  ["Where do I upload my OF videos?", "In the Google Drive app, into the folder of the stage. Under “Scripts” each stage opens the right folder for you."],
+  ["I can't see my Drive folder.", "Sign in to the Google Drive app with the Gmail address you gave us. The folder is under “Shared with me”. If it still doesn't work, message us on WhatsApp."],
+  ["Do I have to shoot reels every day?", "No. For Instagram our AI builds the reels from your photos and we post them. You only shoot your script, stage by stage."],
+  ["Who can see my passwords?", "Only our team. They are stored encrypted and never sent by mail."],
+  ["How does billing work?", "Every Monday you get the invoice for the previous week, in the portal under “Invoices”. You also upload the payment proof there."]]
+};
+
+function openCourse(id){ state.course = D.courses.find(c => c.id === id); state.lesson = null; render(); window.scrollTo(0,0); }
+function openLesson(id){ const l = state.course.lessons.find(x => x.id === id); if (!l || l.state === "locked") { toast(t("lockedMsg")); return; } state.lesson = l; render(); window.scrollTo(0,0); }
+
+function lessonList(c){
+  return `<div class="list">${c.lessons.map((l,i) => `<div class="li ${l.state} ${state.lesson&&state.lesson.id===l.id?"on":""}" onclick="openLesson('${l.id}')">
+    ${tile(l,i,"sm")}<div><div class="t">${esc(l.title)}</div><div class="s">${l.duration?fmt(l.duration):""}${l.state==="available"&&l.percent?` · ${l.percent}%`:""}</div></div>
+    ${l.state==="locked"?'<svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>':""}</div>`).join("")}</div>`;
+}
+
+function renderCourse(){
+  stopPlayer();
+  const c = state.course;
+  $("#main").innerHTML = `<a href="#" class="bk" onclick="state.course=null;render();return false"><i><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></i>${esc(t("back2"))}</a>
+    <span class="eyebrow">${c.total} ${t("lessons")} · ${c.minutes} ${t("min")}</span>
+    <h1>${esc(c.title)}</h1><p class="lead">${esc(c.description)}</p>
+    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><b>${esc(t("progress"))}: ${c.done} ${t("of")} ${c.total}</b>
+      ${c.next?`<button class="btn p" onclick="openLesson('${c.next}')">${esc(t("available"))}</button>`:`<span class="pill ok">${esc(t("finished"))}</span>`}</div>
+      <div class="bar ${c.percent===100?"done":""}"><i style="width:${c.percent}%"></i></div></div>
+    <div class="sec" style="margin-top:18px">${lessonList(c)}</div>`;
+}
+
+function renderLesson(){
+  stopPlayer();
+  const c = state.course, l = state.lesson;
+  const idx = c.lessons.indexOf(l), nxt = c.lessons[idx+1];
+  const files = (l.attachments||[]).map(a => `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.name||"file")}</a>`).join("");
+  const rich = (l.chapters||[]).length && window.innerWidth >= 1150;   // 17.11 Rene (test): desktop view with chapters + takeaways
+  const chap = rich ? `<div class="card chap"><b class="h">${LANGX()==="EN"?"In this video":"In diesem Video"}</b><div class="sub2">${LANGX()==="EN"?"Click to jump there":"Klick springt zur Stelle"}</div>
+      ${l.chapters.map(([sec, tt], i) => `<div class="ci" data-s="${sec}" onclick="seekTo(${sec})"><b>${fmt(sec)}</b>${esc(tt)}</div>`).join("")}</div>` : "";
+  const take = rich && (l.takeaways||[]).length ? `<div class="card take"><b class="h">${LANGX()==="EN"?"Your takeaways":"Das nimmst du mit"}</b><div class="sub2">${LANGX()==="EN"?"To tick off":"Zum Abhaken"}</div>
+      ${l.takeaways.map((x, i) => `<div class="tk ${takeDone(l.id, i)?"ok":""}" onclick="takeToggle(this,'${l.id}',${i})"><i></i>${esc(x)}</div>`).join("")}</div>` : "";
+  $("#main").innerHTML = `<a href="#" class="bk" onclick="state.lesson=null;state.course=null;render();return false"><i><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></i>${esc(t("allVideos"))}</a>
+    <div class="${rich ? "layout3" : "layout"}${!rich && D.audience === "Chatter" ? " wide" : ""}" style="margin-top:14px">${rich ? `<div>${chap}</div>` : ""}<div>
+      <div class="player${!rich && D.audience === "Chatter" ? " wide" : ""}">${l.hasVideo?`<video id="v" playsinline preload="metadata" controls controlsList="nodownload noplaybackrate" disablePictureInPicture oncontextmenu="return false"><source src="/course/media/${l.id}?v=${l.duration || 0}c#t=0.1" type="video/mp4"></video>`:`<div class="lockmsg">${esc(t("noVideo"))}</div>`}</div>
+      <div class="bar ${l.state==="done"?"done":""}"><i id="pb" style="width:${l.percent}%"></i></div>
+    </div><div><div class="card linfo"><span class="eyebrow">${esc(c.title)} · ${D.audience==="Chatter"?`Lesson ${num(l,idx)}`:`Video ${idx+1} ${t("of")} ${c.lessons.length}`}</span>
+      <div class="lesson-head"><h2>${num(l,idx)}. ${esc(l.title)}</h2><span id="st" class="pill ${l.state==="done"?"ok":"gray"}">${l.state==="done"?esc(t("done")):(l.duration?fmt(l.duration):"")}</span></div>
+      ${l.text?`<div class="text">${linkify(esc(l.text))}</div>`:""}
+      ${files?`<div class="sub" style="margin-top:14px;color:var(--muted);font-size:12px;letter-spacing:.1em;text-transform:uppercase;font-weight:700">${esc(t("files"))}</div><div class="files">${files}</div>`:""}
+      ${l.quiz?quizHtml(l):""}
+      <div style="display:flex;gap:10px;margin-top:18px;flex-wrap:wrap">${nxt ? `<button class="btn p" id="nextBtn" ${nxt.state!=="locked"?"":"disabled"} onclick="openLesson('${nxt.id}')">${esc(t("next"))}</button>`
+        : D.audience === "Chatter" && nextCourse(c)
+          ? `<button class="btn p" id="nextBtn" ${c.lessons.every(x => x.state === "done") ? "" : "disabled"} onclick="openNextModule()">Next module →</button>`
+        : /plattform|platform|onboarding/i.test(c.title) && D.audience === "Model"
+          ? `<a class="btn p" id="nextBtn" href="/">${LANGX()==="EN"?"Continue to your portal →":"Weiter zu deinem Portal →"}</a>`
+          : `<button class="btn p" id="nextBtn" onclick="state.lesson=null;state.course=null;render()">${esc(t("allVideos"))}</button>`}</div>
+    </div><div class="card" style="padding:12px;margin-top:14px">${lessonList(c)}</div>${take}</div></div>`;
+  if (l.hasVideo) initPlayer(l);
+  if (rich && l.hasVideo) richPlayer(l);
+}
+
+// 18.11 Rene: chatter lessons show their course number (= Order, matches "Lesson N" in the video); modules open in order
+function num(l, i){ return D.audience === "Chatter" && l.order ? l.order : i + 1; }
+// 19.11 Rene: a small picture per lesson instead of a bare number, so the list is easier to scan. Picked from the title.
+const ICONS = [[/renam/,"🏷️"],[/naming/,"✏️"],[/sexting/,"🔥"],[/finale/,"🎬"],[/aufgaben/,"✅"],[/drive/,"📁"],[/account/,"📱"],[/welcome|willkommen/,"👋"],[/mindset/,"🧠"],[/discord/,"🎧"],[/your shift|schicht/,"⏰"],[/vacation|sick|urlaub/,"🌴"],
+  [/bothers|problem/,"🙋"],[/paid|abrechnung|geld/,"💸"],[/growing|wachsen/,"📈"],[/where you chat|infloww/,"🖥️"],[/chat screen/,"💬"],
+  [/renam|lists/,"🏷️"],[/mass/,"📣"],[/scripts|vault|skript/,"🗂️"],[/speed/,"⚡"],[/profiling/,"🔎"],[/time waster/,"⏳"],
+  [/lead/,"🧭"],[/objection/,"🛡️"],[/custom/,"🎁"],[/aftercare/,"💗"],[/high spender/,"💎"],
+  [/regular|stammkund/,"🔁"],[/long-term|langfrist/,"🤝"],[/no-go/,"🚫"],[/final words|abschluss/,"🏁"],
+  [/portal/,"🏠"],[/stimme|voice/,"🎙️"],[/start/,"🚀"],[/referenz|bilder|stufe|dessous|shoot/,"📸"],[/steckbrief/,"📝"],[/zugäng|login/,"🔑"],[/vertrag|contract/,"✍️"],[/abrechnung|nachweis/,"💸"]];
+function ico(l){ const t = (l.title || "").toLowerCase(); const m = ICONS.find(([re]) => re.test(t)); return m ? m[1] : "▶️"; }
+function tile(l, i, sz){ return `<div class="tile ${sz||""} ${l.state}"><span class="em">${ico(l)}</span><b class="nb" title="${l.state==="done"?"✓":""}">${num(l,i)}</b></div>`; }
+function nextCourse(c){ const i = D.courses.indexOf(c); return D.courses.slice(i + 1).find(x => x.lessons.length); }
+function openNextModule(){ const nc = nextCourse(state.course); if (!nc) return;
+  if (state.course.lessons.every(x => x.state === "done") && nc.lessons[0].state === "locked") nc.lessons[0].state = "available";
+  openFrom(nc.id, nc.lessons[0].id); }
+function linkify(s){ return s.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>'); }
+function quizHtml(l){ return `<div class="quiz"><b>${esc(t("quiz"))}</b><div style="margin:6px 0 8px">${esc(l.quiz.question)}</div>${l.quiz.answers.map((a,i)=>`<label><input type="radio" name="q" value="${i}"> ${esc(a)}</label>`).join("")}<button class="btn" style="margin-top:8px" onclick="checkQuiz(${l.quiz.correct})">${esc(t("check"))}</button></div>`; }
+function checkQuiz(c){ const v = document.querySelector('input[name=q]:checked'); toast(v && +v.value === c ? t("right") : t("wrong")); }
+
+function initPlayer(l){
+  player = $("#v"); furthest = Math.max(l.watched||0, 0); lastSent = 0; dirty = false;
+  player.addEventListener("loadedmetadata", () => { const w = player.videoWidth > player.videoHeight; player.parentElement.classList.toggle("wide", w);
+    const lay = player.closest(".layout"); if (lay) lay.classList.toggle("wide", w); });   // 16.11: box follows the video
+  { // 16.11 Rene: the side bars must be exactly the colour the browser shows in the video - a fixed hex drifts after encoding,
+    // so read the top-left corner of the rendered frame and paint the box with it
+    const cv = document.createElement("canvas"); cv.width = cv.height = 1; const cx = cv.getContext("2d", { willReadFrequently: true });
+    const tint = () => { try { if (player.readyState < 2) return; cx.drawImage(player, 2, 2, 6, 6, 0, 0, 1, 1); const d = cx.getImageData(0, 0, 1, 1).data;
+      player.parentElement.style.background = player.style.background = `rgb(${d[0]},${d[1]},${d[2]})`; } catch (e) {} };
+    ["loadeddata", "seeked", "play"].forEach(ev => player.addEventListener(ev, tint)); player.addEventListener("timeupdate", () => { if (Math.random() < .15) tint(); }); }
+  player.addEventListener("loadedmetadata", () => { if (l.position && l.state !== "done" && l.position < player.duration - 2) player.currentTime = l.position; });
+  player.addEventListener("seeking", () => { if (l.state !== "done" && isGate(state.course) && player.currentTime > furthest + 1.5) { player.currentTime = furthest; toast(t("seekMsg")); } });
+  player.addEventListener("timeupdate", () => { if (player.currentTime > furthest) furthest = player.currentTime; dirty = true; const d = l.duration || player.duration || 0; if (d) $("#pb").style.width = Math.min(100, Math.round(100*furthest/d)) + "%"; });
+  player.addEventListener("pause", () => send(l, true));
+  player.addEventListener("ended", () => { furthest = player.duration || furthest; send(l, true); });
+  tick = setInterval(() => { if (dirty && !player.paused) send(l, false); }, 5000);
+}
+function seekTo(sec){ if (!player) return; player.currentTime = sec; player.play().catch(() => {}); }
+function takeDone(id, i){ try { return localStorage.getItem(`nf_take_${id}_${i}`) === "1"; } catch (e) { return false; } }
+function takeToggle(el, id, i){ el.classList.toggle("ok"); try { localStorage.setItem(`nf_take_${id}_${i}`, el.classList.contains("ok") ? "1" : "0"); } catch (e) {} }
+let ambTick = null;
+function richPlayer(l){   // chapter that is playing lights up; a blurred copy of the frame glows behind the page
+  const cis = [...document.querySelectorAll(".chap .ci")];
+  player.addEventListener("timeupdate", () => { const tm = player.currentTime; let on = -1; cis.forEach((c, i) => { if (tm >= +c.dataset.s - .2) on = i; }); cis.forEach((c, i) => c.classList.toggle("on", i === on)); });
+  let cv = document.getElementById("amb"); if (!cv) { cv = document.createElement("canvas"); cv.id = "amb"; cv.width = 36; cv.height = 64; document.body.prepend(cv); }
+  const cx = cv.getContext("2d"); const draw = () => { try { if (player && player.readyState >= 2) cx.drawImage(player, 0, 0, 36, 64); } catch (e) {} };
+  ["loadeddata", "seeked"].forEach(ev => player.addEventListener(ev, draw)); if (ambTick) clearInterval(ambTick); ambTick = setInterval(draw, 350);
+}
+function stopPlayer(){ if (ambTick) { clearInterval(ambTick); ambTick = null; } const am = document.getElementById("amb"); if (am) am.remove(); if (tick) clearInterval(tick); tick = null; if (player && state.lesson && dirty) send(state.lesson, true, true); player = null; }
+
+async function send(l, force, beacon){
+  if (!player) return;
+  const now = Date.now(); if (!force && now - lastSent < 4000) return; lastSent = now; dirty = false;
+  const body = JSON.stringify({lesson: l.id, position: Math.floor(furthest), duration: Math.floor(player.duration || l.duration || 0)});
+  if (beacon && navigator.sendBeacon) { navigator.sendBeacon("/course/progress", new Blob([body], {type: "application/json"})); return; }
+  try {
+    const r = await fetch("/course/progress", {method: "POST", headers: {"Content-Type": "application/json"}, body, credentials: "same-origin"});
+    const j = await r.json(); if (!j.ok) return;
+    const wasDone = l.state === "done";                       // 17.11 Rene: the toast fired on every progress ping of a finished video
+    Object.assign(l, j.lesson); const c = state.course; c.done = j.course.done; c.percent = j.course.percent; c.next = j.next && j.unlocked ? j.next : c.next;
+    if (isGate(c)) { const lg = document.querySelector(".pfn .obs .lg"), sh = document.querySelector(".pfn .obs .sh");   // 16.11: the bar counts along
+      if (lg) lg.textContent = LANGX() === "EN" ? `Onboarding · ${c.done} of ${c.lessons.length} videos` : `Onboarding · ${c.done} von ${c.lessons.length} Videos`;
+      if (sh) sh.textContent = `${c.done}/${c.lessons.length} Videos`; }
+    if (j.unlocked) { const n = c.lessons.find(x => x.id === j.next); if (n) n.state = "available"; const b = $("#nextBtn"); if (b) b.disabled = false; toast(t("unlocked")); }
+    if (j.lesson.state === "done" && !wasDone) { const s = $("#st"); if (s) { s.className = "pill ok"; s.textContent = t("done"); } $("#pb").parentElement.classList.add("done"); if (!j.next && c.percent === 100) { const nb = $("#nextBtn"); if (nb) nb.disabled = false; if (isGate(c)) unlockPortal(); else toast(t("finished")); } }
+    const side = document.querySelector(".layout .card .list"); if (side) side.outerHTML = lessonList(c);
+  } catch (e) { /* offline: next tick retries */ }
+}
+window.addEventListener("pagehide", () => { if (player && state.lesson) send(state.lesson, true, true); });
+render();
+</script>
+</body></html>

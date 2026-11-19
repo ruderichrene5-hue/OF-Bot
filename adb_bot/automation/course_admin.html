@@ -1,0 +1,82 @@
+<!-- Manager tab "Kurse" (15.11). Fragment: expects the manager page's CSS (.card .btn .pill table .sub select.inl input.inl)
+     and a global api(action, body) -> Promise<json> that POSTs JSON to /manager/api/<action> (handled by manager.api -> course.course_api
+     for actions starting with "course." / "lesson."), plus GET /manager/course/data and POST /manager/course/upload (multipart). -->
+<div id="courseTab">
+  <div class="sec-head"><h2>Kurse</h2><div class="cs" id="cDisk"></div><button class="btn p" onclick="courseForm()">+ Kurs</button></div>
+  <div id="cList" class="list"></div>
+  <details style="margin-top:26px"><summary class="sub" style="cursor:pointer">Fortschritt pro Person (aufklappen)</summary>
+  <div class="card" style="padding:4px 6px;overflow:auto;margin-top:8px"><table><thead><tr><th>E-Mail</th><th>Kurs</th><th>Lektionen</th><th>%</th><th>Minuten</th><th>Zuletzt</th></tr></thead><tbody id="cProg"></tbody></table></div></details>
+</div>
+<script>
+(() => {
+  const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  let C = {courses: [], progress: [], audiences: ["Model","Chatter","Manager"], languages: ["DE","EN"], disk: {}};
+  const open = {};
+
+  async function load(){
+    const r = await fetch("/manager/course/data", {credentials: "same-origin"}); C = await r.json(); draw();
+  }
+  window.courseReload = load;
+  function draw(){
+    document.getElementById("cDisk").textContent = C.disk.freeGB != null ? `${C.disk.courseGB} GB Videos · ${C.disk.freeGB} GB frei auf dem Server` : "";
+    // 19.11 Rene: three groups instead of one pile – Model-Onboarding (first model course), Model-Kurs (the rest), Chatter-Kurs
+    const mc = C.courses.filter(c => c.audience === "Model").sort((a, b) => (a.order || 0) - (b.order || 0));
+    const GROUPS = [["Model-Onboarding", "Das Erste, was ein neues Model sieht. Erst wenn es durch ist, wird ihr Portal freigeschaltet.", mc.slice(0, 1)],
+      ["Model-Kurs", "Alles fürs laufende Arbeiten: Referenzbilder, Stimme, Skripte, OnlyFans, Abrechnung. Steht im Model-Portal unter Kurse.", mc.slice(1)],
+      ["Chatter-Kurs", "Englisch, 4 Module, schalten nacheinander frei. Danach kommt der Test.", C.courses.filter(c => c.audience === "Chatter")],
+      ["Sonstige", "", C.courses.filter(c => !["Model", "Chatter"].includes(c.audience))]];
+    document.getElementById("cList").innerHTML = GROUPS.filter(g => g[2].length).map(([gt, gd, cs]) => `<h2 style="margin:22px 0 2px">${gt}</h2>${gd ? `<div class="s" style="color:var(--muted);font-size:14px;margin-bottom:8px">${gd}</div>` : ""}` + cs.map(c => `<div class="card" style="padding:14px 16px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap">
+        <div><b style="font-size:16px">${esc(c.title)}</b> <span class="pill ${c.active?"ok":"gray"}">${c.active?"aktiv":"inaktiv"}</span> <span class="pill gray">${esc(c.audience)} · ${esc(c.language)}</span>
+          <div class="s" style="color:var(--muted);font-size:13px">${c.total} Lektionen · ${esc(c.description||"")}</div></div>
+        <div class="acts"><button class="btn s" onclick="courseToggle('${c.id}')">${open[c.id]?"Zuklappen":"Lektionen"}</button><button class="btn s" onclick="courseForm('${c.id}')">Bearbeiten</button><button class="btn s p" onclick="lessonForm('${c.id}')">+ Lektion</button></div></div>
+      ${open[c.id] ? `<div class="list" style="margin-top:12px">${c.lessons.map((l,i) => `<div class="item task" draggable="true" data-id="${l.id}" ondragstart="cDrag(event)" ondragover="event.preventDefault()" ondrop="cDrop(event,'${c.id}')">
+          <div><div class="t">${i+1}. ${esc(l.title)} ${l.hasVideo?`<span class="pill ok">${Math.floor(l.duration/60)}:${String(l.duration%60).padStart(2,"0")}</span>`:'<span class="pill warn">kein Video</span>'}</div>
+            <div class="s">${esc((l.text||"").slice(0,120))}</div></div>
+          <div class="acts"><label class="btn s" style="cursor:pointer">${l.hasVideo?"Video ersetzen":"MP4 hochladen"}<input type="file" accept="video/mp4" style="display:none" onchange="cUpload('${l.id}', this)"></label>
+            <button class="btn s" onclick="lessonForm('${c.id}','${l.id}')">Bearbeiten</button><button class="btn s d" onclick="lessonDelete('${l.id}')">Löschen</button></div></div>`).join("") || '<div class="empty">Noch keine Lektionen.</div>'}</div>` : ""}</div>`).join("")).join("") || '<div class="empty">Noch keine Kurse.</div>';
+    document.getElementById("cProg").innerHTML = C.progress.map(p => `<tr><td>${esc(p.email)}</td><td>${esc(p.courseTitle)}</td><td>${p.done} / ${p.total}</td><td><b>${p.percent}%</b></td><td>${p.watchedMin}</td><td>${esc((p.last||"").replace("T"," ").slice(0,16))}</td></tr>`).join("") || '<tr><td colspan="6" class="empty">Noch niemand hat angefangen.</td></tr>';
+  }
+  window.courseToggle = id => { open[id] = !open[id]; draw(); };
+  window.courseForm = id => {
+    const c = C.courses.find(x => x.id === id) || {title:"", audience:"Model", language:"DE", description:"", order: C.courses.length+1, active:true};
+    const title = prompt("Kurstitel", c.title); if (title == null || !title.trim()) return;
+    const audience = prompt("Zielgruppe (Model / Chatter / Manager)", c.audience) || c.audience;
+    const language = prompt("Sprache (DE / EN)", c.language) || c.language;
+    const description = prompt("Beschreibung (kurz)", c.description) ?? c.description;
+    const active = confirm("Kurs aktiv (sichtbar) schalten? OK = ja, Abbrechen = nein");
+    api(id ? "course.update" : "course.create", {id, title, audience, language, description, order: c.order, active}).then(load).catch(e => alert(e.message));
+  };
+  window.lessonForm = (course, id) => {
+    const c = C.courses.find(x => x.id === course); const l = (c && c.lessons.find(x => x.id === id)) || {title:"", text:"", quizQuestion:"", quizAnswers:""};
+    const title = prompt("Lektionstitel", l.title); if (title == null || !title.trim()) return;
+    const text = prompt("Text unter dem Video (optional, Links erlaubt)", l.text) ?? l.text;
+    const quizQuestion = prompt("Quizfrage (leer = keine)", l.quizQuestion) ?? "";
+    let quizAnswers = l.quizAnswers || "";
+    if (quizQuestion) quizAnswers = prompt("Antworten, mit | getrennt, richtige mit * davor (z. B. *Ja|Nein)", quizAnswers.replace(/\n/g,"|")) ?? "";
+    api(id ? "lesson.update" : "lesson.create", {id, course, title, text, quizQuestion, quizAnswers: quizAnswers.split("|").map(s=>s.trim()).filter(Boolean).join("\n")}).then(() => { open[course] = true; load(); }).catch(e => alert(e.message));
+  };
+  window.lessonDelete = id => { if (!confirm("Lektion und Video wirklich löschen?")) return; api("lesson.delete", {id}).then(load).catch(e => alert(e.message)); };
+  window.cUpload = async (id, input) => {
+    const f = input.files[0]; if (!f) return;
+    if (f.size > 2*1024*1024*1024) return alert("Maximal 2 GB pro Video.");
+    const fd = new FormData(); fd.append("lesson", id); fd.append("video", f, f.name);
+    const lbl = input.parentElement; const old = lbl.firstChild.textContent; lbl.firstChild.textContent = "Lädt hoch …";
+    try {
+      const r = await fetch("/manager/course/upload", {method: "POST", body: fd, credentials: "same-origin"});
+      const j = await r.json(); if (!j.ok) throw new Error(j.error || "Upload fehlgeschlagen");
+      alert(`Video gespeichert · ${Math.floor(j.duration/60)}:${String(j.duration%60).padStart(2,"0")} Min.`); load();
+    } catch (e) { alert(e.message); lbl.firstChild.textContent = old; }
+  };
+  let dragId = null;
+  window.cDrag = e => { dragId = e.currentTarget.dataset.id; };
+  window.cDrop = (e, course) => {
+    const target = e.currentTarget.dataset.id; if (!dragId || dragId === target) return;
+    const c = C.courses.find(x => x.id === course); const ids = c.lessons.map(l => l.id);
+    ids.splice(ids.indexOf(target), 0, ids.splice(ids.indexOf(dragId), 1)[0]); dragId = null;
+    api("lesson.reorder", {ids}).then(load).catch(e => alert(e.message));
+  };
+  window.courseTabInit = load;
+  load();
+})();
+</script>

@@ -1,0 +1,765 @@
+<!doctype html>
+<html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Northfeed · Manager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;1,9..144,500&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700&display=swap">
+<style>
+  :root{color-scheme:dark;--bg:#0b0d12;--panel:#161a22;--panel2:#1b2029;--line:#262c38;--line2:#343c4d;--fg:#e6e8ee;--muted:#9aa3b2;--dim:#6b7486;
+        --pink:#ff5c9a;--pink2:#ff9ec4;--ice:#ffc2da;--ok:#3fb950;--bad:#ff6b6b;--warn:#d29922;--r:18px;
+        --sans:"Bricolage Grotesque","Helvetica Neue",Arial,sans-serif;--display:"Fraunces",Georgia,serif}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 var(--sans);-webkit-font-smoothing:antialiased;min-height:100vh;
+       background-image:radial-gradient(900px 500px at 85% -10%,rgba(255,92,154,.18),transparent 60%),radial-gradient(700px 400px at -10% 30%,rgba(255,158,196,.08),transparent 60%)}
+  a{color:inherit;text-decoration:none} button,input,select,textarea{font:inherit;color:inherit}
+  .nav{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:12px 18px;padding:14px clamp(16px,4vw,48px);background:rgba(11,13,18,.72);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+  .logo{display:flex;align-items:center;gap:9px} .logo img{height:26px;display:block} .logo .lp{font-family:var(--display);font-style:italic;font-size:22px;color:var(--pink2);position:relative;top:1px}
+  .tabs{display:flex;gap:4px;margin-left:auto;overflow-x:auto;scrollbar-width:none} .tabs a{padding:8px 14px;border-radius:999px;color:var(--muted);font-weight:600;font-size:14px;white-space:nowrap}
+  .tabs a.on{background:var(--panel);color:var(--fg);border:1px solid var(--line2)} .tabs a .n{display:inline-block;min-width:18px;padding:0 6px;margin-left:6px;border-radius:999px;background:var(--pink);color:#fff;font-size:11px;text-align:center;line-height:18px}
+  .me{display:flex;align-items:center;gap:10px;margin-left:12px;color:var(--muted);font-size:13px} .me .dot{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,var(--pink),var(--ice));display:grid;place-items:center;color:#0b0d12;font-weight:700}
+  /* 18.11 Rene ("zu viel oben, ein paar Sachen in mein Profil"): rarely used pages live behind the avatar */
+  .me{position:relative;cursor:pointer}.me .dot{width:34px;height:34px;transition:box-shadow .15s}.me:hover .dot,.me.open .dot,.me.on .dot{box-shadow:0 0 0 3px rgba(255,92,154,.45)}
+  .me .badge{position:absolute;right:-4px;top:-4px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:var(--pink);color:#fff;font-size:10.5px;font-weight:700;line-height:16px;text-align:center;box-sizing:border-box}
+  .me .menu{position:absolute;right:0;top:46px;min-width:230px;background:var(--panel,#161a22);border:1px solid var(--line2,#343c4d);border-radius:16px;padding:8px;display:none;z-index:60;box-shadow:0 18px 50px rgba(0,0,0,.45)}
+  .me.open .menu{display:block}.me .menu .who{padding:8px 12px 10px;border-bottom:1px solid var(--line2,#343c4d);margin-bottom:6px}.me .menu .who b{display:block;color:var(--fg);font-size:14.5px}
+  .me .menu a{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-radius:10px;color:var(--fg);font-weight:600;font-size:14px;text-decoration:none}.me .menu a:hover,.me .menu a.on{background:#1b2029}
+  .me .menu a .n{min-width:18px;padding:0 6px;border-radius:999px;background:var(--pink);color:#fff;font-size:11px;text-align:center;line-height:18px}.me .menu hr{border:0;border-top:1px solid var(--line2,#343c4d);margin:6px 0}
+  main{padding:30px clamp(16px,4vw,48px) 90px;max-width:1280px;margin:0 auto}
+  .eyebrow{display:inline-flex;gap:8px;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--pink2);font-weight:600}
+  h1{font-family:var(--display);font-weight:500;font-size:clamp(30px,4.5vw,48px);line-height:1.02;margin:6px 0 4px;letter-spacing:-.01em} h1 em{font-style:italic;color:var(--pink2)}
+  .lead{color:var(--muted);margin:0 0 22px;max-width:64ch}
+  h2{font-family:var(--display);font-weight:500;font-size:24px;margin:0;letter-spacing:-.01em}
+  .sec{margin-top:30px} .sec-head{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;margin-bottom:12px;flex-wrap:wrap} .sec-head .cs{color:var(--muted);font-size:13.5px}
+  .card{background:linear-gradient(180deg,rgba(26,23,38,.75),rgba(18,16,28,.85));border:1px solid var(--line2);border-radius:var(--r);padding:18px 20px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+  .kpi .l{color:var(--muted);font-size:12.5px} .kpi .v{font-family:var(--display);font-size:34px;line-height:1.05;margin:4px 0 2px;font-variant-numeric:tabular-nums} .kpi .d{font-size:12.5px;color:var(--muted)}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;background:rgba(255,160,200,.12);color:var(--ice);font-size:12px;font-weight:600;white-space:nowrap}
+  .pill.gray{background:rgba(154,163,178,.14);color:var(--muted)} .pill.ok{background:rgba(63,185,80,.14);color:#7ee098} .pill.warn{background:rgba(210,153,34,.16);color:#ffd27a} .pill.bad{background:rgba(255,107,107,.14);color:#ff9b9b} .pill.blue{background:rgba(79,140,255,.16);color:#9fc0ff}
+  table{width:100%;border-collapse:collapse} th{font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)} td{padding:11px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr.row:hover td{background:rgba(255,255,255,.02)} td .t{font-weight:600} td .s{color:var(--muted);font-size:13px;margin-top:2px}
+  .btn{display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border-radius:999px;border:1px solid var(--line2);background:var(--panel);cursor:pointer;font-weight:600;font-size:13.5px;white-space:nowrap}
+  .btn:hover{border-color:var(--pink)} .btn.p{background:linear-gradient(135deg,var(--pink),#e03d7e);border-color:transparent;color:#fff} .btn.s{padding:6px 10px;font-size:12.5px} .btn.d{color:#ff9b9b} .btn:disabled{opacity:.5;cursor:default}
+  .acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+  .list{display:flex;flex-direction:column;gap:8px}
+  .item{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:start;padding:13px 16px;border-radius:14px;background:var(--panel);border:1px solid var(--line)}
+  .item.plan{border-left:3px solid var(--pink)} .item.task{background:#12151c;border-left:3px solid var(--line2)} .item.late{border-color:rgba(255,107,107,.5)} .item.done{opacity:.5}
+  .item .t{font-weight:600} .item .s{color:var(--muted);font-size:13px;margin-top:2px;line-height:1.45} .item .meta{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:center}
+  #box input[type=tel],#box input[type=email],#box input[type=url],#box input[type=date]{width:100%;box-sizing:border-box}
+  .chips{display:flex;flex-wrap:wrap;gap:6px}.chips button{font:inherit;font-size:12.5px;font-weight:600;padding:6px 12px;border-radius:999px;border:1px solid var(--line2);background:var(--panel2);color:var(--muted);cursor:pointer;white-space:nowrap}
+  .chips button:hover{border-color:var(--pink);color:var(--fg)}.chips button.on{background:rgba(255,92,154,.16);border-color:var(--pink);color:#fff}
+  .chips.sm button{padding:4px 9px;font-size:11.5px}.chips.st button.on.ok{background:rgba(95,211,154,.16);border-color:#5fd39a}
+  .f .chips{margin-top:6px}
+  select.inl,input.inl{background:var(--panel2);border:1px solid var(--line2);border-radius:999px;padding:5px 10px;font-size:12.5px;color:var(--fg)}
+  .sub{font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin:18px 0 8px}
+  .filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+  .modal{position:fixed;inset:0;z-index:50;background:rgba(5,6,10,.7);backdrop-filter:blur(6px);display:none;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto} .modal.on{display:flex}
+  .box{width:100%;max-width:620px;background:#141720;border:1px solid var(--line2);border-radius:20px;padding:22px 24px 26px;box-shadow:0 30px 80px rgba(0,0,0,.6)}
+  .box h2{margin-bottom:12px} .box .x{float:right;background:none;border:0;color:var(--muted);font-size:22px;cursor:pointer;line-height:1}
+  .f{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px} .f .w{grid-column:1/-1} label{display:block;font-size:12.5px;color:var(--muted)} label span{display:block;margin-bottom:4px}
+  input[type=text],input[type=email],input[type=url],input[type=date],input[type=tel],input[type=password],input[type=number],select,textarea{width:100%;background:var(--panel2);border:1px solid var(--line2);border-radius:10px;padding:9px 11px;font-size:14px;color:var(--fg)} textarea{min-height:70px;resize:vertical}
+  input:focus,select:focus,textarea:focus{outline:2px solid var(--pink);border-color:transparent}
+  .days{display:flex;gap:6px;flex-wrap:wrap} .days button{padding:6px 10px;border-radius:999px;border:1px solid var(--line2);background:var(--panel2);cursor:pointer;font-size:12.5px} .days button.on{border-color:var(--pink);background:rgba(255,92,154,.16);color:var(--pink2)}
+  .chk{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--fg)} .chk input{width:auto}
+  .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px;align-items:center} .foot .err{color:#ff9b9b;font-size:13px;margin-right:auto}
+  .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1f2a1f;border:1px solid var(--ok);color:#c9f7d0;padding:10px 16px;border-radius:10px;opacity:0;transition:.2s;pointer-events:none;z-index:60} .toast.bad{background:#2a1f22;border-color:var(--bad);color:#ffc4cb} .toast.show{opacity:1}
+  .apps{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+  .app{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px 16px} .app .ph{display:flex;gap:6px;margin:10px 0} .app .ph img{width:64px;height:64px;object-fit:cover;border-radius:10px;border:1px solid var(--line2);cursor:pointer}
+  .app .ans{font-size:13px;color:var(--muted);line-height:1.5} .app .ans b{color:var(--fg);font-weight:600}
+  .empty{color:var(--dim);padding:26px 0;text-align:center}
+  .week{display:grid;grid-template-columns:repeat(7,1fr);gap:6px} .week .d{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px;min-height:90px} .week .d.today{border-color:var(--pink)} .week .dh{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:6px} .week .e{font-size:12px;padding:4px 6px;border-radius:7px;background:rgba(255,92,154,.12);margin-bottom:4px;cursor:pointer} .week .e.task{background:rgba(154,163,178,.12)} .week .e.done{opacity:.45;text-decoration:line-through}
+  @media(max-width:760px){.f{grid-template-columns:1fr}.week{grid-template-columns:repeat(2,1fr)}.item{grid-template-columns:1fr}.item .meta{justify-content:flex-start}th:nth-child(n+4),td:nth-child(n+4){display:none}}
+.ctedit{max-height:70vh;overflow:auto;background:#fff;color:#111;border-radius:10px;padding:26px 30px;font:15px/1.55 Georgia,'Times New Roman',serif;outline:none}.ctedit h1{font-size:22px;margin:0 0 8px}.ctedit h2{font-size:16px;margin:20px 0 6px}.ctedit p{margin:0 0 8px}.ctedit .muted{color:#666;font-size:13px}.ctedit .ph{display:inline-block;background:#ffe1ee;color:#b0125b;border-radius:6px;padding:0 6px;font:600 12px/1.6 system-ui,sans-serif;user-select:none}.ctedit .sig{display:flex;gap:24px}.ctedit .sig>div{flex:1}
+.setgrid{display:grid;grid-template-columns:1fr 1fr;gap:28px;align-items:start}.setgrid>section{min-width:0}.setgrid h2{margin-top:0}.setgrid .lead{min-height:4.6em}@media(max-width:900px){.setgrid{grid-template-columns:1fr}.setgrid .lead{min-height:0}}
+.setgrid .card .f{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}.setgrid .card .f label{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted)}.setgrid .card .f .w{grid-column:1/-1}.setgrid input:not([type=checkbox]),.setgrid textarea{width:100%;box-sizing:border-box;background:var(--bg,#0b0d12);color:var(--fg,#e6e8ee);border:1px solid var(--line,#232838);border-radius:10px;padding:10px 12px;font:inherit;font-size:14px}
+#bankBox .f{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}#bankBox .f label{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted)}#bankBox .f .w{grid-column:1/-1}#bankBox input:not([type=checkbox]),#bankBox textarea{width:100%;box-sizing:border-box;background:var(--bg,#0b0d12);color:var(--fg,#e6e8ee);border:1px solid var(--line,#232838);border-radius:10px;padding:10px 12px;font:inherit;font-size:14px}#bankBox .chk{flex-direction:row!important;align-items:center}
+.pipe{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(150px,1fr);gap:8px;overflow-x:auto;padding-bottom:8px;width:min(1360px,calc(100vw - 32px));position:relative;left:50%;transform:translateX(-50%)}.pipe .pacts .btn{white-space:nowrap}
+.pcol{background:var(--card,#141720);border:1px solid var(--line,#232838);border-radius:14px;padding:10px;min-height:120px}.pcol.over{border-color:var(--pink2,#ff5c9a);background:#1a1420}.pcard[draggable]{cursor:grab}
+.pch{display:flex;justify-content:space-between;align-items:center;font-size:14px}.pchint{color:var(--dim,#6b7280);font-size:12px;margin:2px 0 8px;min-height:16px}
+.pcard{background:var(--bg,#0b0d12);border:1px solid var(--line,#232838);border-radius:10px;padding:9px 10px;margin-bottom:8px;cursor:pointer}.pcard .t{font-weight:600}.pcard .s{color:var(--muted);font-size:12px;margin-top:2px}.pacts{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.stages{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0}.stages .st{border:1px solid var(--line,#232838);background:transparent;color:var(--muted);border-radius:999px;padding:5px 10px;font:600 12px system-ui;cursor:pointer}
+.stages .st.done{border-color:#2f6b4a;color:#8fd3a9}.stages .st.cur{background:#ff5c9a;border-color:#ff5c9a;color:#fff}
+.card .l{color:var(--dim,#6b7280);font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px}
+.tools{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+.tool{position:relative;display:block;background:var(--panel,#161a22);border:1px solid var(--line,#262c38);border-radius:14px;padding:14px 14px 40px;color:var(--fg);text-decoration:none;transition:border-color .15s}.tool:hover{border-color:#ff5c9a}
+.tool .t{font-weight:700;font-size:15px}.tool .s{color:var(--muted);font-size:13px;margin-top:3px}.tool .h{color:var(--dim,#6b7280);font-size:11px;margin-top:6px}.tool .e{position:absolute;right:10px;bottom:10px}
+
+  .nav .tabs a.mob{display:none}
+  .burger{display:none;width:42px;height:42px;border-radius:12px;border:1px solid var(--line2,#343c4d);background:var(--panel,#161a22);color:var(--fg,#e6e8ee);cursor:pointer;align-items:center;justify-content:center;margin-left:8px;flex:none}
+  .burger span,.burger span::before,.burger span::after{display:block;width:18px;height:2px;border-radius:2px;background:currentColor;position:relative;transition:transform .2s,opacity .2s}
+  .burger span::before,.burger span::after{content:"";position:absolute;left:0}.burger span::before{top:-6px}.burger span::after{top:6px}
+  .nav.open .burger span{background:transparent}.nav.open .burger span::before{transform:translateY(6px) rotate(45deg)}.nav.open .burger span::after{transform:translateY(-6px) rotate(-45deg)}
+  @media(max-width:760px){
+    .burger{display:inline-flex}
+    .nav{flex-wrap:wrap!important}.nav .me{margin-left:auto!important}
+    .nav .tabs{display:none!important;order:3;width:100%;flex-direction:column;gap:4px!important;margin:8px 0 2px!important;padding-top:8px;border-top:1px solid var(--line,#232838);overflow:visible!important}
+    .nav.open .tabs{display:flex!important}
+    .nav .tabs a.mob{display:block}
+    .nav .tabs a{display:block;text-align:left!important;padding:13px 14px!important;font-size:16px!important;border-radius:12px}
+  }
+.bk{display:inline-flex;vertical-align:middle;margin:0 14px 0 0;align-items:center;gap:9px;font-weight:600;font-size:14px;color:#c9cfdb;text-decoration:none;cursor:pointer;background:none;border:0;padding:0;font-family:inherit}.bk i{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:#1b2029;border:1px solid #343c4d;transition:background .15s,border-color .15s}.bk:hover{color:#fff}.bk:hover i{background:#ff5c9a;border-color:#ff5c9a}.bk:hover i svg{stroke:#fff}.bk svg{width:14px;height:14px;stroke:#ff9ec4;fill:none;stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round}
+</style></head>
+<body>
+<nav class="nav">
+  <a class="logo" href="#home"><img src="__LOGO__" alt="Northfeed"><span class="lp">Manager</span></a>
+  <div class="tabs" id="tabs"></div>
+  <div class="me" id="me" title="Profil &amp; Einstellungen"><div class="dot" id="meDot"></div><span class="badge" id="meBadge" hidden></span><div class="menu" id="meMenu"></div></div>
+  <button class="burger" type="button" aria-label="Menü"><span></span></button>
+</nav>
+<main id="main"></main>
+<div class="modal" id="modal" onclick="if(event.target===this)closeModal()"><div class="box" id="box"></div></div>
+<div class="toast" id="toast"></div>
+<div id="courseAdminHolder" style="display:none">__COURSE_ADMIN__</div>
+<script>
+const D = __DATA__;
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const TODAY = D.today;
+const DAYS_DE = {Mon:"Mo",Tue:"Di",Wed:"Mi",Thu:"Do",Fri:"Fr",Sat:"Sa",Sun:"So"};
+const STATUS_DE = {Onboarding:"Onboarding",Active:"Aktiv",Paused:"Pausiert",Ended:"Beendet",Idea:"Idee",Planned:"Geplant","To shoot":"Zu drehen",Shot:"Gedreht",Edited:"Geschnitten",Scheduled:"Eingeplant",Published:"Veröffentlicht",Dropped:"Verworfen",Open:"Offen","In progress":"In Arbeit",Waiting:"Wartet",Done:"Erledigt",High:"Hoch",Medium:"Mittel",Low:"Niedrig","Fixed day":"Fester Tag",By:"Bis spätestens","This week":"Diese Woche",Content:"Content",Shooting:"Dreh",Account:"Account",Chat:"Chat",Admin:"Admin",Other:"Sonstiges",Model:"Model",Team:"Team"};
+const de = v => STATUS_DE[v] || v;
+const STAGES = D.options.stage || [];
+const STAGE_HINT = {"Bewerbung":"neu aus dem Funnel","Kontaktiert":"WhatsApp raus, wartet auf Antwort","Call gebucht":"Termin steht","Vertrag offen":"Vertrag verschickt, noch nicht unterschrieben","Unterschrieben":"Zugang + Drive werden angelegt","Onboarding":"Tutorials, Fragebogen, erster Drehtag planen","Material da":"Erster Upload ist drin","Aktiv":"läuft","Pausiert":"","Beendet":""};
+const stageIdx = st => Math.max(0, STAGES.indexOf(st || "Bewerbung"));
+const waLink = (m, text) => m.whatsapp ? `https://wa.me/${String(m.whatsapp).replace(/[^0-9]/g,"")}${text?`?text=${encodeURIComponent(text)}`:""}` : "";
+const WA_TEXT = {
+  "Kontaktiert": m => `Hi ${m.name.split(" ")[0]}, hier ist Rene von Northfeed. Danke für deine Bewerbung! Wann passt dir diese Woche ein kurzer Call (15 Min)? Hier kannst du dir direkt einen Termin aussuchen: ${(D.links && D.links.cal || "https://cal.com/northfeed/call") + "?" + new URLSearchParams(Object.fromEntries([["name", m.name], ["email", m.email || ""]].filter(([, v]) => v))).toString()}`,
+  "Vertrag offen": (m, link) => `Hi ${m.name.split(" ")[0]} 😊 schön, dass du dabei bist! Hier ist dein Vertrag zum Unterschreiben: ${link || "(Link in deiner Mail an " + (m.email || "dich") + ")"}\nWir haben schon unterschrieben, du musst nur noch die Felder prüfen und unterschreiben. Danach kommt direkt dein Portal-Zugang per Mail.`,
+  "Unterschrieben": m => `Hi ${m.name.split(" ")[0]}, Vertrag ist durch! Dein Portal-Zugang ist jetzt frei: https://portal.northfeed-management.com (Login mit ${m.email || "deiner E-Mail"}, dein Passwort steht in der Willkommensmail). Schau dir als Erstes die kurzen Plattform-Videos an, danach ist alles freigeschaltet und du siehst deine ersten Aufgaben.`
+};
+WA_TEXT["Onboarding"] = WA_TEXT["Unterschrieben"];   // 16.11: the text belongs to the card's current stage, not the next one
+// 18.11 Rene ("auf WhatsApp viel persönlicher"): after every step that mails the model, offer the same message from his own WhatsApp
+WA_TEXT["Daten"] = (m, link) => `Hi ${m.name.split(" ")[0]} 😊 für deinen Vertrag brauchen wir noch kurz deine Daten (Name wie im Ausweis, Geburtsdatum, Adresse): ${link}`;
+WA_TEXT["Zugang"] = m => `Hi ${m.name.split(" ")[0]} 😊 dein Portal-Zugang ist frei: https://portal.northfeed-management.com\nLogin mit ${m.email || "deiner E-Mail"}, dein Passwort steht in der Mail von uns. Schau dir als Erstes die kurzen Plattform-Videos an, danach ist alles freigeschaltet.`;
+WA_TEXT["Bilder"] = (m, note) => `Hi ${m.name.split(" ")[0]} 😊 wir bräuchten noch ein paar neue Referenzbilder von dir${note ? ": " + note : ""}. Einfach in der Google-Drive-App in deinen Ordner „Referenzbilder“ hochladen, die Aufgabe im Portal öffnet ihn dir direkt.`;
+WA_TEXT["Zugänge"] = m => `Hi ${m.name.split(" ")[0]} 😊 trag bitte im Portal noch deine Zugänge ein (Instagram, TikTok usw.), damit wir deine Accounts betreuen können: https://portal.northfeed-management.com/zugaenge\nDie Passwörter werden verschlüsselt gespeichert.`;
+function waAfter(m, title, sub, text){                        // modal with "Per WhatsApp schicken" (or just a toast without a number)
+  if (!m.whatsapp) { toast(sub + " · keine WhatsApp-Nummer hinterlegt"); return; }
+  openModal(`<button class="x" onclick="closeModal()">×</button><h2>${esc(title)}</h2><p style="color:var(--muted)">${esc(sub)} Schick es zusätzlich von deiner WhatsApp, das liest sie schneller.</p>
+    <div class="card" style="font-size:13.5px;white-space:pre-wrap">${esc(text)}</div><div class="foot"><button class="btn" onclick="closeModal()">Nur Mail</button><a class="btn p" href="${waLink(m, text)}" target="_blank" onclick="closeModal()">Per WhatsApp schicken</a></div>`);
+}
+const fmt = k => { if (!k) return ""; const d = new Date(k + "T12:00:00Z"); return d.toLocaleDateString("de-DE", {weekday:"short", day:"numeric", month:"short", timeZone:"UTC"}); };
+// 16.11 launch check: Cal.com stores UTC; Rene reads Berlin time. Birthdate with the year, he checks the age.
+const callFmt = v => { const d = new Date(v); return isNaN(d) ? String(v || "") : d.toLocaleString("de-DE", {weekday:"short", day:"numeric", month:"short", hour:"2-digit", minute:"2-digit", timeZone:"Europe/Berlin"}) + " Uhr"; };
+const dateFull = k => { if (!k) return ""; const d = new Date(String(k).slice(0,10) + "T12:00:00Z"); return isNaN(d) ? String(k) : d.toLocaleDateString("de-DE", {day:"2-digit", month:"2-digit", year:"numeric", timeZone:"UTC"}); };
+function addDays(k, n){ const d = new Date(k + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0,10); }
+function weekStart(k){ const d = new Date(k + "T12:00:00Z"); const wd = (d.getUTCDay() + 6) % 7; return addDays(k, -wd); }
+const WK0 = weekStart(TODAY), WK1 = addDays(WK0, 7);
+const inWeek = k => k && k >= WK0 && k < WK1;
+const planDone = p => ["Shot","Edited","Scheduled","Published"].includes(p.status);
+const modelById = id => D.models.find(m => m.id === id) || {};
+
+function toast(msg, bad){ const t = $("#toast"); t.textContent = msg; t.className = "toast show" + (bad ? " bad" : ""); setTimeout(() => t.className = "toast", 2600); }
+async function api(action, body){
+  const r = await fetch("/manager/api/" + action, {method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify(body || {})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+const liveModel = id => { const m = modelById(id); return !m.id || (m.status !== "Ended" && m.stage !== "Beendet"); };
+async function reload(){ const r = await fetch("/manager/data"); const j = await r.json(); Object.assign(D, j); if (!$("#modal").classList.contains("on")) route(); }
+function reloadLater(){ reload().catch(() => {}); }
+// 15.11 Rene: no browser pop-ups at the top of the window; every question is a dialog inside the page
+function ask(title, text, opts){ opts = opts || {}; return new Promise(res => {
+  openModal(`<button class="x" onclick="askDone(null)">×</button><h2>${esc(title)}</h2>${text ? `<p style="color:var(--muted)">${esc(text)}</p>` : ""}
+    ${opts.input !== undefined ? `<div class="f"><label class="w"><textarea id="ask_in" rows="3" placeholder="${esc(opts.placeholder || "")}">${esc(opts.input)}</textarea></label></div>` : ""}
+    <div class="foot"><button class="btn" onclick="askDone(null)">Abbrechen</button>${opts.alt ? `<button class="btn" onclick="askDone('alt')">${esc(opts.alt)}</button>` : ""}<button class="btn ${opts.danger ? "d" : "p"}" onclick="askDone(true)">${esc(opts.ok || "OK")}</button></div>`);
+  window.askDone = v => { const out = v === null ? null : v === "alt" ? "alt" : (opts.input !== undefined ? ($("#ask_in") ? $("#ask_in").value : "") : true); closeModal(); res(out); };
+}); }
+
+// ---------- pages ----------
+const pages = {
+  home(){
+    const live = D.models.filter(m => m.status !== "Ended" && !PIPE_ONLY.includes(m.stage));   // 19.11 Rene: the overview only holds signed models, the rest is in Bewerbungen
+    const act = live.filter(m => m.stage === "Aktiv").length;
+    const mine = D.tasks.filter(t => t.assigned === "Team" && t.status !== "Done" && liveModel(t.model)).sort((a,b) => (a.due||"9999").localeCompare(b.due||"9999"));
+    const late = mine.filter(t => t.due && t.due < TODAY);
+    const apps = D.applications.filter(a => ["new","contacted"].includes(a.status));
+    const rows = live.map(m => {
+      const mt = D.tasks.filter(t => t.model === m.id && t.status !== "Done"), mo = mt.filter(t => t.assigned !== "Team"), l = mt.filter(t => t.due && t.due < TODAY).length;
+      return `<tr class="row" style="cursor:pointer" onclick="location.hash='model/${m.id}'"><td><div class="t">${esc(m.name)}</div><div class="s">${esc(m.email || "keine E-Mail")} · ${esc(m.language)}</div></td>
+        <td><span class="pill ${m.stage==="Aktiv"?"ok":m.stage==="Pausiert"?"warn":"blue"}">${esc(m.stage || de(m.status))}</span><div class="s">${esc(m.package || "Full Management")}</div></td>
+        <td><div class="t">${mo.length} fürs Model${l ? ` <span class="pill bad">${l} überfällig</span>` : ""}</div><div class="s">${mt.length - mo.length} für dich</div></td>
+        <td style="text-align:right;color:var(--muted);font-size:20px">›</td></tr>`;
+    }).join("");
+    $("#main").innerHTML = `<span class="eyebrow">Manager · ${fmt(TODAY)}</span><h1>Hallo ${esc(D.manager.name)}, <em>so steht es.</em></h1>
+      <div class="kpis"><div class="card kpi"><div class="l">Aktive Models</div><div class="v">${act}</div><div class="d">${live.length - act} im Onboarding</div></div>
+        <div class="card kpi"><div class="l">Deine Aufgaben</div><div class="v">${mine.length}</div><div class="d ${late.length?"down":""}">${late.length} überfällig</div></div>
+        <div class="card kpi"><div class="l">Offene Bewerbungen</div><div class="v">${apps.length}</div><div class="d"><a href="#pipeline">zu Bewerbungen →</a></div></div></div>
+      <div id="homeTodo"></div>
+      <div class="sec"><div class="sec-head"><div><h2>Deine Aufgaben</h2><div class="cs">Alles, was bei dir liegt. Model-Aufgaben stehen beim Model.</div></div><button class="btn p" onclick="openTaskForm('', null, 'Team')">+ Aufgabe für mich</button></div>
+        <div class="list">${mine.slice(0, 12).map(t => taskItem(t, true)).join("") || '<div class="empty">Nichts offen. Gut.</div>'}</div>${mine.length > 12 ? `<p class="lead"><a href="#tasks">alle ${mine.length} ansehen →</a></p>` : ""}</div>
+      <div class="sec"><div class="sec-head"><div><h2>Models</h2><div class="cs">Model anklicken: Content-Plan, Aufgaben, Zugänge, Vertrag, alles auf einer Seite. Neue Models kommen meist über Bewerbungen.</div></div><button class="btn" onclick="openModelForm()">+ Model anlegen</button></div>
+      <div class="card" style="padding:4px 6px;overflow:auto"><table><thead><tr><th>Model</th><th>Stufe</th><th>Aufgaben</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Noch keine Models.</td></tr>'}</tbody></table></div></div>
+      <div class="sec"><div class="sec-head"><div><h2>Chatter</h2><div class="cs">Wer gerade in Schicht ist, Stufe, Schicht und Creator. Klick öffnet die Verwaltung (Test lesen, freigeben, Vertrag).</div></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">${D.massSheet ? `<a class="btn s" href="${D.massSheet}" target="_blank" rel="noopener">Massennachrichten-Sheet ↗</a>` : ""}<a class="btn s" href="#chatter">Verwalten</a><a class="btn p" href="#chatter/neu">+ Chatter anlegen</a></div></div>
+        <div id="homeCh"><div class="empty">lädt…</div></div></div>
+      <div class="sec"><div class="sec-head"><div><h2>Diese Woche</h2><div class="cs">Plan-Einträge und Aufgaben mit festem Tag, alle Models.</div></div></div>${weekHtml()}</div>`;
+    if (CH) renderHomeChatter(); api("chatter.list", {}).then(o => { CH = o; renderHomeChatter(); }).catch(() => { if ($("#homeCh")) $("#homeCh").innerHTML = '<div class="empty">Chatter konnten nicht geladen werden.</div>'; });
+  },
+  model(id){
+    const m = modelById(id); if (!m.id) { location.hash = "home"; return; }
+    fetch("/manager/onboarding/" + id).then(r => r.json()).then(o => { const el = document.getElementById("ob_" + id); if (!el) return;
+      const R = o.references || {}; const c = R.counts || {}; const sb = (o.steckbrief && o.steckbrief.status) || "Offen"; const done = !!(o.complete || (R.done && o.steckbrief && o.steckbrief.status !== "Offen")); const rv = o.steckbrief && o.steckbrief.review || {}; const conf = (k, t) => rv[k] === "Done" ? ` <span class="pill ok">${t} bestätigt</span>` : rv[k] ? ` · <button class="btn s ${rv[k] === "Waiting" ? "p" : ""}" title="Bilder im Drive angeschaut? Dann hakt sich ihre Aufgabe ab." onclick="confirmImages('${id}','${k}')">${t} bestätigen</button>` : "";
+        el.innerHTML = `Steckbrief ${esc(sb)} · Bilder ${Object.entries(R.targets||{}).reduce((a,[k,v])=>a+Math.min(c[k]||0,v[0]),0)}/${Object.values(R.targets||{}).reduce((a,v)=>a+v[0],0)}${done ? ' <span class="pill ok">komplett</span>' : ''}${R.folder ? ` · <a href="${esc(R.folder)}" target="_blank" style="color:var(--pink2)">Ordner</a>` : ""}${conf("bilder", "Referenzbilder")}${conf("ofbilder", "OF-Bilder")} · <button class="btn s" onclick="requestImages('${id}')">Bilder nachfordern</button> · <button class="btn s" title="In welchen Sprachen die Chatter schreiben (steht im Steckbrief)" onclick="setLanguages('${id}', this.dataset.v)" data-v="${esc((o.steckbrief && o.steckbrief.languages) || "")}">Sprachen: ${esc((o.steckbrief && o.steckbrief.languages) || "eintragen")}</button>`; }).catch(() => {});
+    setTimeout(() => loadVault(id), 0);
+    const mp = D.plan.filter(p => p.model === id), mt = D.tasks.filter(t => t.model === id);
+    $("#main").innerHTML = `<a href="#home" class="bk"><i><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></i>Übersicht</a><span class="eyebrow">${esc(m.stage || de(m.status))} · ${esc(m.language)}</span>
+      <h1>${esc(m.name)}</h1><p class="lead">${esc(m.email || "keine E-Mail")}${m.onlyfans ? ` · <a href="${esc(m.onlyfans)}" target="_blank" style="color:var(--pink2)">OnlyFans</a>` : ""}${m.drive ? ` · <a href="${esc(m.drive)}" target="_blank" style="color:var(--pink2)">Drive</a>` : ""}</p>
+      ${stageBar(m)}
+      <div class="card" style="margin:10px 0 14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;font-size:14px">
+        <div><div class="l">Paket</div><b>${esc(m.package || "Full Management")}</b>${m.split?` · ${esc(m.split)} % Management`:""}<div class="s">${esc([m.legalName, [m.street, [m.zip, m.city].filter(Boolean).join(" "), m.country].filter(Boolean).join(", ")].filter(Boolean).join(" · ") || "Vertragsdaten fehlen")}</div></div>
+        <div><div class="l">Kontakt</div>${m.whatsapp ? `<a href="${waLink(m)}" target="_blank" style="color:var(--pink2)">WhatsApp ${esc(m.whatsapp)}</a>` : "keine Nummer"}${m.callDate?`<br>Call ${esc(callFmt(m.callDate))}`:""}</div>
+        <div><div class="l">Vertrag</div>${m.contractSigned ? `unterschrieben ${fmt(m.contractSigned)}${m.contractPdf?` · <a href="${esc(m.contractPdf)}" target="_blank" style="color:var(--pink2)">PDF</a>`:""}` : m.contractSent ? `verschickt ${fmt(m.contractSent)}, offen` : `noch nicht verschickt`}${!m.contractSigned ? ` · <button class="btn s ${m.dataSubmitted && !m.contractSent ? "p" : ""}" onclick="sendContract('${id}')">Vertrag senden</button>` : ""}${!m.contractSent && !m.contractSigned ? `<div style="margin-top:6px">${m.dataSubmitted ? `<span class="pill warn">Daten eingetragen ${fmt(m.dataSubmitted)}, bitte prüfen</span>` : `<button class="btn s" onclick="requestData('${id}')">Daten vom Model anfordern</button>`}</div>` : ""}<div style="margin-top:6px">${m.welcomeSent ? `Zugang verschickt ${fmt(m.welcomeSent)} · ` : ""}<button class="btn s" onclick="sendAccess('${id}')">${m.welcomeSent ? "Zugang nochmal senden" : m.contractSigned ? "Zugang senden" : "Zugang senden (ohne Vertrag)"}</button></div></div>
+        <div><div class="l">Onboarding</div><span id="ob_${id}">lädt…</span><div style="margin-top:6px"><button class="btn s ${m.ofPhotos ? "p" : ""}" title="Aufgabe „Bilder für OnlyFans hochladen“ (Profilbild, Banner, ~20 Feed). Nur für Models ohne fertiges OF-Profil." onclick="toggleOfPhotos('${id}')">OF-Bilder: ${m.ofPhotos ? "nötig ✓" : "nicht nötig"}</button></div></div>
+        <div><div class="l">Zugänge</div><span id="vault_${id}">lädt…</span></div>
+        <div><div class="l">Drive</div>${m.drive ? `<a href="${esc(m.drive)}" target="_blank" style="color:var(--pink2)">Model-Ordner</a>${m.uploadsFolder?` · <a href="${esc(m.uploadsFolder)}" target="_blank" style="color:var(--pink2)">Referenzbilder</a>`:""}` : `<button class="btn s" onclick="makeDrive('${id}')">Ordner anlegen</button>`}</div>
+      </div>
+      <div class="acts" style="justify-content:flex-start;margin-bottom:8px"><button class="btn" onclick="openModelForm('${id}')">Bearbeiten</button><button class="btn p" onclick="openPlanForm('${id}')">+ Plan-Eintrag</button><button class="btn p" onclick="openTaskForm('${id}')">+ Aufgabe</button>${m.email ? `<a class="btn" href="/?as=${encodeURIComponent(m.email)}" target="_blank">Als Model ansehen</a>` : ""}</div>
+      <div class="sec"><div class="sec-head"><div><h2>Content-Plan</h2><div class="cs">${mp.length} Einträge</div></div>${mp.some(p => !planDone(p) && p.status !== "Dropped") ? `<button class="btn s" onclick="copyTo('plan', mp_open('${id}'))">Offenen Plan zu anderen Models kopieren</button>` : ""}</div><div class="list">${mp.map(planItem).join("") || '<div class="empty">Noch kein Plan.</div>'}</div></div>
+      <div class="sec"><div class="sec-head"><h2>Aufgaben</h2><div class="cs">${mt.filter(t=>t.status!=="Done").length} offen</div></div><div class="list">${mt.map(taskItem).join("") || '<div class="empty">Keine Aufgaben.</div>'}</div></div>`;
+  },
+  pipeline(){
+    const apps = D.applications.filter(a => ["new","contacted"].includes(a.status));
+    const drop = st => `ondragover="event.preventDefault();this.classList.add('over')" ondragleave="this.classList.remove('over')" ondrop="this.classList.remove('over');dropCard(event,'${st}')"`;
+    const cols = STAGES.filter(st => !["Pausiert","Beendet"].includes(st)).map(st => {
+      const ms = D.models.filter(m => (m.stage || "Bewerbung") === st && m.status !== "Ended");
+      const appCards = st === "Bewerbung" ? apps.map(a => `<div class="pcard" draggable="true" ondragstart="dragStart(event,'app','${a.id}')" onclick="openApp('${a.id}')"><div class="t">${esc([a.firstName,a.lastName].filter(Boolean).join(" ") || a.instagram || "ohne Name")}${a.status==="contacted"?' <span class="pill blue">kontaktiert</span>':""}</div><div class="s">${esc(a.received.slice(0,10))}${a.instagram?` · @${esc(a.instagram)}`:""}${a.score?` · Score ${esc(a.score)}`:""}</div>
+          <div class="pacts"><button class="btn s p" onclick="event.stopPropagation();acceptAppTo('${a.id}','Kontaktiert')">→ Kontaktiert</button>${a.phone?`<a class="btn s" href="${waLink({whatsapp:a.phone}, WA_TEXT["Kontaktiert"]({name:[a.firstName,a.lastName].filter(Boolean).join(" ") || "du", email:a.email || ""}))}" target="_blank" onclick="event.stopPropagation()">WhatsApp</a>`:""}</div></div>`).join("") : "";
+      return `<div class="pcol" ${drop(st)}><div class="pch"><b>${esc(st)}</b><span class="cs">${ms.length + (st === "Bewerbung" ? apps.length : 0)}</span></div><div class="pchint">${esc(STAGE_HINT[st]||"")}</div>
+        ${appCards}${ms.map(m => `<div class="pcard" draggable="true" ondragstart="dragStart(event,'model','${m.id}')" onclick="location.hash='model/${m.id}'"><div class="t">${esc(m.name)}</div><div class="s">${esc(m.package || "Full Management")}${m.callDate?` · Call ${esc(callFmt(m.callDate))}`:""}${m.contractSent&&!m.contractSigned?` · Vertrag seit ${fmt(m.contractSent)}`:""}${m.dataSubmitted&&!m.contractSent?' <span class="pill warn">Daten prüfen</span>':""}</div>
+          <div class="pacts">${nextStageBtn(m, true)}${waLink(m) ? `<a class="btn s" href="${waLink(m, WA_TEXT[m.stage] ? WA_TEXT[m.stage](m) : "")}" target="_blank" onclick="event.stopPropagation()">WhatsApp</a>` : ""}</div></div>`).join("")}${!ms.length && !appCards ? '<div class="empty" style="padding:10px">–</div>' : ""}</div>`;
+    }).join("");
+    const parked = D.models.filter(m => ["Pausiert","Beendet"].includes(m.stage) || m.status === "Ended");
+    $("#main").innerHTML = `<span class="eyebrow">Bewerbungen</span><h1>Von der <em>Bewerbung</em> bis Aktiv.</h1><p class="lead">Karten einfach in die nächste Spalte ziehen. Eine Bewerbung wird beim Ziehen automatisch zum Model, „Vertrag senden“ auf der Model-Seite verschickt den Vertrag, nach der Unterschrift entstehen Drive-Ordner, Portal-Zugang und Willkommensmail von selbst. <a href="#apps" style="color:var(--pink2)">Alle Bewerbungen (auch abgelehnte)</a></p>
+      <div class="pipe">${cols}</div><div class="pcol" style="margin-top:10px;min-height:0;padding:8px 12px" ${drop("Pausiert")}><span class="cs">Hierher ziehen = Pausiert.</span> ${parked.length ? `Pausiert/Beendet: ${parked.map(m => `<a href="#model/${m.id}" style="color:var(--muted)">${esc(m.name)}</a>`).join(", ")}` : ""}</div>`;
+  },
+  tools(){
+    const groups = D.toolGroups.filter(g => D.tools.some(t => t.group === g));
+    $("#main").innerHTML = `<span class="eyebrow">Tools</span><h1>Alles, womit du <em>arbeitest</em>.</h1><p class="lead">Ein Klick öffnet das Werkzeug in einem neuen Tab. Links kannst du selbst ergänzen oder ändern.</p>
+      <div class="acts" style="justify-content:flex-start;margin-bottom:6px"><button class="btn p" onclick="openToolForm()">+ Link</button></div>
+      ${groups.map(g => `<div class="sec"><div class="sec-head"><h2>${esc(g)}</h2></div><div class="tools">${D.tools.filter(t => t.group === g).map(t => `<a class="tool" href="${esc(t.url)}" target="_blank" rel="noopener"><div class="t">${esc(t.name)}</div><div class="s">${esc(t.desc)}</div>${t.hint?`<div class="h">${esc(t.hint)}</div>`:""}<button class="btn s e" onclick="event.preventDefault();event.stopPropagation();openToolForm('${t.id}')">Bearbeiten</button></a>`).join("")}</div></div>`).join("")}`;
+  },
+  abrechnung(){
+    $("#main").innerHTML = `<span class="eyebrow">Abrechnung</span><h1>Wöchentlich, <em>Montag bis Sonntag</em>.</h1><p class="lead">Montags: Nettoumsatz der Vorwoche eintragen, „Rechnung senden“. Fällig ist Mittwoch 23:59, gutgeschrieben bis Freitag. Nachweise vom Model landen hier und im Drive.</p><div id="billMount" class="empty">lädt…</div>`;
+    if (BILL) renderBilling(); loadBilling();                // 16.11: show the last state at once, refresh behind it
+  },
+  einstellungen(){
+    $("#main").innerHTML = `<span class="eyebrow">Einstellungen</span><h1><em>Einstellungen</em>.</h1>
+      <div class="setgrid"><section>      <h2>Mailversand von info@</h2><p class="lead">Einmal einrichten: Google-App-Passwort von info@northfeed-management.com hier einfügen. Es wird nur auf dem Server gespeichert, danach gehen Vertrag, Login-Codes und Willkommensmail automatisch raus. ${D.mailReady ? '<span class="pill ok">eingerichtet</span>' : '<span class="pill warn">noch nicht eingerichtet</span>'}</p>
+      <div class="card"><div class="f"><label class="w"><span>Absender (Workspace-Nutzer)</span><input type="email" id="s_user" value="info@northfeed-management.com"></label>
+      <label class="w"><span>App-Passwort (16 Zeichen, von myaccount.google.com → Sicherheit → App-Passwörter)</span><input type="password" id="s_pw" autocomplete="off" placeholder="xxxx xxxx xxxx xxxx"></label></div>
+      <div class="foot"><span class="err" id="s_err"></span><button class="btn p" id="s_save" onclick="saveSmtp()">Speichern und Testmail senden</button></div></div>
+      </section><section>      <h2>Übersetzung (DeepL)</h2><p class="lead">Für englische Chatter wird alles automatisch professionell übersetzt (Persona der Creator usw.). Einmal einen DeepL-API-Schlüssel einfügen: deepl.com/pro-api → „DeepL API Free“ (bis 500.000 Zeichen im Monat kostenlos) → Konto → API-Schlüssel. Er wird nur auf dem Server gespeichert. ${D.deeplReady ? '<span class="pill ok">eingerichtet</span>' : '<span class="pill warn">noch nicht eingerichtet</span>'}</p>
+      <div class="card"><div class="f"><label class="w"><span>DeepL-API-Schlüssel</span><input type="password" id="dl_key" autocomplete="off" placeholder="xxxxxxxx-xxxx-…:fx"></label></div>
+      <div class="foot"><span class="err" id="dl_err"></span><button class="btn p" id="dl_save" onclick="saveDeepl()">Prüfen und speichern</button></div></div>
+      </section><section>      <h2>Discord für Chatter-Schichten</h2><p class="lead">Start/Ende und Schichtberichte der Chatter gehen automatisch in euren Discord. Pro Kanal einen Webhook anlegen: Kanal-Einstellungen → Integrationen → Webhooks → Neuer Webhook → „Webhook-URL kopieren“ und hier einfügen. ${D.discordReady === 3 ? '<span class="pill ok">eingerichtet</span>' : `<span class="pill warn">${D.discordReady || 0} von 3 eingerichtet</span>`}</p>
+      <div class="card"><div class="f"><label class="w"><span>#online-offline</span><input type="password" id="wh_on" autocomplete="off" placeholder="https://discord.com/api/webhooks/…"></label>
+      <label class="w"><span>#shift-log</span><input type="password" id="wh_log" autocomplete="off" placeholder="https://discord.com/api/webhooks/…"></label>
+      <label class="w"><span>#admin (Warnungen an dich)</span><input type="password" id="wh_al" autocomplete="off" placeholder="https://discord.com/api/webhooks/…"></label></div>
+      <div class="foot"><span class="err" id="wh_err"></span><button class="btn p" id="wh_save" onclick="saveDiscord()">Testen und speichern</button></div></div>
+      </section><section>      <h2>Bankverbindungen für Rechnungen</h2><p class="lead">Mehrere Konten möglich, eins ist aktiv. Neue Rechnungen nehmen das aktive Konto, jede Rechnung merkt sich ihr Konto. Ohne aktives Konto gehen keine Rechnungen raus.</p>
+      <div class="card" id="bankBox"><div class="empty">lädt…</div></div></section></div>
+      <section style="margin-top:34px"><h2>Vertrag</h2><p class="lead">Der Rohvertrag, den jedes neue Model zum Unterschreiben bekommt. Text direkt hier ändern und speichern, danach geht jeder neue Vertrag mit dem neuen Text raus. Schon verschickte Verträge bleiben, wie sie sind. Die rosa Felder füllt das System aus, die bleiben drin.</p>
+      <div class="card"><div class="s" id="ctMeta" style="margin-bottom:10px">lädt…</div><div id="ctEdit" class="ctedit" contenteditable="true" spellcheck="true"></div>
+      <div class="foot"><span class="err" id="ctErr"></span><a class="btn" href="/manager/vertrag.pdf" target="_blank">PDF ansehen</a><button class="btn p" id="ctSave" onclick="saveContract()">Vertrag speichern</button></div></div></section>`;
+    loadContract();
+    api("billing.settings", {}).then(o => { if (!$("#bankBox")) return; $("#bankBox").innerHTML = `${o.accounts.map(a => `<div class="item" style="margin-bottom:8px"><div><div class="t">${esc(a.label)} ${a.active ? '<span class="pill ok">aktiv</span>' : ""}</div><div class="s">${esc(a.holder)} · ${esc(a.iban)}${a.bic ? " · " + esc(a.bic) : ""}${a.bank ? " · " + esc(a.bank) : ""}</div></div>
+        <div class="acts">${a.active ? "" : `<button class="btn s" onclick="bankAct('${a.id}')">Aktiv setzen</button>`}<button class="btn s d" onclick="bankDel('${a.id}','${esc(a.label)}')">Entfernen</button></div></div>`).join("") || '<div class="empty" style="margin-bottom:10px">Noch kein Konto hinterlegt.</div>'}
+      <div class="f" style="margin-top:12px"><label><span>Bezeichnung (nur intern)</span><input id="b_label" placeholder="z. B. Banking Circle"></label><label><span>Kontoinhaber</span><input id="b_holder"></label>
+      <label class="w"><span>IBAN</span><input id="b_iban" autocomplete="off"></label><label><span>BIC / SWIFT</span><input id="b_bic"></label><label><span>Bank</span><input id="b_bank"></label>
+      <label><span>Land</span><input id="b_country"></label><label class="chk" style="align-self:end"><input type="checkbox" id="b_active" checked> Ab sofort aktiv</label></div>
+      <div class="foot"><span class="err" id="b_err"></span><button class="btn p" onclick="bankAdd()">Konto hinzufügen</button></div>
+      <div class="f" style="margin-top:18px"><label class="w"><span>Hinweis unten auf jeder Rechnung</span><textarea id="b_tax">${esc(o.settings.taxnote)}</textarea></label></div>
+      <div class="foot"><button class="btn" onclick="saveTax()">Hinweis speichern</button></div>`; }).catch(e => { if ($("#bankBox")) $("#bankBox").innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; });
+  },
+  chatter(){                                                   // 18.11 Rene: chatter pipeline – course → test → test shift (4 h) → contract → active
+    $("#main").innerHTML = `<a href="#home" class="bk"><i><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></i>Übersicht</a><span class="eyebrow">Chatter verwalten</span><h1>Vom Kurs zur <em>ersten Schicht</em>.</h1><p class="lead">Neuer Chatter → Login-Mail → Kurs → Test (Teil A automatisch, Teil B liest du hier) → 4-Stunden-Testschicht → Vertrag → aktiv. Jede Stufe gibst du hier frei.</p>${D.massSheet ? `<p style="margin:-6px 0 18px"><a class="btn s" href="${D.massSheet}" target="_blank" rel="noopener">Massennachrichten-Sheet öffnen ↗</a> <span class="s" style="color:var(--muted);font-size:13px;margin-left:8px">Texte für die Massennachrichten alle 2 h – das Chatter-Portal schlägt daraus vor und trägt ein, was benutzt wurde.</span></p>` : ""}
+      <div class="card" style="margin-bottom:22px"><div class="f"><label><span>Name</span><input id="ch_name" type="text" placeholder="z. B. Maria Santos"></label><label><span>E-Mail</span><input id="ch_mail" type="email" placeholder="maria@gmail.com"></label>
+      <label><span>Schicht</span><input id="ch_shift" type="text" placeholder="Mon–Sat 08:00–16:00 (Sun off)"></label><label><span>Supervisor</span><input id="ch_sup" type="text" value="René"></label></div>
+      <div class="foot"><span class="err" id="ch_err"></span><button class="btn p" id="ch_add" onclick="addChatter()">Anlegen + Login-Mail senden</button></div></div>
+      <div id="chMount"><div class="empty">lädt…</div></div>`;
+    loadChatter();
+    if ((location.hash.split("/")[1] || "") === "neu") setTimeout(() => { const n = $("#ch_name"); if (n) { n.scrollIntoView({block: "center"}); n.focus(); } }, 50);
+  },
+  skripte(){                                                   // 16.11 Rene: OF scripts (PPV ladders), edited here, shown to the model in her language
+    $("#main").innerHTML = `<span class="eyebrow">Skripte</span><h1>Framework-<em>Skript</em>.</h1><p class="lead">Jedes Model dreht das Framework, Stufe für Stufe, jede Stufe wird intimer. Das Model sieht im Portal unter „Skripte“ jede Stufe in seiner Sprache, ohne Preise, und lädt Bilder und Videos mit der Google-Drive-App in den Ordner der Stufe. Fehlt eine Übersetzung, sieht sie die andere Sprache.</p><div id="scMount">${SC ? "" : '<div class="empty">lädt…</div>'}</div>`;
+    if (SC) renderScripts(); loadScripts();
+  },
+  kurse(){
+    $("#main").innerHTML = `<span class="eyebrow">Kurse</span><h1>Drei <em>Kurse</em>.</h1><p class="lead">Model-Onboarding, Model-Kurs und Chatter-Kurs. Lektion für Lektion, die nächste schaltet frei, wenn die vorige zu Ende geschaut ist. Videos als MP4 hochladen. <a href="/course?audience=Model" target="_blank" style="color:var(--pink2)">Als Model ansehen</a> · <a href="/course?audience=Chatter" target="_blank" style="color:var(--pink2)">Als Chatter ansehen</a></p><div id="courseMount"></div>`;
+    const holder = document.getElementById("courseAdminHolder"); const mount = document.getElementById("courseMount");
+    while (holder.firstChild) mount.appendChild(holder.firstChild);
+    holder.dataset.moved = "1"; if (window.courseReload) window.courseReload();
+  },
+  plan(){
+    const f = state.planFilter;
+    const list = D.plan.filter(p => (f.model ? p.model === f.model : liveModel(p.model)) && (!f.status || p.status === f.status) && (f.past || !p.date || p.date >= addDays(TODAY, -1)));
+    $("#main").innerHTML = `<span class="eyebrow">Content-Plan</span><h1>Was <em>gedreht</em> wird.</h1>
+      <div class="filters" style="flex-wrap:wrap;gap:10px">${modelChips("f_model", f.model, true)}${chips("f_status", [["", "Alle Status"]].concat(D.options.planStatus.map(o => [o, de(o)])), f.status)}<label class="chk"><input type="checkbox" id="f_past" ${f.past?"checked":""}> Vergangene zeigen</label><button class="btn p" style="margin-left:auto" onclick="openPlanForm(state.planFilter.model)">+ Plan-Eintrag</button></div>
+      <div class="list">${list.map(p => planItem(p, true)).join("") || '<div class="empty">Nichts gefunden.</div>'}</div>`;
+    $("#f_model").onclick = e => { if (e.target.closest("button")) { state.planFilter.model = e.target.closest("button").dataset.val; route(); } };
+    $("#f_status").onclick = e => { if (e.target.closest("button")) { state.planFilter.status = e.target.closest("button").dataset.val; route(); } };
+    $("#f_past").onchange = e => { state.planFilter.past = e.target.checked; route(); };
+  },
+  tasks(){
+    const f = state.taskFilter;
+    const all = D.tasks.filter(t => (f.model ? t.model === f.model : liveModel(t.model)) && (f.done || t.status !== "Done"));
+    const mine = all.filter(t => t.assigned === "Team"), models = all.filter(t => t.assigned !== "Team");
+    $("#main").innerHTML = `<span class="eyebrow">Aufgaben</span><h1>Was <em>erledigt</em> werden muss.</h1>
+      <div class="filters" style="flex-wrap:wrap;gap:10px">${modelChips("f_model", f.model, true)}<label class="chk"><input type="checkbox" id="f_done" ${f.done?"checked":""}> Erledigte zeigen</label><button class="btn" style="margin-left:auto" onclick="openTaskForm(state.taskFilter.model, null, 'Team')">+ Aufgabe für mich</button><button class="btn p" onclick="openTaskForm(state.taskFilter.model, null, 'Model')">+ Aufgabe fürs Model</button></div>
+      <div class="sec"><div class="sec-head"><div><h2>Deine Aufgaben</h2><div class="cs">Zuständig: du. Das Model sieht sie nicht.</div></div></div><div class="list">${mine.map(t => taskItem(t, true)).join("") || '<div class="empty">Nichts offen.</div>'}</div></div>
+      <div class="sec"><div class="sec-head"><div><h2>Model-Aufgaben</h2><div class="cs">Stehen im Portal des jeweiligen Models.</div></div></div><div class="list">${models.map(t => taskItem(t, true)).join("") || '<div class="empty">Nichts offen.</div>'}</div></div>`;
+    $("#f_model").onclick = e => { if (e.target.closest("button")) { state.taskFilter.model = e.target.closest("button").dataset.val; route(); } };
+    $("#f_done").onchange = e => { state.taskFilter.done = e.target.checked; route(); };
+  },
+  apps(){
+    const f = state.appFilter;
+    const list = D.applications.filter(a => !f.status || a.status === f.status);
+    const L = {new:"Neu", contacted:"Kontaktiert", accepted:"Angenommen", declined:"Abgelehnt"};
+    const cards = list.map(appCard).join("");
+    $("#main").innerHTML = `<span class="eyebrow">Bewerbungen</span><h1>Wer sich <em>beworben</em> hat.</h1><p class="lead">Aus dem Creator-Funnel. Annehmen legt das Model mit den Bewerbungsdaten an.</p>
+      <div class="filters">${chips("f_app", [["", "Alle"], ["new","Neu"], ["contacted","Kontaktiert"], ["accepted","Angenommen"], ["declined","Abgelehnt"]], f.status)}</div><div class="apps">${cards || '<div class="empty">Keine Bewerbungen.</div>'}</div>`;
+    $("#f_app").onclick = e => { if (e.target.closest("button")) { state.appFilter.status = e.target.closest("button").dataset.val; route(); } };
+  }
+};
+const state = { planFilter:{model:"",status:"",past:false}, taskFilter:{model:"",done:false}, appFilter:{status:""} };
+
+// 15.11 Rene: buttons instead of dropdowns, everywhere
+function chips(id, opts, cur, label, cls, onpick){ // opts: [value,…] or [[value,label],…]
+  const items = opts.map(o => Array.isArray(o) ? o : [o, label ? label(o) : de(o)]);
+  return `<div class="chips ${cls||""}" ${id?`id="${id}"`:""} data-v="${esc(cur||"")}">${items.map(([v,l]) => `<button type="button" class="${String(v)===String(cur||"")?"on":""}" data-val="${esc(v)}" ${onpick?`onclick="${onpick.replace(/\$V/g, esc(v))}"`:""}>${esc(l)}</button>`).join("")}</div>`;
+}
+document.addEventListener("click", e => { const b = e.target.closest(".chips button"); if (!b) return; const g = b.parentElement; g.dataset.v = b.dataset.val; g.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); });
+const activeModels = () => D.models.filter(m => m.status !== "Ended" && m.stage !== "Beendet");
+function modelChips(id, cur, withAll){ return chips(id, (withAll ? [["", "Alle"]] : []).concat(activeModels().map(m => [m.id, m.name])), cur); }
+function sel(id, opts, val, empty, labels){ return `<select class="inl" id="${id}"><option value="">${esc(empty)}</option>${opts.map(o => `<option value="${esc(o)}" ${o===val?"selected":""}>${esc(labels ? labels[o] : de(o))}</option>`).join("")}</select>`; }
+function modelSelect(id, val, empty){ return `<select class="inl" id="${id}"><option value="">${esc(empty)}</option>${D.models.filter(m=>m.status!=="Ended").map(m => `<option value="${m.id}" ${m.id===val?"selected":""}>${esc(m.name)}</option>`).join("")}</select>`; }
+const PLAN_QUICK = ["Planned","Shot","Edited","Published"];
+function statusSel(kind, id, val, opts){
+  const list = kind === "plan" ? PLAN_QUICK.concat(PLAN_QUICK.includes(val) ? [] : [val]) : opts;
+  return chips("", list, val, null, "sm st", `setStatus('${kind}','${id}','$V')`);
+}
+function planItem(p, withModel){
+  const late = p.date && p.date < TODAY && !planDone(p) && p.status !== "Dropped";
+  return `<div class="item plan ${planDone(p)?"done":""} ${late?"late":""}"><div><div class="t">${esc(p.title)}${withModel?` <span class="pill gray">${esc(p.modelName)}</span>`:""}</div>
+    <div class="s">${[p.platform, p.type, p.outfit].filter(Boolean).map(esc).join(" · ")}${p.hook?"<br>"+esc(p.hook):""}${p.reference?` · <a href="${esc(p.reference)}" target="_blank" style="color:var(--pink2)">Referenz</a>`:""}${p.published?` · <a href="${esc(p.published)}" target="_blank" style="color:var(--pink2)">Veröffentlicht</a>`:""}${p.files.length?` · ${p.files.length} Datei(en)`:""}</div></div>
+    <div class="meta"><span class="pill gray">${fmt(p.date) || "ohne Datum"}</span>${statusSel("plan", p.id, p.status, D.options.planStatus)}<button class="btn s" onclick="openPlanForm('${p.model}','${p.id}')">Bearbeiten</button><button class="btn s" title="Zu anderen Models kopieren" onclick="copyTo('plan', ['${p.id}'])">Kopieren</button></div></div>`;
+}
+function taskItem(t, withModel){
+  const late = t.due && t.due < TODAY && t.status !== "Done";
+  return `<div class="item task ${t.status==="Done"?"done":""} ${late?"late":""}"><div><div class="t">${esc(t.title)}${withModel?` <span class="pill gray">${esc(t.modelName)}</span>`:""}${t.priority==="High"?' <span class="pill bad">wichtig</span>':""}${!t.visible?' <span class="pill warn">für Model unsichtbar</span>':""}</div>
+    <div class="s">${[de(t.category), de(t.assigned)].filter(Boolean).join(" · ")}${t.desc?"<br>"+esc(t.desc):""}</div></div>
+    <div class="meta"><span class="pill gray">${t.due ? (t.dueType==="By"?"bis ":"") + fmt(t.due) : de(t.dueType)}</span>${statusSel("task", t.id, t.status, D.options.taskStatus)}<button class="btn s" onclick="openTaskForm('${t.model}','${t.id}')">Bearbeiten</button><button class="btn s" title="Zu anderen Models kopieren" onclick="copyTo('task', ['${t.id}'])">Kopieren</button></div></div>`;
+}
+// 19.11 Rene: copy plan entries / tasks over to other models
+const PIPE_ONLY = ["Bewerbung","Kontaktiert","Call gebucht","Vertrag offen","Beendet"];
+const mp_open = id => D.plan.filter(p => p.model === id && !planDone(p) && p.status !== "Dropped").map(p => p.id);
+function copyTo(kind, ids){
+  const items = ids.map(i => (kind === "plan" ? D.plan : D.tasks).find(x => x.id === i)).filter(Boolean); if (!items.length) return;
+  const from = items[0].model, targets = D.models.filter(m => m.id !== from && m.status !== "Ended" && !PIPE_ONLY.includes(m.stage));
+  if (!targets.length) { toast("Kein anderes Model zum Kopieren da.", true); return; }
+  openModal(`<button class="x" onclick="closeModal()">×</button><h2>${items.length > 1 ? items.length + " Einträge" : "„" + esc(items[0].title) + "“"} kopieren</h2>
+    <p style="color:var(--muted)">Zu welchen Models? ${kind === "plan" ? "Datum, Idee, Referenz und Caption werden übernommen, Status startet neu." : "Die Aufgabe wird bei jedem Model neu angelegt, Status offen."}</p>
+    <div class="list" style="margin:10px 0">${targets.map(m => `<label class="chk item" style="cursor:pointer"><input type="checkbox" class="cp_m" value="${m.id}"> ${esc(m.name)}</label>`).join("")}</div>
+    <div class="foot"><span class="err" id="cp_err"></span><button class="btn" onclick="closeModal()">Abbrechen</button><button class="btn p" id="cp_go" onclick="doCopy('${kind}', ${esc(JSON.stringify(ids))})">Kopieren</button></div>`);
+}
+async function doCopy(kind, ids){
+  const to = [...document.querySelectorAll(".cp_m:checked")].map(x => x.value); if (!to.length) { $("#cp_err").textContent = "Mindestens ein Model wählen."; return; }
+  $("#cp_go").disabled = true; let n = 0;
+  try { for (const m of to) for (const i of ids) {
+      if (kind === "plan") { const p = D.plan.find(x => x.id === i);
+        await api("plan.create", {model:m, date:p.date, title:p.title, platform:p.platform, type:p.type, status:"Planned", outfit:p.outfit, hook:p.hook, reference:p.reference, caption:p.caption, notes:p.notes}); }
+      else { const t = D.tasks.find(x => x.id === i);
+        await api("task.create", {model:m, category:t.category, title:t.title, dueType:t.dueType, due:t.due, priority:t.priority, status:"Open", assigned:t.assigned, visible:t.visible, desc:t.desc}); }
+      n++; }
+    closeModal(); toast(`${n} Eintr${n === 1 ? "ag" : "äge"} kopiert`); reloadLater(); }
+  catch(e){ $("#cp_err").textContent = e.message; $("#cp_go").disabled = false; }
+}
+function weekHtml(){
+  const cols = [];
+  for (let i = 0; i < 7; i++) {
+    const k = addDays(WK0, i);
+    const es = D.plan.filter(p => p.date === k && p.status !== "Dropped" && liveModel(p.model)).map(p => `<div class="e ${planDone(p)?"done":""}" onclick="openPlanForm('${p.model}','${p.id}')" title="${esc(p.modelName)}">${esc(p.modelName)}: ${esc(p.title)}</div>`)
+      .concat(D.tasks.filter(t => t.due === k && liveModel(t.model)).map(t => `<div class="e task ${t.status==="Done"?"done":""}" onclick="openTaskForm('${t.model}','${t.id}')">${esc(t.modelName)}: ${esc(t.title)}</div>`));
+    cols.push(`<div class="d ${k===TODAY?"today":""}"><div class="dh">${fmt(k)}</div>${es.join("") || '<div style="color:var(--dim);font-size:12px">–</div>'}</div>`);
+  }
+  return `<div class="week">${cols.join("")}</div>`;
+}
+
+function nextStage(m){ const i = stageIdx(m.stage); return STAGES[Math.min(i + 1, STAGES.indexOf("Aktiv"))]; }
+function nextStageBtn(m, small){ const cur = m.stage || "Bewerbung"; if (cur === "Aktiv" || ["Pausiert","Beendet"].includes(cur)) return ""; const nx = nextStage(m); return `<button class="btn ${small?"s ":""}p" onclick="event.stopPropagation();setStage('${m.id}','${nx}')">→ ${esc(nx)}</button>`; }
+function stageBar(m){
+  const cur = stageIdx(m.stage);
+  return `<div class="stages">${STAGES.filter(st => !["Pausiert","Beendet"].includes(st)).map((st, i) => `<button type="button" class="st ${i<cur?"done":""} ${i===cur?"cur":""}" onclick="setStage('${m.id}','${st}')" title="${esc(STAGE_HINT[st]||"")}">${esc(st)}</button>`).join("")}
+    <button type="button" class="st" onclick="setStage('${m.id}','Pausiert')">Pausieren</button><button type="button" class="st" onclick="setStage('${m.id}','Beendet')">Beenden</button></div>`;
+}
+async function setStage(id, stage){
+  const m = modelById(id); const before = {stage: m.stage, status: m.status};
+  if (stage === "Beendet" && !(await ask(`${m.name} beenden?`, "Der Portal-Zugang wird gesperrt.", {ok:"Beenden", danger:true}))) return;
+  if (stage === "Vertrag offen" && !m.contractSigned) { await sendContract(id); return; }            // C: the column means "contract is out"
+  if (["Unterschrieben","Onboarding","Aktiv"].includes(stage) && !m.contractSigned && !m.welcomeSent) {  // E: no contract, no welcome mail yet
+    const go = await ask(`${m.name} hat keinen unterschriebenen Vertrag`, "Soll sie trotzdem ihren Portal-Zugang per Mail bekommen? Das ist der Weg für bestehende Models ohne Vertrag.", {ok:"Zugang senden und verschieben", alt:"Nur verschieben"});
+    if (go === null) return;
+    if (go === true) { await sendAccess(id, stage); return; }
+  }
+  m.stage = stage; if (stage === "Aktiv") m.status = "Active"; if (stage === "Pausiert") m.status = "Paused"; if (stage === "Beendet") m.status = "Ended";
+  route();                                                    // card moves now, the server catches up in the background
+  try { const r = await api("model.stage", {id, stage}); toast(r.driveQueued ? `${m.name}: ${stage} · Drive-Ordner wird angelegt` : `${m.name}: ${stage}`); reloadLater(); }
+  catch(e){ Object.assign(m, before); route(); toast("Nicht gespeichert: " + e.message, true); }
+}
+async function sendContract(id){
+  const m = modelById(id);
+  const miss = [["legalName","bürgerlicher Name"],["birthdate","Geburtsdatum"],["email","E-Mail"],["street","Straße"],["city","Ort"]].filter(([k]) => !m[k] && !(["street","city"].includes(k) && m.address)).map(([,l]) => l);
+  if (miss.length) {
+    const how = await ask(`Für den Vertrag fehlt noch: ${miss.join(", ")}`, `Soll ${m.name} die Daten selbst eintragen? Sie bekommt einen Link per Mail, du bekommst eine Nachricht, sobald sie fertig ist, und schickst dann den Vertrag.`, {ok:"Link ans Model schicken", alt:"Selbst eintragen"});
+    if (how === "alt") { openModelForm(id); setTimeout(() => { const e = $("#m_err"); if (e) e.textContent = "Für den Vertrag fehlt noch: " + miss.join(", ") + "."; }, 30); }
+    if (how === true) await requestData(id);
+    return; }
+  if (m.dataSubmitted && !(await ask(`Daten von ${m.name} geprüft?`, `${m.legalName} · geb. ${dateFull(m.birthdate)} · ${[m.street, [m.zip, m.city].filter(Boolean).join(" "), m.country].filter(Boolean).join(", ")} · ${m.email}`, {ok:"Stimmt, weiter", alt:"Bearbeiten"}).then(r => r === "alt" ? (openModelForm(id), false) : r))) return;
+  if (!(await ask(`Vertrag an ${m.name} schicken?`, `Geht an ${m.email}. Deine Unterschrift ist schon drauf, sie unterschreibt als Zweite.`, {ok:"Vertrag senden"}))) return;
+  const before = m.stage; m.stage = "Vertrag offen"; m.contractSent = TODAY; route();
+  try { const r = await api("model.contract", {id}); reloadLater(); waAfter(m, "Vertrag ist raus", `Per Mail an ${m.email}.`, WA_TEXT["Vertrag offen"](m, r.signUrl)); } catch(e){ m.stage = before; m.contractSent = ""; route(); toast("Vertrag nicht verschickt: " + e.message, true); }
+}
+async function requestData(id){ const m = modelById(id);
+  try { const r = await api("model.dataRequest", {id}); const wa = m.whatsapp ? waLink(m, WA_TEXT["Daten"](m, r.link)) : "";
+    openModal(`<button class="x" onclick="closeModal()">×</button><h2>Link ist raus</h2><p style="color:var(--muted)">${r.mailed ? `Per Mail an ${esc(r.email)}.` : "Mail ging nicht raus, schick den Link per WhatsApp."} Sobald ${esc(m.name)} die Daten abschickt, bekommst du eine Nachricht und eine Aufgabe.</p><div class="card" style="font-size:13px;word-break:break-all">${esc(r.link)}</div><div class="foot">${wa ? `<a class="btn" href="${wa}" target="_blank">Auch per WhatsApp schicken</a>` : ""}<button class="btn p" onclick="closeModal()">Fertig</button></div>`); }
+  catch(e){ toast("Fehler: " + e.message, true); } }
+let SETUP = null;
+async function loadSetup(){ const el = document.getElementById("setupList"); if (!el) return;
+  if (SETUP) renderSetup(el, SETUP);
+  try { const r = await api("setup.status", {}); SETUP = r; if (document.getElementById("setupList") === el) renderSetup(el, r); }
+  catch(e){ if (!SETUP) el.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; } }
+function renderSetup(el, r){ { const open = r.items.filter(i => !i.done).length;
+    el.innerHTML = `<div class="s" style="color:var(--muted);margin-bottom:6px">${open ? `${open} offen` : "Alles erledigt."}</div>` + r.items.map(i => `<div class="item" style="${i.done ? "opacity:.55" : ""}"><div><div class="t">${i.done ? "✓" : "○"} ${esc(i.title)}</div><div class="s">${esc(i.text)}</div></div>
+      <div class="acts">${i.link && !i.done ? `<a class="btn s" href="${i.link}">Öffnen</a>` : ""}${i.kind === "manual" ? `<button class="btn s ${i.done ? "" : "p"}" onclick="toggleSetup('${i.key}', ${!i.done})">${i.done ? "Wieder öffnen" : "Erledigt"}</button>` : ""}</div></div>`).join("");
+    SETUP_OPEN = open; renderMe("einstellungen"); } }
+async function toggleSetup(key, done){ try { await api("setup.toggle", {key, done}); loadSetup(); } catch(e){ toast("Fehler: " + e.message, true); } }
+async function bankAdd(){ try { await api("billing.accountAdd", {label:val("b_label"), holder:val("b_holder"), iban:val("b_iban"), bic:val("b_bic"), bank:val("b_bank"), country:val("b_country"), active:val("b_active")}); toast("Konto gespeichert"); route(); } catch(e){ $("#b_err").textContent = e.message; } }
+async function bankAct(id){ try { await api("billing.accountActivate", {id}); toast("Aktives Konto geändert"); route(); } catch(e){ toast("Fehler: " + e.message, true); } }
+async function bankDel(id, label){ if (!(await ask(`Konto „${label}“ entfernen?`, "Bereits verschickte Rechnungen behalten ihre Bankdaten.", {ok:"Entfernen", danger:true}))) return; try { await api("billing.accountRemove", {id}); toast("Entfernt"); route(); } catch(e){ toast("Fehler: " + e.message, true); } }
+async function loadContract(){ try { const o = await api("contract.template", {}); if (!$("#ctEdit")) return;
+    $("#ctEdit").innerHTML = o.body; $("#ctMeta").textContent = `Zuletzt geändert ${o.updated} · ${o.fields.length} Felder, die das System ausfüllt`; }
+  catch(e){ if ($("#ctMeta")) $("#ctMeta").textContent = "Fehler: " + e.message; } }
+async function saveContract(){ const b = $("#ctSave"); b.disabled = true; b.textContent = "Wird gespeichert, dauert etwa eine Minute …"; $("#ctErr").textContent = "";
+  try { await api("contract.templateSave", {body: $("#ctEdit").innerHTML}); toast("Vertrag gespeichert, neue Verträge nutzen jetzt diesen Text"); loadContract(); }
+  catch(e){ $("#ctErr").textContent = e.message; toast("Nicht gespeichert: " + e.message, true); }
+  finally { b.disabled = false; b.textContent = "Vertrag speichern"; } }
+async function saveTax(){ try { await api("billing.settings", {taxnote:val("b_tax")}); toast("Hinweis gespeichert"); } catch(e){ toast("Fehler: " + e.message, true); } }
+let BILL = null;
+let SC = null;
+async function loadScripts(){ try { SC = await api("scripts.list", {}); if ($("#scMount") && !$("#scEdit")) renderScripts(); } catch(e){ if ($("#scMount")) $("#scMount").innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; } }
+function renderScripts(){ const el = $("#scMount"); if (!el || !SC) return;
+  const cards = SC.scripts.map(s => `<div class="item"><div><div class="t">Skript ${s.no} · ${esc(s.name)} ${s.active ? '<span class="pill ok">aktiv</span>' : '<span class="pill">inaktiv</span>'}</div>
+    <div class="s">${s.stages.length} Stufen${(s.place && s.place.de) ? " · " + esc(s.place.de) : ""} · ${s.stages.map(g => esc(g.title.de || g.title.en)).join(" → ")}</div></div><div class="acts"><button class="btn s" onclick="editScript('${s.id}')">Bearbeiten</button></div></div>`).join("") || '<div class="empty">Noch kein Skript.</div>';
+  el.innerHTML = `<div class="acts" style="justify-content:flex-start;margin-bottom:10px"><button class="btn p" onclick="editScript()">+ Skript</button></div><div class="list">${cards}</div>`; }   // 19.11 Rene: "wer dreht welches Skript" weg, jedes Model dreht das Framework
+async function toggleScript(model, sid){ const m = SC.models.find(x => x.id === model); const was = m.scripts.slice();
+  m.scripts = m.scripts.includes(sid) ? m.scripts.filter(x => x !== sid) : m.scripts.concat(sid); renderScripts();
+  try { await api("scripts.assign", {model, scripts: m.scripts}); } catch(e){ m.scripts = was; renderScripts(); toast("Fehler: " + e.message, true); } }
+const TWO = (cls, v, ph, area) => ["de","en"].map(l => area ? `<label><span>${ph} (${l.toUpperCase()})</span><textarea class="${cls}" data-l="${l}">${esc((v||{})[l]||"")}</textarea></label>` : `<label><span>${ph} (${l.toUpperCase()})</span><input type="text" class="${cls}" data-l="${l}" value="${esc((v||{})[l]||"")}"></label>`).join("");
+function clipHtml(c){ c = c || {}; return `<div class="clip f" style="border-top:1px dashed var(--line2);padding-top:10px;margin-top:10px">${TWO("c_title", c.title, "Video-Titel")}${TWO("c_text", c.text, "Was passiert", true)}<label><span>Fotos genau zu diesem Video (z. B. 3–4)</span><input type="text" class="c_photos" value="${esc(c.photos||"")}"></label><div class="w" style="text-align:right"><button class="btn s d" onclick="this.closest('.clip').remove()">Video entfernen</button></div></div>`; }
+function stageHtml(g){ g = g || {clips: []}; return `<div class="card stg" style="margin-bottom:12px"><div class="sec-head"><h2 class="stgN">Stufe</h2><div class="acts"><button class="btn s" onclick="moveStage(this,-1)">↑</button><button class="btn s" onclick="moveStage(this,1)">↓</button><button class="btn s d" onclick="this.closest('.stg').remove();numberStages()">Stufe entfernen</button></div></div>
+  <div class="f">${TWO("g_title", g.title, "Titel")}<label><span>Bilder (Anzahl, z. B. 8 oder ca. 32)</span><input type="text" class="g_photos" value="${esc(g.photos||"")}"></label><label><span>Preis in € (nur intern)</span><input type="text" class="g_price" value="${g.price == null ? "" : esc(g.price)}"></label>
+  ${TWO("g_outfit", g.outfit, "Outfit", true)}${TWO("g_poses", g.poses, "Posen und Bild", true)}</div>
+  <div class="clips">${(g.clips||[]).map(clipHtml).join("")}</div><div class="acts" style="justify-content:flex-start;margin-top:10px"><button class="btn s" onclick="this.parentElement.previousElementSibling.insertAdjacentHTML('beforeend', clipHtml())">+ Video</button></div></div>`; }
+function numberStages(){ document.querySelectorAll("#scEdit .stgN").forEach((h, i) => h.textContent = "Stufe " + (i + 1)); }
+function moveStage(b, d){ const st = b.closest(".stg"); const sib = d < 0 ? st.previousElementSibling : st.nextElementSibling; if (!sib || !sib.classList.contains("stg")) return; d < 0 ? sib.before(st) : sib.after(st); numberStages(); }
+function editScript(id){ const s = (SC && SC.scripts.find(x => x.id === id)) || {name: "", no: "", active: true, note: "", place: {de: "", en: ""}, stages: []};
+  $("#scMount").innerHTML = `<div id="scEdit"><div class="acts" style="justify-content:flex-start;margin-bottom:12px"><button class="bk" onclick="SC && renderScripts()"><i><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></i>Zurück</button></div>
+    <div class="card" style="margin-bottom:14px"><div class="f"><label><span>Name</span><input type="text" id="sc_name" value="${esc(s.name)}" placeholder="z. B. Framework"></label><label><span>Nummer</span><input type="number" id="sc_no" value="${esc(s.no)}"></label>
+    ${TWO("sc_place", s.place, "Wo wird gedreht (sieht das Model)", true)}
+    <label class="w"><span>Notiz (nur intern)</span><input type="text" id="sc_note" value="${esc(s.note)}"></label><label class="chk"><input type="checkbox" id="sc_active" ${s.active ? "checked" : ""}> Aktiv (Models sehen es)</label></div></div>
+    <div id="stgList">${s.stages.map(stageHtml).join("")}</div>
+    <div class="acts" style="justify-content:flex-start;margin:6px 0 20px"><button class="btn" onclick="$('#stgList').insertAdjacentHTML('beforeend', stageHtml());numberStages()">+ Stufe</button></div>
+    <div class="foot"><span class="err" id="sc_err"></span><button class="btn p" onclick="saveScript('${id || ""}')">Speichern</button></div></div>`;
+  numberStages(); window.scrollTo(0, 0); }
+async function saveScript(id){ const two = (root, cls) => { const o = {}; root.querySelectorAll(":scope ." + cls).forEach(i => o[i.dataset.l] = i.value.trim()); return o; };
+  const stages = [...document.querySelectorAll("#stgList .stg")].map(st => { const f = st.querySelector(".f");
+    return {title: two(f, "g_title"), photos: st.querySelector(".g_photos").value.trim(), price: st.querySelector(".g_price").value.trim(), outfit: two(f, "g_outfit"), poses: two(f, "g_poses"),
+      clips: [...st.querySelectorAll(".clip")].map(c => ({title: two(c, "c_title"), text: two(c, "c_text"), photos: c.querySelector(".c_photos").value.trim()}))}; });
+  const place = {}; document.querySelectorAll("#scEdit .sc_place").forEach(i => place[i.dataset.l] = i.value.trim());
+  try { await api("scripts.save", {id, name: val("sc_name"), no: val("sc_no"), note: val("sc_note"), active: $("#sc_active").checked, place, stages});
+    toast("Skript gespeichert"); SC = null; $("#scMount").innerHTML = '<div class="empty">lädt…</div>'; loadScripts(); }
+  catch(e){ $("#sc_err").textContent = e.message; } }
+async function loadBilling(){ try { BILL = await api("billing.overview", {}); renderBilling(); } catch(e){ if ($("#billMount")) $("#billMount").innerHTML = esc(e.message); } }
+function renderBilling(){
+  const o = BILL, el = $("#billMount"); if (!el) return; el.className = "";
+  const weeks = [...new Set(o.rows.map(r => r.week))];
+  const pill = st => `<span class="pill ${st==="Bezahlt"?"ok":st==="Überfällig"?"bad":st==="Nachweis da"?"blue":st==="Rechnung raus"?"warn":"gray"}">${esc(st)}</span>`;
+  const row = r => `<tr class="row"><td><div class="t">${esc(r.modelName)}</div><div class="s">KW ${r.kw} · fällig ${fmt(r.due)}${r.no?` · ${esc(r.no)}`:""}</div></td>
+    <td>${r.status==="Offen" ? `<input class="inl" style="width:120px" id="net_${r.id}" value="${r.net ?? ""}" placeholder="Netto €" onkeydown="if(event.key==='Enter')setNet('${r.id}')"> <button class="btn s" onclick="setNet('${r.id}')">OK</button> <button class="btn s" onclick="estimateNet('${r.id}')">Schätzen</button>` : `<div class="t">${eur(r.net)}</div>`}<div class="s">${r.source?esc(r.source):""}${r.revProof?` · <a href="${esc(r.revProof)}" target="_blank" style="color:var(--pink2)">Screenshot</a>`:""}</div></td>
+    <td><div class="t">${r.amount!=null?eur(r.amount):"–"}</div><div class="s">${r.share} %</div></td>
+    <td>${pill(r.status)}${r.payProof?`<div class="s"><a href="${esc(r.payProof)}" target="_blank" style="color:var(--pink2)">Nachweis</a></div>`:""}</td>
+    <td class="acts">${r.status==="Offen"&&r.amount!=null?`<button class="btn s p" onclick="sendInvoice('${r.id}')">Rechnung senden</button>`:""}${r.pdf?`<a class="btn s" href="${esc(r.pdf)}" target="_blank">PDF</a>`:""}${["Rechnung raus","Nachweis da","Überfällig"].includes(r.status)?`<button class="btn s" onclick="markPaid('${r.id}')">Bezahlt</button>`:""}</td></tr>`;
+  el.innerHTML = `${o.bankReady ? "" : `<div class="card" style="border-color:var(--warn,#ffb35c);margin-bottom:12px">Bankverbindung fehlt noch. <a href="#einstellungen" style="color:var(--pink2)">In den Einstellungen eintragen</a>, sonst gehen keine Rechnungen raus.</div>`}
+    <div class="acts" style="justify-content:flex-start;margin-bottom:10px"><button class="btn" onclick="ensureWeek()">Zeilen für KW ${o.kw} anlegen</button><span class="s" style="color:var(--muted);align-self:center">${o.active} aktive Model(s). Passiert montags auch automatisch.</span></div>
+    ${weeks.map(w => `<div class="sec"><div class="sec-head"><h2>KW ${o.rows.find(r => r.week===w).kw}</h2><div class="cs">${fmt(w)} bis ${fmt(addDays(w,6))} · Summe ${eur(o.rows.filter(r => r.week===w).reduce((s,r)=>s+(r.amount||0),0))}</div></div>
+      <div class="card" style="padding:4px 6px;overflow:auto"><table><thead><tr><th>Model</th><th>Nettoumsatz</th><th>Betrag</th><th>Status</th><th></th></tr></thead><tbody>${o.rows.filter(r => r.week===w).map(row).join("")}</tbody></table></div></div>`).join("") || '<div class="empty">Noch keine Abrechnungen. Montags entstehen die Zeilen für alle Models auf „Aktiv“.</div>'}`;
+}
+const eur = v => v == null || v === "" ? "–" : Number(v).toLocaleString("de-DE", {style:"currency", currency:"EUR"});
+async function ensureWeek(){ try { const r = await api("billing.ensure", {}); toast(`${r.created} Zeile(n) angelegt`); loadBilling(); } catch(e){ toast("Fehler: " + e.message, true); } }
+async function setNet(id){ const v = val("net_" + id); if (!v) return; try { await api("billing.set", {id, net:v, source:"CRM"}); toast("Gespeichert"); loadBilling(); } catch(e){ toast("Fehler: " + e.message, true); } }
+async function estimateNet(id){ try { await api("billing.estimate", {id}); toast("Aus den letzten 4 Wochen geschätzt"); loadBilling(); } catch(e){ toast(e.message, true); } }
+async function sendInvoice(id){ const r0 = BILL.rows.find(r => r.id===id); if (!(await ask(`Rechnung an ${r0.modelName} senden?`, `${eur(r0.amount)} für KW ${r0.kw}, fällig ${fmt(r0.due)}. Geht als PDF per Mail raus und steht im Portal.`, {ok:"Rechnung senden"}))) return;
+  try { const r = await api("billing.send", {id}); toast(`Rechnung ${r.no} ${r.mailed ? "verschickt" : "erstellt, Mail ging nicht raus"}`, !r.mailed); loadBilling(); } catch(e){ toast("Fehler: " + e.message, true); } }
+async function markPaid(id){ try { await api("billing.paid", {id}); toast("Als bezahlt markiert"); loadBilling(); } catch(e){ toast("Fehler: " + e.message, true); } }
+async function loadVault(id){ const el = document.getElementById("vault_" + id); if (!el) return;
+  try { const v = await api("model.vault", {id});
+    el.innerHTML = `${v.accounts.map(a => `<div class="s" style="margin-top:4px">${a.kind === "fan" ? '<span class="pill">Fanseite</span> ' : ""}${a.link ? `<a href="${esc(a.link)}" target="_blank" style="color:var(--pink2)">${esc(a.platform)}</a>` : esc(a.platform)} · ${a.kind === "fan" ? "" : "@"}${esc(a.username)}${a.email ? ` · ${esc(a.email)}` : ""}${a.hasPassword ? ` · <button class="btn s" onclick="revealPw('${id}',${a.i},this)">Passwort zeigen</button>` : " · kein Passwort"}${a.note ? ` · ${esc(a.note)}` : ""}</div>`).join("") || '<div class="s">Noch keine Accounts hinterlegt.</div>'}
+      <div style="margin-top:6px">${v.updated ? `<span class="s">Stand ${fmt(v.updated)}</span> · ` : ""}<button class="btn s" onclick="requestVault('${id}')">Zugänge anfordern</button></div>`; }
+  catch(e){ el.textContent = e.message; } }
+async function revealPw(id, i, btn){ try { const r = await api("model.vaultReveal", {id, i}); btn.outerHTML = `<code style="user-select:all">${esc(r.pw)}</code>`; } catch(e){ toast("Fehler: " + e.message, true); } }
+async function requestVault(id){ try { const r = await api("model.vaultRequest", {id}); if (!r.mailed) toast("Mail ging nicht raus", true); else waAfter(modelById(id), "Bitte um Zugänge ist raus", "Per Mail.", WA_TEXT["Zugänge"](modelById(id))); } catch(e){ toast("Fehler: " + e.message, true); } }
+async function sendAccess(id, stage){
+  const m = modelById(id); if (!m.email) { openModelForm(id); toast("Erst eine E-Mail eintragen", true); return; }
+  const before = m.stage; m.stage = stage && !["Unterschrieben"].includes(stage) ? stage : "Onboarding"; route();
+  try { const r = await api("model.access", {id}); if (stage && stage !== r.stage && stage !== "Unterschrieben") await api("model.stage", {id, stage});
+    if (!r.mailed) toast("Zugang angelegt, Mail ging nicht raus (Einstellungen prüfen)", true); else waAfter(m, "Zugang ist raus", `Per Mail an ${m.email} · Drive-Ordner wird angelegt.`, WA_TEXT["Zugang"](m)); reloadLater(); }
+  catch(e){ m.stage = before; route(); toast("Fehler: " + e.message, true); }
+}
+function openToolForm(id){
+  const t = id ? D.tools.find(x => x.id === id) : {group:"Northfeed", order:50};
+  openModal(`<button class="x" onclick="closeModal()">×</button><h2>${id ? "Link bearbeiten" : "Link hinzufügen"}</h2>
+    <div class="f"><label class="w"><span>Name *</span><input type="text" id="tl_name" value="${esc(t.name)}"></label>
+    <label class="w"><span>URL *</span><input type="url" id="tl_url" value="${esc(t.url)}" placeholder="https://…"></label>
+    <label class="w"><span>Gruppe</span>${chips("tl_group", D.toolGroups.filter(g => g !== "Sonstiges"), t.group || "Tools", g => g)}</label>
+    <label><span>Reihenfolge</span><input type="number" id="tl_order" value="${esc(t.order)}"></label>
+    <label class="w"><span>Beschreibung</span><input type="text" id="tl_desc" value="${esc(t.desc)}"></label>
+    <label class="w"><span>Login-Hinweis (welches Konto, nie das Passwort)</span><input type="text" id="tl_hint" value="${esc(t.hint)}"></label></div>
+    <div class="foot"><span class="err" id="tl_err"></span>${id ? `<button class="btn d" onclick="deleteTool('${id}')">Löschen</button>` : ""}<button class="btn" onclick="closeModal()">Abbrechen</button><button class="btn p" id="tl_save" onclick="saveTool(${id?`'${id}'`:"null"})">Speichern</button></div>`);
+}
+async function saveTool(id){
+  const body = {name:val("tl_name"), url:val("tl_url"), group:val("tl_group"), order:Number(val("tl_order")||50), desc:val("tl_desc"), hint:val("tl_hint")};
+  if (!body.name || !body.url) { $("#tl_err").textContent = "Name und URL fehlen."; return; }
+  try { if (id) { body.id = id; await api("tool.update", body); } else await api("tool.create", body); closeModal(); await reload(); toast("Link gespeichert"); }
+  catch(e){ $("#tl_err").textContent = e.message; }
+}
+async function deleteTool(id){ if (!(await ask("Link entfernen?", "", {ok:"Entfernen", danger:true}))) return; try { await api("tool.delete", {id}); closeModal(); await reload(); toast("Link entfernt"); } catch(e){ toast("Fehler: " + e.message, true); } }
+let CH = null;
+function renderHomeChatter(){                                   // 18.11 Rene: compact chatter list under the models + what needs you
+  const el = $("#homeCh"); if (!el || !CH) return;
+  const live = CH.chatters.filter(c => c.stage !== "Rejected");
+  const pill = {"Review":"warn","Test shift":"blue","Contract":"blue","Active":"ok","Course":"gray","Test":"gray"};
+  const label = {"Course":"Kurs","Test":"Test","Review":"Test lesen","Test shift":"Testschicht","Contract":"Vertrag offen","Active":"Aktiv"};
+  const order = ["Review","Test shift","Contract","Test","Course","Active"];
+  live.sort((a,b) => (b.running - a.running) || order.indexOf(a.stage) - order.indexOf(b.stage));
+  el.innerHTML = live.length ? `<div class="card" style="padding:4px 6px;overflow:auto"><table><thead><tr><th>Chatter</th><th>Stufe</th><th>Schicht</th><th>Creator</th><th>Umsatz</th></tr></thead><tbody>${live.map(c => `
+    <tr class="row" style="cursor:pointer" onclick="location.hash='chatter'"><td><div class="t">${esc(c.name)}</div><div class="s">${esc(c.email)}</div></td>
+      <td><span class="pill ${pill[c.stage]||"gray"}">${esc(label[c.stage] || c.stage)}</span></td>
+      <td>${c.running ? '<span class="pill ok">in Schicht</span>' : ""}<div class="s">${esc(c.shift || "keine Schicht")}</div></td>
+      <td><div class="s">${esc(c.models.map(m => m.name).join(", ") || "–")}</div></td>
+      <td><div class="t">$${c.revenue.toLocaleString("en-US")}</div><div class="s">${c.shifts} Schichten</div></td></tr>`).join("")}</tbody></table></div>`
+    : '<div class="empty">Noch keine Chatter. <a href="#chatter/neu" style="color:var(--pink2)">Ersten anlegen →</a></div>';
+  const todo = [], n = st => CH.chatters.filter(c => c.stage === st).length, apps = D.applications.filter(a => a.status === "new").length;
+  if (apps) todo.push([`${apps} neue Bewerbung${apps > 1 ? "en" : ""}`, "#pipeline"]);
+  if (n("Review")) todo.push([`${n("Review")} Chatter-Test${n("Review") > 1 ? "s" : ""} lesen`, "#chatter"]);
+  if (n("Test shift")) todo.push([`${n("Test shift")} Testschicht${n("Test shift") > 1 ? "en" : ""} auswerten`, "#chatter"]);
+  if (n("Contract")) todo.push([`${n("Contract")} Chatter-Vertrag offen`, "#chatter"]);
+  const t = $("#homeTodo"); if (t) t.innerHTML = todo.length ? `<div class="sec" style="margin-top:6px"><div class="sec-head"><div><h2>Zu erledigen</h2></div></div><div style="display:flex;gap:10px;flex-wrap:wrap">${todo.map(([txt, h]) => `<a class="btn" href="${h}" style="border-color:var(--pink)">${esc(txt)} →</a>`).join("")}</div></div>` : "";
+}
+async function loadChatter(){ try { CH = await api("chatter.list", {}); renderChatter(); } catch(e){ if ($("#chMount")) $("#chMount").innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; } }
+const CH_NEXT = {"Review": [["Test shift","Test bestanden → Testschicht"],["Rejected","Ablehnen"]], "Test shift": [["Contract","Testschicht bestanden → Vertrag"],["Rejected","Ablehnen"]],
+  "Contract": [["Active","Manuell aktiv setzen"]], "Course": [["Rejected","Ablehnen"]], "Test": [["Rejected","Ablehnen"]], "Active": [["Rejected","Beenden"]], "Rejected": [["Course","Wieder öffnen"]]};
+function renderChatter(){
+  if (!$("#chMount") || !CH) return;
+  const by = st => CH.chatters.filter(c => c.stage === st);
+  const pill = {"Review":"warn","Test shift":"blue","Contract":"blue","Active":"ok","Rejected":"bad"};
+  $("#chMount").innerHTML = CH.stages.filter(st => by(st).length).map(st => `<h2 style="margin:26px 0 10px">${esc(st)} <span class="pill ${pill[st]||"gray"}">${by(st).length}</span></h2>` + by(st).map(c => `
+    <div class="item" style="flex-wrap:wrap;margin-bottom:10px"><div style="flex:1;min-width:260px"><div class="t">${esc(c.name)} ${c.running ? '<span class="pill ok">in Schicht</span>' : ""}</div>
+      <div class="s">${esc(c.email)} · ${esc(c.shift || "keine Schicht")} · Creator: ${esc(c.models.map(m => m.name).join(", ") || "–")} · ${c.shifts} Schichten · $${c.revenue.toLocaleString("en-US")}</div>
+      ${c.testScore != null ? `<details style="margin-top:8px"><summary class="s" style="cursor:pointer">Test: Teil A ${c.testScore}/17 – Antworten lesen</summary><pre style="white-space:pre-wrap;font:13px/1.5 inherit;background:var(--panel2,#161a22);padding:12px;border-radius:12px;margin-top:8px">${esc(c.testAnswers)}</pre></details>` : ""}</div>
+      <div class="acts">${(CH_NEXT[c.stage] || []).map(([st, lab]) => `<button class="btn s ${st === "Rejected" ? "d" : ""}" onclick="chStage('${c.id}','${st}','${esc(c.name)}')">${esc(lab)}</button>`).join("")}
+      <button class="btn s" onclick="chEdit('${c.id}')">Schicht/Creator</button></div></div>`).join("")).join("") || '<div class="empty">Noch keine Chatter.</div>';
+}
+async function addChatter(){
+  $("#ch_add").disabled = true; $("#ch_err").textContent = "";
+  try { const r = await api("chatter.create", {name: val("ch_name"), email: val("ch_mail"), shift: val("ch_shift"), supervisor: val("ch_sup")});
+    toast(r.mailed ? "Angelegt, Login-Mail ist raus" : "Angelegt (Mail nicht verschickt – Mailversand prüfen)"); ["ch_name","ch_mail","ch_shift"].forEach(i => $("#"+i).value = ""); await loadChatter(); }
+  catch(e){ $("#ch_err").textContent = e.message; }
+  $("#ch_add").disabled = false;
+}
+async function chStage(id, st, name){
+  const txt = {"Test shift":"Er bekommt eine Mail: Test bestanden, Testschicht folgt.","Active":"Er bekommt die Willkommensmail mit Discord-Link.","Rejected":"Er bekommt eine freundliche Absage, der Portal-Zugang endet.","Contract":"Der englische Vertrag geht sofort per DocuSeal raus (du unterschreibst automatisch). Nach seiner Unterschrift wird er automatisch aktiv und bekommt die Discord-Einladung.","Course":"Zugang wieder offen, er startet beim Kurs."}[st] || "";
+  if (!(await ask(`${name}: ${st}?`, txt, {ok:"Ja", danger: st === "Rejected"}))) return;
+  try { const r = await api("chatter.stage", {id, stage: st}); toast(r.mailed ? "Gespeichert, Mail ist raus" : "Gespeichert"); await loadChatter(); } catch(e){ toast("Fehler: " + e.message, true); }
+}
+async function chEdit(id){
+  const c = CH.chatters.find(x => x.id === id); if (!c) return;
+  const sh = await ask("Schicht", "z. B. Mon–Sat 08:00–16:00 (Sun off) oder Shift 2", {input: c.shift || "", ok:"Weiter"}); if (sh === null) return;
+  const opts = CH.models.map(m => m.name).join(", ");
+  const ms = await ask("Creator", "Namen mit Komma trennen. Verfügbar: " + opts, {input: c.models.map(m => m.name).join(", "), ok:"Speichern"}); if (ms === null) return;
+  const ids = ms.split(",").map(x => x.trim().toLowerCase()).filter(Boolean).map(n => (CH.models.find(m => m.name.toLowerCase() === n) || {}).id).filter(Boolean);
+  try { await api("chatter.update", {id, shift: sh, models: ids}); toast("Gespeichert"); await loadChatter(); } catch(e){ toast("Fehler: " + e.message, true); }
+}
+async function saveDiscord(){
+  $("#wh_save").disabled = true; $("#wh_err").textContent = "";
+  try { const r = await fetch("/manager/discord", {method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({online: val("wh_on"), log: val("wh_log"), alert: val("wh_al")})}); const j = await r.json(); if (!j.ok) throw new Error(j.error || "Fehler");
+    toast("Discord verbunden – Testnachricht ist in den Kanälen"); D.discordReady = (D.discordReady || 0) + j.saved.length; route(); }
+  catch(e){ $("#wh_err").textContent = e.message; $("#wh_save").disabled = false; }
+}
+async function saveDeepl(){
+  $("#dl_save").disabled = true; $("#dl_err").textContent = "";
+  try { const r = await fetch("/manager/deepl", {method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({key: val("dl_key")})}); const j = await r.json(); if (!j.ok) throw new Error(j.error || "Fehler");
+    toast(`DeepL läuft (${j.used.toLocaleString("de-DE")} von ${j.limit.toLocaleString("de-DE")} Zeichen genutzt)`); D.deeplReady = true; route(); }
+  catch(e){ $("#dl_err").textContent = e.message; $("#dl_save").disabled = false; }
+}
+async function saveSmtp(){
+  $("#s_save").disabled = true; $("#s_err").textContent = "";
+  try { const r = await fetch("/manager/smtp", {method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({user: val("s_user"), password: val("s_pw")})}); const j = await r.json(); if (!j.ok) throw new Error(j.error || "Fehler");
+    toast("Mailversand läuft, Testmail ist raus"); D.mailReady = true; route(); }
+  catch(e){ $("#s_err").textContent = e.message; $("#s_save").disabled = false; }
+}
+async function confirmImages(id, key){ try { await api("model.confirmImages", {id, key}); toast("Bestätigt, ihre Aufgabe ist abgehakt."); route(); } catch (e) { toast(String(e.message || e), true); } }
+async function setLanguages(id, cur){ const v = await ask("Sprachen", "In welchen Sprachen schreiben ihre Chatter?", {input: cur || "", placeholder:"z. B. Deutsch, Englisch", ok:"Speichern"}); if (v === null) return;
+  try { await api("model.languages", {id, languages: v}); toast("Gespeichert."); route(); } catch (e) { toast(String(e.message || e), true); } }
+async function requestImages(id){ const n = await ask("Bilder nachfordern", "Was soll sie nachliefern? Das landet als Aufgabe in ihrem Portal.", {input:"", placeholder:"z. B. Ganzkörper, 5 neue, Tageslicht", ok:"Anfordern"}); if (n === null) return; try { const r = await api("model.requestImages", {id, note:n}); await reload(); waAfter(modelById(id), "Bilder angefordert", r.mailed ? "Aufgabe angelegt und Mail raus." : "Aufgabe angelegt.", WA_TEXT["Bilder"](modelById(id), n)); } catch(e){ toast("Fehler: " + e.message, true); } }
+async function makeDrive(id){ try { const r = await api("model.drive", {id}); toast("Drive-Ordner stehen" + (r.drive.shared ? " und sind freigegeben" : "")); await reload(); } catch(e){ toast("Fehler: " + e.message, true); } }
+
+// ---------- actions ----------
+async function setStatus(kind, id, status){ try { await api(kind + ".update", {id, status}); toast("Gespeichert"); const it = (kind==="plan"?D.plan:D.tasks).find(x => x.id===id); if (it) it.status = status; route(); } catch(e){ toast("Fehler: " + e.message, true); } }
+async function appStatus(id, status, extra){ try { await api("app.status", Object.assign({id, status}, extra||{})); const a = D.applications.find(x => x.id===id); if (a) Object.assign(a, {status}, extra||{}); toast("Gespeichert"); closeModal(); route(); } catch(e){ toast("Fehler: " + e.message, true); } }
+let DRAG = null;
+function dragStart(ev, kind, id){ DRAG = {kind, id}; ev.dataTransfer.effectAllowed = "move"; try { ev.dataTransfer.setData("text/plain", id); } catch(e){} }
+async function dropCard(ev, stage){ ev.preventDefault(); const d = DRAG; DRAG = null; if (!d) return;
+  if (d.kind === "model") { const m = modelById(d.id); if ((m.stage || "Bewerbung") !== stage) await setStage(d.id, stage); return; }
+  if (d.kind === "app") { if (stage === "Bewerbung") return; await acceptAppTo(d.id, stage); } }
+async function acceptAppTo(id, stage){ const a = D.applications.find(x => x.id===id); if (!a) return;
+  const name = [a.firstName,a.lastName].filter(Boolean).join(" ") || a.instagram || (a.email || "").split("@")[0] || "Neues Model";
+  try { const r = await api("model.create", {name, email:a.email, language:(a.lang||"de").toUpperCase()==="DE"?"DE":"EN", whatsapp:a.phone || "", stage: stage === "Vertrag offen" ? "Call gebucht" : stage, generatePassword:true});
+    a.status = "accepted"; D.models.push({id:r.id, name, email:a.email || "", language:(a.lang||"de").toUpperCase()==="DE"?"DE":"EN", whatsapp:a.phone || "", stage: stage === "Vertrag offen" ? "Call gebucht" : stage, status:"Onboarding", package:"Full Management", hasPassword:true, accountsMode:"Nein"});
+    closeModal(); toast(`${name} ist jetzt ein Model (${stage})`); location.hash = "model/" + r.id;
+    api("app.status", {id, status:"accepted", model:name}).then(reloadLater).catch(() => {});
+    if (stage === "Vertrag offen") setTimeout(() => sendContract(r.id), 200); }
+  catch(e){ toast("Fehler: " + e.message, true); } }
+function appCard(a){
+  const L = {new:"Neu", contacted:"Kontaktiert", accepted:"Angenommen", declined:"Abgelehnt"};
+  return `<div class="app"><div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start"><div><div class="t" style="font-weight:600">${esc([a.firstName,a.lastName].filter(Boolean).join(" ") || "ohne Name")}</div><div class="s" style="color:var(--muted);font-size:13px">${esc(a.received.replace("T"," ").slice(0,16))} · ${esc(a.lang.toUpperCase())}${a.score?` · Score ${esc(a.score)}`:""}${a.utm?` · ${esc(a.utm)}`:""}</div></div><span class="pill ${a.status==="accepted"?"ok":a.status==="declined"?"bad":a.status==="contacted"?"blue":""}">${L[a.status]}</span></div>
+      <div class="ph">${a.photos.map(p => `<img src="${esc(p)}" alt="" onclick="window.open('${esc(p)}')">`).join("")}</div>
+      <div class="ans">${a.email?`<b>E-Mail</b> ${esc(a.email)}<br>`:""}${a.phone?`<b>WhatsApp</b> <a href="https://wa.me/${esc(a.phone.replace(/[^0-9]/g,""))}" target="_blank" style="color:var(--pink2)">${esc(a.phone)}</a><br>`:""}${a.instagram?`<b>Instagram</b> ${esc(a.instagram)}<br>`:""}${Object.entries(a.answers).map(([k,v]) => `<b>${esc(k)}</b> ${esc(Array.isArray(v)?v.join(", "):v)}`).join("<br>")}${a.note?`<br><b>Notiz</b> ${esc(a.note)}`:""}${a.model?`<br><b>Model</b> ${esc(a.model)}`:""}</div>
+      <div class="acts" style="justify-content:flex-start;margin-top:10px">${a.status!=="contacted"?`<button class="btn s" onclick="appStatus('${a.id}','contacted')">Kontaktiert</button>`:""}${a.status!=="accepted"?`<button class="btn s p" onclick="acceptAppTo('${a.id}','Kontaktiert')">→ Kontaktiert (wird Model)</button>`:""}${a.status!=="declined"?`<button class="btn s d" onclick="appStatus('${a.id}','declined')">Ablehnen</button>`:""}<button class="btn s" onclick="appNote('${a.id}')">Notiz</button></div></div>`;
+}
+function openApp(id){ const a = D.applications.find(x => x.id===id); if (!a) return; openModal(`<button class="x" onclick="closeModal()">×</button><h2>Bewerbung</h2>${appCard(a)}`); }
+async function appNote(id){ const a = D.applications.find(x => x.id===id); const n = await ask("Notiz zur Bewerbung", "", {input:a.note || "", ok:"Speichern"}); if (n === null) return; appStatus(id, a.status, {note:n}); }
+function acceptApp(id){ const a = D.applications.find(x => x.id===id); closeModal();
+  openModelForm(null, {name:[a.firstName,a.lastName].filter(Boolean).join(" "), email:a.email, language:(a.lang||"de").toUpperCase()==="DE"?"DE":"EN", handles:a.instagram, notes:"Aus Bewerbung " + a.id, whatsapp:a.phone || "", stage:"Neu", _app:id}); }
+
+// ---------- forms ----------
+function closeModal(){ $("#modal").classList.remove("on"); $("#box").innerHTML = ""; }
+function openModal(html){ $("#box").innerHTML = html; $("#modal").classList.add("on"); const f = $("#box input,#box select,#box textarea"); if (f) f.focus(); }
+function val(id){ const el = document.getElementById(id); if (!el) return ""; if (el.classList.contains("chips")) return el.dataset.v || ""; return el.type === "checkbox" ? el.checked : el.value.trim(); }
+function optionsHtml(list, cur){ return list.map(o => `<option value="${esc(o)}" ${o===cur?"selected":""}>${de(o)}</option>`).join(""); }
+function modelOptions(cur){ return D.models.filter(m=>m.status!=="Ended").map(m => `<option value="${m.id}" ${m.id===cur?"selected":""}>${esc(m.name)}</option>`).join(""); }
+
+function openModelForm(id, pre){
+  const m = id ? modelById(id) : Object.assign({status:"Onboarding", language:"DE", package:"Full Management", country:"Deutschland"}, pre || {});
+  openModal(`<button class="x" onclick="closeModal()">×</button><h2>${id ? "Model bearbeiten" : "Model anlegen"}</h2>
+    <div class="f"><label><span>Name (Künstlername) *</span><input type="text" id="m_name" value="${esc(m.name)}" placeholder="z. B. Lea"></label>
+    <label><span>E-Mail (Login + Drive, am besten Gmail)</span><input type="email" id="m_email" value="${esc(m.email)}" placeholder="lea@gmail.com"></label>
+    <label><span>WhatsApp (mit Ländervorwahl)</span><input type="tel" id="m_whatsapp" value="${esc(m.whatsapp)}" placeholder="+49 170 1234567"></label>
+    <label><span>Sprache im Portal</span>${chips("m_language", [["DE","Deutsch"],["EN","Englisch"]], m.language || "DE")}</label>
+    <label><span>Leistungsumfang (Regel: Full Management)</span>${chips("m_package", D.options.package, m.package || "Full Management", x => x)}</label>
+    <label><span>Portal-Passwort ${id ? (m.hasPassword ? "(gesetzt, leer lassen = behalten)" : "(noch keins)") : ""}</span><input type="text" id="m_password" placeholder="${id ? "neues Passwort oder leer" : "leer = wird automatisch erzeugt"}" autocomplete="off"></label>
+    <div class="w" style="margin:6px 0 -2px;color:var(--muted);font-size:13px;letter-spacing:.3px">VERTRAGSDATEN (werden in den Vertrag eingesetzt)</div>
+    <label><span>Bürgerlicher Name</span><input type="text" id="m_legalName" value="${esc(m.legalName)}" placeholder="Vor- und Nachname wie im Ausweis"></label>
+    <label><span>Geburtsdatum</span><input type="date" id="m_birthdate" value="${esc(m.birthdate)}"></label>
+    <label class="w"><span>Straße und Hausnummer</span><input type="text" id="m_street" value="${esc(m.street)}"></label>
+    <label><span>PLZ</span><input type="text" id="m_zip" value="${esc(m.zip)}"></label>
+    <label><span>Ort</span><input type="text" id="m_city" value="${esc(m.city)}"></label>
+    <label><span>Land</span><input type="text" id="m_country" value="${esc(m.country || "Deutschland")}"></label>
+    ${!id && !(pre && pre._app) ? '' : ''}</div>
+    <div class="foot"><span class="err" id="m_err"></span><button class="btn" onclick="closeModal()">Abbrechen</button><button class="btn p" id="m_save" onclick="saveModel(${id?`'${id}'`:"null"}, ${pre&&pre._app?`'${pre._app}'`:"null"}, ${pre&&pre.stage?`'${pre.stage}'`:"null"})">Speichern</button></div>`);
+}
+// 16.11 Rene: OF photos (profile picture, banner, feed) are optional - only models without a ready OF profile get the task
+async function toggleOfPhotos(id){ const m = modelById(id); if (!m.id) return; m.ofPhotos = !m.ofPhotos; route();
+  try { await api("model.update", {id, ofPhotos: m.ofPhotos}); } catch (e) { m.ofPhotos = !m.ofPhotos; route(); toast(String(e.message || e), true); } }
+async function saveModel(id, appId, stage){
+  const body = {name:val("m_name"), email:val("m_email"), language:val("m_language"), password:val("m_password"), package:val("m_package"), whatsapp:val("m_whatsapp"),
+    legalName:val("m_legalName"), birthdate:val("m_birthdate"), street:val("m_street"), zip:val("m_zip"), city:val("m_city"), country:val("m_country")};
+  if (stage) body.stage = stage;
+  if (!body.name) { $("#m_err").textContent = "Name fehlt."; return; }
+  $("#m_save").disabled = true;
+  try {
+    let pw = "";
+    if (id) { body.id = id; await api("model.update", body); }
+    else { body.generatePassword = true; const r = await api("model.create", body); pw = r.password;
+      // 15.11 Rene "Anlegen dauert": show the new model at once, refresh in the background
+      D.models.push(Object.assign({id:r.id, status:"Onboarding", stage: stage || "Onboarding", package: body.package || "Full Management", hasPassword:true, accountsMode:"Nein"}, body));
+      if (appId) { const a = D.applications.find(x => x.id === appId); if (a) a.status = "accepted"; api("app.status", {id:appId, status:"accepted", model:body.name}).catch(() => {}); } }
+    closeModal(); if (id) Object.assign(modelById(id), body); route(); reloadLater();
+    toast(id ? "Model gespeichert" : "Model angelegt");
+    if (!id && pw) openModal(`<button class="x" onclick="closeModal()">×</button><h2>${esc(body.name)} ist angelegt</h2><p style="color:var(--muted)">Login für das Portal (portal.northfeed-management.com):</p><div class="card" style="font-size:15px"><b>E-Mail</b> ${esc(body.email || "— noch keine E-Mail eingetragen")}<br><b>Passwort</b> <code style="font-size:16px">${esc(pw)}</code></div><p style="color:var(--muted);font-size:13px;margin-top:12px">Nach der Unterschrift geht das Passwort automatisch mit der Willkommensmail raus. Bei einem Model ohne Vertrag schickst du es per WhatsApp.</p><div class="foot"><button class="btn p" onclick="closeModal()">Fertig</button></div>`);
+  } catch(e) { $("#m_err") && ($("#m_err").textContent = e.message); $("#m_save") && ($("#m_save").disabled = false); toast("Fehler: " + e.message, true); }
+}
+function openPlanForm(modelId, id){
+  const p = id ? D.plan.find(x => x.id===id) : {model: modelId || "", date: TODAY, platform:"Instagram", type:"Reel", status:"Planned"};
+  openModal(`<button class="x" onclick="closeModal()">×</button><h2>${id ? "Plan-Eintrag bearbeiten" : "Plan-Eintrag anlegen"}</h2>
+    <div class="f"><label class="w"><span>Model *</span>${modelChips("p_model", p.model || (activeModels()[0]||{}).id)}</label><label><span>Datum</span><input type="date" id="p_date" value="${esc(p.date)}"></label>
+    <label class="w"><span>Titel *</span><input type="text" id="p_title" value="${esc(p.title)}" placeholder="z. B. Reel: Mein Morgen ohne Handy"></label>
+    <label class="w"><span>Plattform</span>${chips("p_platform", D.options.platform, p.platform)}</label><label class="w"><span>Typ</span>${chips("p_type", D.options.type, p.type)}</label>
+    <label class="w"><span>Status</span>${chips("p_status", D.options.planStatus, p.status)}</label><label><span>Outfit / Ort</span><input type="text" id="p_outfit" value="${esc(p.outfit)}"></label>
+    <label class="w"><span>Hook / Idee (die ersten 3 Sekunden, oder die Idee in 1–2 Sätzen)</span><textarea id="p_hook">${esc(p.hook)}</textarea></label>
+    <label class="w"><span>Referenz-Link (Reel, an dem sich das orientiert; wird im Portal abgespielt)</span><input type="url" id="p_reference" value="${esc(p.reference)}" placeholder="https://www.instagram.com/reel/…"></label>
+    <label class="w"><span>Caption</span><textarea id="p_caption">${esc(p.caption)}</textarea></label>
+    <label><span>Veröffentlicht-Link</span><input type="url" id="p_published" value="${esc(p.published)}"></label><label><span>Notizen</span><input type="text" id="p_notes" value="${esc(p.notes)}"></label></div>
+    <div class="foot"><span class="err" id="p_err"></span><button class="btn" onclick="closeModal()">Abbrechen</button><button class="btn p" id="p_save" onclick="savePlan(${id?`'${id}'`:"null"})">Speichern</button></div>`);
+}
+async function savePlan(id){
+  const body = {model:val("p_model"), date:val("p_date"), title:val("p_title"), platform:val("p_platform"), type:val("p_type"), status:val("p_status"), outfit:val("p_outfit"), hook:val("p_hook"), reference:val("p_reference"), caption:val("p_caption"), published:val("p_published"), notes:val("p_notes")};
+  if (!body.title || !body.model) { $("#p_err").textContent = "Model und Titel fehlen."; return; }
+  $("#p_save").disabled = true;
+  try { if (id) { body.id = id; await api("plan.update", body); } else await api("plan.create", body); closeModal(); toast("Plan gespeichert"); reloadLater(); }
+  catch(e) { $("#p_err").textContent = e.message; $("#p_save").disabled = false; }
+}
+function openTaskForm(modelId, id, who){
+  const t = id ? D.tasks.find(x => x.id===id) : {model: modelId || (who === "Team" && D.models[0] ? D.models.filter(m=>m.status!=="Ended")[0].id : ""), status:"Open", priority:"Medium", assigned:who || "Model", dueType:"Fixed day", visible:(who || "Model") === "Model", due:TODAY};
+  openModal(`<button class="x" onclick="closeModal()">×</button><h2>${id ? "Aufgabe bearbeiten" : "Aufgabe anlegen"}</h2>
+    <div class="f"><label class="w"><span>Model *</span>${modelChips("t_model", t.model || (activeModels()[0]||{}).id)}</label><label class="w"><span>Kategorie</span>${chips("t_category", D.options.category, t.category || "Content")}</label>
+    <label class="w"><span>Aufgabe *</span><input type="text" id="t_title" value="${esc(t.title)}" placeholder="z. B. Profilbild aktualisieren"></label>
+    <label><span>Fälligkeit</span>${chips("t_dueType", D.options.dueType, t.dueType)}</label><label><span>Datum</span><input type="date" id="t_due" value="${esc(t.due)}"></label>
+    <label><span>Priorität</span>${chips("t_priority", D.options.priority, t.priority)}</label><label><span>Status</span>${chips("t_status", D.options.taskStatus, t.status)}</label>
+    <label><span>Zuständig</span>${chips("t_assigned", [["Model","Model"],["Team","Ich / Team"]], t.assigned === "Team" ? "Team" : "Model")}</label><label class="chk" style="align-self:end"><input type="checkbox" id="t_visible" ${t.visible?"checked":""}> Im Portal sichtbar</label>
+    <label class="w"><span>Beschreibung (das sieht das Model)</span><textarea id="t_desc">${esc(t.desc)}</textarea></label></div>
+    <div class="foot"><span class="err" id="t_err"></span><button class="btn" onclick="closeModal()">Abbrechen</button><button class="btn p" id="t_save" onclick="saveTask(${id?`'${id}'`:"null"})">Speichern</button></div>`);
+}
+async function saveTask(id){
+  const body = {model:val("t_model"), category:val("t_category"), title:val("t_title"), dueType:val("t_dueType"), due:val("t_dueType")==="This week"?"":val("t_due"), priority:val("t_priority"), status:val("t_status"), assigned:val("t_assigned"), visible:val("t_visible"), desc:val("t_desc")};
+  if (!body.title || !body.model) { $("#t_err").textContent = "Model und Aufgabe fehlen."; return; }
+  $("#t_save").disabled = true;
+  try { if (id) { body.id = id; await api("task.update", body); } else await api("task.create", body); closeModal(); toast("Aufgabe gespeichert"); reloadLater(); }
+  catch(e) { $("#t_err").textContent = e.message; $("#t_save").disabled = false; }
+}
+
+// ---------- router ----------
+const TABS = [["home","Übersicht"],["pipeline","Bewerbungen"],["tasks","Aufgaben"],["abrechnung","Abrechnung"]];   // 19.11 Rene: Content-Plan lives on each model   // 18.11 Rene: chatter live in the overview, under the models
+const MENU = [["kurse","Kurse"],["skripte","Skripte"],["tools","Tools"],["einstellungen","Einstellungen"]];   // 18.11 behind the avatar
+let SETUP_OPEN = 0;
+function renderMe(p){
+  const n = SETUP_OPEN ? `<span class="n">${SETUP_OPEN}</span>` : "";
+  $("#meMenu").innerHTML = `<div class="who"><b>${esc(D.manager.name || "Manager")}</b>Northfeed Manager</div>` +
+    MENU.map(([k,l]) => `<a href="#${k}" class="${p===k?"on":""}">${l}${k==="einstellungen"?n:""}</a>`).join("") + `<hr><a href="/logout">Logout</a>`;
+  $("#me").classList.toggle("on", MENU.some(([k]) => k === p));
+  const bd = $("#meBadge"); bd.hidden = !SETUP_OPEN; bd.textContent = SETUP_OPEN || "";
+}
+function route(){
+  const parts = (location.hash.slice(1) || "home").split("/"); const p = parts[0];
+  const newApps = D.applications.filter(a => a.status === "new").length;
+  $("#tabs").innerHTML = TABS.map(([k,l]) => `<a href="#${k}" class="${(p===k||((p==="model"||p==="chatter")&&k==="home")||(p==="apps"&&k==="pipeline"))?"on":""}">${l}${k==="pipeline"&&newApps?`<span class="n">${newApps}</span>`:""}</a>`).join("") + MENU.map(([k,l]) => `<a class="mob ${p===k?"on":""}" href="#${k}">${l}</a>`).join("") + `<a class="mob" href="/logout">Logout</a>`;
+  $("#meDot").textContent = (D.manager.name || "M").slice(0,1).toUpperCase(); renderMe(p);
+  const mnt = document.getElementById("courseMount"), hold = document.getElementById("courseAdminHolder");
+  if (mnt && hold) { while (mnt.firstChild) hold.appendChild(mnt.firstChild); }
+  if (p === "model") pages.model(parts[1]); else (pages[p] || pages.home)();
+  window.scrollTo(0, 0);
+}
+window.addEventListener("hashchange", route);
+setTimeout(() => {                                             // 16.11 "warum lädt das": fetch the slower tabs in the background right after start
+  if (!BILL) api("billing.overview", {}).then(o => { BILL = o; if ($("#billMount")) renderBilling(); }).catch(() => {});
+  if (!SC) api("scripts.list", {}).then(o => { SC = o; if ($("#scMount") && !$("#scEdit")) renderScripts(); }).catch(() => {});
+}, 400);
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+route();
+
+document.addEventListener("click", e => { const nav = document.querySelector(".nav"); if (!nav) return;
+  if (e.target.closest(".burger")) { nav.classList.toggle("open"); return; }
+  const me = $("#me"); if (me) { if (e.target.closest("#meMenu a")) me.classList.remove("open"); else if (e.target.closest("#me")) me.classList.toggle("open"); else me.classList.remove("open"); }
+  if (e.target.closest(".nav .tabs a")) nav.classList.remove("open"); });
+</script>
+</body></html>

@@ -9,6 +9,7 @@ The page is rebuilt at most every REBUILD_SECONDS and served from memory.
 from __future__ import annotations
 
 import base64
+import requests
 import json
 import re
 import hashlib
@@ -41,7 +42,7 @@ FARM_REBUILD_SECONDS = 60
 _live_lock = threading.Lock()
 
 # One tab bar over every page, so Accounts / Proxys / Live read as one platform.
-NAV = [("/live", "Phones"), ("/", "CRM")]   # Proxies & Containers page removed (Rene 2026-10-08)
+NAV = [("/live", "Phones"), ("/", "CRM"), ("/funnel", "Funnel")]   # Proxies & Containers page removed (Rene 2026-10-08); Funnel 2026-11-11
 _NAV_CSS = (
     "<style>:root{--nav-h:58px}html{padding-top:58px}"
     ".pf-nav{position:fixed;top:0;left:0;right:0;z-index:1000;box-sizing:border-box;"
@@ -217,10 +218,35 @@ def _crm_dataset() -> dict:
         return _crm_data["data"]
 
 
+_crm_refreshing = {"on": False}
+
+
+def _crm_dataset_fast() -> dict:
+    """15.11 Rene ("nichts darf länger dauern"): the portal never waits for crm.data() (~2 min, fleet tables).
+    Stale-while-revalidate: serve what is cached (or an empty set) and refresh in the background. Models see
+    account numbers only when their switch is not "Nein", so an empty set costs nothing visible."""
+    import threading
+    stale = _crm_data["data"] is None or time.time() - _crm_data["at"] > REBUILD_SECONDS
+    if stale and not _crm_refreshing["on"]:
+        _crm_refreshing["on"] = True
+        def _bg():
+            try:
+                _crm_dataset()
+            except Exception as e:  # noqa: BLE001
+                print("crm refresh failed:", e)
+            finally:
+                _crm_refreshing["on"] = False
+        threading.Thread(target=_bg, daemon=True).start()
+    if _crm_data["data"] is not None:
+        return _crm_data["data"]
+    import datetime as _d
+    return {"accounts": [], "today": _d.date.today().isoformat(), "built": "", "models": [], "phones": []}
+
+
 def _portal_page(model: str) -> bytes:
     """Northfeed model portal (16.10): today/week/reels/tasks/accounts in the website's look."""
     from adb_bot.automation import portal
-    return portal.build(model, _crm_dataset()).encode("utf-8")
+    return portal.build(model, _crm_dataset_fast()).encode("utf-8")
 
 
 def _creator_page(model: str) -> bytes:
@@ -242,45 +268,272 @@ def _creator_page(model: str) -> bytes:
 class Handler(BaseHTTPRequestHandler):
     identity: str | None = None                  # e-mail from Cloudflare Access, None for the password login
 
+    def _cookie(self, name: str) -> str:
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == name:
+                return v.strip()
+        return ""
+
+    def _send_json(self, obj, code: int = 200):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code); self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body))); self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(body)
+
     def _portal_session(self) -> str | None:
         """portal.* only: e-mail from the nf_session cookie, or None."""
         from adb_bot.automation import portal_auth
         for part in self.headers.get("Cookie", "").split(";"):
             k, _, v = part.strip().partition("=")
             if k == "nf_session":
-                return portal_auth.read(v)
+                em = portal_auth.read(v)
+                if em:                                       # 17.11 funnel test: "Beenden" promises a locked portal, but a session
+                    try:                                     # from before the end kept every page open for up to 30 days
+                        m = portal_auth.models_by_email(cached=True).get(em)
+                        if m and not portal_auth.session_allowed(m):
+                            return None
+                    except Exception as e:  # noqa: BLE001
+                        print("portal session check:", e)
+                return em
         return None
+
+    _NF_ICONS = {"/favicon.ico": ("favicon.ico", "image/x-icon"), "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+                 "/favicon-32.png": ("favicon-32.png", "image/png"), "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
+                 "/icon-192.png": ("icon-192.png", "image/png"), "/icon-512.png": ("icon-512.png", "image/png")}
 
     def _portal_site(self, route: str):
         from adb_bot.automation import portal_auth
+        if route in self._NF_ICONS:                           # 15.11 Rene: portal shows the Northfeed icon, not RNX Viewer
+            name, ctype = self._NF_ICONS[route]
+            f = Path("/root/northfeed-site/static") / name
+            if not f.exists():
+                self.send_response(404); self.end_headers(); return
+            data = f.read_bytes()
+            self.send_response(200); self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "public, max-age=86400"); self.end_headers(); self.wfile.write(data); return
         lang = (self.headers.get("Accept-Language") or "en")[:2].lower()
         lang = lang if lang in ("de", "en", "th") else "en"
         if route.startswith("/portal/ref/"):
             if self._portal_session() or self._basic_ok():
                 return self._portal_ref(route)
             self.send_response(401); self.end_headers(); return
+        if route.startswith("/vertragsdaten/"):             # 15.11 Rene: the model enters her own contract data (signed link, no login)
+            from adb_bot.automation import contract_data
+            return self._send_html(contract_data.page(route.split("/", 2)[2]))
+        if route == "/mass/usage.csv":                       # 18.11: the mass-message Google Sheet pulls "last used" (secret key)
+            import hmac as _h
+            key = os.environ.get("MASS_USAGE_KEY", "")
+            if not key or not _h.compare_digest((parse_qs(urlsplit(self.path).query).get("k") or [""])[0], key):
+                self.send_response(403); self.end_headers(); return
+            from adb_bot.automation import mass_messages
+            data = mass_messages.usage_csv()
+            self.send_response(200); self.send_header("Content-Type", "text/csv; charset=utf-8"); self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(data); return
         if route == "/logout":
             self.send_response(302); self.send_header("Set-Cookie", "nf_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax")
+            self.send_header("Set-Cookie", "nf_as=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax")
             self.send_header("Location", "/"); self.end_headers(); return
         email = self._portal_session()
+        q = parse_qs(urlsplit(self.path).query)
         if email:
-            model = portal_auth.models_by_email().get(email, {}).get("name")
+            from adb_bot.automation import manager
+            if manager.is_manager(email):                   # 14.11: agency side on the same host
+                self.identity = email
+                if q.get("as"):                              # look at one model's portal, manager session stays
+                    em = q["as"][0].strip().lower()
+                    if em in portal_auth.models_by_email():
+                        self.send_response(302); self.send_header("Set-Cookie", f"nf_as={em}; Path=/; Secure; HttpOnly; SameSite=Lax")
+                        self.send_header("Location", "/"); self.end_headers(); return
+                if route == "/manager/data":
+                    return self._send_json(manager.overview(email))
+                if route.startswith("/manager/onboarding/"):   # 15.11 Steckbrief + Referenzbilder summary for one model
+                    from adb_bot.automation import onboarding_portal
+                    return self._send_json(onboarding_portal.manager_summary(route.split("/")[3]))
+                if route == "/manager/course/data":          # 15.11 courses
+                    from adb_bot.automation import course
+                    return self._send_json(course.manager_overview())
+                if route == "/course" or route.startswith("/course/"):
+                    return self._course_get(route, email, q, "Manager", "/manager")
+                if route == "/manager/vertrag.pdf":            # 17.11: preview of the current raw contract
+                    from adb_bot.automation import contract_template
+                    pth = contract_template.preview_pdf()
+                    if not pth:
+                        self.send_response(404); self.end_headers(); return
+                    data = pth.read_bytes()
+                    self.send_response(200); self.send_header("Content-Type", "application/pdf"); self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(data); return
+                if route.startswith("/manager/app/"):
+                    parts = route.split("/")
+                    f = manager.app_file(parts[3], parts[4]) if len(parts) == 5 else None
+                    if not f:
+                        self.send_response(404); self.end_headers(); return
+                    data = f.read_bytes()
+                    self.send_response(200); self.send_header("Content-Type", "application/pdf" if f.suffix == ".pdf" else "image/jpeg")
+                    self.send_header("Content-Length", str(len(data))); self.send_header("Cache-Control", "private, max-age=3600"); self.end_headers(); self.wfile.write(data); return
+                if route == "/manager" or route.startswith("/manager/"):
+                    return self._send_html(manager.build(email).encode("utf-8"), [("Set-Cookie", "nf_as=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax")])
+                as_em = self._cookie("nf_as")
+                if as_em and portal_auth.lookup(as_em):
+                    model = portal_auth.lookup(as_em)["name"]
+                    return self._send_html(_portal_page(model).replace(b"</body>", b'<a href="/manager" style="position:fixed;left:14px;bottom:14px;z-index:99;background:#ff5c9a;color:#fff;padding:10px 16px;border-radius:999px;font:600 13px system-ui;text-decoration:none">&larr; Manager</a></body>'))
+                self.send_response(302); self.send_header("Location", "/manager"); self.end_headers(); return
+            from adb_bot.automation import chatter_portal
+            ch = chatter_portal.team_by_email(cached=True).get(email)   # 18.11 Rene: chatter view (English, course first)
+            if ch and chatter_portal.access_allowed(ch):
+                self.identity = email
+                if route == "/course" or route.startswith("/course/"):
+                    return self._course_get(route, email, q, "Chatter", "/")
+                if route == "/konto/agreement.pdf":          # 18.11: the chatter's signed agreement
+                    from adb_bot.automation import chatter_admin
+                    pth = chatter_admin.contract_pdf(ch["id"])
+                    if not pth:
+                        self.send_response(404); self.end_headers(); return
+                    data = pth.read_bytes()
+                    self.send_response(200); self.send_header("Content-Type", "application/pdf"); self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Content-Disposition", 'attachment; filename="Northfeed_Agreement.pdf"'); self.send_header("Cache-Control", "private, no-store")
+                    self.end_headers(); self.wfile.write(data); return
+                if route == "/konto":                        # 18.11 Rene: avatar -> shift, contract, password
+                    return self._send_html(chatter_portal.konto(email, (q.get("ok") or [""])[0] == "pw", (q.get("perr") or [""])[0]))
+                if route == "/mass":                         # 18.11 Rene: mass messages every 2 h, used ones tracked
+                    if chatter_portal.stage(ch) not in ("Active", "Test shift"):
+                        self.send_response(302); self.send_header("Location", "/"); self.end_headers(); return
+                    from adb_bot.automation import mass_messages
+                    return self._send_html(mass_messages.page(email, (q.get("ok") or [""])[0]))
+                st = chatter_portal.stage(ch)                # 18.11 Rene: course → test → review → test shift → contract → active
+                if st == "Course" and not chatter_portal.course_open(email):
+                    chatter_portal.set_stage(ch, "Test"); st = "Test"
+                if st == "Course":
+                    self.send_response(302); self.send_header("Location", "/course"); self.end_headers(); return
+                if st == "Test" or route == "/test":
+                    from adb_bot.automation import chatter_test
+                    return self._send_html(chatter_test.page(email, (q.get("err") or [""])[0]))
+                return self._send_html(chatter_portal.page(email, (q.get("err") or [""])[0]))
+            model = portal_auth.lookup(email).get("name")
             if model:
                 self.identity = email
-                return self._send_html(_portal_page(model))
-        q = parse_qs(urlsplit(self.path).query)
+                from adb_bot.automation import onboarding_portal, portal_frame
+                if route in ("/", "/onboarding", "/skripte", "/zugaenge", "/abrechnung"):
+                    # 16.11 Rene: first the welcome videos and nothing else (not locked, simply not shown); afterwards all open
+                    try:
+                        if portal_frame.ctx(email)["open"]:
+                            self.send_response(302); self.send_header("Location", "/course"); self.end_headers(); return
+                    except Exception as e:  # noqa: BLE001
+                        print("onboarding gate:", e)
+                if route == "/course" or route.startswith("/course/"):
+                    return self._course_get(route, email, q, "Model", "/")
+                if route == "/zugaenge":                     # 15.11 Rene (H): logins for the marketing accounts, encrypted
+                    from adb_bot.automation import access_vault
+                    me = portal_auth.lookup(email)
+                    return self._send_html(portal_frame.wrap_shell(access_vault.page(me["id"], me["name"], bool(q.get("ok"))), portal_frame.ctx(email), "zugaenge"))
+                if route == "/konto":                        # 16.11 Rene: contract + contract data, opened from the avatar
+                    from adb_bot.automation import konto
+                    me = portal_auth.lookup(email)
+                    return self._send_html(portal_frame.wrap_shell(konto.page(me["id"], (q.get("ok") or [""])[0] == "1", (q.get("err") or [""])[0], (q.get("ok") or [""])[0] == "pw", (q.get("perr") or [""])[0]), portal_frame.ctx(email), "konto"))
+                if route == "/konto/vertrag.pdf":
+                    from adb_bot.automation import onboarding as _ob
+                    pth = _ob.contract_pdf(portal_auth.lookup(email)["id"])
+                    if not pth:
+                        self.send_response(404); self.end_headers(); return
+                    data = pth.read_bytes()
+                    self.send_response(200); self.send_header("Content-Type", "application/pdf"); self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Content-Disposition", 'attachment; filename="Vertrag_Northfeed.pdf"'); self.send_header("Cache-Control", "private, no-store")
+                    self.end_headers(); self.wfile.write(data); return
+                if route == "/skripte":                      # 16.11 Rene: OF scripts, stage by stage, in her language
+                    from adb_bot.automation import scripts
+                    me = portal_auth.lookup(email)
+                    fc = portal_frame.ctx(email)
+                    if fc["open"]:                           # 16.11 Rene: Plan + Skripte unlock after Steckbrief + Bilder
+                        return self._send_html(portal_frame.locked_page(fc, "skripte"))
+                    return self._send_html(portal_frame.wrap_shell(scripts.page(me["id"], me["name"]), fc, "skripte"))
+                if route == "/abrechnung":                   # 15.11 Rene (I): weekly invoices, proof upload
+                    from adb_bot.automation import billing
+                    me = portal_auth.lookup(email)
+                    return self._send_html(portal_frame.wrap_shell(billing.model_page(me["id"], me["name"], (q.get("ok") or [""])[0]), portal_frame.ctx(email), "abrechnung"))
+                if route.startswith("/abrechnung/pdf/"):
+                    from adb_bot.automation import billing
+                    me = portal_auth.lookup(email)
+                    return billing.send_pdf(self, me["id"], route.rsplit("/", 1)[1])
+                if route == "/onboarding":
+                    return self._send_html(portal_frame.wrap_app(onboarding_portal.build(email, (q.get("lang") or [None])[0]).encode("utf-8"), portal_frame.ctx(email), "start"))
+                if route == "/onboarding/state":
+                    return self._send_json(onboarding_portal.state(email))
+                if route == "/onboarding/done":
+                    st = onboarding_portal.state(email)
+                    self.send_response(302); self.send_header("Location", "/" if st.get("complete") else "/onboarding"); self.end_headers(); return
+                if onboarding_portal._ob_lock.locked():       # 16.11: her first tasks are being created right now (last welcome
+                    with onboarding_portal._ob_lock:           # video just finished); wait so the page shows all of them at once
+                        pass
+                from concurrent.futures import ThreadPoolExecutor   # 15.11: page and banner state in parallel
+                with ThreadPoolExecutor(2) as _ex:
+                    _fp, _fs = _ex.submit(_portal_page, model), _ex.submit(onboarding_portal.state, email)
+                    page = _fp.result()
+                try:                                           # 16.11 Rene: no banner; Steckbrief, Bilder, Zugänge, Drive-App are normal tasks
+                    st = _fs.result()
+                    if not st.get("complete") and not portal_frame.ctx(email)["open"]:
+                        import threading as _th
+                        _th.Thread(target=onboarding_portal.ensure_onboarding_tasks, args=(portal_auth.lookup(email)["id"],), daemon=True).start()
+                        _th.Thread(target=onboarding_portal.drive_check_open, args=(portal_auth.lookup(email)["id"],), daemon=True).start()
+                except Exception as e:  # noqa: BLE001
+                    print("onboarding tasks:", e)
+                try:
+                    page = page.replace(b"<script>\nconst D = ", portal_frame.home_script(portal_frame.ctx(email)) + b"<script>\nconst D = ", 1)
+                except Exception as e:  # noqa: BLE001
+                    print("portal nav:", e)
+                return self._send_html(page)
+        import time as _t
+        _open = _t.time() < float(os.environ.get("PORTAL_OPEN_UNTIL", "0") or 0)   # 14.11 Rene: short window without staff login
+        if q.get("as") and (_open or self._basic_ok()):   # staff: ?as=<model e-mail> -> real model session (14.11, Rene tests the model side)
+            em = q["as"][0].strip().lower()
+            if em in portal_auth.models_by_email():
+                tok = portal_auth.issue(em)
+                self.send_response(302)
+                self.send_header("Set-Cookie", f"nf_session={tok}; Path=/; Max-Age={30*86400}; Secure; HttpOnly; SameSite=Lax")
+                self.send_header("Location", "/"); self.end_headers(); return
         if q.get("model") and self._basic_ok():            # staff preview: ?model=Lea with the platform password
             return self._send_html(_portal_page(q["model"][0].strip()))
+        if route == "/portal/forgot":                       # 16.11: password reset, step 1 (e-mail)
+            return self._send_html(portal_auth.login_page(lang, "forgot", (q.get("email") or [""])[0]).encode("utf-8"))
+        if route == "/portal/reset":                        # 16.11: step 2, from the link in the mail
+            t_ = (q.get("t") or [""])[0]; em = portal_auth.reset_email(t_)
+            return self._send_html(portal_auth.login_page(lang, "reset" if em else "forgot", em or "", "" if em else "expired", t_).encode("utf-8"))
         if route != "/":
             self.send_response(302); self.send_header("Location", "/"); self.end_headers(); return
         return self._send_html(portal_auth.login_page(lang).encode("utf-8"))
 
+    def _course_get(self, route: str, email: str, q: dict, default_audience: str, back: str):
+        """GET side of the Memberspot-style courses (15.11): page, catalog JSON, byte-range video."""
+        from adb_bot.automation import course
+        aud = (q.get("audience") or [default_audience])[0]
+        if default_audience != "Manager":
+            aud = default_audience                           # a model never sees the chatter course
+        if route == "/course":
+            page = course.build(email, aud, (q.get("lang") or [None])[0], back).encode("utf-8")
+            if default_audience == "Model":                  # 16.11: same bar as every model page
+                from adb_bot.automation import portal_frame
+                page = portal_frame.wrap_app(page, portal_frame.ctx(email), "course")
+            elif default_audience == "Chatter":              # 18.11 Rene: chatters get the same bar and background
+                from adb_bot.automation import chatter_portal, portal_frame
+                page = portal_frame.wrap_app(page, chatter_portal.ctx(email), "course")
+            return self._send_html(page)
+        if route == "/course/data":
+            return self._send_json(course.catalog(email, aud))
+        if route.startswith("/course/media/"):
+            return course.handle_media(self, route.split("/")[3].split("?")[0], email)
+        self.send_response(404); self.end_headers()
+
+    _NF_HEAD = (b'<link rel="icon" href="/favicon.svg?v=2" type="image/svg+xml"><link rel="icon" href="/favicon.ico?v=2" sizes="any">'
+                b'<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2"><meta name="theme-color" content="#0b0d12">')   # ?v=2: Cloudflare had cached the RNX icons
+
     def _send_html(self, body: bytes, extra: list | None = None):
+        if (self.headers.get("Host") or "").startswith("portal.") and b"<head>" in body and b'rel="icon"' not in body:
+            body = body.replace(b"<head>", b"<head>" + self._NF_HEAD, 1)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         for k, v in extra or []:
+            self.send_header(k, v)
+        for k, v in (extra or []):
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
@@ -504,31 +757,282 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(502); self.send_header("Content-Type", "application/json"); self.end_headers()
                 self.wfile.write(json.dumps({"ok": False, "error": str(exc)}).encode())
             return
-        if route in ("/portal/login", "/portal/verify"):
+        if route in ("/portal/login", "/portal/verify", "/portal/forgot", "/portal/reset"):
+            # 16.11 Rene: password only (e-mail + password on one page), "Passwort vergessen" -> 30-min link by mail -> new password
             from adb_bot.automation import portal_auth
             length = int(self.headers.get("Content-Length") or 0)
             form = {k: v[0] for k, v in parse_qs(self.rfile.read(min(length, 4096)).decode("utf-8", "replace")).items()}
             lang = (self.headers.get("Accept-Language") or "en")[:2].lower(); lang = lang if lang in ("de", "en", "th") else "en"
             email = form.get("email", "").strip().lower()
-            if route == "/portal/login":
-                m = portal_auth.models_by_email().get(email)
+            from adb_bot.automation import manager
+            if route == "/portal/forgot":
+                try:
+                    portal_auth.send_reset(email)
+                except Exception as e:  # noqa: BLE001
+                    print("portal send_reset:", e)
+                return self._send_html(portal_auth.login_page(lang, "sent", email).encode("utf-8"))
+            if route == "/portal/reset":
+                tok_in = form.get("t", "")
+                em = portal_auth.reset_email(tok_in)
+                if not em:
+                    return self._send_html(portal_auth.login_page(lang, "forgot", "", "expired").encode("utf-8"))
+                ok, _msg = portal_auth.set_password(em, form.get("password", ""))
+                if not ok:
+                    return self._send_html(portal_auth.login_page(lang, "reset", em, "short", tok_in).encode("utf-8"))
+                email = em
+            else:
+                from adb_bot.automation import chatter_portal
+                m = portal_auth.models_by_email().get(email) or manager.managers_by_email().get(email)
+                ch = None if m else chatter_portal.team_by_email().get(email)   # 18.11 Rene: chatters sign in on the same page
+                if not m and not ch:
+                    return self._send_html(portal_auth.login_page(lang, "login", email, "unknown").encode("utf-8"))
+                if ch:
+                    if not chatter_portal.access_allowed(ch):
+                        return self._send_html(portal_auth.login_page(lang, "login", email, "ended").encode("utf-8"))
+                    if not chatter_portal.check(email, form.get("secret", "")):
+                        return self._send_html(portal_auth.login_page(lang, "login", email, "wrong").encode("utf-8"))
+                    m = ch
+                elif email not in manager.managers_by_email(True) and not portal_auth.access_allowed(m):
+                    return self._send_html(portal_auth.login_page(lang, "login", email, "ended" if not portal_auth.session_allowed(m) else "locked").encode("utf-8"))
+                if not ch and portal_auth.throttled(email):
+                    return self._send_html(portal_auth.login_page(lang, "login", email, "throttled").encode("utf-8"))
+                if not ch:
+                    m = portal_auth.check(email, form.get("secret", ""))
+                    if not m:
+                        mg = manager.managers_by_email().get(email)
+                        if mg and mg["password"] and hmac.compare_digest(mg["password"], form.get("secret", "").strip()):
+                            m = mg
                 if not m:
-                    return self._send_html(portal_auth.login_page(lang, "email", email, "unknown").encode("utf-8"))
-                mode = "code" if portal_auth.smtp_ready() else "password"
-                if mode == "code":
-                    try:
-                        portal_auth.send_code(email)
-                    except Exception as e:  # noqa: BLE001
-                        print("portal send_code:", e); mode = "password"
-                return self._send_html(portal_auth.login_page(lang, "secret", email, "", mode).encode("utf-8"))
-            m = portal_auth.check(email, form.get("secret", ""))
-            if not m:
-                mode = "code" if portal_auth.smtp_ready() else "password"
-                return self._send_html(portal_auth.login_page(lang, "secret", email, "wrong", mode).encode("utf-8"))
+                    return self._send_html(portal_auth.login_page(lang, "login", email, "wrong").encode("utf-8"))
             tok = portal_auth.issue(email)
             self.send_response(302)
             self.send_header("Set-Cookie", f"nf_session={tok}; Path=/; Max-Age={30*86400}; Secure; HttpOnly; SameSite=Lax")
-            self.send_header("Location", "/"); self.end_headers(); return
+            self.send_header("Location", "/manager" if manager.is_manager(email) else "/"); self.end_headers(); return
+        if route.startswith("/vertragsdaten/"):             # 15.11: contract data form submit
+            from adb_bot.automation import contract_data
+            raw = self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 50_000)).decode("utf-8", "replace")
+            return self._send_html(contract_data.submit(route.split("/", 2)[2], parse_qs(raw)))
+        if route == "/cal/webhook":                          # 15.11: Cal.com booking -> card to "Call gebucht"
+            from adb_bot.automation import cal_booking
+            raw = self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 500_000))
+            try:
+                out = cal_booking.handle(json.loads(raw.decode("utf-8") or "{}"))
+                print("cal/webhook:", out)
+                return self._send_json(out)
+            except Exception as e:  # noqa: BLE001
+                print("cal/webhook error:", e)
+                return self._send_json({"ok": False, "error": str(e)[:200]}, 500)
+        if route == "/sign/webhook":                         # 15.11: DocuSeal -> after the model signed
+            from adb_bot.automation import docuseal, onboarding
+            raw = self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 2_000_000))
+            if not docuseal.verify_webhook(self.headers, raw):
+                return self._send_json({"ok": False, "error": "bad secret"}, 403)
+            # 16.11 launch check: DocuSeal gives up after 15 s and retries up to 10 times; Drive + PDF + mail take ~90 s.
+            # So answer at once and do the work in the background; contract_signed skips a model that is already through.
+            def _work(raw=raw):
+                try:
+                    with _SIGN_LOCK:                          # form.completed and submission.completed arrive together: two Drive trees
+                        res = docuseal.handle_webhook(json.loads(raw.decode("utf-8") or "{}"))
+                        if res and res.get("role") == "Contractor":   # 18.11: chatter agreement
+                            from adb_bot.automation import chatter_admin
+                            print("sign/webhook chatter:", chatter_admin.contract_signed(res), flush=True)
+                        elif res:
+                            print("sign/webhook:", onboarding.contract_signed(res["model_email"], res.get("pdf_path"), str(res.get("submission_id", ""))), flush=True)
+                except Exception as e:  # noqa: BLE001
+                    print("sign/webhook error:", e, flush=True)
+            import threading
+            threading.Thread(target=_work, daemon=True, name="sign-webhook").start()
+            return self._send_json({"ok": True, "queued": True})
+        if route == "/test":                                 # 18.11 Rene: chatter final test (chatter_test.py)
+            from adb_bot.automation import chatter_portal, chatter_test
+            email = self._portal_session()
+            if not chatter_portal.team_by_email().get(email or ""):
+                self.send_response(302); self.send_header("Location", "/"); self.end_headers(); return
+            raw = self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 40_000)).decode("utf-8", "replace")
+            ok, msg = chatter_test.submit(email, parse_qs(raw))
+            self.send_response(303)
+            self.send_header("Location", "/test" + ("?err=" + __import__("urllib.parse").parse.quote(msg) if msg else ""))
+            self.end_headers(); return
+        if route == "/mass/sent":                            # 18.11 Rene: log a mass message (mass_messages.py)
+            from adb_bot.automation import chatter_portal, mass_messages
+            email = self._portal_session()
+            me = chatter_portal.team_by_email().get(email or "")
+            if not me or chatter_portal.stage(me) not in ("Active", "Test shift"):
+                self.send_response(302); self.send_header("Location", "/"); self.end_headers(); return
+            raw = self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 20_000)).decode("utf-8", "replace")
+            try:
+                ok, msg = mass_messages.mark_sent(email, parse_qs(raw))
+            except requests.RequestException as e:
+                msg = f"Could not save: {str(e)[:120]}"
+            self.send_response(303)
+            self.send_header("Location", "/mass?ok=" + __import__("urllib.parse").parse.quote(msg))
+            self.end_headers(); return
+        if route in ("/shift/start", "/shift/end"):          # 18.11 Rene: chatter shifts with report (shifts.py)
+            from adb_bot.automation import chatter_portal, shifts
+            email = self._portal_session()
+            me = chatter_portal.team_by_email().get(email or "")
+            if not me or not chatter_portal.access_allowed(me):
+                self.send_response(302); self.send_header("Location", "/"); self.end_headers(); return
+            raw = self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 20_000)).decode("utf-8", "replace")
+            form = parse_qs(raw)
+            err = ""
+            try:
+                if route == "/shift/start":
+                    shifts.start(me)
+                else:
+                    rev = {k[4:]: (v[0] or "0") for k, v in form.items() if k.startswith("rev:")}
+                    shifts.end(me, {"revenue": rev, "sent": (form.get("sent") or ["0"])[0], "sold": (form.get("sold") or ["0"])[0],
+                                    "handover": (form.get("handover") or [""])[0]})
+            except (ValueError, requests.RequestException) as e:
+                err = str(e)[:200]
+            self.send_response(303)
+            self.send_header("Location", "/" + ("?err=" + __import__("urllib.parse").parse.quote(err) if err else ""))
+            self.end_headers(); return
+        if route == "/konto/password":                       # 16.11 Rene: password only, she can change it herself
+            from adb_bot.automation import portal_auth, chatter_portal
+            email = self._portal_session()
+            is_ch = not portal_auth.models_by_email().get(email or "") and bool(chatter_portal.team_by_email().get(email or ""))   # 18.11 chatters too
+            if not is_ch and not portal_auth.models_by_email().get(email or ""):
+                self.send_response(302); self.send_header("Location", "/"); self.end_headers(); return
+            raw = self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 4000)).decode("utf-8", "replace")
+            ok, msg = (chatter_portal if is_ch else portal_auth).set_password(email, (parse_qs(raw).get("password") or [""])[0])
+            self.send_response(303); self.send_header("Location", "/konto?ok=pw" if ok else "/konto?perr=" + __import__("urllib.parse").parse.quote(msg))
+            self.end_headers(); return
+        if route == "/konto/email":                          # 16.11 Rene: the model may change her e-mail; Rene gets told
+            from adb_bot.automation import portal_auth, konto
+            email = self._portal_session()
+            mm = portal_auth.models_by_email().get(email or "")
+            if not mm:
+                self.send_response(302); self.send_header("Location", "/"); self.end_headers(); return
+            raw = self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 4000)).decode("utf-8", "replace")
+            new_em = (parse_qs(raw).get("email") or [""])[0].strip().lower()
+            ok, msg = konto.change_email(mm["id"], email, new_em)
+            if ok:
+                tok = portal_auth.issue(new_em)
+                self.send_response(303); self.send_header("Set-Cookie", f"nf_session={tok}; Path=/; Max-Age={30*86400}; Secure; HttpOnly; SameSite=Lax")
+                self.send_header("Location", "/konto?ok=1"); self.end_headers(); return
+            self.send_response(303); self.send_header("Location", "/konto?err=" + __import__("urllib.parse").parse.quote(msg)); self.end_headers(); return
+        if route in ("/zugaenge", "/abrechnung/upload"):     # 15.11 Rene (H, I): model session only
+            from adb_bot.automation import portal_auth
+            email = self._portal_session()
+            mm = portal_auth.models_by_email().get(email or "")
+            if not mm:
+                self.send_response(302); self.send_header("Location", "/"); self.end_headers(); return
+            try:
+                if route == "/zugaenge":
+                    from adb_bot.automation import access_vault, onboarding, cal_booking
+                    raw = self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 60_000)).decode("utf-8", "replace")
+                    d = access_vault.submit(mm["id"], parse_qs(raw, keep_blank_values=True))
+                    try:                                       # 16.11: the onboarding task "Zugänge eintragen" closes itself
+                        if d.get("onlyfans") or d.get("accounts"):
+                            from adb_bot.automation import onboarding_portal as _obp
+                            _obp.close_onboarding_task(mm["id"], "zugaenge")
+                    except Exception as e:  # noqa: BLE001
+                        print("zugaenge task:", e)
+                    onboarding._patch(mm["id"], {"Access saved": d["updated"]})
+                    cal_booking._tg(f"🔐 Zugänge hinterlegt · {mm['name']} · {len(d['accounts'])} Account(s){' · CRM verbunden' if d['crm'] else ''}")
+                    self.send_response(303); self.send_header("Location", "/zugaenge?ok=1"); self.end_headers(); return
+                from adb_bot.automation import billing
+                kind = billing.handle_upload(self, mm["id"], mm["name"])
+                self.send_response(303); self.send_header("Location", f"/abrechnung?ok={kind}"); self.end_headers(); return
+            except Exception as e:  # noqa: BLE001
+                print("model post error:", route, e)
+                return self._send_html(f"<p style='font:16px system-ui;padding:30px'>Das hat nicht geklappt: {str(e)[:160]}. <a href='{route}'>Zurück</a></p>".encode())
+        if route.startswith("/onboarding/"):                  # 15.11: Steckbrief + Referenzbilder (model session only)
+            from adb_bot.automation import onboarding_portal, portal_auth
+            email = self._portal_session()
+            if not email or email not in portal_auth.models_by_email():
+                return self._send_json({"ok": False, "error": "not signed in"}, 401)
+            try:
+                if route == "/onboarding/upload":
+                    return self._send_json(onboarding_portal.handle_upload(self, email))
+                data = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 200_000)).decode("utf-8") or "{}")
+                if route == "/onboarding/steckbrief":
+                    return self._send_json(onboarding_portal.save_steckbrief(email, data))
+                if route == "/onboarding/reference/delete":
+                    return self._send_json(onboarding_portal.delete_reference(email, str(data.get("id", ""))))
+                return self._send_json({"ok": False, "error": "unknown"}, 404)
+            except ValueError as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            except Exception as e:  # noqa: BLE001
+                print("onboarding:", e)
+                return self._send_json({"ok": False, "error": "server error"}, 500)
+        if route == "/course/progress":                      # 15.11: watched position from the player (also sendBeacon)
+            from adb_bot.automation import course
+            email = self._portal_session()
+            if not email:
+                return self._send_json({"ok": False, "error": "not signed in"}, 401)
+            try:
+                data = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 20_000)).decode("utf-8") or "{}")
+                return self._send_json(course.progress(email, str(data.get("lesson", "")), float(data.get("position") or 0), data.get("duration")))
+            except ValueError as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+        if route == "/manager/course/upload":                 # multipart MP4 (up to 2 GB)
+            from adb_bot.automation import manager, course
+            email = self._portal_session()
+            if not email or not manager.is_manager(email):
+                return self._send_json({"ok": False, "error": "not signed in"}, 401)
+            tmp = None
+            try:
+                mp = course.parse_multipart(self)
+                f = mp["files"].get("video")
+                if not f:
+                    raise ValueError("no video")
+                tmp = f["path"]
+                with open(tmp, "rb") as fh:
+                    return self._send_json(course.save_upload(mp["fields"].get("lesson", ""), fh, f["size"]))
+            except ValueError as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            finally:
+                if tmp:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+        if route == "/manager/discord":                       # 18.11: chatter shift webhooks (online-offline, shift-log, admin alerts)
+            from adb_bot.automation import manager, shifts
+            email = self._portal_session()
+            if not email or not manager.is_manager(email):
+                return self._send_json({"ok": False, "error": "not signed in"}, 401)
+            try:
+                data = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 10_000)).decode("utf-8") or "{}")
+                return self._send_json(shifts.store_webhooks(str(data.get("online", "")), str(data.get("log", "")), str(data.get("alert", ""))))
+            except ValueError as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+        if route == "/manager/deepl":                         # 18.11: Rene pastes the DeepL API key once; stored only in the env file
+            from adb_bot.automation import manager, translate
+            email = self._portal_session()
+            if not email or not manager.is_manager(email):
+                return self._send_json({"ok": False, "error": "not signed in"}, 401)
+            try:
+                data = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 10_000)).decode("utf-8") or "{}")
+                return self._send_json(translate.store_key(str(data.get("key", ""))))
+            except ValueError as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+        if route == "/manager/smtp":                          # 15.11: Rene pastes the info@ app password once; stored only in the env file
+            from adb_bot.automation import manager, onboarding
+            email = self._portal_session()
+            if not email or not manager.is_manager(email):
+                return self._send_json({"ok": False, "error": "not signed in"}, 401)
+            try:
+                data = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 10_000)).decode("utf-8") or "{}")
+                return self._send_json(onboarding.store_smtp(str(data.get("user", "")), str(data.get("password", ""))))
+            except ValueError as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+        if route.startswith("/manager/api/"):
+            from adb_bot.automation import manager
+            email = self._portal_session()
+            if not email or not manager.is_manager(email):
+                return self._send_json({"ok": False, "error": "not signed in"}, 401)
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                data = json.loads(self.rfile.read(min(length, 200_000)).decode("utf-8") or "{}")
+                return self._send_json(manager.api(route[len("/manager/api/"):], data, email))
+            except ValueError as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            except Exception as e:  # noqa: BLE001
+                print("manager/api:", e)
+                return self._send_json({"ok": False, "error": "server error"}, 500)
         if route == "/portal/done":
             # model ticks an item in the portal -> status written to the Northfeed Portal base
             if not self._authorized():
@@ -545,6 +1049,52 @@ class Handler(BaseHTTPRequestHandler):
             body = json.dumps({"ok": ok}).encode()
             self.send_response(200 if ok else 400); self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.split("?")[0] == "/northfeed/track":
+            # 11.11 (Rene: "dashboard das alle Schritte anzeigt und die Prozentzahl"): one line per step of the
+            # paid-ads funnel -> /opt/northfeed-applications/events.jsonl, read by the /funnel page. Public, no auth.
+            import datetime as _dt
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if 0 < length <= 8192 else b""
+            try:
+                ev = json.loads(raw.decode("utf-8"))
+                assert isinstance(ev, dict)
+            except Exception:
+                self.send_response(204); self.send_header("Access-Control-Allow-Origin", "*"); self.end_headers(); return
+            keep = {k: ev.get(k) for k in ("vid", "ev", "step", "score", "lang", "angle",
+                                           "utm_source", "utm_medium", "utm_campaign", "ref") if ev.get(k)}
+            keep["t"] = _dt.datetime.now().isoformat(timespec="seconds")
+            keep["ip"] = self.headers.get("CF-Connecting-IP") or self.headers.get("X-Forwarded-For") or self.client_address[0]
+            try:
+                out = Path("/opt/northfeed-applications"); out.mkdir(parents=True, exist_ok=True)
+                with (out / "events.jsonl").open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(keep, ensure_ascii=False) + "\n")
+            except Exception:  # noqa: BLE001
+                pass
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            return
+        if self.path.split("?")[0] == "/northfeed/oauth-drop":
+            # 16.11: one-time hand-over of the Drive OAuth client secret straight from the Cloud Console tab to the
+            # server, so it never passes through chat/agent output. Needs the one-time token file; consumed on use.
+            tokf = Path("/etc/northfeed/oauth_drop.token")
+            t = (parse_qs(urlsplit(self.path).query).get("t") or [""])[0]
+            ok = tokf.exists() and t and t == tokf.read_text().strip()
+            if ok:
+                try:
+                    d = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8"))
+                    assert str(d.get("id", "")).endswith(".apps.googleusercontent.com") and str(d.get("sec", "")).startswith("GOCSPX-")
+                    out = Path("/etc/northfeed/drive_oauth_web.json" if "web" in self.path else "/etc/northfeed/drive_oauth.json")
+                    out.write_text(json.dumps({"client_id": d["id"], "client_secret": d["sec"]}))
+                    out.chmod(0o600)
+                    tokf.unlink()
+                except Exception:  # noqa: BLE001
+                    ok = False
+            self.send_response(200 if ok else 403)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(b"ok" if ok else b"no")
+            return
         if self.path.split("?")[0] == "/northfeed/apply":
             # 2026-10-12: application funnel of the new agency site (public, no auth). Stores one JSON per
             # application under /opt/northfeed-applications; photos arrive base64 inside the JSON.
@@ -566,11 +1116,13 @@ class Handler(BaseHTTPRequestHandler):
             pdir = out / fid
             saved = []
             for key, b64 in photos.items():
-                if not isinstance(b64, str) or not b64.startswith("data:image/"):
+                # 13.11: chatter funnel also sends a CV as PDF
+                if not isinstance(b64, str) or not (b64.startswith("data:image/") or b64.startswith("data:application/pdf")):
                     continue
                 try:
                     mime, payload = b64.split(";base64,", 1)
-                    ext = {"data:image/jpeg": "jpg", "data:image/png": "png", "data:image/webp": "webp", "data:image/heic": "heic"}.get(mime, "jpg")
+                    ext = {"data:image/jpeg": "jpg", "data:image/png": "png", "data:image/webp": "webp", "data:image/heic": "heic",
+                           "data:application/pdf": "pdf"}.get(mime, "jpg")
                     pdir.mkdir(exist_ok=True)
                     (pdir / f"{key}.{ext}").write_bytes(__import__("base64").b64decode(payload))
                     saved.append(f"{key}.{ext}")
@@ -689,6 +1241,30 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if self.path.split("?")[0] == "/northfeed/oauth-callback":
+            # 16.11: Google redirects here after Rene clicks "Zulassen" for the Northfeed Drive web client;
+            # the code is exchanged server-side and only the token file is written (never shown anywhere).
+            q = parse_qs(urlsplit(self.path).query)
+            msg = "Fehler, bitte Claude Bescheid geben."
+            try:
+                c = json.loads(Path("/etc/northfeed/drive_oauth_web.json").read_text())
+                r = requests.post("https://oauth2.googleapis.com/token", timeout=30, data={
+                    "code": (q.get("code") or [""])[0], "client_id": c["client_id"], "client_secret": c["client_secret"],
+                    "redirect_uri": "https://portal.northfeed-management.com/northfeed/oauth-callback", "grant_type": "authorization_code"})
+                tok = r.json()
+                if r.ok and tok.get("refresh_token"):
+                    import datetime as _dt
+                    tok["expiry"] = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=int(tok.get("expires_in", 3600)))).isoformat()
+                    out = Path("/etc/northfeed/drive_token.json"); out.write_text(json.dumps(tok)); out.chmod(0o600)
+                    msg = "Fertig. Northfeed Drive ist verbunden, du kannst den Tab schließen."
+                else:
+                    msg += f" ({tok.get('error', r.status_code)})"
+            except Exception as e:  # noqa: BLE001
+                msg += f" ({type(e).__name__})"
+            body = f"<!doctype html><meta charset=utf-8><body style='font:20px system-ui;background:#0b0d12;color:#eef0f5;padding:40px'>{msg}</body>".encode()
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(body))); self.end_headers()
+            self.wfile.write(body)
+            return
         if (self.path.split("?")[0] == "/vnc"
                 and self.headers.get("Upgrade", "").lower() == "websocket"):
             ticket = (parse_qs(urlsplit(self.path).query).get("t") or [""])[0]
@@ -880,6 +1456,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if (self.headers.get("Host") or "").startswith("portal.") and self.path.split("?")[0] in self._NF_ICONS:
+            return self._portal_site(self.path.split("?")[0])          # 16.11: portal got the RNX favicon.ico from the line below
         if self.path in _public:     # public: browsers fetch these without auth
             f = Path(__file__).parent / "static" / _public[self.path]
             body = f.read_bytes() if f.exists() else b""
@@ -931,6 +1509,24 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/creator":                       # staff preview: /creator?model=Nikki
             model = (parse_qs(urlsplit(self.path).query).get("model") or [""])[0].strip()
             body = _creator_page(model) if model else b"<pre>/creator?model=&lt;Model name&gt;</pre>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if route == "/funnel":                        # 11.11: steps, drop-off and finished leads of the paid-ads funnel
+            from adb_bot.automation import northfeed_funnel
+            q = parse_qs(urlsplit(self.path).query)
+            try:
+                days = int((q.get("days") or ["30"])[0])
+            except ValueError:
+                days = 30
+            try:
+                body = _with_nav(northfeed_funnel.build(days).encode("utf-8"), "/funnel")
+            except Exception as exc:  # noqa: BLE001
+                body = _with_nav(f"<pre>Funnel error: {exc}</pre>".encode(), "/funnel")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -1103,9 +1699,26 @@ def main() -> None:
     host = os.environ.get("PLATFORM_HOST", "127.0.0.1")
     port = int(os.environ.get("PLATFORM_PORT", "8095"))
     threading.Thread(target=_warm, daemon=True, name="warm-pages").start()
+    from adb_bot.automation import drive_tree as _dt          # 16.11: Rohmaterial / Ready to Post files into day folders
+    threading.Thread(target=_dt.sort_loop, daemon=True, name="drive-days").start()
+    from adb_bot.automation import onboarding_portal as _obp   # 16.11: images are uploaded in Drive, counted here
+    threading.Thread(target=_obp.drive_check_loop, daemon=True, name="drive-check").start()
+    from adb_bot.automation import shifts as _shifts           # 18.11: chatter shift alerts (not started / no report)
+    threading.Thread(target=_shifts.check_loop, daemon=True, name="shift-check").start()
+    try:                                                     # 16.11: manager/portal tabs read a warm Airtable cache instead of waiting
+        from adb_bot.automation import portal as _p, manager as _m, billing as _b, scripts as _sc
+        from adb_bot.automation import onboarding_portal as _op
+        from adb_bot.automation import course as _co
+        _p.warm([_p.T_MODELS, _p.T_PLAN, _p.T_TASKS, _m.T_TOOLS, _b.T_BILL, _sc.T_SCRIPTS, _m.T_MANAGERS, _op.T_STECKBRIEF, _op.T_REFS,
+                 _co.T_COURSES, _co.T_LESSONS, _co.T_PROGRESS])
+    except Exception as e:  # noqa: BLE001
+        print("[platform] cache warm-up not started:", e)
     ThreadingHTTPServer((host, port), Handler).serve_forever()
 
 
+
+
+_SIGN_LOCK = threading.Lock()                    # 16.11: one contract_signed at a time (see /sign/webhook)
 
 
 def _northfeed_notify(data: dict, pdir, photos: list) -> None:
@@ -1115,10 +1728,99 @@ def _northfeed_notify(data: dict, pdir, photos: list) -> None:
     if not tok or not chat:
         return
     g = lambda k: data.get(k) or "–"
+    src = (data.get("source") or "").strip()
+    if src == "chatter-funnel":
+        # 13.11: chatter applications (LUX-style funnel) – one line per answer, files attached below
+        a = data.get("answers") or {}
+        if not isinstance(a, dict):
+            a = {}
+        sc = (data.get("score") or "").strip()
+        head = "\U0001f7e9 Chatter-Bewerbung" if sc != "X" else "\u274c Chatter abgelehnt"
+        lines = [f"{head} \u00b7 Northfeed",
+                 f"Name: {g('first_name')} {data.get('last_name') or ''}".rstrip(),
+                 f"WhatsApp: {g('phone')} \u00b7 E-Mail: {g('email')}",
+                 f"Alter: {a.get('age') or '\u2013'} \u00b7 Laptop: {a.get('laptop') or '\u2013'} \u00b7 Ger\u00e4t: {a.get('device') or '\u2013'}",
+                 f"Erfahrung: {a.get('exp') or '\u2013'} {a.get('explen') or ''}".rstrip(),
+                 f"Stunden/Tag: {a.get('hours') or '\u2013'} \u00b7 Zeiten: {', '.join(a.get('times') or []) or '\u2013'}",
+                 f"Englisch: {a.get('grade') or '\u2013'} \u00b7 Job k\u00fcndigen: {a.get('quit') or '\u2013'}",
+                 f"Speedtest: {a.get('wifi') or '\u2013'}",
+                 f"Video: {a.get('video') or '\u2013'}",
+                 f"Dateien: {', '.join(photos) or '\u2013'} \u00b7 Server: /opt/northfeed-applications/"]
+        text = "\n".join(lines)
+        base = f"https://api.telegram.org/bot{tok}"
+        fields = {"chat_id": chat, "text": text}
+        if topic:
+            fields["message_thread_id"] = topic
+        try:
+            boundary = "----nf" + _uuid.uuid4().hex
+            body = b""
+            for k, v in fields.items():
+                body += f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode()
+            body += f"--{boundary}--\r\n".encode()
+            req = _ur.Request(f"{base}/sendMessage", data=body, headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+            _ur.urlopen(req, timeout=15).read()
+            for fn in photos[:3]:
+                blob = (pdir / fn).read_bytes()
+                b2 = "----nf" + _uuid.uuid4().hex
+                kind = "document" if fn.endswith(".pdf") else "photo"
+                body = f"--{b2}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat}\r\n".encode()
+                if topic:
+                    body += f"--{b2}\r\nContent-Disposition: form-data; name=\"message_thread_id\"\r\n\r\n{topic}\r\n".encode()
+                body += f"--{b2}\r\nContent-Disposition: form-data; name=\"{kind}\"; filename=\"{fn}\"\r\nContent-Type: application/octet-stream\r\n\r\n".encode() + blob + f"\r\n--{b2}--\r\n".encode()
+                req = _ur.Request(f"{base}/send{kind.capitalize()}", data=body, headers={"Content-Type": f"multipart/form-data; boundary={b2}"})
+                _ur.urlopen(req, timeout=30).read()
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    if src in ("paid-ads-funnel", "start-funnel", "referral-signup"):
+        # 11.11: der Paid-Ads-Funnel schickt andere Felder als das Formular auf /bewerben.
+        a = data.get("answers") or {}
+        if not isinstance(a, dict):
+            a = {}
+        at = data.get("attribution") or {}
+        if not isinstance(at, dict):
+            at = {}
+        sc = (data.get("score") or "").strip()
+        head = {"A": "\U0001f7e9 A-Lead", "B": "\U0001f7e8 B-Lead", "C": "\u2b1c Warteliste",
+                "X": "\u274c Abgelehnt"}.get(sc, "\U0001f49b Lead")
+        if src == "referral-signup":
+            lines = ["\U0001f91d Empfehlungs-Anmeldung \u00b7 Northfeed",
+                     f"Name: {g('first_name')}",
+                     f"E-Mail: {g('email')}",
+                     f"Code: {g('ref_code')}"]
+        else:
+            lines = [f"{head} \u00b7 Northfeed Funnel ({src})",
+                     f"Name: {g('first_name')}",
+                     f"Instagram: {g('instagram')}",
+                     f"WhatsApp: {g('phone')} \u00b7 E-Mail: {g('email')}",
+                     f"OnlyFans: {a.get('of') or '\u2013'} \u00b7 Umsatz: {a.get('revenue') or '\u2013'} \u00b7 Zeit: {a.get('hours') or '\u2013'}",
+                     f"Land: {a.get('country') or '\u2013'} \u00b7 Gesicht: {a.get('face') or '\u2013'} \u00b7 Explizit: {a.get('body') or '\u2013'}",
+                     f"Gr\u00f6\u00dftes Problem: {a.get('problem') or '\u2013'}",
+                     f"Warum wir: {a.get('why') or '\u2013'}"]
+        lines.append(f"Quelle: {at.get('utm_source') or '\u2013'} / {at.get('utm_campaign') or '\u2013'} \u00b7 Angle: {at.get('angle') or '\u2013'} \u00b7 Sprache: {data.get('lang') or '\u2013'}")
+        lines.append("Server: /opt/northfeed-applications/")
+        text = "\n".join(lines)
+        base = f"https://api.telegram.org/bot{tok}"
+        fields = {"chat_id": chat, "text": text}
+        if topic:
+            fields["message_thread_id"] = topic
+        try:
+            import uuid as _u2
+            boundary = "----nf" + _u2.uuid4().hex
+            body = b""
+            for k, v in fields.items():
+                body += f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode()
+            body += f"--{boundary}--\r\n".encode()
+            req = _ur.Request(f"{base}/sendMessage", data=body,
+                              headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+            _ur.urlopen(req, timeout=60).read()
+        except Exception:  # noqa: BLE001
+            pass
+        return
     why = ", ".join(data.get("why") or []) if isinstance(data.get("why"), list) else g("why")
     lines = ["🩷 Neue Bewerbung · Northfeed",
              f"Name: {g('first_name')} {g('last_name')}",
-             f"WhatsApp: {g('phone_cc')} {g('phone')}",
+             f"WhatsApp: {g('phone_cc')} {g('phone')} · E-Mail: {g('email')}",
              f"OnlyFans aktiv: {g('active')} · Umsatz: {g('rev')} · Zeit: {g('time') if data.get('time') else g('time2')}",
              f"Rolle/Ziel: {g('role')} / {g('goal')}",
              f"Gesicht zeigen: {g('face')} · Verstecken: {g('hide')} · Sperren: {g('block')}",
