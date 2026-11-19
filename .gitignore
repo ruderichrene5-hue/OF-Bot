@@ -31,3 +31,6 @@ Thumbs.db
 # Claude Code local state: session settings and git worktrees. Not project
 # configuration -- a worktree checked in here would nest a repo inside the repo.
 .claude/
+
+# hand-made backup copies (e.g. portal.py.bak-20261116a)
+*.bak-*
