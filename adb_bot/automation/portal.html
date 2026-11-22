@@ -129,6 +129,9 @@
   .rt-h span{display:inline-grid;place-items:center;min-width:22px;height:22px;border-radius:50%;background:rgba(236,72,153,.16);color:var(--pink2,#f472b6);font-size:12px;font-weight:700}
   .rt-ul{margin:2px 0 6px 30px;padding:0} .rt-ul li{margin:3px 0;padding-left:2px}
   .rt-file{display:flex;align-items:center;gap:12px;margin-top:10px} .rt-file img{width:84px;height:84px;object-fit:cover;border-radius:12px;border:1px solid var(--line,#232838);display:block}
+  .rt-more summary{cursor:pointer;list-style:none;display:inline-flex;align-items:center;gap:6px;margin-top:6px;color:var(--pink2,#f472b6);font-weight:600;font-size:13px;user-select:none}
+  .rt-more summary::-webkit-details-marker{display:none} .rt-more summary::before{content:"▸";transition:transform .15s} .rt-more[open] summary::before{transform:rotate(90deg)}
+  .rt-more summary .o, .rt-more[open] summary .c{display:none} .rt-more[open] summary .o{display:inline}
   .rt-dl{color:var(--pink2,#f472b6);font-weight:600;font-size:13.5px;text-decoration:none}
 
 </style><style>@view-transition{navigation:auto}.pfn,body>nav.nav{view-transition-name:nfbar}</style><script type="speculationrules">{"prerender":[{"source":"list","urls":["/","/course","/skripte","/zugaenge","/abrechnung","/onboarding"],"eagerness":"conservative"}]}</script></head>
@@ -243,7 +246,14 @@ function richText(s){
     out.push(h ? `<div class="rt-h"><span>${h[1]}</span>${esc(h[2])}</div>` : `<div class="${inStep && !/^(Abhaken|Tick it off)/.test(l) ? "rt-q" : "rt-p"}">${esc(l)}</div>`);
   }
   if (ul) out.push("</ul>");
-  return `<div class="rt">${out.join("")}</div>`;
+  // 22.11 Rene: long instructions start folded – intro stays visible, the steps open on click
+  const steps = out.filter(x => x.startsWith('<div class="rt-h">')).length;
+  let cut = out.findIndex(x => x.startsWith('<div class="rt-h">'));
+  if (cut < 0) cut = out.length > 4 ? 1 : out.length;
+  if (cut >= out.length) return `<div class="rt">${out.join("")}</div>`;
+  if (cut > 2) cut = 1;
+  if (cut && !out[0].startsWith('<div class="rt-p"')) cut = 0;   // never split a list
+  return `<div class="rt">${out.slice(0, cut).join("")}<details class="rt-more" onclick="event.stopPropagation()"><summary><span class="c">${(LANG === "de" ? "Anleitung anzeigen" : "Show instructions")}${steps ? " · " + steps + " " + (LANG === "de" ? "Schritte" : "steps") : ""}</span><span class="o">${(LANG === "de" ? "Anleitung ausblenden" : "Hide instructions")}</span></summary>${out.slice(cut).join("")}</details></div>`;
 }
 function fileHtml(f){
   if (!f || !f.url) return "";
