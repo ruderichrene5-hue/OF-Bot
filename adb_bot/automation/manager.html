@@ -177,7 +177,7 @@ const pages = {
     const rows = live.map(m => {
       const mt = D.tasks.filter(t => t.model === m.id && t.status !== "Done"), mo = mt.filter(t => t.assigned !== "Team"), l = mt.filter(t => t.due && t.due < TODAY).length;
       return `<tr class="row" style="cursor:pointer" onclick="location.hash='model/${m.id}'"><td><div class="t">${esc(m.name)}</div><div class="s">${esc(m.email || "keine E-Mail")} · ${esc(m.language)}</div></td>
-        <td><span class="pill ${m.stage==="Aktiv"?"ok":m.stage==="Pausiert"?"warn":"blue"}">${esc(m.stage || de(m.status))}</span><div class="s">${esc(m.package || "Full Management")}</div></td>
+        <td><span class="pill ${m.stage==="Aktiv"?"ok":m.stage==="Pausiert"?"warn":"blue"}">${esc(m.stage || de(m.status))}</span></td>
         <td><div class="t">${mo.length} fürs Model${l ? ` <span class="pill bad">${l} überfällig</span>` : ""}</div><div class="s">${mt.length - mo.length} für dich</div></td>
         <td style="text-align:right;color:var(--muted);font-size:20px">›</td></tr>`;
     }).join("");
@@ -207,7 +207,7 @@ const pages = {
       <h1>${esc(m.name)}</h1><p class="lead">${esc(m.email || "keine E-Mail")}${m.onlyfans ? ` · <a href="${esc(m.onlyfans)}" target="_blank" style="color:var(--pink2)">OnlyFans</a>` : ""}${m.drive ? ` · <a href="${esc(m.drive)}" target="_blank" style="color:var(--pink2)">Drive</a>` : ""}</p>
       ${stageBar(m)}
       <div class="card" style="margin:10px 0 14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;font-size:14px">
-        <div><div class="l">Paket</div><b>${esc(m.package || "Full Management")}</b>${m.split?` · ${esc(m.split)} % Management`:""}<div class="s">${esc([m.legalName, [m.street, [m.zip, m.city].filter(Boolean).join(" "), m.country].filter(Boolean).join(", ")].filter(Boolean).join(" · ") || "Vertragsdaten fehlen")}</div></div>
+        <div><div class="l">Vertragsdaten</div><div class="s">${esc([m.legalName, [m.street, [m.zip, m.city].filter(Boolean).join(" "), m.country].filter(Boolean).join(", ")].filter(Boolean).join(" · ") || "Vertragsdaten fehlen")}</div></div>
         <div><div class="l">Kontakt</div>${m.whatsapp ? `<a href="${waLink(m)}" target="_blank" style="color:var(--pink2)">WhatsApp ${esc(m.whatsapp)}</a>` : "keine Nummer"}${m.callDate?`<br>Call ${esc(callFmt(m.callDate))}`:""}</div>
         <div><div class="l">Vertrag</div>${m.contractSigned ? `unterschrieben ${fmt(m.contractSigned)}${m.contractPdf?` · <a href="${esc(m.contractPdf)}" target="_blank" style="color:var(--pink2)">PDF</a>`:""}` : m.contractSent ? `verschickt ${fmt(m.contractSent)}, offen` : `noch nicht verschickt`}${!m.contractSigned ? ` · <button class="btn s ${m.dataSubmitted && !m.contractSent ? "p" : ""}" onclick="sendContract('${id}')">Vertrag senden</button>` : ""}${!m.contractSent && !m.contractSigned ? `<div style="margin-top:6px">${m.dataSubmitted ? `<span class="pill warn">Daten eingetragen ${fmt(m.dataSubmitted)}, bitte prüfen</span>` : `<button class="btn s" onclick="requestData('${id}')">Daten vom Model anfordern</button>`}</div>` : ""}<div style="margin-top:6px">${m.welcomeSent ? `Zugang verschickt ${fmt(m.welcomeSent)} · ` : ""}<button class="btn s" onclick="sendAccess('${id}')">${m.welcomeSent ? "Zugang nochmal senden" : m.contractSigned ? "Zugang senden" : "Zugang senden (ohne Vertrag)"}</button></div></div>
         <div><div class="l">Onboarding</div><span id="ob_${id}">lädt…</span><div style="margin-top:6px"><button class="btn s ${m.ofPhotos ? "p" : ""}" title="Aufgabe „Bilder für OnlyFans hochladen“ (Profilbild, Banner, ~20 Feed). Nur für Models ohne fertiges OF-Profil." onclick="toggleOfPhotos('${id}')">OF-Bilder: ${m.ofPhotos ? "nötig ✓" : "nicht nötig"}</button></div></div>
@@ -226,7 +226,7 @@ const pages = {
       const appCards = st === "Bewerbung" ? apps.map(a => `<div class="pcard" draggable="true" ondragstart="dragStart(event,'app','${a.id}')" onclick="openApp('${a.id}')"><div class="t">${esc([a.firstName,a.lastName].filter(Boolean).join(" ") || a.instagram || "ohne Name")}${a.status==="contacted"?' <span class="pill blue">kontaktiert</span>':""}</div><div class="s">${esc(a.received.slice(0,10))}${a.instagram?` · @${esc(a.instagram)}`:""}${a.score?` · Score ${esc(a.score)}`:""}</div>
           <div class="pacts"><button class="btn s p" onclick="event.stopPropagation();acceptAppTo('${a.id}','Kontaktiert')">→ Kontaktiert</button>${a.phone?`<a class="btn s" href="${waLink({whatsapp:a.phone}, WA_TEXT["Kontaktiert"]({name:[a.firstName,a.lastName].filter(Boolean).join(" ") || "du", email:a.email || ""}))}" target="_blank" onclick="event.stopPropagation()">WhatsApp</a>`:""}</div></div>`).join("") : "";
       return `<div class="pcol" ${drop(st)}><div class="pch"><b>${esc(st)}</b><span class="cs">${ms.length + (st === "Bewerbung" ? apps.length : 0)}</span></div><div class="pchint">${esc(STAGE_HINT[st]||"")}</div>
-        ${appCards}${ms.map(m => `<div class="pcard" draggable="true" ondragstart="dragStart(event,'model','${m.id}')" onclick="location.hash='model/${m.id}'"><div class="t">${esc(m.name)}</div><div class="s">${esc(m.package || "Full Management")}${m.callDate?` · Call ${esc(callFmt(m.callDate))}`:""}${m.contractSent&&!m.contractSigned?` · Vertrag seit ${fmt(m.contractSent)}`:""}${m.dataSubmitted&&!m.contractSent?' <span class="pill warn">Daten prüfen</span>':""}</div>
+        ${appCards}${ms.map(m => `<div class="pcard" draggable="true" ondragstart="dragStart(event,'model','${m.id}')" onclick="location.hash='model/${m.id}'"><div class="t">${esc(m.name)}</div><div class="s">${m.callDate?`Call ${esc(callFmt(m.callDate))}`:""}${m.contractSent&&!m.contractSigned?` · Vertrag seit ${fmt(m.contractSent)}`:""}${m.dataSubmitted&&!m.contractSent?' <span class="pill warn">Daten prüfen</span>':""}</div>
           <div class="pacts">${nextStageBtn(m, true)}${waLink(m) ? `<a class="btn s" href="${waLink(m, WA_TEXT[m.stage] ? WA_TEXT[m.stage](m) : "")}" target="_blank" onclick="event.stopPropagation()">WhatsApp</a>` : ""}</div></div>`).join("")}${!ms.length && !appCards ? '<div class="empty" style="padding:10px">–</div>' : ""}</div>`;
     }).join("");
     const parked = D.models.filter(m => ["Pausiert","Beendet"].includes(m.stage) || m.status === "Ended");
@@ -347,9 +347,9 @@ function planItem(p, withModel){
 }
 function taskItem(t, withModel){
   const late = t.due && t.due < TODAY && t.status !== "Done";
-  return `<div class="item task ${t.status==="Done"?"done":""} ${late?"late":""}"><div><div class="t">${esc(t.title)}${withModel?` <span class="pill gray">${esc(t.modelName)}</span>`:""}${t.priority==="High"?' <span class="pill bad">wichtig</span>':""}${!t.visible?' <span class="pill warn">für Model unsichtbar</span>':""}</div>
+  return `<div class="item task ${t.status==="Done"?"done":""} ${late?"late":""}"><div><div class="t" style="cursor:pointer" title="Bearbeiten" onclick="openTaskForm('${t.model}','${t.id}')">${esc(t.title)}${withModel?` <span class="pill gray">${esc(t.modelName)}</span>`:""}${t.priority==="High"?' <span class="pill bad">wichtig</span>':""}${!t.visible?' <span class="pill warn">für Model unsichtbar</span>':""}</div>
     <div class="s">${[de(t.category), de(t.assigned)].filter(Boolean).join(" · ")}${t.desc?"<br>"+esc(t.desc):""}</div></div>
-    <div class="meta"><span class="pill gray">${t.due ? (t.dueType==="By"?"bis ":"") + fmt(t.due) : de(t.dueType)}</span>${statusSel("task", t.id, t.status, D.options.taskStatus)}<button class="btn s" onclick="openTaskForm('${t.model}','${t.id}')">Bearbeiten</button><button class="btn s" title="Zu anderen Models kopieren" onclick="copyTo('task', ['${t.id}'])">Kopieren</button></div></div>`;
+    <div class="meta"><span class="pill gray">${t.due ? (t.dueType==="By"?"bis ":"") + fmt(t.due) : de(t.dueType)}</span>${chips("", ["In progress","Done"], t.status, null, "sm st", `setStatus('task','${t.id}',('${t.status}'==='$V')?'Open':'$V')`)}<button class="btn s" onclick="deleteTask('${t.id}')">Löschen</button></div></div>`;   // 22.11 Rene: only In Arbeit, Erledigt, Löschen; click again = back to open, title click = edit
 }
 // 19.11 Rene: copy plan entries / tasks over to other models
 const PIPE_ONLY = ["Bewerbung","Kontaktiert","Call gebucht","Vertrag offen","Beendet"];
@@ -388,13 +388,22 @@ function weekHtml(){
 
 function nextStage(m){ const i = stageIdx(m.stage); return STAGES[Math.min(i + 1, STAGES.indexOf("Aktiv"))]; }
 function nextStageBtn(m, small){ const cur = m.stage || "Bewerbung"; if (cur === "Aktiv" || ["Pausiert","Beendet"].includes(cur)) return ""; const nx = nextStage(m); return `<button class="btn ${small?"s ":""}p" onclick="event.stopPropagation();setStage('${m.id}','${nx}')">→ ${esc(nx)}</button>`; }
+const POST_SIGN = ["Unterschrieben","Onboarding","Material da","Aktiv","Pausiert"];
+const isSigned = m => !!(m.contractSigned || m.oldAgency || POST_SIGN.includes(m.stage));    // 22.11 Rene: a signed model never goes back into the funnel
 function stageBar(m){
   const cur = stageIdx(m.stage);
+  if (isSigned(m)) {                                           // 22.11 Rene: signed = only forward to Aktiv, Beenden or Löschen
+    const ai = STAGES.indexOf("Aktiv"), from = m.stage === "Pausiert" ? ai : Math.max(STAGES.indexOf("Unterschrieben"), cur);
+    const fw = STAGES.slice(from, ai + 1);
+    return `<div class="stages">${fw.map(st => `<button type="button" class="st ${st===m.stage?"cur":""}" onclick="setStage('${m.id}','${st}')" title="${esc(STAGE_HINT[st]||"")}">${esc(st)}</button>`).join("")}
+    <button type="button" class="st" onclick="setStage('${m.id}','Beendet')">Beenden</button><button type="button" class="st" onclick="deleteModel('${m.id}')">Löschen</button></div>`;
+  }
   return `<div class="stages">${STAGES.filter(st => !["Pausiert","Beendet"].includes(st)).map((st, i) => `<button type="button" class="st ${i<cur?"done":""} ${i===cur?"cur":""}" onclick="setStage('${m.id}','${st}')" title="${esc(STAGE_HINT[st]||"")}">${esc(st)}</button>`).join("")}
     <button type="button" class="st" onclick="setStage('${m.id}','Pausiert')">Pausieren</button><button type="button" class="st" onclick="setStage('${m.id}','Beendet')">Beenden</button></div>`;
 }
 async function setStage(id, stage){
   const m = modelById(id); const before = {stage: m.stage, status: m.status};
+  if (isSigned(m) && !POST_SIGN.includes(stage) && stage !== "Beendet") { toast(`${m.name} hat schon unterschrieben, zurück in die Bewerbung geht nicht.`, true); route(); return; }
   if (stage === "Beendet" && !(await ask(`${m.name} beenden?`, "Der Portal-Zugang wird gesperrt.", {ok:"Beenden", danger:true}))) return;
   if (stage === "Vertrag offen" && !m.contractSigned) { await sendContract(id); return; }            // C: the column means "contract is out"
   if (["Unterschrieben","Onboarding","Aktiv"].includes(stage) && !m.contractSigned && !m.welcomeSent) {  // E: no contract, no welcome mail yet
@@ -406,6 +415,18 @@ async function setStage(id, stage){
   route();                                                    // card moves now, the server catches up in the background
   try { const r = await api("model.stage", {id, stage}); toast(r.driveQueued ? `${m.name}: ${stage} · Drive-Ordner wird angelegt` : `${m.name}: ${stage}`); reloadLater(); }
   catch(e){ Object.assign(m, before); route(); toast("Nicht gespeichert: " + e.message, true); }
+}
+async function deleteTask(id){
+  const t = D.tasks.find(x => x.id === id); if (!t) return;
+  if (!(await ask(`„${t.title}“ löschen?`, "Die Aufgabe verschwindet auch beim Model.", {ok:"Löschen", danger:true}))) return;
+  try { await api("task.delete", {id}); D.tasks = D.tasks.filter(x => x.id !== id); toast("Aufgabe gelöscht"); route(); }
+  catch(e){ toast("Nicht gelöscht: " + e.message, true); }
+}
+async function deleteModel(id){
+  const m = modelById(id);
+  if (!(await ask(`${m.name} löschen?`, "Model, ihre Aufgaben und ihr Content-Plan verschwinden aus dem Portal, der Drive-Zugang wird entzogen. In Airtable 7 Tage im Papierkorb.", {ok:"Löschen", danger:true}))) return;
+  try { await api("model.delete", {id}); D.models = D.models.filter(x => x.id !== id); toast(`${m.name} gelöscht`); location.hash = "home"; reloadLater(); }
+  catch(e){ toast("Nicht gelöscht: " + e.message, true); }
 }
 async function sendContract(id){
   const m = modelById(id);

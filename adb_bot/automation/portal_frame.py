@@ -39,6 +39,8 @@ def ctx(email: str) -> dict:
         videos = (sum(c["done"] for c in ob), sum(c["total"] for c in ob))
     except Exception as e:  # noqa: BLE001
         print("[frame] onboarding videos:", e)
+    if row.get("Alte Agentur"):                              # 21.11 Rene: existing models from the old agency go straight into the portal
+        open_steps = 0
     invoices = any(rec in (r["fields"].get("Model") or []) and r["fields"].get("Status") != "Offen"
                    for r in portal.fetch_cached(billing.T_BILL, 20))
     return {"rec": rec, "name": str(row.get("Name") or me.get("name") or ""), "lang": lang, "open": open_steps, "videos": videos,

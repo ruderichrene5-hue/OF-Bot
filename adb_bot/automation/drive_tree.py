@@ -49,7 +49,9 @@ MODEL_FOLDERS = {
     "OF-Content": "writer", "OF-Content/Skripte": None, "OF-Content/Bilder": None, "OF-Content/Videos": None,
     "OF-Content/Archiv": None, "OF-Content/Profil": None,
     "Social Media": None, "Social Media/Instagram": None, "Social Media/Instagram/Rohmaterial": "writer",
-    "Social Media/Instagram/Fertig zum Posten": None, "Social Media/Instagram/Archiv": None,
+    "Social Media/Instagram/Fertig zum Posten": None,
+    "Social Media/Instagram/Feed-Bilder": None,  # 21.11 Rene: plain pictures from us to fill her feed, no date, she takes what she needs
+    "Social Media/Instagram/Archiv": None,
     "Custom-Anfragen": "writer", "Custom-Anfragen/Archiv": None,
     "Stimme": "writer",                          # 18.11 Rene: 30-60 min voice recording in one take for the ElevenLabs voice clone
 }
@@ -59,6 +61,7 @@ OF_SUB = ["Profilbild", "Banner"]
 OF_COUNT = {"Profilbild": f"{OF_PHOTOS}/Profilbild", "Banner": f"{OF_PHOTOS}/Banner", "Feed": "OF-Content/Bilder"}   # = onboarding_portal.OF_CATEGORIES "folder"
 POSTED = "Social Media/Instagram/Fertig zum Posten"
 POST_TIMES = ["10:00", "12:30", "15:00", "17:30", "20:00"]   # 17.11 Rene: we always post 5 times a day between 10 and 20 h
+POST_KINDS = ["Reels", "Feed", "Story"]   # 21.11 Rene: she posts more than reels; Reels/<time>, Feed/<Post N> (several pictures = carousel), Story/
 POST_DAYS_AHEAD, POST_DAYS_KEEP = 5, 10                       # day folders 5 days ahead, trashed 10 days after the day
 WEEKDAY = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 TEAM = "KI-Content"                              # team-only folder next to the shared one; the model never gets a share on it
@@ -368,6 +371,25 @@ def count_images(model_name: str) -> dict:
     return out
 
 
+def _times_into_reels(day_id: str, reels_id: str) -> int:
+    """21.11: day folders from before POST_KINDS held the time folders directly ("10:00", or "15 UHR" from the old
+    Veralta drive); move them under Reels/ (same-named empty new folder there is trashed first, content is never lost)."""
+    q = f"'{day_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    moved = 0
+    for f in _req("GET", f"{API}/files", params={"q": q, "fields": "files(id,name)", "pageSize": 100, "supportsAllDrives": "true",
+                                                 "includeItemsFromAllDrives": "true"}).json().get("files", []):
+        if f["name"] in POST_KINDS or not re.fullmatch(r"\d{1,2}(:\d{2})?( ?UHR)?", f["name"].strip(), re.I):
+            continue
+        for twin in _children(reels_id, f["name"]):               # the empty slot post_days just made
+            q2 = f"'{twin['id']}' in parents and trashed = false"
+            if not _req("GET", f"{API}/files", params={"q": q2, "fields": "files(id)", "pageSize": 1, "supportsAllDrives": "true",
+                                                       "includeItemsFromAllDrives": "true"}).json().get("files"):
+                _req("PATCH", f"{API}/files/{twin['id']}", params={"supportsAllDrives": "true", "fields": "id"}, json={"trashed": True})
+        _req("PATCH", f"{API}/files/{f['id']}", params={"addParents": reels_id, "removeParents": day_id, "supportsAllDrives": "true", "fields": "id"})
+        moved += 1
+    return moved
+
+
 def post_days(model_name: str) -> dict:
     """17.11 Rene: "Fertig zum Posten" always holds the next POST_DAYS_AHEAD days as "<YYYY-MM-DD> <Wochentag>", each with one
     folder per posting time; the cutter drops each finished reel into its time. Days older than POST_DAYS_KEEP go to the trash."""
@@ -385,8 +407,10 @@ def post_days(model_name: str) -> dict:
         if not _children(pid, name):
             made += 1
         day = ensure_folder_id(pid, name)
+        kinds = {k: ensure_folder_id(day, k) for k in POST_KINDS}
         for t in POST_TIMES:
-            ensure_folder_id(day, t)
+            ensure_folder_id(kinds["Reels"], t)
+        _times_into_reels(day, kinds["Reels"])
     q = f"'{pid}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     trashed = 0
     for f in _req("GET", f"{API}/files", params={"q": q, "fields": "files(id,name)", "pageSize": 200, "supportsAllDrives": "true",
@@ -440,14 +464,15 @@ def sort_into_days(model_name: str) -> int:
 
 
 def sort_all() -> dict:
-    """All Northfeed models with a Drive folder (old-agency models excluded)."""
+    """All Northfeed models with a Drive folder. Old-agency models: no sorting, but their posting-day folders
+    (21.11 Rene: Kati/Mandy run their own account from the new tree, the folders must always be there)."""
     out = {}
     for r in portal.fetch_cached(portal.T_MODELS, 60):
         f = r["fields"]
-        if not f.get(F_ROOT) or f.get("Alte Agentur") or not str(f.get("Name") or "").strip():
+        if not f.get(F_ROOT) or not str(f.get("Name") or "").strip():
             continue
         try:
-            n = sort_into_days(str(f["Name"]))
+            n = 0 if f.get("Alte Agentur") else sort_into_days(str(f["Name"]))
             if n:
                 out[f["Name"]] = n
             _post_days_daily(str(f["Name"]))

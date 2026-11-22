@@ -266,7 +266,10 @@ _ob_lock = threading.Lock()
 def ensure_onboarding_tasks(model_rec: str) -> None:
     """Create the onboarding tasks once (in her language); already finished parts are created as Done.
     16.11 launch check: the player reports the last video twice within a second, so two callers raced and the model
-    got every task twice; one at a time, each reading the tasks fresh."""
+    got every task twice; one at a time, each reading the tasks fresh.
+    21.11 Rene: models from the old agency (Kati, Mandy) get no automatic tasks or starter scripts; the team sets them by hand."""
+    if (_model_by_id(model_rec) or {}).get("fields", {}).get("Alte Agentur"):
+        return
     with _ob_lock:
         portal.bust(portal.T_TASKS)                        # _linked reads a 20 s cache that would not show the first caller's rows
         _ensure_onboarding_tasks(model_rec)

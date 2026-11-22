@@ -151,7 +151,8 @@ def overview(email: str) -> dict:
                "contractSigned": _s(f.get("Contract signed")), "contractPdf": _s(f.get("Contract PDF")), "uploadsFolder": _s(f.get("Uploads folder")),
                "welcomeSent": _s(f.get("Welcome sent")), "legalName": _s(f.get("Legal name")), "birthdate": _s(f.get("Birthdate")),
                "address": _s(f.get("Address")), "proofChannel": _s(f.get("Proof channel")), "accountsMode": _s(f.get("Accounts im Portal") or "Nein"), "ofPhotos": bool(f.get("OF-Bilder nötig")),
-               "dataSubmitted": _s(f.get("Contract data submitted")), "street": _s(f.get("Street")), "zip": _s(f.get("ZIP")), "city": _s(f.get("City")), "country": _s(f.get("Country"))}
+               "dataSubmitted": _s(f.get("Contract data submitted")), "street": _s(f.get("Street")), "zip": _s(f.get("ZIP")), "city": _s(f.get("City")), "country": _s(f.get("Country")),
+               "oldAgency": bool(f.get("Alte Agentur"))}
               for r in rows[portal.T_MODELS] for f in [r["fields"]]]
     by_id = {m["id"]: m for m in models}
     plan = [{"id": r["id"], "model": (f.get("Model") or [""])[0], "title": _s(f.get("Title")), "date": _s(f.get("Date")),
@@ -219,6 +220,7 @@ MODEL_FIELDS = {"name": "Name", "email": "Email", "status": "Status", "language"
                 "street": "Street", "zip": "ZIP", "city": "City", "country": "Country",
                 "ofPhotos": "OF-Bilder nötig"}
 STAGES = ["Bewerbung", "Kontaktiert", "Call gebucht", "Vertrag offen", "Unterschrieben", "Onboarding", "Aktiv", "Pausiert", "Beendet"]
+POST_SIGN = ["Unterschrieben", "Onboarding", "Material da", "Aktiv", "Pausiert"]
 LEGACY_STAGE = {"Neu": "Bewerbung", "Material da": "Onboarding"}        # 15.11 Rene: fewer columns; old values read as the new ones
 PACKAGES = {"Full Management": 60, "Marketing": 40, "Chatting": 40}
 PLAN_FIELDS = {"title": "Title", "date": "Date", "platform": "Platform", "type": "Type", "status": "Status", "hook": "Hook / idea",
@@ -288,6 +290,10 @@ def api(action: str, body: dict, email: str) -> dict:
         rec, stage = body.get("id", ""), str(body.get("stage", ""))
         if stage not in STAGES:
             raise ValueError("unknown stage")
+        cur = next((r["fields"] for r in portal._fetch(portal.T_MODELS) if r["id"] == rec), {})
+        signed = bool(cur.get("Contract signed") or cur.get("Alte Agentur")) or LEGACY_STAGE.get(_s(cur.get("Stage")), _s(cur.get("Stage"))) in POST_SIGN
+        if signed and stage not in POST_SIGN and stage != "Beendet":     # 22.11 Rene: a signed model never goes back into the funnel
+            raise ValueError("Model hat schon unterschrieben, zurück in die Bewerbung geht nicht")
         f = {"Stage": stage}
         today = dt.date.today().isoformat()
         if stage == "Vertrag offen":
@@ -332,6 +338,28 @@ def api(action: str, body: dict, email: str) -> dict:
             raise ValueError("bad record id")
         r = requests.delete(_url(T_TOOLS, rec), headers=_hdr(), timeout=30)
         return {"ok": r.ok}
+    if action == "model.delete":                             # 22.11 Rene: signed models end with Aktiv, Beenden or Löschen
+        rec = body.get("id", "")
+        if not re.fullmatch(r"rec[A-Za-z0-9]{14}", rec):
+            raise ValueError("bad record id")
+        row = next((r["fields"] for r in portal._fetch(portal.T_MODELS) if r["id"] == rec), None)
+        if row is None:
+            raise ValueError("Model nicht gefunden")
+        try:
+            from . import drive_tree
+            print("[manager] drive revoke before delete", rec, drive_tree.revoke(_s(row.get("Email")), row))
+        except Exception as e:  # noqa: BLE001
+            print("[manager] drive revoke failed", rec, e)
+        for t in (portal.T_TASKS, portal.T_PLAN):           # her tasks and plan go with her; invoices stay (bookkeeping)
+            ids = [r["id"] for r in portal._fetch(t) if rec in (r["fields"].get("Model") or [])]
+            for i in range(0, len(ids), 10):
+                requests.delete(_url(t, ""), headers=_hdr(), params=[("records[]", x) for x in ids[i:i + 10]], timeout=30)
+        r = requests.delete(_url(portal.T_MODELS, rec), headers=_hdr(), timeout=30)
+        for t in (portal.T_MODELS, portal.T_TASKS, portal.T_PLAN):
+            portal.bust(t)
+        if not r.ok:
+            raise ValueError(f"Airtable {r.status_code}")
+        return {"ok": True}
     if action == "model.requestImages":                      # 15.11: ask a model for new reference images
         from . import onboarding_portal
         return onboarding_portal.request_images(body.get("id", ""), str(body.get("note", "")), email)
@@ -414,6 +442,15 @@ def api(action: str, body: dict, email: str) -> dict:
         f.setdefault("Assigned to", "Model")
         f.setdefault("Due type", "Fixed day" if f.get("Due") else "This week")
         return {"ok": True, "id": _create(portal.T_TASKS, f)["id"]}
+    if action == "task.delete":                              # 22.11 Rene: delete button on every task in the manager
+        rec = body.get("id", "")
+        if not re.fullmatch(r"rec[A-Za-z0-9]{14}", rec):
+            raise ValueError("bad record id")
+        r = requests.delete(_url(portal.T_TASKS, rec), headers=_hdr(), timeout=30)
+        portal.bust(portal.T_TASKS)
+        if not r.ok:
+            raise ValueError(f"Airtable {r.status_code}")
+        return {"ok": True}
     if action == "task.update":
         f = _clean(body, TASK_FIELDS)
         if "visible" in body:
