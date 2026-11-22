@@ -177,7 +177,7 @@ def _fetch(table: str, formula: str | None = None) -> list:
 
 def _att(v):
     a = (v or [{}])[0]
-    return {"url": a.get("url"), "type": a.get("type", ""), "thumb": ((a.get("thumbnails") or {}).get("large") or {}).get("url")} if a.get("url") else None
+    return {"url": a.get("url"), "type": a.get("type", ""), "name": a.get("filename", ""), "thumb": ((a.get("thumbnails") or {}).get("large") or {}).get("url")} if a.get("url") else None
 
 
 def portal_data(model: str, crm_dataset: dict | None = None) -> dict:
@@ -198,7 +198,8 @@ def portal_data(model: str, crm_dataset: dict | None = None) -> dict:
     tasks = [{"id": r["id"], "title": f.get("Task", ""), "category": f.get("Category", ""), "due": f.get("Due"),
               "dueType": f.get("Due type", "Fixed day" if f.get("Due") else "This week"), "status": f.get("Status", "Open"),
               "priority": f.get("Priority", ""), "assigned": f.get("Assigned to", "Model"), "desc": f.get("Description", ""),
-              "file": _att(f.get("Files")), "drive": f.get("Drive folder"), "review": f.get("Task", "") in _review_titles()}
+              "file": _att(f.get("Files")), "files": [x for x in (_att([a]) for a in f.get("Files") or []) if x],
+              "drive": f.get("Drive folder"), "review": f.get("Task", "") in _review_titles()}
              for r in rows_t for f in [r["fields"]] if mid and mid in (f.get("Model") or []) and f.get("Visible to model")]
     for p in plan:
         p["refVideo"] = f"/portal/ref/{p['id']}.mp4" if ref_file(f"{p['id']}.mp4") else None

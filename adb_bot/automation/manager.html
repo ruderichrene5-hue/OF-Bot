@@ -103,9 +103,6 @@
   .rt-h span{display:inline-grid;place-items:center;min-width:22px;height:22px;border-radius:50%;background:rgba(236,72,153,.16);color:var(--pink2,#f472b6);font-size:12px;font-weight:700}
   .rt-ul{margin:2px 0 6px 30px;padding:0} .rt-ul li{margin:3px 0;padding-left:2px}
   .rt-file{display:flex;align-items:center;gap:12px;margin-top:10px} .rt-file img{width:84px;height:84px;object-fit:cover;border-radius:12px;border:1px solid var(--line,#232838);display:block}
-  .rt-more summary{cursor:pointer;list-style:none;display:inline-flex;align-items:center;gap:6px;margin-top:6px;color:var(--pink2,#f472b6);font-weight:600;font-size:13px;user-select:none}
-  .rt-more summary::-webkit-details-marker{display:none} .rt-more summary::before{content:"▸";transition:transform .15s} .rt-more[open] summary::before{transform:rotate(90deg)}
-  .rt-more summary .o, .rt-more[open] summary .c{display:none} .rt-more[open] summary .o{display:inline}
   .rt-dl{color:var(--pink2,#f472b6);font-weight:600;font-size:13.5px;text-decoration:none}
 </style></head>
 <body>
@@ -368,27 +365,25 @@ function richText(s){
     out.push(h ? `<div class="rt-h"><span>${h[1]}</span>${esc(h[2])}</div>` : `<div class="${inStep && !/^(Abhaken|Tick it off)/.test(l) ? "rt-q" : "rt-p"}">${esc(l)}</div>`);
   }
   if (ul) out.push("</ul>");
-  // 22.11 Rene: long instructions start folded – intro stays visible, the steps open on click
-  const steps = out.filter(x => x.startsWith('<div class="rt-h">')).length;
-  let cut = out.findIndex(x => x.startsWith('<div class="rt-h">'));
-  if (cut < 0) cut = out.length > 4 ? 1 : out.length;
-  if (cut >= out.length) return `<div class="rt">${out.join("")}</div>`;
-  if (cut > 2) cut = 1;
-  if (cut && !out[0].startsWith('<div class="rt-p"')) cut = 0;   // never split a list
-  return `<div class="rt">${out.slice(0, cut).join("")}<details class="rt-more" onclick="event.stopPropagation()"><summary><span class="c">${"Anleitung anzeigen"}${steps ? " · " + steps + " " + "Schritte" : ""}</span><span class="o">${"Anleitung ausblenden"}</span></summary>${out.slice(cut).join("")}</details></div>`;
+  return `<div class="rt">${out.join("")}</div>`;
 }
 function fileHtml(f){
-  if (Array.isArray(f)) f = f[0];
-  if (!f || !f.url) return "";
-  const img = (f.type || "").startsWith("image");
-  return `<div class="rt-file">${img ? `<a href="${esc(f.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()"><img src="${esc(f.thumb || f.url)}" alt=""></a>` : ""}<a class="rt-dl" href="${esc(f.url)}" target="_blank" rel="noopener" download onclick="event.stopPropagation()">⬇ ${img ? "Bild herunterladen" : "Datei herunterladen"}</a></div>`;
+  const fs = (Array.isArray(f) ? f : [f]).filter(x => x && x.url);
+  return fs.map(f => { const img = (f.type || "").startsWith("image");
+  return `<div class="rt-file">${img ? `<a href="${esc(f.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()"><img src="${esc(f.thumb || f.url)}" alt=""></a>` : ""}<a class="rt-dl" href="${esc(f.url)}" target="_blank" rel="noopener" download onclick="event.stopPropagation()">⬇ ${img ? "Bild herunterladen" : "Datei herunterladen"}${fs.length > 1 && f.name ? ` · ${esc(f.name)}` : ""}</a></div>`; }).join("");
 }
 function taskItem(t, withModel){
   const late = t.due && t.due < TODAY && t.status !== "Done";
-  return `<div class="item task ${t.status==="Done"?"done":""} ${late?"late":""}"><div><div class="t" style="cursor:pointer" title="Bearbeiten" onclick="openTaskForm('${t.model}','${t.id}')">${esc(t.title)}${withModel?` <span class="pill gray">${esc(t.modelName)}</span>`:""}${t.priority==="High"?' <span class="pill bad">wichtig</span>':""}${!t.visible?' <span class="pill warn">für Model unsichtbar</span>':""}</div>
-    <div class="s">${[de(t.category), de(t.assigned)].filter(Boolean).join(" · ")}</div>${t.desc?richText(t.desc):""}${fileHtml(t.files)}</div>
+  return `<div class="item task ${t.status==="Done"?"done":""} ${late?"late":""}"><div style="cursor:pointer" title="Öffnen" onclick="openTaskView('${t.id}')"><div class="t">${esc(t.title)}${withModel?` <span class="pill gray">${esc(t.modelName)}</span>`:""}${t.priority==="High"?' <span class="pill bad">wichtig</span>':""}${!t.visible?' <span class="pill warn">für Model unsichtbar</span>':""}</div>
+    <div class="s">${[de(t.category), de(t.assigned)].filter(Boolean).join(" · ")}</div></div>
     <div class="meta"><span class="pill gray">${t.due ? (t.dueType==="By"?"bis ":"") + fmt(t.due) : de(t.dueType)}</span>${chips("", ["In progress","Done"], t.status, null, "sm st", `setStatus('task','${t.id}',('${t.status}'==='$V')?'Open':'$V')`)}<button class="btn s" onclick="deleteTask('${t.id}')">Löschen</button></div></div>`;   // 22.11 Rene: only In Arbeit, Erledigt, Löschen; click again = back to open, title click = edit
 }
+// 22.11 Rene: the list shows only the title, a click opens the task on its own (text + pictures), × goes back
+function openTaskView(id){ const t = D.tasks.find(x => x.id === id); if (!t) return;
+  openModal(`<button class="x" onclick="closeModal()">×</button><h2>${esc(t.title)}</h2>
+    <div class="s" style="color:var(--muted)">${[t.modelName, de(t.category), t.due ? (t.dueType==="By"?"bis ":"") + fmt(t.due) : ""].filter(Boolean).map(esc).join(" · ")}</div>
+    ${t.desc ? richText(t.desc) : ""}${fileHtml(t.files)}
+    <div style="display:flex;gap:8px;margin-top:20px"><button class="btn s" onclick="openTaskForm('${t.model}','${t.id}')">Bearbeiten</button></div>`); }
 // 19.11 Rene: copy plan entries / tasks over to other models
 const PIPE_ONLY = ["Bewerbung","Kontaktiert","Call gebucht","Vertrag offen","Beendet"];
 const mp_open = id => D.plan.filter(p => p.model === id && !planDone(p) && p.status !== "Dropped").map(p => p.id);
