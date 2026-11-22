@@ -123,6 +123,14 @@
     .nav.open .tabs{display:flex!important}
     .nav .tabs a{display:block;text-align:left!important;padding:13px 14px!important;font-size:16px!important;border-radius:12px}
   }
+
+  .rt{margin-top:6px;color:var(--muted);font-size:13.5px;line-height:1.5}
+  .rt-p{margin:4px 0} .rt-q{margin:2px 0 2px 30px;padding:2px 10px;border-left:2px solid var(--pink2,#f472b6);color:var(--fg);font-weight:500} .rt-h{display:flex;gap:8px;align-items:center;margin:12px 0 4px;color:var(--fg);font-weight:600;font-size:14px}
+  .rt-h span{display:inline-grid;place-items:center;min-width:22px;height:22px;border-radius:50%;background:rgba(236,72,153,.16);color:var(--pink2,#f472b6);font-size:12px;font-weight:700}
+  .rt-ul{margin:2px 0 6px 30px;padding:0} .rt-ul li{margin:3px 0;padding-left:2px}
+  .rt-file{display:flex;align-items:center;gap:12px;margin-top:10px} .rt-file img{width:84px;height:84px;object-fit:cover;border-radius:12px;border:1px solid var(--line,#232838);display:block}
+  .rt-dl{color:var(--pink2,#f472b6);font-weight:600;font-size:13.5px;text-decoration:none}
+
 </style><style>@view-transition{navigation:auto}.pfn,body>nav.nav{view-transition-name:nfbar}</style><script type="speculationrules">{"prerender":[{"source":"list","urls":["/","/course","/skripte","/zugaenge","/abrechnung","/onboarding"],"eagerness":"conservative"}]}</script></head>
 <body>
 <nav class="nav">
@@ -212,7 +220,7 @@ function days(n){ const out = []; for (let i = n - 1; i >= 0; i--) out.push(addD
 function entries(){
   const out = [];
   for (const p of P) out.push({ kind:"plan", id:p.id, date:p.date, title:p.title, sub:[tr("type", p.type), p.outfit].filter(Boolean).join(" · "), platform:p.platform, status:p.status, done:isDone(p) || DONE.has(p.id), fixed:true, video:!!(p.refVideo || p.file || p.reference), type:p.type, hook:p.hook });   // 16.11 Rene: plan entries only show what is due, no upload button
-  for (const t of T) out.push({ kind:"task", id:t.id, date:t.due, title:t.title, sub:t.desc, platform:t.category, status:t.status, done:t.status === "Done" || (!t.review && DONE.has(t.id)), review:!!t.review, fixed:t.dueType === "Fixed day", by:t.dueType === "By", priority:t.priority, drive:t.drive });
+  for (const t of T) out.push({ kind:"task", id:t.id, date:t.due, title:t.title, sub:t.desc, platform:t.category, status:t.status, done:t.status === "Done" || (!t.review && DONE.has(t.id)), review:!!t.review, fixed:t.dueType === "Fixed day", by:t.dueType === "By", priority:t.priority, drive:t.drive, file:t.file });
   return out;
 }
 // 16.11 Rene: open "bis …" tasks (Skript 1/2) are work in progress, they sit under Heute
@@ -222,13 +230,33 @@ function isStart(e){ return e.kind === "task" && (e.platform === "Onboarding" ||
 function weekList(){ const t = new Set(todayList().map(e => e.id));
   return entries().filter(e => !t.has(e.id) && ((e.fixed && e.date > TODAY && e.date <= weekEnd) || (e.by && e.date > TODAY) || (!e.fixed && !e.by))).sort((a, b) => (a.done - b.done) || (a.date || "9").localeCompare(b.date || "9")); }
 
+// 22.11 Rene: task texts keep their lines; "1. …" = step heading, "- …" = bullet
+function richText(s){
+  const out = []; let ul = false, inStep = false;
+  for (const raw of String(s || "").split("\n")) {
+    const l = raw.trim();
+    const li = l.match(/^[-•]\s+(.*)$/), h = l.match(/^(\d+)\.\s+(.*)$/);
+    if (li) { if (!ul) { out.push('<ul class="rt-ul">'); ul = true; } out.push(`<li>${esc(li[1])}</li>`); continue; }
+    if (ul) { out.push("</ul>"); ul = false; }
+    if (!l) continue;
+    if (h) inStep = true;
+    out.push(h ? `<div class="rt-h"><span>${h[1]}</span>${esc(h[2])}</div>` : `<div class="${inStep && !/^(Abhaken|Tick it off)/.test(l) ? "rt-q" : "rt-p"}">${esc(l)}</div>`);
+  }
+  if (ul) out.push("</ul>");
+  return `<div class="rt">${out.join("")}</div>`;
+}
+function fileHtml(f){
+  if (!f || !f.url) return "";
+  const img = (f.type || "").startsWith("image");
+  return `<div class="rt-file">${img ? `<a href="${esc(f.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()"><img src="${esc(f.thumb || f.url)}" alt=""></a>` : ""}<a class="rt-dl" href="${esc(f.url)}" target="_blank" rel="noopener" download onclick="event.stopPropagation()">⬇ ${img ? (LANG === "de" ? "Bild herunterladen" : "Download picture") : (LANG === "de" ? "Datei herunterladen" : "Download file")}</a></div>`;
+}
 function itemHtml(e){
   const late = !e.done && e.date && e.date < TODAY;
   const when = e.by ? L.by + " " + nice(e.date) : e.date ? nice(e.date) : L.week;
   const typeLbl = e.kind === "plan" ? (e.platform === "Instagram" && e.type === "Reel" ? "IG Reel" : e.platform === "TikTok" && e.type === "Reel" ? "TikTok" : tr("type", e.type)) : "";
   return `<div id="it-${e.id}" class="item ${e.kind} ${e.kind === "plan" ? pf(e.platform) : ""} ${e.done ? "done" : ""} ${late ? "late" : ""}" data-id="${e.id}" data-kind="${e.kind}">
     ${e.review && !e.done ? `<div class="chk lock"></div>` : `<div class="chk ${e.done ? "on" : ""}" ${e.review ? "" : `data-tick="${e.id}"`}><svg viewBox="0 0 24 24"><path d="M5 12l5 5L20 7"/></svg></div>`}
-    <div>${typeLbl ? `<div class="tl">${esc(typeLbl)}</div>` : ""}<div class="t">${esc(e.title)}${e.video ? `<span class="vid"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>${L.video}</span>` : ""}</div>${e.sub ? `<div class="s">${esc(e.sub)}</div>` : ""}</div>
+    <div>${typeLbl ? `<div class="tl">${esc(typeLbl)}</div>` : ""}<div class="t">${esc(e.title)}${e.video ? `<span class="vid"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>${L.video}</span>` : ""}</div>${e.sub ? (e.kind === "task" ? richText(e.sub) : `<div class="s">${esc(e.sub)}</div>`) : ""}${e.kind === "task" ? fileHtml(e.file) : ""}</div>
     <div class="meta">${late ? `<span class="pill bad">${L.overdue}</span>` : ""}${e.priority === "High" ? `<span class="pill bad">${L.high}</span>` : ""}
       ${e.kind === "task" ? `<span class="pill gray">${esc(tr("cat", e.platform))}</span>` : ""}
       <span class="pill ${stCls(e.status)}">${esc(e.review && e.status === "Waiting" ? L.inReview : tr("status", e.status))}</span>${e.drive ? (e.drive.startsWith("/") ? `<a class="upl" href="${esc(e.drive)}" onclick="event.stopPropagation()">${LANG === "de" ? "Öffnen" : "Open"} →</a>` : `<a class="upl" href="${esc(e.drive)}" target="_blank" rel="noopener" onclick="event.stopPropagation()"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16"/></svg>${L.upload}</a>`) : ""}<span class="when">${when}</span></div></div>`;
@@ -348,7 +376,7 @@ function byDay(rows){ let last = null;
 function jump(id){ const el = document.getElementById("it-" + id); if (!el) return; el.scrollIntoView({ behavior:"smooth", block:"center" }); el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 1600); }
 
 function tasks(){
-  const row = t => itemHtml({ kind:"task", id:t.id, date:t.due, title:t.title, sub:t.desc, platform:t.category, status:t.status, done:t.status === "Done" || (!t.review && DONE.has(t.id)), review:!!t.review, fixed:t.dueType === "Fixed day", by:t.dueType === "By", priority:t.priority, drive:t.drive });
+  const row = t => itemHtml({ kind:"task", id:t.id, date:t.due, title:t.title, sub:t.desc, platform:t.category, status:t.status, done:t.status === "Done" || (!t.review && DONE.has(t.id)), review:!!t.review, fixed:t.dueType === "Fixed day", by:t.dueType === "By", priority:t.priority, drive:t.drive, file:t.file });
   const open = T.filter(t => t.status !== "Done" && !DONE.has(t.id)), done = T.filter(t => t.status === "Done" || DONE.has(t.id));
   $("#main").innerHTML = `<span class="eyebrow">${L.tasksEyebrow}</span><h1>${L.tasksH}</h1><p class="lead">${L.tasksSub}</p>
     <div class="list">${open.map(row).join("") || `<div class="empty">${L.allDone}</div>`}</div>

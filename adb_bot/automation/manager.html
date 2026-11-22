@@ -97,6 +97,13 @@
     .nav .tabs a{display:block;text-align:left!important;padding:13px 14px!important;font-size:16px!important;border-radius:12px}
   }
 .bk{display:inline-flex;vertical-align:middle;margin:0 14px 0 0;align-items:center;gap:9px;font-weight:600;font-size:14px;color:#c9cfdb;text-decoration:none;cursor:pointer;background:none;border:0;padding:0;font-family:inherit}.bk i{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:#1b2029;border:1px solid #343c4d;transition:background .15s,border-color .15s}.bk:hover{color:#fff}.bk:hover i{background:#ff5c9a;border-color:#ff5c9a}.bk:hover i svg{stroke:#fff}.bk svg{width:14px;height:14px;stroke:#ff9ec4;fill:none;stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round}
+
+  .rt{margin-top:6px;color:var(--muted);font-size:13.5px;line-height:1.5}
+  .rt-p{margin:4px 0} .rt-q{margin:2px 0 2px 30px;padding:2px 10px;border-left:2px solid var(--pink2,#f472b6);color:var(--fg);font-weight:500} .rt-h{display:flex;gap:8px;align-items:center;margin:12px 0 4px;color:var(--fg);font-weight:600;font-size:14px}
+  .rt-h span{display:inline-grid;place-items:center;min-width:22px;height:22px;border-radius:50%;background:rgba(236,72,153,.16);color:var(--pink2,#f472b6);font-size:12px;font-weight:700}
+  .rt-ul{margin:2px 0 6px 30px;padding:0} .rt-ul li{margin:3px 0;padding-left:2px}
+  .rt-file{display:flex;align-items:center;gap:12px;margin-top:10px} .rt-file img{width:84px;height:84px;object-fit:cover;border-radius:12px;border:1px solid var(--line,#232838);display:block}
+  .rt-dl{color:var(--pink2,#f472b6);font-weight:600;font-size:13.5px;text-decoration:none}
 </style></head>
 <body>
 <nav class="nav">
@@ -345,10 +352,31 @@ function planItem(p, withModel){
     <div class="s">${[p.platform, p.type, p.outfit].filter(Boolean).map(esc).join(" · ")}${p.hook?"<br>"+esc(p.hook):""}${p.reference?` · <a href="${esc(p.reference)}" target="_blank" style="color:var(--pink2)">Referenz</a>`:""}${p.published?` · <a href="${esc(p.published)}" target="_blank" style="color:var(--pink2)">Veröffentlicht</a>`:""}${p.files.length?` · ${p.files.length} Datei(en)`:""}</div></div>
     <div class="meta"><span class="pill gray">${fmt(p.date) || "ohne Datum"}</span>${statusSel("plan", p.id, p.status, D.options.planStatus)}<button class="btn s" onclick="openPlanForm('${p.model}','${p.id}')">Bearbeiten</button><button class="btn s" title="Zu anderen Models kopieren" onclick="copyTo('plan', ['${p.id}'])">Kopieren</button></div></div>`;
 }
+// 22.11 Rene: task texts keep their lines; "1. …" = step heading, "- …" = bullet
+function richText(s){
+  const out = []; let ul = false, inStep = false;
+  for (const raw of String(s || "").split("\n")) {
+    const l = raw.trim();
+    const li = l.match(/^[-•]\s+(.*)$/), h = l.match(/^(\d+)\.\s+(.*)$/);
+    if (li) { if (!ul) { out.push('<ul class="rt-ul">'); ul = true; } out.push(`<li>${esc(li[1])}</li>`); continue; }
+    if (ul) { out.push("</ul>"); ul = false; }
+    if (!l) continue;
+    if (h) inStep = true;
+    out.push(h ? `<div class="rt-h"><span>${h[1]}</span>${esc(h[2])}</div>` : `<div class="${inStep && !/^(Abhaken|Tick it off)/.test(l) ? "rt-q" : "rt-p"}">${esc(l)}</div>`);
+  }
+  if (ul) out.push("</ul>");
+  return `<div class="rt">${out.join("")}</div>`;
+}
+function fileHtml(f){
+  if (Array.isArray(f)) f = f[0];
+  if (!f || !f.url) return "";
+  const img = (f.type || "").startsWith("image");
+  return `<div class="rt-file">${img ? `<a href="${esc(f.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()"><img src="${esc(f.thumb || f.url)}" alt=""></a>` : ""}<a class="rt-dl" href="${esc(f.url)}" target="_blank" rel="noopener" download onclick="event.stopPropagation()">⬇ ${img ? "Bild herunterladen" : "Datei herunterladen"}</a></div>`;
+}
 function taskItem(t, withModel){
   const late = t.due && t.due < TODAY && t.status !== "Done";
   return `<div class="item task ${t.status==="Done"?"done":""} ${late?"late":""}"><div><div class="t" style="cursor:pointer" title="Bearbeiten" onclick="openTaskForm('${t.model}','${t.id}')">${esc(t.title)}${withModel?` <span class="pill gray">${esc(t.modelName)}</span>`:""}${t.priority==="High"?' <span class="pill bad">wichtig</span>':""}${!t.visible?' <span class="pill warn">für Model unsichtbar</span>':""}</div>
-    <div class="s">${[de(t.category), de(t.assigned)].filter(Boolean).join(" · ")}${t.desc?"<br>"+esc(t.desc):""}</div></div>
+    <div class="s">${[de(t.category), de(t.assigned)].filter(Boolean).join(" · ")}</div>${t.desc?richText(t.desc):""}${fileHtml(t.files)}</div>
     <div class="meta"><span class="pill gray">${t.due ? (t.dueType==="By"?"bis ":"") + fmt(t.due) : de(t.dueType)}</span>${chips("", ["In progress","Done"], t.status, null, "sm st", `setStatus('task','${t.id}',('${t.status}'==='$V')?'Open':'$V')`)}<button class="btn s" onclick="deleteTask('${t.id}')">Löschen</button></div></div>`;   // 22.11 Rene: only In Arbeit, Erledigt, Löschen; click again = back to open, title click = edit
 }
 // 19.11 Rene: copy plan entries / tasks over to other models
