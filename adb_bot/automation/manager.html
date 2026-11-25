@@ -383,7 +383,7 @@ function openTaskView(id){ const t = D.tasks.find(x => x.id === id); if (!t) ret
   openModal(`<button class="x" onclick="closeModal()">×</button><h2>${esc(t.title)}</h2>
     <div class="s" style="color:var(--muted)">${[t.modelName, de(t.category), t.due ? (t.dueType==="By"?"bis ":"") + fmt(t.due) : ""].filter(Boolean).map(esc).join(" · ")}</div>
     ${t.desc ? richText(t.desc) : ""}${fileHtml(t.files)}
-    <div style="display:flex;gap:8px;margin-top:20px"><button class="btn s" onclick="openTaskForm('${t.model}','${t.id}')">Bearbeiten</button></div>`); }
+    <div style="display:flex;gap:8px;margin-top:20px">${t.drive ? `<a class="btn s p" href="${esc(t.drive)}" target="_blank" rel="noopener">Drive-Ordner ↗</a>` : ""}<button class="btn s" onclick="openTaskForm('${t.model}','${t.id}')">Bearbeiten</button></div>`); }
 // 19.11 Rene: copy plan entries / tasks over to other models
 const PIPE_ONLY = ["Bewerbung","Kontaktiert","Call gebucht","Vertrag offen","Beendet"];
 const mp_open = id => D.plan.filter(p => p.model === id && !planDone(p) && p.status !== "Dropped").map(p => p.id);

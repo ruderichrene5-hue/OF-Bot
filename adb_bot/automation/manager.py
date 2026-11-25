@@ -164,7 +164,8 @@ def overview(email: str) -> dict:
     tasks = [{"id": r["id"], "model": (f.get("Model") or [""])[0], "title": _s(f.get("Task")), "category": _s(f.get("Category")),
               "due": _s(f.get("Due")), "dueType": _s(f.get("Due type") or ("Fixed day" if f.get("Due") else "This week")),
               "status": _s(f.get("Status") or "Open"), "priority": _s(f.get("Priority")), "assigned": _s(f.get("Assigned to") or "Model"),
-              "desc": _s(f.get("Description")), "visible": bool(f.get("Visible to model")), "files": _att(f.get("Files"))}
+              "desc": _s(f.get("Description")), "visible": bool(f.get("Visible to model")), "files": _att(f.get("Files")),
+              "drive": _s(f.get("Drive folder"))}
              for r in rows[portal.T_TASKS] for f in [r["fields"]]]
     for p in plan:
         p["modelName"] = by_id.get(p["model"], {}).get("name", "")

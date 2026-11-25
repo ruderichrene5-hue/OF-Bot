@@ -259,7 +259,7 @@ function itemHtml(e){
     <div>${typeLbl ? `<div class="tl">${esc(typeLbl)}</div>` : ""}<div class="t">${esc(e.title)}${e.video ? `<span class="vid"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>${L.video}</span>` : ""}</div>${e.sub && e.kind !== "task" ? `<div class="s">${esc(e.sub)}</div>` : ""}</div>
     <div class="meta">${late ? `<span class="pill bad">${L.overdue}</span>` : ""}${e.priority === "High" ? `<span class="pill bad">${L.high}</span>` : ""}
       ${e.kind === "task" ? `<span class="pill gray">${esc(tr("cat", e.platform))}</span>` : ""}
-      <span class="pill ${stCls(e.status)}">${esc(e.review && e.status === "Waiting" ? L.inReview : tr("status", e.status))}</span>${e.drive ? (e.drive.startsWith("/") ? `<a class="upl" href="${esc(e.drive)}" onclick="event.stopPropagation()">${LANG === "de" ? "Öffnen" : "Open"} →</a>` : `<a class="upl" href="${esc(e.drive)}" target="_blank" rel="noopener" onclick="event.stopPropagation()"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16"/></svg>${L.upload}</a>`) : ""}<span class="when">${when}</span></div></div>`;
+      <span class="pill ${stCls(e.status)}">${esc(e.review && e.status === "Waiting" ? L.inReview : tr("status", e.status))}</span>${e.drive ? (e.drive.startsWith("/") ? `<a class="upl" href="${esc(e.drive)}" onclick="event.stopPropagation()">${LANG === "de" ? "Öffnen" : "Open"} →</a>` : `<a class="upl" href="${esc(e.drive)}" target="_blank" rel="noopener" onclick="event.stopPropagation()"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16"/></svg>${e.kind === "task" ? "Drive" : L.upload}</a>`) : ""}<span class="when">${when}</span></div></div>`;
 }
 function weekGrouped(wk){
   const MAX = 6, shown = wk.filter(e => !e.done).slice(0, MAX), rest = wk.filter(e => !e.done).length - shown.length;
@@ -289,7 +289,8 @@ function openTask(id){ const t = T.find(x => x.id === id); if (!t) return;
   $("#modalBox").className = "box nomedia";
   $("#modalBox").innerHTML = `<div class="body">${t.priority === "High" ? `<span class="pill bad">${L.high}</span> ` : ""}<span class="pill gray">${esc(tr("cat", t.category))}</span>
     <h3>${esc(t.title)}</h3>${t.due ? `<div style="color:var(--muted)">${t.dueType === "By" ? L.by + " " : ""}${nice(t.due)}</div>` : ""}
-    ${t.desc ? richText(t.desc) : ""}${fileHtml(t.files && t.files.length ? t.files : t.file)}</div>`;
+    ${t.desc ? richText(t.desc) : ""}${fileHtml(t.files && t.files.length ? t.files : t.file)}
+    ${t.drive && !t.drive.startsWith("/") ? `<a class="btn p" style="display:inline-flex;margin-top:18px" href="${esc(t.drive)}" target="_blank" rel="noopener">${LANG === "de" ? "Ordner im Drive öffnen" : "Open folder in Drive"} ↗</a>` : ""}</div>`;   // 25.11 Rene: task opens straight into its Drive folder
   $("#modal").classList.add("on"); }
 
 // ---------- pages ----------
